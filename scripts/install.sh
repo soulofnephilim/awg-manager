@@ -46,7 +46,7 @@ ensure_curl() {
 # --- Определение архитектуры ---
 detect_arch() {
     info "Определяю архитектуру..."
-    ARCH=$(opkg print-architecture 2>/dev/null | awk '/_kn/{sub(/_kn.*/, "", $2); print $2}')
+    ARCH=$(opkg print-architecture 2>/dev/null | grep '_kn' | awk '{print $2}' | sed 's/_kn.*//')
     [ -z "$ARCH" ] && error "Не удалось определить архитектуру. Это роутер Keenetic с Entware?"
 
     case "$ARCH" in
