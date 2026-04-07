@@ -13,7 +13,7 @@
 set -e
 
 REPO="hoaxisr/awg-manager"
-ENTWARE_REPO="http://repo.hoaxisr.ru"
+ENTWARE_REPO="https://hoaxisr.github.io/entware-repo"
 OPKG_CONF="/opt/etc/opkg/awg_manager.conf"
 TMP_DIR="/tmp/awg-manager-install"
 
@@ -137,9 +137,7 @@ install_package() {
 
 # --- Добавить opkg репозиторий ---
 add_repo() {
-    # Convert arch format: aarch64-3.10 → aarch64-k3.10, mipsel-3.4 → mipsel-k3.4
-    REPO_ARCH=$(echo "$ARCH" | sed 's/-\([0-9]\)/-k\1/')
-    REPO_LINE="src/gz hoaxisr ${ENTWARE_REPO}/${REPO_ARCH}"
+    REPO_LINE="src/gz keenetic_custom ${ENTWARE_REPO}/${ARCH}-kn"
 
     if [ -f "$OPKG_CONF" ] && grep -qF "$REPO_LINE" "$OPKG_CONF" 2>/dev/null; then
         return
@@ -147,7 +145,7 @@ add_repo() {
 
     mkdir -p /opt/etc/opkg
     echo "$REPO_LINE" > "$OPKG_CONF"
-    info "Репозиторий добавлен: ${ENTWARE_REPO}/${REPO_ARCH}"
+    info "Репозиторий добавлен: ${ENTWARE_REPO}/${ARCH}-kn"
 }
 
 # --- Запуск сервиса ---
