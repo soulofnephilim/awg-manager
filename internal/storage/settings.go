@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 15
+	CurrentSchemaVersion = 16
 	DefaultPort          = 2222
 	DefaultInterface     = "br0"
 )
@@ -103,6 +103,9 @@ func (s *SettingsStore) Load() (*Settings, error) {
 		if settings.SchemaVersion < 15 {
 			s.migrateToV15(&settings)
 		}
+		if settings.SchemaVersion < 16 {
+			s.migrateToV16(&settings)
+		}
 		// Save migrated settings
 		if err := s.saveUnlocked(&settings); err != nil {
 			return nil, err
@@ -118,6 +121,7 @@ func (s *SettingsStore) defaultSettings() *Settings {
 	return &Settings{
 		SchemaVersion: CurrentSchemaVersion,
 		AuthEnabled:   false,
+		UsageLevel:    UsageLevelBasic,
 		Server: ServerSettings{
 			Port:      DefaultPort,
 			Interface: DefaultInterface,
@@ -210,9 +214,10 @@ func (s *SettingsStore) migrateToV6(settings *Settings) {
 	settings.SchemaVersion = 6
 }
 
-// migrateToV7 migrates settings from v6 to v7.
+// migrateToV7 was a version bump for an experimental field that was
+// removed before reaching production. Kept as a no-op so the schema
+// ladder remains contiguous.
 func (s *SettingsStore) migrateToV7(settings *Settings) {
-	// OnboardingCompleted defaults to false (zero value) — no action needed
 	settings.SchemaVersion = 7
 }
 
@@ -271,6 +276,16 @@ func (s *SettingsStore) migrateToV15(settings *Settings) {
 	settings.SingboxRouter.PolicyName = ""
 	settings.SingboxRouter.Enabled = false
 	settings.SchemaVersion = 15
+}
+
+// migrateToV16 introduces UsageLevel. Any user reaching this migration
+// already has a working settings file (the file existed on disk before
+// the upgrade), so they are an existing user — set advanced. Fresh
+// installs never run this migration: defaultSettings() ships v16 with
+// usageLevel="basic".
+func (s *SettingsStore) migrateToV16(settings *Settings) {
+	settings.UsageLevel = UsageLevelAdvanced
+	settings.SchemaVersion = 16
 }
 
 // migrateManagedServers moves a legacy singular managedServer into the
