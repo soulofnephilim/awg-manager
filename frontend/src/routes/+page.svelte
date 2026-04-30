@@ -12,6 +12,8 @@
 	import { singboxStatus, singboxTunnels } from '$lib/stores/singbox';
 	import { SingboxInstallBanner, SingboxTunnelCard, SingboxGhostTerminal } from '$lib/components/singbox';
 	import { feedTraffic } from '$lib/stores/traffic';
+	import { usageLevel } from '$lib/stores/settings';
+	import { isSectionVisible } from '$lib/types/usageLevel';
 
 	type TunnelTab = 'awg' | 'singbox';
 
@@ -171,10 +173,21 @@
 	// Tabs
 	let activeTab = $state<TunnelTab>('awg');
 
-	const tunnelTabs = $derived([
-		{ id: 'awg', label: 'AWG', badge: awgList.length + systemList.length },
-		{ id: 'singbox', label: 'Sing-box', badge: singboxTunnelsList.length },
-	]);
+	const tunnelTabs = $derived(
+		[
+			{ id: 'awg', label: 'AWG', badge: awgList.length + systemList.length },
+			isSectionVisible($usageLevel, 'singboxTunnels')
+				? { id: 'singbox', label: 'Sing-box', badge: singboxTunnelsList.length }
+				: null,
+		].filter((t): t is { id: string; label: string; badge: number } => t !== null),
+	);
+
+	// Auto-switch off sing-box tab if it becomes hidden (basic mode).
+	$effect(() => {
+		if (!tunnelTabs.find((t) => t.id === activeTab)) {
+			activeTab = 'awg';
+		}
+	});
 
 	onMount(() => {
 		// URL query wins over sessionStorage — lets other pages
