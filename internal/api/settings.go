@@ -55,7 +55,7 @@ type DNSRouteSettingsDTO struct {
 
 // SettingsData is the payload for GET /settings/get.
 type SettingsData struct {
-	SchemaVersion       int                  `json:"schemaVersion" example:"3"`
+	SchemaVersion       int                  `json:"schemaVersion" example:"16"`
 	AuthEnabled         bool                 `json:"authEnabled" example:"false"`
 	Server              ServerSettingsDTO    `json:"server"`
 	PingCheck           PingCheckSettingsDTO `json:"pingCheck"`
@@ -63,6 +63,10 @@ type SettingsData struct {
 	DisableMemorySaving bool                 `json:"disableMemorySaving" example:"false"`
 	Updates             UpdateSettingsDTO    `json:"updates"`
 	DnsRoute            DNSRouteSettingsDTO  `json:"dnsRoute"`
+	// UsageLevel controls which UI sections are visible to the user.
+	// Filtering is frontend-only — the API does not enforce it.
+	// enums: basic,advanced,expert
+	UsageLevel string `json:"usageLevel" example:"advanced" enums:"basic,advanced,expert"`
 }
 
 // SettingsResponse is the envelope for GET /settings/get.
@@ -140,7 +144,7 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Update saves settings.
 //
 //	@Summary		Update settings
-//	@Description	Persists Settings. Sub-structs (server, pingCheck, logging, dnsRoute, managedServers, ...) preserved when zero/nil. ApiKey preserved when empty (rotate via /settings/regenerate-api-key). Top-level bool flags (authEnabled, disableMemorySaving, onboardingCompleted) MUST be sent on every save.
+//	@Description	Persists Settings. Sub-structs (server, pingCheck, logging, dnsRoute, managedServers, ...) preserved when zero/nil. ApiKey preserved when empty (rotate via /settings/regenerate-api-key). Top-level bool flags (authEnabled, disableMemorySaving) MUST be sent on every save.
 //	@Tags			settings
 //	@Accept			json
 //	@Produce		json
@@ -172,7 +176,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	//
 	// Policy: for every top-level sub-struct or slice field, restore from
 	// existing if the incoming value is zero. Top-level bool flags
-	// (AuthEnabled, DisableMemorySaving, OnboardingCompleted) cannot be
+	// (AuthEnabled, DisableMemorySaving) cannot be
 	// defended this way — "false" and "not sent" are indistinguishable —
 	// so the caller is expected to always send the full object.
 	if settings.Server == (storage.ServerSettings{}) {
@@ -209,6 +213,20 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// matches the behavior of other secret fields.
 	if settings.ApiKey == "" {
 		settings.ApiKey = oldSettings.ApiKey
+	}
+
+	// UsageLevel is a top-level string but treated like a sub-struct: an
+	// empty value (omitted from payload) restores from existing rather
+	// than silently resetting to "basic". A non-empty value is validated;
+	// invalid input rejected with 400 so a typo does not silently turn
+	// into "advanced".
+	if settings.UsageLevel == "" {
+		settings.UsageLevel = oldSettings.UsageLevel
+	} else if storage.NormalizeUsageLevel(settings.UsageLevel) != settings.UsageLevel {
+		response.ErrorWithStatus(w, http.StatusBadRequest,
+			"invalid usageLevel: must be one of basic, advanced, expert",
+			"INVALID_USAGE_LEVEL")
+		return
 	}
 
 	// Detect ping check toggle change before saving
