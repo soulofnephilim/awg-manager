@@ -20,6 +20,7 @@
 	import { singboxRouter } from '$lib/stores/singboxRouter';
 	import { invalidateResource, invalidateAll } from '$lib/stores/storeRegistry';
 	import { setDeviceProxyMissingTarget, clearDeviceProxyMissingTarget } from '$lib/stores/deviceproxy';
+	import { settings as settingsStore, reloadSettings } from '$lib/stores/settings';
 	import type { UpdateInfo } from '$lib/types';
 	import LoginForm from '$lib/components/LoginForm.svelte';
 	import { Modal } from '$lib/components/ui';
@@ -157,6 +158,10 @@
 				if (data.resource === 'deviceproxy.config') {
 					clearDeviceProxyMissingTarget();
 				}
+				// Settings is not a PollingStore — explicit reload.
+				if (data.resource === 'settings') {
+					void reloadSettings();
+				}
 			},
 
 			// Device-proxy: selected outbound was deleted — show a banner in the tab.
@@ -217,6 +222,13 @@
 			api.checkUpdate().then(info => updateInfo = info).catch(() => null);
 		} else {
 			updateInfo = null;
+		}
+	});
+
+	// Load settings store on first authentication (not a PollingStore).
+	$effect(() => {
+		if ($isAuthenticated && get(settingsStore) === null) {
+			void reloadSettings();
 		}
 	});
 
