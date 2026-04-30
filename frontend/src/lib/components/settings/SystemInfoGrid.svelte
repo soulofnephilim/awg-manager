@@ -41,6 +41,8 @@
 		font-size: 0.8125rem;
 		font-family: var(--font-mono);
 		color: var(--color-text-secondary);
+		text-align: right;
+		word-break: break-word;
 	}
 
 	.info-link {

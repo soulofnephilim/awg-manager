@@ -27,9 +27,17 @@
     margin: 0 auto;
     padding: 1.5rem;
     width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
   }
 
   .width-narrow { max-width: 960px; }
   .width-wide { max-width: 1440px; }
   .width-full { max-width: 100%; }
+
+  @media (max-width: 640px) {
+    .page-container {
+      padding: 0.75rem;
+    }
+  }
 </style>

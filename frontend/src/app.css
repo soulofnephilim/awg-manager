@@ -540,6 +540,12 @@ label {
 	justify-content: space-between;
 	gap: 1rem;
 	padding: 0.875rem 0;
+	flex-wrap: wrap;
+}
+
+.setting-row > *:first-child {
+	min-width: 0;
+	flex: 1 1 220px;
 }
 
 .setting-row:first-child {
@@ -957,6 +963,17 @@ label {
 		flex-direction: column;
 		align-items: flex-start;
 		gap: 0.5rem;
+	}
+}
+
+@media (max-width: 640px) {
+	.setting-row {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 0.5rem;
+	}
+	.setting-row > *:first-child {
+		flex: initial;
 	}
 }
 
