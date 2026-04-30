@@ -53,6 +53,8 @@
 	let infoFor = $state<UsageLevel | null>(null);
 	const infoOpt = $derived(infoFor ? OPTIONS.find((o) => o.value === infoFor) : null);
 
+	let expanded = $state(false);
+
 	function selectLevel(level: UsageLevel) {
 		if (level === value || saving) return;
 		void onSelect(level);
@@ -65,58 +67,84 @@
 </script>
 
 <div class="card">
-	<div class="section-label">Уровень использования</div>
-	<p class="card-hint">
-		Скрывает разделы, которые вам не нужны. Данные при понижении уровня не удаляются.
-	</p>
-
-	<div
-		class="level-grid"
-		role="radiogroup"
-		aria-label="Уровень использования"
-		aria-busy={saving}
+	<button
+		type="button"
+		class="collapsible-header"
+		aria-expanded={expanded}
+		aria-controls="usage-level-body"
+		onclick={() => (expanded = !expanded)}
 	>
-		{#each OPTIONS as opt (opt.value)}
-			{@const selected = value === opt.value}
-			<button
-				type="button"
-				role="radio"
-				aria-checked={selected}
-				class="level-card"
-				class:selected
-				disabled={saving}
-				onclick={() => selectLevel(opt.value)}
+		<span class="section-label">Уровень использования</span>
+		<span class="header-meta">
+			<span class="current-level">{USAGE_LEVEL_LABELS[value]}</span>
+			<svg
+				class="chevron"
+				class:open={expanded}
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				aria-hidden="true"
 			>
-				<span
-					class="info-btn"
-					role="button"
-					tabindex="0"
-					aria-label={`Подробнее про уровень «${opt.title}»`}
-					onclick={(e) => openInfo(e, opt.value)}
-					onkeydown={(e) => {
-						if (e.key === 'Enter' || e.key === ' ') {
-							openInfo(e, opt.value);
-						}
-					}}
-				>
-					<svg viewBox="0 0 24 24" aria-hidden="true">
-						<circle cx="12" cy="12" r="10" />
-						<line x1="12" y1="11" x2="12" y2="17" />
-						<circle cx="12" cy="7.5" r="0.8" />
-					</svg>
-				</span>
+				<polyline points="6 9 12 15 18 9" />
+			</svg>
+		</span>
+	</button>
 
-				<div class="level-title">{opt.title}</div>
-				<div class="level-summary">{opt.summary}</div>
+	{#if expanded}
+		<div id="usage-level-body" class="collapsible-body">
+			<p class="card-hint">
+				Скрывает разделы, которые вам не нужны. Данные при понижении уровня не удаляются.
+			</p>
 
-				{#if selected}
-					<span class="level-check" aria-hidden="true">
-						<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12" /></svg>
-					</span>
-				{/if}
-			</button>
-		{/each}
-	</div>
+			<div
+				class="level-grid"
+				role="radiogroup"
+				aria-label="Уровень использования"
+				aria-busy={saving}
+			>
+				{#each OPTIONS as opt (opt.value)}
+					{@const selected = value === opt.value}
+					<button
+						type="button"
+						role="radio"
+						aria-checked={selected}
+						class="level-card"
+						class:selected
+						disabled={saving}
+						onclick={() => selectLevel(opt.value)}
+					>
+						<span
+							class="info-btn"
+							role="button"
+							tabindex="0"
+							aria-label={`Подробнее про уровень «${opt.title}»`}
+							onclick={(e) => openInfo(e, opt.value)}
+							onkeydown={(e) => {
+								if (e.key === 'Enter' || e.key === ' ') {
+									openInfo(e, opt.value);
+								}
+							}}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<circle cx="12" cy="12" r="10" />
+								<line x1="12" y1="11" x2="12" y2="17" />
+								<circle cx="12" cy="7.5" r="0.8" />
+							</svg>
+						</span>
+
+						<div class="level-title">{opt.title}</div>
+
+						{#if selected}
+							<span class="level-check" aria-hidden="true">
+								<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12" /></svg>
+							</span>
+						{/if}
+					</button>
+				{/each}
+			</div>
+		</div>
+	{/if}
 </div>
 
 <Modal
@@ -137,6 +165,47 @@
 </Modal>
 
 <style>
+	.collapsible-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+		background: transparent;
+		border: 0;
+		padding: 0;
+		margin: 0;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+		text-align: left;
+	}
+	.collapsible-header:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+		border-radius: var(--radius-sm);
+	}
+	.header-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		color: var(--color-text-muted);
+		font-size: 0.8125rem;
+	}
+	.current-level {
+		color: var(--color-text-secondary);
+	}
+	.chevron {
+		width: 14px;
+		height: 14px;
+		transition: transform var(--t-fast) ease;
+	}
+	.chevron.open {
+		transform: rotate(180deg);
+	}
+
+	.collapsible-body {
+		margin-top: 0.75rem;
+	}
 	.card-hint {
 		color: var(--color-text-muted);
 		font-size: 0.8125rem;
@@ -145,14 +214,19 @@
 
 	.level-grid {
 		display: grid;
-		grid-template-columns: 1fr;
+		grid-template-columns: repeat(3, 1fr);
 		gap: 0.5rem;
+	}
+	@media (max-width: 480px) {
+		.level-grid {
+			grid-template-columns: 1fr;
+		}
 	}
 
 	.level-card {
 		position: relative;
-		text-align: left;
-		padding: 0.75rem 1rem;
+		text-align: center;
+		padding: 0.625rem 0.5rem;
 		background: var(--color-bg-tertiary);
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-md);
@@ -182,27 +256,20 @@
 
 	.level-title {
 		font-weight: 600;
-		font-size: 1rem;
-		margin-bottom: 0.25rem;
-		padding-right: 1.75rem;
-	}
-	.level-summary {
-		color: var(--color-text-muted);
-		font-size: 0.8125rem;
-		padding-right: 1.75rem;
+		font-size: 0.875rem;
+		padding: 0 1.25rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.level-check {
 		position: absolute;
-		top: 0.5rem;
-		left: 0.5rem;
-		width: 18px;
-		height: 18px;
+		top: 0.375rem;
+		left: 0.375rem;
+		width: 14px;
+		height: 14px;
 		color: var(--color-accent);
-	}
-	.level-card.selected .level-title,
-	.level-card.selected .level-summary {
-		padding-left: 1.75rem;
 	}
 	.level-check svg {
 		width: 100%;
@@ -214,10 +281,10 @@
 
 	.info-btn {
 		position: absolute;
-		top: 0.5rem;
-		right: 0.5rem;
-		width: 18px;
-		height: 18px;
+		top: 0.375rem;
+		right: 0.375rem;
+		width: 14px;
+		height: 14px;
 		color: var(--color-text-muted);
 		cursor: pointer;
 		display: inline-flex;
@@ -233,8 +300,8 @@
 		outline-offset: 2px;
 	}
 	.info-btn svg {
-		width: 14px;
-		height: 14px;
+		width: 12px;
+		height: 12px;
 		fill: none;
 		stroke: currentColor;
 		stroke-width: 2;
