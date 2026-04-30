@@ -7,7 +7,7 @@
 	import { notifications } from '$lib/stores/notifications';
 	import { api } from '$lib/api/client';
 	import { TunnelCard, ExternalTunnelCard, AdoptTunnelDialog, SystemTunnelCard, TunnelReferencedModal } from '$lib/components/tunnels';
-	import { PageContainer, LoadingSpinner } from '$lib/components/layout';
+	import { PageContainer, LoadingSpinner, WelcomeBanner } from '$lib/components/layout';
 	import { Modal, StoreStatusBadge, TrafficChartModal, Button, Badge, Tabs } from '$lib/components/ui';
 	import { singboxStatus, singboxTunnels } from '$lib/stores/singbox';
 	import { SingboxInstallBanner, SingboxTunnelCard, SingboxGhostTerminal } from '$lib/components/singbox';
@@ -315,6 +315,7 @@
 </svelte:head>
 
 <PageContainer width="full">
+	<WelcomeBanner />
 	{#if loading}
 		<div class="py-12">
 			<LoadingSpinner size="lg" message="Загрузка туннелей..." />

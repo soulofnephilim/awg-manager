@@ -4,3 +4,4 @@ export type { PageWidth } from './PageContainer.svelte';
 export { default as LoadingSpinner } from './LoadingSpinner.svelte';
 export { default as EmptyState } from './EmptyState.svelte';
 export { default as AppHeader } from './AppHeader.svelte';
+export { default as WelcomeBanner } from './WelcomeBanner.svelte';
