@@ -1752,12 +1752,23 @@ definitions:
       pingCheck:
         $ref: '#/definitions/api.PingCheckSettingsDTO'
       schemaVersion:
-        example: 3
+        example: 16
         type: integer
       server:
         $ref: '#/definitions/api.ServerSettingsDTO'
       updates:
         $ref: '#/definitions/api.UpdateSettingsDTO'
+      usageLevel:
+        description: |-
+          UsageLevel controls which UI sections are visible to the user.
+          Filtering is frontend-only — the API does not enforce it.
+          enums: basic,advanced,expert
+        enum:
+        - basic
+        - advanced
+        - expert
+        example: advanced
+        type: string
     type: object
   api.SettingsResponse:
     properties:
@@ -6234,7 +6245,7 @@ paths:
       description: Persists Settings. Sub-structs (server, pingCheck, logging, dnsRoute,
         managedServers, ...) preserved when zero/nil. ApiKey preserved when empty
         (rotate via /settings/regenerate-api-key). Top-level bool flags (authEnabled,
-        disableMemorySaving, onboardingCompleted) MUST be sent on every save.
+        disableMemorySaving) MUST be sent on every save.
       parameters:
       - description: Full settings object
         in: body
