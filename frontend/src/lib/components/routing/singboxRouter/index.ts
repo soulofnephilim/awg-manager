@@ -1,6 +1,5 @@
 export { default as NetfilterMissingBanner } from './NetfilterMissingBanner.svelte';
 export { default as EngineStatusCard } from './EngineStatusCard.svelte';
-export { default as PolicyDevicePicker } from './PolicyDevicePicker.svelte';
 export { default as RefreshSettingsModal } from './RefreshSettingsModal.svelte';
 export { default as RulesList } from './RulesList.svelte';
 export { default as RuleEditModal } from './RuleEditModal.svelte';

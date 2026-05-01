@@ -66,7 +66,6 @@ import type {
 	SingboxRouterOutbound,
 	SingboxRouterPreset,
 	RouterPolicy,
-	RouterPolicyDevice,
 	SingboxRouterDNSServer,
 	SingboxRouterDNSRule,
 	SingboxRouterDNSGlobals
@@ -1454,26 +1453,6 @@ class ApiClient {
 		return this.request<RouterPolicy>('/singbox/router/policies', {
 			method: 'POST',
 			body: JSON.stringify({ description: description ?? 'awgm-router' }),
-		});
-	}
-
-	async singboxRouterPolicyDevices(policyName: string): Promise<RouterPolicyDevice[]> {
-		return this.request<RouterPolicyDevice[]>(
-			`/singbox/router/policy-devices?name=${encodeURIComponent(policyName)}`
-		);
-	}
-
-	async singboxRouterPolicyBind(mac: string, policyName: string): Promise<void> {
-		await this.request('/singbox/router/policy-devices/bind', {
-			method: 'POST',
-			body: JSON.stringify({ mac, policyName }),
-		});
-	}
-
-	async singboxRouterPolicyUnbind(mac: string): Promise<void> {
-		await this.request('/singbox/router/policy-devices/unbind', {
-			method: 'POST',
-			body: JSON.stringify({ mac }),
 		});
 	}
 
