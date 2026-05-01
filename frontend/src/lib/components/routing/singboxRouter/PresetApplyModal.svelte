@@ -86,7 +86,7 @@
 	.form {
 		display: grid;
 		gap: 0.75rem;
-		min-width: 380px;
+		min-width: 0;
 	}
 	.preview {
 		padding: 0.75rem;

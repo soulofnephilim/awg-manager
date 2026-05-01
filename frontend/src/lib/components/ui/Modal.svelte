@@ -110,24 +110,12 @@
         flex-direction: column;
     }
 
-    /* Each size class caps at its target width. Viewport-cap is enforced
-       in two redundant layers (modern + fallback) so the card never
-       exceeds the visible area on narrow windows even if min() is
-       unsupported. The fallback `max-width: calc(100vw - 2rem)` declared
-       AFTER the size-class rule wins via CSS source order, which is
-       acceptable here because we WANT viewport to clamp the size class. */
-    .max-w-sm { max-width: 24rem; }
-    .max-w-md { max-width: 32rem; }
-    .max-w-lg { max-width: 40rem; }
-    .max-w-xl { max-width: 48rem; }
-
-    .modal-card {
-        max-width: min(48rem, calc(100vw - 2rem));
-    }
-    .modal-card.max-w-sm { max-width: min(24rem, calc(100vw - 2rem)); }
-    .modal-card.max-w-md { max-width: min(32rem, calc(100vw - 2rem)); }
-    .modal-card.max-w-lg { max-width: min(40rem, calc(100vw - 2rem)); }
-    .modal-card.max-w-xl { max-width: min(48rem, calc(100vw - 2rem)); }
+    /* Each size class caps at its target width but never exceeds the
+       visible viewport (minus backdrop padding). */
+    .max-w-sm { max-width: min(24rem, calc(100vw - 2rem)); }
+    .max-w-md { max-width: min(32rem, calc(100vw - 2rem)); }
+    .max-w-lg { max-width: min(40rem, calc(100vw - 2rem)); }
+    .max-w-xl { max-width: min(48rem, calc(100vw - 2rem)); }
 
     .modal-header {
         display: flex;

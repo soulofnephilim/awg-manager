@@ -152,7 +152,7 @@
 	.form {
 		display: grid;
 		gap: 0.6rem;
-		min-width: 420px;
+		min-width: 0;
 	}
 	.section-label {
 		font-size: 0.7rem;

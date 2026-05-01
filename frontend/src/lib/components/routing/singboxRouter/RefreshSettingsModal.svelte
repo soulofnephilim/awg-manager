@@ -77,7 +77,7 @@
 	.form {
 		display: grid;
 		gap: 0.75rem;
-		min-width: 320px;
+		min-width: 0;
 	}
 	.field {
 		display: grid;
