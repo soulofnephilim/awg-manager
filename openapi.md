@@ -94,3 +94,49 @@ VITE_API_STRIP_PREFIX=1
 
 - Prism mock не выполняет backend-логику, а отдает ответы на основе примеров/схем OpenAPI.
 - Убедись, что backend не занят на `8080` (или используй другой порт Prism).
+
+## 6) Stateful mock proxy (state-aware overrides)
+
+`frontend/scripts/mock-proxy.mjs` располагается между Vite и Prism и
+предоставляет небольшие override'ы поверх stateless Prism:
+
+- Persistent `usageLevel` между `/settings/get` и `/settings/update`.
+- Симуляция ошибки `/singbox/install` по флагу.
+- Фейковые `singbox`-логи в `/logs` (8 записей, 6 подгрупп, разные уровни).
+
+Запуск рядом с Prism:
+
+```bash
+# Терминал A
+cd frontend
+npm run mock
+
+# Терминал B
+node frontend/scripts/mock-proxy.mjs
+
+# Терминал C
+cd frontend
+VITE_API_TARGET=http://127.0.0.1:8081 npm run dev:mock
+```
+
+### Симуляция ошибки установки sing-box
+
+```bash
+# При запуске
+MOCK_SINGBOX_INSTALL_FAIL=1 node frontend/scripts/mock-proxy.mjs
+
+# В рантайме
+curl -X POST http://127.0.0.1:8081/__mock/singbox-install-fail \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true}'
+```
+
+Прокси отвечает HTTP 500 с кодом `SINGBOX_INSTALL_ERROR` и подделанным
+opkg-style stderr. Отключить — `enabled: false`.
+
+### Просмотр singbox-логов
+
+`GET /logs?group=singbox` — только фейковые singbox-записи.
+`GET /logs?group=singbox&subgroup=process` — фильтр по подгруппе.
+`GET /logs?group=singbox&subgroup=process&level=error` — плюс уровень.
+`GET /logs` (без фильтров) — Prism-заглушки + фейковые singbox-записи в одном потоке.
