@@ -4,6 +4,8 @@
 // - Optional: simulate /singbox/install failure via env MOCK_SINGBOX_INSTALL_FAIL=1
 //   or runtime POST /__mock/singbox-install-fail body {"enabled": true|false}.
 // - Streams /events normally (Prism handles SSE shape).
+// - Injects 8 fake singbox log entries into GET /logs (covers all 6 subgroups
+//   and 4 levels). Honors group/subgroup/level filter query params.
 // Default upstream: http://127.0.0.1:8080 (Prism). Listen: 8081.
 
 import http from 'node:http';
@@ -35,6 +37,46 @@ async function fetchJSON(path, init) {
 function send(res, status, body, contentType = 'application/json') {
 	res.writeHead(status, { 'Content-Type': contentType });
 	res.end(typeof body === 'string' ? body : JSON.stringify(body));
+}
+
+const FAKE_SINGBOX_LOGS = [
+	{ group: 'singbox', subgroup: 'process',  action: 'stdout', level: 'info',  target: '', message: 'sing-box version 1.9.3 starting' },
+	{ group: 'singbox', subgroup: 'process',  action: 'stderr', level: 'error', target: '', message: 'FATAL: failed to bind tproxy: address already in use' },
+	{ group: 'singbox', subgroup: 'process',  action: 'stderr', level: 'warn',  target: '', message: 'WARN: deprecated config field "auto_detect_interface"' },
+	{ group: 'singbox', subgroup: 'runtime',  action: 'clash',  level: 'info',  target: '', message: '[Connection] tcp 192.168.1.50:54321 -> example.com:443' },
+	{ group: 'singbox', subgroup: 'inbound',  action: 'tproxy', level: 'info',  target: '', message: '[TPROXY] mark=0x1 fwmark applied to flow' },
+	{ group: 'singbox', subgroup: 'outbound', action: 'route',  level: 'info',  target: '', message: '[Outbound] selected: vless-server-1' },
+	{ group: 'singbox', subgroup: 'dns',      action: 'lookup', level: 'debug', target: '', message: '[DNS] resolve example.com via 1.1.1.1' },
+	{ group: 'singbox', subgroup: 'router',   action: 'match',  level: 'full',  target: '', message: '[Router] match rule "geo:RU" -> outbound: direct' },
+];
+
+function buildFakeSingboxEntries() {
+	const nowMs = Date.now();
+	return FAKE_SINGBOX_LOGS.map((e, i) => ({
+		...e,
+		// Backend serializes time.Time as RFC3339; match that so the frontend
+		// formatTime helper renders correctly. Stagger by 1s per entry.
+		timestamp: new Date(nowMs - (FAKE_SINGBOX_LOGS.length - i) * 1000).toISOString(),
+	}));
+}
+
+function applyFilters(entries, qs) {
+	let out = entries;
+	const sub = qs.get('subgroup');
+	if (sub) out = out.filter((e) => e.subgroup === sub);
+	const lvl = qs.get('level');
+	if (lvl) {
+		const levelOrder = ['error', 'warn', 'info', 'full', 'debug'];
+		const idx = levelOrder.indexOf(lvl);
+		if (idx >= 0) {
+			const allowed = new Set(levelOrder.slice(0, idx + 1));
+			// ERROR and WARN always visible regardless of configured level.
+			allowed.add('error');
+			allowed.add('warn');
+			out = out.filter((e) => allowed.has(e.level));
+		}
+	}
+	return out;
 }
 
 const server = http.createServer((req, res) => {
@@ -77,6 +119,27 @@ const server = http.createServer((req, res) => {
 			} catch (e) {
 				send(res, 500, { success: false, error: String(e) });
 			}
+		});
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/logs') {
+		const group = url.searchParams.get('group');
+		if (group === 'singbox') {
+			// Pure singbox view — bypass Prism entirely.
+			const fake = applyFilters(buildFakeSingboxEntries(), url.searchParams);
+			send(res, 200, { data: { enabled: true, logs: fake, total: fake.length }, success: true });
+			return;
+		}
+		// Mixed view — pass through to Prism, then merge in singbox entries
+		// so the singbox chip lights up with content even from the all-groups view.
+		fetchJSON(req.url).then(({ status, body }) => {
+			if (body && typeof body === 'object' && body.data && Array.isArray(body.data.logs)) {
+				const fake = applyFilters(buildFakeSingboxEntries(), url.searchParams);
+				body.data.logs = body.data.logs.concat(fake);
+				body.data.total = (body.data.total ?? body.data.logs.length);
+			}
+			send(res, status, body);
 		});
 		return;
 	}
