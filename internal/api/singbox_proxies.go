@@ -197,3 +197,106 @@ func (h *SingboxProxiesHandler) clashGet(ctx context.Context, path, query string
 // queryEscape is a tiny wrapper so callers don't have to import
 // net/url for one-off escapes.
 func queryEscape(s string) string { return url.QueryEscape(s) }
+
+// Select godoc
+//
+//	@Summary		Switch active member of a sing-box selector group
+//	@Description	Sets the active member of a Clash-managed `selector` outbound. URLTest / loadbalance groups are read-only and return 400.
+//	@Tags			singbox-router
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxProxiesSelectRequest	true	"Group and member tags"
+//	@Success		200		{object}	OkResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		405		{object}	APIErrorEnvelope
+//	@Failure		502		{object}	APIErrorEnvelope
+//	@Router			/singbox/router/proxies/select [post]
+func (h *SingboxProxiesHandler) Select(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var req SingboxProxiesSelectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "invalid JSON: "+err.Error(), "INVALID_REQUEST")
+		return
+	}
+	if req.Group == "" || req.Member == "" {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "group and member required", "INVALID_REQUEST")
+		return
+	}
+
+	// Confirm group is a selector and member belongs to it.
+	raw, err := h.clashGet(r.Context(), "/proxies", "")
+	if err != nil {
+		response.ErrorWithStatus(w, http.StatusBadGateway, err.Error(), "CLASH_UNREACHABLE")
+		return
+	}
+	var parsed struct {
+		Proxies map[string]struct {
+			Name string   `json:"name"`
+			Type string   `json:"type"`
+			All  []string `json:"all"`
+		} `json:"proxies"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		response.InternalError(w, "parse clash response: "+err.Error())
+		return
+	}
+	g, ok := parsed.Proxies[req.Group]
+	if !ok {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "group "+req.Group+" not found", "GROUP_NOT_FOUND")
+		return
+	}
+	if strings.ToLower(g.Type) != "selector" {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "group "+req.Group+" is not a selector", "GROUP_NOT_SELECTOR")
+		return
+	}
+	memberOK := false
+	for _, m := range g.All {
+		if m == req.Member {
+			memberOK = true
+			break
+		}
+	}
+	if !memberOK {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "member "+req.Member+" not in "+req.Group, "MEMBER_NOT_IN_GROUP")
+		return
+	}
+
+	// PUT /proxies/<group> {"name":"<member>"}
+	body, _ := json.Marshal(map[string]string{"name": req.Member})
+	if err := h.clashPut(r.Context(), "/proxies/"+url.PathEscape(req.Group), body); err != nil {
+		response.ErrorWithStatus(w, http.StatusBadGateway, err.Error(), "CLASH_UNREACHABLE")
+		return
+	}
+	response.Success(w, struct{}{})
+}
+
+// clashPut sends a PUT with a JSON body to the upstream Clash API.
+func (h *SingboxProxiesHandler) clashPut(ctx context.Context, path string, body []byte) error {
+	base := h.clashBaseURL()
+	if base == "" {
+		return errors.New("clash base URL not configured")
+	}
+	client := h.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, base+path, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		out, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("clash %d: %s", resp.StatusCode, string(out))
+	}
+	return nil
+}

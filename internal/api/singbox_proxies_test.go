@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,5 +74,69 @@ func TestSingboxProxiesHandler_List_FiltersToCompositeGroups(t *testing.T) {
 				t.Errorf("veesp-fast members: %+v", g.Members)
 			}
 		}
+	}
+}
+
+func TestSingboxProxiesHandler_Select_HappyPath(t *testing.T) {
+	var captured struct {
+		method string
+		path   string
+		body   string
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		captured.body = string(body)
+		// /proxies (GET) for group lookup
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/proxies") {
+			_, _ = w.Write([]byte(`{"proxies":{"veesp-fast":{"name":"veesp-fast","type":"Selector","now":"vless-1","all":["vless-1","vless-2"]}}}`))
+			return
+		}
+		// /proxies/<group> (PUT) for member switch
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+
+	known := map[string]struct{}{"veesp-fast": {}}
+	h := &SingboxProxiesHandler{
+		clashBaseURL:    func() string { return upstream.URL },
+		knownComposites: func() map[string]struct{} { return known },
+		httpClient:      upstream.Client(),
+	}
+	body := strings.NewReader(`{"group":"veesp-fast","member":"vless-2"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/proxies/select", body)
+	h.Select(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	if captured.method != http.MethodPut {
+		t.Errorf("expected upstream PUT, got %s", captured.method)
+	}
+	if !strings.Contains(captured.body, `"vless-2"`) {
+		t.Errorf("upstream body missing member: %s", captured.body)
+	}
+}
+
+func TestSingboxProxiesHandler_Select_GroupNotSelector(t *testing.T) {
+	upstream := fakeClashServer(t, `{"proxies":{"auto":{"name":"auto","type":"URLTest","now":"vless-1","all":["vless-1"]}}}`)
+	t.Cleanup(upstream.Close)
+	known := map[string]struct{}{"auto": {}}
+	h := &SingboxProxiesHandler{
+		clashBaseURL:    func() string { return upstream.URL },
+		knownComposites: func() map[string]struct{} { return known },
+		httpClient:      upstream.Client(),
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/proxies/select",
+		strings.NewReader(`{"group":"auto","member":"vless-1"}`))
+	h.Select(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "GROUP_NOT_SELECTOR") {
+		t.Errorf("expected GROUP_NOT_SELECTOR code, got %s", rec.Body.String())
 	}
 }
