@@ -1,5 +1,6 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
+    import { goto } from '$app/navigation';
     import { page } from '$app/stores';
     import { routing, subscribeRouting, invalidateAllRouting } from '$lib/stores/routing';
     import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
@@ -14,38 +15,35 @@
     import AccessPoliciesTab from './AccessPoliciesTab.svelte';
     import ClientRoutesTab from './ClientRoutesTab.svelte';
     import { HrNeoTab } from '$lib/components/hrneo';
-    import { DeviceProxyTab } from '$lib/components/deviceproxy';
-    import { deviceProxyConfig, deviceProxyRuntime } from '$lib/stores/deviceproxy';
-    import SingboxRouterTab from './SingboxRouterTab.svelte';
+    import { SingboxRoutingPage } from '$lib/components/singbox-routing';
     import { isRoutingSubTabVisible, type RoutingSubTab, type UsageLevel } from '$lib/types/usageLevel';
     import { usageLevel } from '$lib/stores/settings';
 
     // Per-section polling stores — subscribe here so all 8 fetch while
     // the routing page is open. Unsubscribed on destroy to stop polling.
     let unsubRouting: (() => void) | null = null;
-    let unsubDPConfig: (() => void) | null = null;
-    let unsubDPRuntime: (() => void) | null = null;
 
     onMount(() => {
+        // Legacy URL redirect: the standalone "Прокси для устройств" tab
+        // moved into the Sing-box page as a sub-tab. Preserve old links.
+        const sp = new URLSearchParams($page.url.search);
+        if (sp.get('tab') === 'deviceproxy') {
+            sp.set('tab', 'singbox');
+            sp.set('sub', 'deviceproxy');
+            goto(`?${sp.toString()}`, { replaceState: true });
+        }
         unsubRouting = subscribeRouting();
-        // Subscribe to the deviceproxy stores so the tab badge can
-        // reflect current enabled/alive state even when the user is
-        // not on the deviceproxy tab.
-        unsubDPConfig = deviceProxyConfig.subscribe(() => {});
-        unsubDPRuntime = deviceProxyRuntime.subscribe(() => {});
     });
     onDestroy(() => {
         unsubRouting?.();
-        unsubDPConfig?.();
-        unsubDPRuntime?.();
     });
 
-    let activeTab = $state<'hrneo' | 'dns' | 'ip' | 'policy' | 'clientvpn' | 'deviceproxy' | 'singbox'>('dns');
+    let activeTab = $state<'hrneo' | 'dns' | 'ip' | 'policy' | 'clientvpn' | 'singbox'>('dns');
 
     // Deep link: ?tab=hrneo from the Settings page HR NEO card, etc.
     $effect(() => {
         const t = $page.url.searchParams.get('tab');
-        if (t === 'hrneo' || t === 'dns' || t === 'ip' || t === 'policy' || t === 'clientvpn' || t === 'deviceproxy' || t === 'singbox') {
+        if (t === 'hrneo' || t === 'dns' || t === 'ip' || t === 'policy' || t === 'clientvpn' || t === 'singbox') {
             if (tabVisible(t)) {
                 activeTab = t;
             }
@@ -126,32 +124,6 @@
         }
     });
 
-    // Device-proxy tab status badge. None when proxy is disabled (badge
-    // hidden), green "вкл" when enabled and sing-box is alive, muted
-    // "стоп" when enabled but daemon is down.
-    let dpEnabled = $derived($deviceProxyConfig.data?.enabled ?? false);
-    let dpAlive = $derived($deviceProxyRuntime.data?.alive ?? false);
-    let deviceProxyTab = $derived.by(() => {
-        if (!singboxInstalled) return null;
-        if (!dpEnabled) {
-            return { id: 'deviceproxy', label: 'Прокси для устройств' } as const;
-        }
-        if (dpAlive) {
-            return {
-                id: 'deviceproxy',
-                label: 'Прокси для устройств',
-                badge: 'вкл',
-                badgeTone: 'success',
-            } as const;
-        }
-        return {
-            id: 'deviceproxy',
-            label: 'Прокси для устройств',
-            badge: 'стоп',
-            badgeTone: 'muted',
-        } as const;
-    });
-
     type TabItem = {
         id: string;
         label: string;
@@ -188,7 +160,6 @@
             { id: 'ip', label: 'IP-адреса', badge: ipActiveCount },
             isOS5 ? { id: 'policy', label: 'Политики доступа', badge: policyCount } : null,
             { id: 'clientvpn', label: 'VPN для устройств', badge: clientRouteCount },
-            deviceProxyTab,
             singboxInstalled ? { id: 'singbox', label: 'Sing-box Router', badge: singboxRuleCount } : null,
         ] as (TabItem | null)[])
             .filter((t): t is TabItem => t !== null)
@@ -199,7 +170,7 @@
     // (uninstall while the page is open), bounce them off.
     $effect(() => {
         if (!$systemInfo.data) return;
-        if (!singboxInstalled && (activeTab === 'deviceproxy' || activeTab === 'singbox')) {
+        if (!singboxInstalled && activeTab === 'singbox') {
             activeTab = 'dns';
         }
     });
@@ -291,10 +262,8 @@
                 {policyDevices}
                 {routingTunnels}
             />
-        {:else if activeTab === 'deviceproxy'}
-            <DeviceProxyTab />
         {:else if activeTab === 'singbox'}
-            <SingboxRouterTab {routingTunnels} />
+            <SingboxRoutingPage />
         {/if}
     {/if}
 </PageContainer>
