@@ -244,18 +244,23 @@
 		box-sizing: border-box;
 	}
 	.segment {
-		display: inline-flex;
+		display: flex;
+		width: 100%;
 		border: 1px solid var(--border);
 		border-radius: 4px;
 		overflow: hidden;
 	}
 	.segment button {
+		flex: 1 1 0;
+		min-width: 0;
 		background: transparent;
 		border: none;
 		padding: 0.4rem 0.9rem;
 		font-size: 0.85rem;
 		cursor: pointer;
 		color: var(--muted-text);
+		text-align: center;
+		white-space: nowrap;
 	}
 	.segment button + button {
 		border-left: 1px solid var(--border);

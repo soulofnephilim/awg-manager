@@ -57,13 +57,26 @@
 
   const VIEWPORT_PADDING = 8;
 
+  function findScrollAncestor(el: HTMLElement | null): HTMLElement | null {
+    for (let p = el?.parentElement ?? null; p; p = p.parentElement) {
+      const cs = getComputedStyle(p);
+      if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && p.scrollHeight > p.clientHeight) {
+        return p;
+      }
+    }
+    return null;
+  }
+
   function recomputePlacement() {
     if (!triggerEl || !panelEl) return;
     const triggerRect = triggerEl.getBoundingClientRect();
     const menuHeight = panelEl.getBoundingClientRect().height;
-    const viewportHeight = window.innerHeight;
-    const spaceBelow = viewportHeight - triggerRect.bottom - VIEWPORT_PADDING;
-    const spaceAbove = triggerRect.top - VIEWPORT_PADDING;
+    // Outer bound: the closest scroll ancestor (e.g. modal body) OR window viewport.
+    const scroller = findScrollAncestor(triggerEl);
+    const bottomBound = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
+    const topBound = scroller ? scroller.getBoundingClientRect().top : 0;
+    const spaceBelow = bottomBound - triggerRect.bottom - VIEWPORT_PADDING;
+    const spaceAbove = triggerRect.top - topBound - VIEWPORT_PADDING;
     // Flip up only if there isn't enough room below AND there's more room above.
     menuUp = menuHeight > spaceBelow && spaceAbove > spaceBelow;
   }
