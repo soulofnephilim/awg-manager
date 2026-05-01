@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { SingboxStatus, HydraRouteStatus } from '$lib/types';
-	import { Button, StatusDot } from '$lib/components/ui';
+	import { Button, Modal, StatusDot } from '$lib/components/ui';
+	import { copyToClipboard } from '$lib/utils/clipboard';
 
 	interface Props {
 		singboxStatus: SingboxStatus | null;
@@ -26,6 +27,25 @@
 	const singboxRunning = $derived(singboxStatus?.running ?? false);
 	const hydraInstalled = $derived(hydraStatus?.installed ?? false);
 	const hydraRunning = $derived(hydraStatus?.running ?? false);
+
+	let errorModalOpen = $state(false);
+
+	function showErrorDetails() {
+		errorModalOpen = true;
+	}
+
+	async function copyError() {
+		if (singboxInstallError) {
+			await copyToClipboard(singboxInstallError);
+		}
+	}
+
+	// Auto-close modal when the upstream error is cleared (e.g. successful retry).
+	$effect(() => {
+		if (singboxInstallError === null) {
+			errorModalOpen = false;
+		}
+	});
 </script>
 
 {#if showSingbox || showHydra}
@@ -55,7 +75,12 @@
 								Поддержка VLESS/Reality, Hysteria2, NaiveProxy. Требует Entware на внешнем носителе.
 							</span>
 							{#if singboxInstallError}
-								<span class="setting-description error">{singboxInstallError}</span>
+								<span class="install-error-row">
+									<span class="install-error-label">Не удалось установить</span>
+									<Button variant="ghost" size="sm" onclick={showErrorDetails}>
+										Подробнее
+									</Button>
+								</span>
 							{/if}
 						{/if}
 					</div>
@@ -105,6 +130,21 @@
 	</div>
 {/if}
 
+<Modal
+	open={errorModalOpen}
+	title="Не удалось установить sing-box"
+	size="lg"
+	onclose={() => (errorModalOpen = false)}
+>
+	<pre class="error-pre">{singboxInstallError ?? ''}</pre>
+	{#snippet actions()}
+		<Button variant="ghost" size="sm" onclick={copyError}>Скопировать</Button>
+		<Button variant="primary" size="sm" onclick={() => (errorModalOpen = false)}>
+			Закрыть
+		</Button>
+	{/snippet}
+</Modal>
+
 <style>
 	.integration-item {
 		display: flex;
@@ -129,5 +169,27 @@
 
 	.error {
 		color: var(--color-error);
+	}
+
+	.install-error-row {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.install-error-label {
+		color: var(--color-error);
+		font-size: 0.8125rem;
+	}
+	.error-pre {
+		margin: 0;
+		padding: 0.75rem;
+		background: var(--color-bg-tertiary);
+		border-radius: var(--radius-sm);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		white-space: pre-wrap;
+		word-break: break-word;
+		max-height: 50vh;
+		overflow: auto;
 	}
 </style>
