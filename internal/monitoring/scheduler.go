@@ -136,6 +136,28 @@ func (s *Scheduler) SetEventBus(bus *events.Bus) {
 	s.deps.Bus = bus
 }
 
+// SetSingboxTunnels wires the sing-box tunnel lister after construction so
+// the server bootstrap can build the singbox.Operator (and the adapter that
+// projects it) later in the wiring sequence than the monitoring service
+// itself. Optional — when never set, sing-box rows are skipped.
+func (s *Scheduler) SetSingboxTunnels(l SingboxTunnelLister) {
+	s.deps.SingboxTunnels = l
+}
+
+// SetComposites wires the composite-outbound lister after construction so
+// the server bootstrap can build the router service first. Optional — when
+// never set, urltest membership is skipped.
+func (s *Scheduler) SetComposites(l CompositeOutboundLister) {
+	s.deps.Composites = l
+}
+
+// SetClashState wires the Clash latency cache after construction so the
+// server bootstrap can build the ClashProxy first. Optional — when never
+// set, ClashDelay/UrltestGroup are not populated.
+func (s *Scheduler) SetClashState(p ClashStateProvider) {
+	s.deps.ClashState = p
+}
+
 // Start launches the background loop and returns immediately.
 func (s *Scheduler) Start(ctx context.Context) {
 	go s.loop(ctx)

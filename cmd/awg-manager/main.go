@@ -810,6 +810,14 @@ func main() {
 	routerScheduler := router.NewScheduler(routerSvc, settingsStore, log)
 	routerScheduler.Start()
 
+	// Late-bind sing-box / router / Clash deps into the monitoring scheduler.
+	// monitoringService is constructed early (line ~421) so the matrix can
+	// include Keenetic-native tunnels; singboxOp + routerSvc + clashProxy
+	// are constructed later in the bootstrap, hence the deferred wiring.
+	monitoringService.SetSingboxTunnels(&monitoringSingboxTunnelAdapter{op: singboxOp})
+	monitoringService.SetComposites(&monitoringCompositesAdapter{svc: routerSvc})
+	monitoringService.SetClashState(monitoring.NewClashState(clashProxy.ClashBaseURL, nil))
+
 	srv.SetSingboxRouterHandler(api.NewSingboxRouterHandler(routerSvc, loggingService))
 	srv.SetAWGOutboundsHandler(api.NewAWGOutboundsHandler(awgoutboundsSvc))
 	srv.SetSingboxConfigHandler(api.NewSingboxConfigHandler(sbOrch.ConfigDir))

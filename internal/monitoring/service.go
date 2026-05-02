@@ -49,6 +49,25 @@ func (s *Service) SetEventBus(bus *events.Bus) {
 	s.scheduler.SetEventBus(bus)
 }
 
+// SetSingboxTunnels delegates to the scheduler. main.go uses this to wire
+// the sing-box tunnel adapter after singbox.Operator has been constructed.
+func (s *Service) SetSingboxTunnels(l SingboxTunnelLister) {
+	s.scheduler.SetSingboxTunnels(l)
+}
+
+// SetComposites delegates to the scheduler. main.go uses this to wire the
+// router composite-outbound adapter after the router service has been
+// constructed.
+func (s *Service) SetComposites(l CompositeOutboundLister) {
+	s.scheduler.SetComposites(l)
+}
+
+// SetClashState delegates to the scheduler. main.go uses this to wire the
+// Clash latency cache after ClashProxy has been constructed.
+func (s *Service) SetClashState(p ClashStateProvider) {
+	s.scheduler.SetClashState(p)
+}
+
 // Scheduler exposes the underlying scheduler so collaborators (e.g. the
 // connectivity Monitor) can request an immediate matrix tick without
 // importing internal types.
