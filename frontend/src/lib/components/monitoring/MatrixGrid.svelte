@@ -20,8 +20,13 @@
 		return t.id.startsWith('sys-');
 	}
 
+	function isSingbox(t: MonitoringTunnel): boolean {
+		return t.source === 'singbox';
+	}
+
 	// Managed AWG tunnels open the pingcheck drawer on the monitoring page.
-	// System tunnels are read-only — Keenetic owns their pingcheck.
+	// System tunnels and sing-box t2sX are read-only — neither has NDMS-side
+	// pingcheck (Keenetic owns the system case; sing-box uses Clash urltest).
 	function tunnelHref(t: MonitoringTunnel): string {
 		return `/monitoring?pingcheck=${encodeURIComponent(t.id)}`;
 	}
@@ -53,6 +58,10 @@
 								<span class="tunnel-system" title="Системный туннель Keenetic — pingcheck управляется в системе">
 									{t.name}
 								</span>
+							{:else if isSingbox(t)}
+								<span class="tunnel-system" title="Sing-box туннель — мониторинг через Clash urltest, NDMS pingcheck не применяется">
+									{t.name}
+								</span>
 							{:else}
 								<a href={tunnelHref(t)} class="tunnel-link" title="Открыть настройки pingcheck">
 									{t.name}
@@ -66,7 +75,7 @@
 									mono
 									title={`Источник: urltest группа "${t.urltestGroup ?? ''}"`}
 								>
-									clash: {t.clashDelay}ms
+									<span class="clash-num">clash: <span class="clash-val">{t.clashDelay}</span>ms</span>
 									<LatencySparkline
 										history={$latencyHistory.get(t.singboxTag ?? '') ?? []}
 										width={36}
@@ -120,6 +129,16 @@
 <style>
 	.wrap {
 		overflow-x: auto;
+	}
+
+	.clash-num {
+		font-variant-numeric: tabular-nums;
+	}
+
+	.clash-val {
+		display: inline-block;
+		min-width: 3ch;
+		text-align: right;
 	}
 
 	.matrix {
