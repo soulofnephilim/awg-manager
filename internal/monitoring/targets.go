@@ -23,6 +23,21 @@ type Tunnel struct {
 	PingcheckTarget string `json:"pingcheckTarget"` // empty when restart pingcheck disabled
 	SelfTarget      string `json:"selfTarget"`      // host the connectivity-check probes; empty when method=disabled/handshake
 	SelfMethod      string `json:"selfMethod"`      // "http", "ping", "handshake", "disabled"
+
+	// Source identifies which lister produced this tunnel: "awg",
+	// "system", "singbox". Drives row visual hints in the matrix UI.
+	Source string `json:"source,omitempty"`
+	// SingboxTag is the sing-box outbound tag (e.g. "veesp") for
+	// Source=="singbox" tunnels; empty otherwise. Lets the frontend
+	// reach into the per-member latency history map keyed by tag.
+	SingboxTag string `json:"singboxTag,omitempty"`
+	// ClashDelay is the last-recorded sing-box urltest delay (ms) for
+	// this tunnel. 0 means: not a urltest member, or no delay recorded
+	// yet, or Clash unreachable.
+	ClashDelay int `json:"clashDelay,omitempty"`
+	// UrltestGroup is the tag of the urltest composite group this
+	// tunnel belongs to (when ClashDelay is non-zero). Empty otherwise.
+	UrltestGroup string `json:"urltestGroup,omitempty"`
 }
 
 // BaseTargets is the hardcoded base list. Extend by code change only — there
