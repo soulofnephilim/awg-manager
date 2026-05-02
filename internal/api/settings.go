@@ -66,8 +66,11 @@ type SettingsData struct {
 	DnsRoute            DNSRouteSettingsDTO  `json:"dnsRoute"`
 	// UsageLevel controls which UI sections are visible to the user.
 	// Filtering is frontend-only — the API does not enforce it.
-	// enums: basic,advanced,expert
-	UsageLevel string `json:"usageLevel" example:"advanced" enums:"basic,advanced,expert"`
+	// enums: expert,advanced,basic
+	// First enum is the prism mock default (prism picks the first
+	// enum value over the example tag); putting `expert` first means
+	// dev:mock surfaces all advanced UI without manual toggling.
+	UsageLevel string `json:"usageLevel" example:"expert" enums:"expert,advanced,basic"`
 }
 
 // SettingsResponse is the envelope for GET /settings/get.
