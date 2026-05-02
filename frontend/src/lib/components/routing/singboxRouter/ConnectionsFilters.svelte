@@ -64,29 +64,41 @@
 		oninput={onSearchInput}
 	/>
 
-	<Dropdown
-		label="Outbound"
-		value={filters.outbound}
-		options={outboundDropdown}
-		onchange={(v) => onChange({ ...filters, outbound: v })}
-		fullWidth
-	/>
+	<div class="filter-row">
+		<span class="filter-label">Outbound</span>
+		<div class="filter-control">
+			<Dropdown
+				value={filters.outbound}
+				options={outboundDropdown}
+				onchange={(v) => onChange({ ...filters, outbound: v })}
+				fullWidth
+			/>
+		</div>
+	</div>
 
-	<Dropdown
-		label="Network"
-		value={filters.network}
-		options={networkDropdown}
-		onchange={(v) => onChange({ ...filters, network: v })}
-		fullWidth
-	/>
+	<div class="filter-row">
+		<span class="filter-label">Network</span>
+		<div class="filter-control">
+			<Dropdown
+				value={filters.network}
+				options={networkDropdown}
+				onchange={(v) => onChange({ ...filters, network: v })}
+				fullWidth
+			/>
+		</div>
+	</div>
 
-	<Dropdown
-		label="Rule"
-		value={filters.rule}
-		options={ruleDropdown}
-		onchange={(v) => onChange({ ...filters, rule: v })}
-		fullWidth
-	/>
+	<div class="filter-row">
+		<span class="filter-label">Rule</span>
+		<div class="filter-control">
+			<Dropdown
+				value={filters.rule}
+				options={ruleDropdown}
+				onchange={(v) => onChange({ ...filters, rule: v })}
+				fullWidth
+			/>
+		</div>
+	</div>
 </div>
 
 <style>
@@ -103,5 +115,21 @@
 		border: 1px solid var(--border-1, #2c3134);
 		border-radius: 6px;
 		color: var(--text-primary, #e8e6e3);
+	}
+	.filter-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+	.filter-label {
+		flex: 0 0 96px;
+		font-size: 12px;
+		color: var(--text-secondary, #b8b6b3);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+	.filter-control {
+		flex: 1;
+		min-width: 0;
 	}
 </style>
