@@ -25,10 +25,10 @@
 	let pingOpenKernel = $state(false);
 	let pingOpenNative = $state(false);
 
-	async function refresh() {
+	async function refresh(force = false) {
 		refreshing = true;
 		try {
-			const snap = await api.getMonitoringMatrix();
+			const snap = await api.getMonitoringMatrix({ force });
 			monitoringStore.setSnapshot(snap);
 		} catch {
 			notifications.error('Не удалось загрузить матрицу мониторинга');
@@ -37,7 +37,7 @@
 		}
 	}
 
-	onMount(refresh);
+	onMount(() => refresh(false));
 
 	function openCell(target: MonitoringTarget, tunnel: MonitoringTunnel) {
 		drawerTarget = target;
@@ -118,7 +118,7 @@
 				Обновлено: {formatRelativeTime($monitoringStore.lastUpdatedAt)}
 			{/if}
 		</span>
-		<Button variant="ghost" size="sm" onclick={refresh} loading={refreshing}>Обновить</Button>
+		<Button variant="ghost" size="sm" onclick={() => refresh(true)} loading={refreshing}>Обновить</Button>
 	</div>
 
 	{#if $monitoringStore.snapshot}

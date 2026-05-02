@@ -1317,8 +1317,9 @@ class ApiClient {
 	// #region Monitoring (Phase 3)
 	// ─────────────────────────────────────────────
 
-	async getMonitoringMatrix(): Promise<MonitoringSnapshot> {
-		return this.request<MonitoringSnapshot>('/monitoring/matrix');
+	async getMonitoringMatrix(opts?: { force?: boolean }): Promise<MonitoringSnapshot> {
+		const path = opts?.force ? '/monitoring/matrix?force=1' : '/monitoring/matrix';
+		return this.request<MonitoringSnapshot>(path);
 	}
 
 	async getMonitoringHistory(params: {
