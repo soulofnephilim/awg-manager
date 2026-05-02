@@ -24,13 +24,13 @@
 	<ConnectionsBreakdownPanel
 		title="By Host"
 		buckets={byHost}
-		activeKey={''}
+		activeKey={filters.search}
 		onSelect={(k) => onFilterToggle('host', k)}
 	/>
 	<ConnectionsBreakdownPanel
 		title="By Client"
 		buckets={byClient}
-		activeKey={''}
+		activeKey={filters.search}
 		onSelect={(k) => onFilterToggle('client', k)}
 	/>
 </div>
