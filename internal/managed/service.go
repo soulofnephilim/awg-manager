@@ -54,6 +54,13 @@ type ManagedServerService interface {
 	// ASC params
 	GetASCParams(ctx context.Context, id string) (json.RawMessage, error)
 	SetASCParams(ctx context.Context, id string, params json.RawMessage) error
+
+	// InvalidateCache invalidates the per-interface WGServerStore cache
+	// entry. Called by API mutation handlers immediately after a
+	// successful write so the next read (typically the SSE-driven
+	// frontend re-fetch) sees fresh NDMS state instead of cached
+	// pre-mutation values.
+	InvalidateCache(id string)
 }
 
 // rciPoster is the minimal POST surface managed needs from the NDMS transport.
@@ -94,4 +101,15 @@ func New(
 		log:       log,
 		appLog:    logging.NewScopedLogger(appLogger, logging.GroupServer, logging.SubManaged),
 	}
+}
+
+// InvalidateCache flushes the cached NDMS state for the given server id
+// (interface name). Safe to call concurrently. No-op when WGServers is
+// nil (test fakes) — see rci.go for the same defensive check used by
+// InvalidateAll.
+func (s *Service) InvalidateCache(id string) {
+	if s.queries == nil || s.queries.WGServers == nil {
+		return
+	}
+	s.queries.WGServers.Invalidate(id)
 }
