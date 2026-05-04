@@ -50,6 +50,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
+	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
 	"github.com/hoaxisr/awg-manager/internal/staticroute"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
@@ -643,6 +644,21 @@ func main() {
 		_ = sbOrch.SetEnabled(singboxorch.SlotRouter, curSettings.SingboxRouter.Enabled)
 	}
 
+	// Subscription service — owns 40-subscriptions.json in config.d.
+	// NewOperatorAdapter registers the slot into sbOrch (must happen before
+	// Bootstrap so Bootstrap can scan the file). LoadFromDisk reads any
+	// existing 40-subscriptions.json so the in-memory state is consistent.
+	subStorePath := filepath.Join(*dataDir, "subscriptions.json")
+	subStore, err := subscription.NewStore(subStorePath)
+	if err != nil {
+		log.Errorf("subscription store: %v", err)
+	}
+	subAdapter := subscription.NewOperatorAdapter(sbOrch)
+	if err := subAdapter.LoadFromDisk(singboxConfigDir); err != nil {
+		log.Warnf("subscription adapter: load from disk: %v", err)
+	}
+	subSvc := subscription.NewService(subStore, subAdapter)
+
 	// Wire orchestrator into Operator so ApplyConfig writes 10-tunnels.json
 	// through SlotTunnels rather than an in-place write that bypasses
 	// the orchestrator's validate / debounced reload.
@@ -906,6 +922,16 @@ func main() {
 		nil,
 	)
 	srv.SetSingboxProxiesHandler(proxiesHandler)
+
+	// Wire subscription handler + start refresh scheduler.
+	// subSvc and subAdapter are constructed earlier (after sbOrch.Bootstrap).
+	subSched := subscription.NewScheduler(subStore, func(ctx context.Context, id string) error {
+		_, err := subSvc.Refresh(ctx, id)
+		return err
+	})
+	subSched.Start(context.Background())
+	srv.SetSubscriptionHandler(api.NewSubscriptionHandler(subSvc))
+	srv.AddShutdownHook(subSched.Stop)
 
 	// Boot status: 0 = booting, 1 = done. Used by /api/system/info.
 	var bootDone int32

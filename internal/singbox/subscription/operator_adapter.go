@@ -51,10 +51,12 @@ type OperatorAdapter struct {
 	cfg slotConfig
 }
 
-// NewOperatorAdapter constructs the adapter and registers the subscription
-// slot with the orchestrator. Call before orch.Bootstrap().
+// NewOperatorAdapter constructs the adapter. In production the subscription
+// slot is registered via singboxorch.KnownSlots() before Bootstrap; in unit
+// tests the adapter registers it itself (Register is idempotent — duplicate
+// calls return ErrSlotAlreadyRegistered which is silently ignored here).
 func NewOperatorAdapter(orch *orchestrator.Orchestrator) *OperatorAdapter {
-	_ = orch.Register(SlotSubscriptionsMeta) // idempotent in tests
+	_ = orch.Register(SlotSubscriptionsMeta)
 	return &OperatorAdapter{
 		orch: orch,
 		cfg:  newEmptySlot(),
