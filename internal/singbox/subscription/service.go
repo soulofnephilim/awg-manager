@@ -241,6 +241,9 @@ func (s *Service) SetActiveMember(ctx context.Context, id, memberTag string) err
 	if err := s.mutator.AddOutbound(sub.SelectorTag, BuildSelector(sub.SelectorTag, sub.MemberTags, memberTag)); err != nil {
 		return err
 	}
+	if err := s.store.SetActiveMember(id, memberTag); err != nil {
+		return err
+	}
 	return s.mutator.Reload(ctx)
 }
 

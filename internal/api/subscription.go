@@ -33,6 +33,7 @@ type SubscriptionDTO struct {
 	ListenPort     int                  `json:"listenPort" example:"11080"`
 	MemberTags     []string             `json:"memberTags"`
 	OrphanTags     []string             `json:"orphanTags"`
+	ActiveMember   string               `json:"activeMember" example:"sub-abc-aaaa"`
 	Enabled        bool                 `json:"enabled"`
 	IsDefaultRoute bool                 `json:"isDefaultRoute"`
 }
@@ -115,6 +116,7 @@ func toSubscriptionDTO(s subscription.Subscription) SubscriptionDTO {
 		ListenPort:     int(s.ListenPort),
 		MemberTags:     members,
 		OrphanTags:     orphans,
+		ActiveMember:   s.ActiveMember,
 		Enabled:        s.Enabled,
 		IsDefaultRoute: s.IsDefaultRoute,
 	}

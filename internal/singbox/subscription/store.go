@@ -177,6 +177,8 @@ func (s *Store) UpdateState(id string, res RefreshResult) error {
 }
 
 // SetMembership replaces MemberTags + OrphanTags atomically. Used by Service.Refresh.
+// Auto-defaults ActiveMember to the first member when empty, and falls back to the
+// first remaining member when the current active becomes orphan.
 func (s *Store) SetMembership(id string, members, orphans []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -186,6 +188,32 @@ func (s *Store) SetMembership(id string, members, orphans []string) error {
 	}
 	sub.MemberTags = members
 	sub.OrphanTags = orphans
+	if sub.ActiveMember == "" && len(members) > 0 {
+		sub.ActiveMember = members[0]
+	}
+	if sub.ActiveMember != "" {
+		found := false
+		for _, m := range members {
+			if m == sub.ActiveMember {
+				found = true
+				break
+			}
+		}
+		if !found && len(members) > 0 {
+			sub.ActiveMember = members[0]
+		}
+	}
+	return s.saveLocked()
+}
+
+func (s *Store) SetActiveMember(id, memberTag string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, ok := s.data[id]
+	if !ok {
+		return fmt.Errorf("subscription %q not found", id)
+	}
+	sub.ActiveMember = memberTag
 	return s.saveLocked()
 }
 

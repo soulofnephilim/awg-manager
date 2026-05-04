@@ -16,6 +16,7 @@ type Subscription struct {
 	ListenPort     uint16    `json:"listenPort"`              // localhost port for the mixed inbound
 	MemberTags     []string  `json:"memberTags"`              // every member outbound tag
 	OrphanTags     []string  `json:"orphanTags"`              // tags missing on last refresh
+	ActiveMember   string    `json:"activeMember,omitempty"` // currently-active selector member tag
 	Enabled        bool      `json:"enabled"`
 	IsDefaultRoute bool      `json:"isDefaultRoute"`
 }

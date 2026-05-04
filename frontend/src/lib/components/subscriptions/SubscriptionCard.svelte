@@ -37,10 +37,10 @@
 	</div>
 	<div class="meta mono">{subscription.inboundTag} · :{subscription.listenPort}</div>
 	<div class="info">
-		{subscription.memberTags.length} серверов · обновлено {lastFetchedHuman}
-		{#if subscription.refreshHours > 0}
-			· auto {subscription.refreshHours}ч
-		{/if}
+		{subscription.memberTags.length} серверов
+		{#if subscription.activeMember}· активен <span class="mono">{subscription.activeMember}</span>{/if}
+		· обновлено {lastFetchedHuman}
+		{#if subscription.refreshHours > 0}· auto {subscription.refreshHours}ч{/if}
 	</div>
 	{#if subscription.lastError}
 		<div class="err-msg mono">{subscription.lastError}</div>

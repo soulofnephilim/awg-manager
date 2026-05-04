@@ -1461,6 +1461,7 @@ export interface Subscription {
 	listenPort: number;
 	memberTags: string[];
 	orphanTags: string[];
+	activeMember: string;
 	enabled: boolean;
 	isDefaultRoute: boolean;
 }

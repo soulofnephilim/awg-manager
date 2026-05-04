@@ -38,6 +38,10 @@
 		<div class="lbl">Серверов</div>
 		<div class="val">{subscription.memberTags.length}</div>
 	</div>
+	<div class="row">
+		<div class="lbl">Активный сервер</div>
+		<div class="val mono">{subscription.activeMember || '—'}</div>
+	</div>
 	{#if subscription.orphanTags.length > 0}
 		<div class="row warn">
 			<div class="lbl">Orphan</div>
