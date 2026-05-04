@@ -21,13 +21,23 @@
 	);
 
 	// Autodetect DNS from tunnel.interface.dns once we land on the summary.
-	// tunnelTag is used directly as the tunnel ID (AWGTagInfo.tag === tunnel.id).
-	// If detection fails or the field is empty, leave dnsServer as null so the
-	// orchestrator falls back to 1.1.1.1.
+	// tunnelTag has the form "awg-<id>" (managed) or "awg-sys-<id>" (system) —
+	// strip the prefix to recover the AWG tunnel ID accepted by getTunnel().
+	// System tunnels do not expose a wg-quick-style DNS field, so we only
+	// attempt detection on the managed prefix. On any failure we leave
+	// dnsServer null and the orchestrator falls back to Cloudflare 1.1.1.1.
+	function tagToTunnelId(tag: string): string | null {
+		if (tag.startsWith('awg-sys-')) return null;
+		if (tag.startsWith('awg-')) return tag.slice(4);
+		return null;
+	}
 	onMount(async () => {
-		if (!$wizardState.tunnelTag) return;
+		const tag = $wizardState.tunnelTag;
+		if (!tag) return;
+		const id = tagToTunnelId(tag);
+		if (!id) return;
 		try {
-			const tunnel = await api.getTunnel($wizardState.tunnelTag);
+			const tunnel = await api.getTunnel(id);
 			const dns = tunnel.interface?.dns?.trim();
 			if (dns) singboxWizard.setDnsServer(dns);
 		} catch {
