@@ -79,13 +79,22 @@ func clashFieldsToValues(p map[string]any) url.Values {
 		if name := asString(gp["grpc-service-name"]); name != "" {
 			v.Set("serviceName", name)
 		}
-	case "http", "h2":
+	case "http":
 		hp := nestedMap(p, "http-opts")
 		if path := asString(hp["path"]); path != "" {
 			v.Set("path", path)
 		}
 		if host := asString(hp["host"]); host != "" {
 			v.Set("host", host)
+		}
+	case "h2":
+		hp := nestedMap(p, "h2-opts")
+		if path := asString(hp["path"]); path != "" {
+			v.Set("path", path)
+		}
+		// h2-opts.host is []string per Clash spec; take the first non-empty entry.
+		if hosts := asStringSlice(hp["host"]); len(hosts) > 0 {
+			v.Set("host", hosts[0])
 		}
 	}
 

@@ -104,6 +104,51 @@ func TestClashFieldsToValues_RealityGRPC(t *testing.T) {
 	}
 }
 
+func TestClashFieldsToValues_HTTP(t *testing.T) {
+	in := map[string]any{
+		"server":  "h",
+		"port":    443,
+		"network": "http",
+		"http-opts": map[string]any{
+			"path": "/api",
+			"host": "example.com",
+		},
+	}
+	got := clashFieldsToValues(in)
+	if got.Get("type") != "http" {
+		t.Errorf("type=%q want http", got.Get("type"))
+	}
+	if got.Get("path") != "/api" {
+		t.Errorf("path=%q want /api", got.Get("path"))
+	}
+	if got.Get("host") != "example.com" {
+		t.Errorf("host=%q want example.com", got.Get("host"))
+	}
+}
+
+func TestClashFieldsToValues_H2(t *testing.T) {
+	in := map[string]any{
+		"server":  "h",
+		"port":    443,
+		"network": "h2",
+		"h2-opts": map[string]any{
+			"path": "/h2path",
+			// h2-opts.host is a list per Clash spec
+			"host": []any{"first.example.com", "second.example.com"},
+		},
+	}
+	got := clashFieldsToValues(in)
+	if got.Get("type") != "h2" {
+		t.Errorf("type=%q want h2", got.Get("type"))
+	}
+	if got.Get("path") != "/h2path" {
+		t.Errorf("path=%q want /h2path", got.Get("path"))
+	}
+	if got.Get("host") != "first.example.com" {
+		t.Errorf("host=%q want first.example.com (first list entry)", got.Get("host"))
+	}
+}
+
 func TestAsInt(t *testing.T) {
 	cases := []struct {
 		in   any
@@ -136,6 +181,8 @@ func TestAsBool(t *testing.T) {
 		{false, false},
 		{1, true},
 		{0, false},
+		{float64(1), true},
+		{float64(0), false},
 		{"true", true},
 		{"1", true},
 		{"yes", true},
