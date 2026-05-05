@@ -556,7 +556,7 @@
 			<SubscriptionList subscriptions={subscriptionsList} onAdd={() => (createModalOpen = true)} />
 		{:else}
 			<SingboxInstallBanner />
-			{#if singboxTunnelsList.length === 0}
+			{#if singboxTunnelsList.length === 0 && subscriptionsActiveCards.length === 0}
 				<SingboxGhostTerminal />
 				<div class="info-card">
 					<h3 class="info-title">О Sing-box</h3>
@@ -578,7 +578,7 @@
 						</div>
 					</div>
 				</div>
-			{:else}
+			{:else if singboxTunnelsList.length > 0}
 				<div class="tunnels-toolbar">
 					<span class="tunnel-count">
 						{singboxTunnelsList.length}
