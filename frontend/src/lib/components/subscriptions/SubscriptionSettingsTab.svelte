@@ -62,10 +62,10 @@
 		}
 	}
 
-	async function doDelete(cascade: boolean): Promise<void> {
+	async function doDelete(): Promise<void> {
 		deleting = true;
 		try {
-			await api.deleteSubscription(subscription.id, cascade);
+			await api.deleteSubscription(subscription.id);
 			goto('/');
 		} finally {
 			deleting = false;
@@ -100,13 +100,10 @@
 	{#if !confirmDelete}
 		<Button variant="danger" onclick={() => (confirmDelete = true)}>Удалить подписку</Button>
 	{:else}
-		<div>Удалить подписку. Что делать с outbound'ами?</div>
+		<div>Удалить подписку и все её ресурсы (sing-box outbound'ы, NDMS Proxy)?</div>
 		<div class="confirm-actions">
-			<Button variant="ghost" disabled={deleting} onclick={() => doDelete(false)}>
-				Оставить осиротевшими
-			</Button>
-			<Button variant="danger" disabled={deleting} loading={deleting} onclick={() => doDelete(true)}>
-				Удалить cascade
+			<Button variant="danger" disabled={deleting} loading={deleting} onclick={doDelete}>
+				Удалить
 			</Button>
 			<Button variant="ghost" onclick={() => (confirmDelete = false)}>Отмена</Button>
 		</div>

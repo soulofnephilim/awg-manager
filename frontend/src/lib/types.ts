@@ -1450,6 +1450,7 @@ export interface SubscriptionHeader {
 
 export interface SubscriptionMember {
 	tag: string;
+	label?: string;
 	protocol: string;
 	server: string;
 	port: number;

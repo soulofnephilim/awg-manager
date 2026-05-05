@@ -1644,8 +1644,8 @@ class ApiClient {
 		);
 	}
 
-	async deleteSubscription(id: string, cascade: boolean): Promise<void> {
-		const url = `/singbox/subscriptions/delete?id=${encodeURIComponent(id)}&cascade=${cascade ? '1' : '0'}`;
+	async deleteSubscription(id: string): Promise<void> {
+		const url = `/singbox/subscriptions/delete?id=${encodeURIComponent(id)}`;
 		await this.request(url, { method: 'DELETE' });
 	}
 

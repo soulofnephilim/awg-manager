@@ -72,7 +72,7 @@
 >
 	<div class="header">
 		<span class="led" class:on={active} aria-hidden="true"></span>
-		<span class="title" title={member.tag}>{member.server}</span>
+		<span class="title" title={member.tag}>{member.label || member.server}</span>
 		<span class="port mono">:{member.port}</span>
 	</div>
 	<div class="badges">
@@ -86,6 +86,9 @@
 			<span class="badge tls">TLS</span>
 		{/if}
 	</div>
+	{#if member.label}
+		<div class="server-line mono" title={member.tag}>{member.server}:{member.port}</div>
+	{/if}
 	<div class="delay-row">
 		<span
 			role="button"
@@ -235,4 +238,13 @@
 	.spark.slow .bar { background: #d29922; }
 	.spark.fail .bar { background: #f85149; }
 	.bar.empty       { opacity: 0.3; }
+	.server-line {
+		font-size: 0.72rem;
+		color: var(--color-text-muted);
+		opacity: 0.85;
+		margin: 0.15rem 0 0.35rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 </style>
