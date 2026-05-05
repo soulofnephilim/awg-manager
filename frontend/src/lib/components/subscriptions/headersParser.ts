@@ -26,3 +26,21 @@ X-Device-Locale: ru
 X-Ver-OS: 26.4
 X-App-Version: 4.6.0
 X-Device-Model: iPhone 17 Pro Max`;
+
+// Empty mihomo / Clash template — every recognised header listed but
+// blank, so the user only fills in what their provider actually checks.
+// Lines with empty values are silently dropped by parseHeadersText.
+export const MIHOMO_PRESET = `# Шаблон Clash / mihomo. Заполни нужные строки и сохрани.
+# Пустые строки и строки с # игнорируются.
+User-Agent: mihomo/v1.19.20
+X-HWID:
+X-Device-OS: Android
+X-Device-Locale: ru
+X-Device-Model:
+X-Ver-OS:
+X-App-Version:
+Accept-Encoding: gzip
+X-Real-IP:
+X-Forwarded-For:
+# Connection / Host / Content-Length / Transfer-Encoding / Upgrade
+# управляются Go-клиентом и игнорируются.`;
