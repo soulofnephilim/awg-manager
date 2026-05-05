@@ -45,6 +45,34 @@ def main() -> int:
             print("[smoke-sub] verify selector tag visible")
             page.wait_for_selector('text=/sub-/', timeout=5000)
 
+            # ── Clash YAML subscription create ─────────────────────────────
+            print("[smoke-sub] navigate / and create Clash YAML subscription")
+            page.goto(f"{BASE}/")
+            page.wait_for_load_state("networkidle")
+            page.get_by_role("button", name="Подписки").click()
+            page.wait_for_timeout(300)
+
+            page.get_by_role("button", name="Добавить подписку").click()
+            page.wait_for_timeout(300)
+
+            page.locator('input[type="text"]').first.fill("Clash Mock")
+            page.locator('input[type="url"]').first.fill(
+                f"{BASE}/__mock__/clash-subscription.yaml"
+            )
+            page.get_by_role("button", name="Создать").click()
+
+            print("[smoke-sub] await Clash detail page")
+            page.wait_for_url("**/subscriptions/sub-*", timeout=10000)
+            page.wait_for_load_state("networkidle")
+
+            print("[smoke-sub] verify 3 Clash member labels visible")
+            for label in ("🇺🇸 LA-1 (mock)", "🇩🇪 FRA-1 (mock)", "🇯🇵 TYO-1 (mock)"):
+                if not page.get_by_text(label).first.is_visible(timeout=5000):
+                    raise AssertionError(f"member label {label!r} not visible on Clash detail page")
+
+            page.screenshot(path="/tmp/subscription-clash-yaml-created.png", full_page=True)
+            print("[smoke-sub] Clash YAML create flow OK")
+
             # Active member surfacing on Sing-box tab + in-card swap
             print("[smoke-sub] navigate to / and switch to Sing-box tab")
             page.goto(f"{BASE}/")
