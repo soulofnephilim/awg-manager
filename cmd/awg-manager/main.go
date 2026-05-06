@@ -162,16 +162,6 @@ func main() {
 		log,
 	)
 
-	// Fetch NDMS version info via RCI (single HTTP call, cached for all consumers).
-	// At early boot, retry until NDMS responds (up to 30s).
-	ndmsTimeout := time.Second // normal restart: single attempt
-	if uptime > 0 && uptime < 120 {
-		ndmsTimeout = 30 * time.Second // boot: wait for NDMS
-	}
-	if err := ndmsinfo.Init(context.Background(), ndmsTimeout); err != nil {
-		log.Warn("NDMS version info not available", map[string]interface{}{"error": err.Error()})
-	}
-
 	// Load kernel module if available (before backend detection)
 	kmodLoader := kmod.New()
 
@@ -202,12 +192,14 @@ func main() {
 	})
 
 	// Initialize SystemInfoStore at boot — one-shot fetch of /show/version.
-	{
-		initCtx, initCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := ndmsQueries.SystemInfo.Init(initCtx); err != nil {
-			log.Warnf("ndms sysinfo init: %v", err)
-		}
-		initCancel()
+	// Compute timeout based on system uptime (wait longer at early boot).
+	ndmsTimeout := time.Second // normal restart: single attempt
+	if uptime > 0 && uptime < 120 {
+		ndmsTimeout = 30 * time.Second // boot: wait for NDMS
+	}
+	// Wire ndmsinfo to the SystemInfoStore, then initialize with retry.
+	if err := ndmsinfo.Init(context.Background(), ndmsQueries.SystemInfo, ndmsTimeout); err != nil {
+		log.Warn("NDMS version info not available", map[string]interface{}{"error": err.Error()})
 	}
 
 	// Warm NDMS list caches before accepting clients so the first SSE snapshot
@@ -1528,11 +1520,6 @@ func runCleanup(dataDir string) {
 	log := logger.New()
 	defer log.Close()
 
-	// Init NDMS info (needed for OS detection)
-	initCtx, initCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	_ = ndmsinfo.Init(initCtx, 10*time.Second)
-	initCancel()
-
 	settingsStore := storage.NewSettingsStore(dataDir)
 	settingsStore.Load()
 
@@ -1548,6 +1535,12 @@ func runCleanup(dataDir string) {
 		Logger: nil,
 		IsOS5:  osdetect.Is5,
 	})
+
+	// Init NDMS info (needed for OS detection). Wire ndmsinfo to the
+	// SystemInfoStore, then initialize with retry.
+	if err := ndmsinfo.Init(context.Background(), cleanupNDMSQueries.SystemInfo, 10*time.Second); err != nil {
+		log.Warnf("cleanup: NDMS version info not available: %v", err)
+	}
 
 	// Create service components
 	wgClient := wg.New()
