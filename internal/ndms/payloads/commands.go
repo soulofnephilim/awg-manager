@@ -130,6 +130,16 @@ func CmdWireguardPeerDisconnect(name, publicKey string) any {
 	}}}
 }
 
+// CmdWireguardPeerNo removes a peer from the WireGuard interface entirely
+// (deletes the peer entry, not just disconnects it). Verified RCI shape:
+// `{"peer": {"key": "...", "no": true}}` returns
+// `Wireguard::Interface: removed peer "..."` from NDMS.
+func CmdWireguardPeerNo(name, publicKey string) any {
+	return map[string]any{"interface": map[string]any{"name": name, "wireguard": map[string]any{
+		"peer": map[string]any{"key": publicKey, "no": true},
+	}}}
+}
+
 // --- System (#30) ---
 
 func CmdSave() any {

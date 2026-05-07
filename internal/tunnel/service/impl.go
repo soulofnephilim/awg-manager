@@ -494,7 +494,7 @@ func (s *ServiceImpl) applyDiffNWG(ctx context.Context, oldStored, newStored *st
 	}
 
 	if !awgPeerEqual(oldStored.Peer, newStored.Peer) {
-		if err := s.nwgOperator.SyncPeer(ctx, newStored); err != nil {
+		if err := s.nwgOperator.SyncPeer(ctx, newStored, oldStored.Peer.PublicKey); err != nil {
 			s.logWarn("update", tunnelID, "Failed to sync NWG peer: "+err.Error())
 			errs = append(errs, fmt.Errorf("sync peer: %w", err))
 		}
@@ -749,6 +749,12 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 		wasNativeRunning = stateInfo.State == tunnel.StateRunning || stateInfo.State == tunnel.StateStarting
 	}
 
+	// Capture the old peer's public key BEFORE overwriting Interface/Peer.
+	// SyncPeer needs it to remove the orphan peer entry from NDMS when the
+	// new conf carries a different PublicKey — without this the interface
+	// ends up with both old and new peers (NDMS indexes by key).
+	oldPublicKey := stored.Peer.PublicKey
+
 	// Replace Interface + Peer entirely
 	stored.Interface = parsed.Interface
 	stored.Peer = parsed.Peer
@@ -782,7 +788,7 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 				s.logWarn("replace-config", tunnelID, "Stop before peer sync failed: "+err.Error())
 			}
 		}
-		if err := s.nwgOperator.SyncPeer(ctx, stored); err != nil {
+		if err := s.nwgOperator.SyncPeer(ctx, stored, oldPublicKey); err != nil {
 			s.logWarn("replace-config", tunnelID, "SyncPeer failed: "+err.Error())
 		}
 		if err := s.nwgOperator.SyncAddressMTU(ctx, stored); err != nil {

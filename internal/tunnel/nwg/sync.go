@@ -102,7 +102,15 @@ func (o *OperatorNativeWG) SyncAddressMTU(ctx context.Context, stored *storage.A
 
 // SyncPeer pushes the stored peer configuration to the NDMS interface.
 // This applies key/allowed-ips/keepalive/preshared-key from storage.
-func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunnel) error {
+//
+// previousPublicKey lets callers atomically replace the peer when the
+// public key changes (e.g. ReplaceConfig from a fresh .conf). If non-
+// empty AND different from stored.Peer.PublicKey, the old peer entry is
+// removed from NDMS in the same batch as the new one is added — without
+// this, NDMS keeps both peers (it indexes by key) and the interface
+// ends up with an orphan from the previous config. Pass "" when there
+// is no previous peer to remove (e.g. fresh tunnel start).
+func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunnel, previousPublicKey string) error {
 	ndmsName := NewNWGNames(stored.NWGIndex).NDMSName
 	o.appLog.Full("replace-config", stored.Name, "Syncing peer parameters to NDMS")
 
@@ -147,10 +155,12 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 		}
 	}
 
-	_, err := o.transport.PostBatch(ctx, []any{
-		payloads.CmdWireguardPeer(ndmsName, peerCfg),
-		payloads.CmdSave(),
-	})
+	cmds := make([]any, 0, 3)
+	if previousPublicKey != "" && previousPublicKey != stored.Peer.PublicKey {
+		cmds = append(cmds, payloads.CmdWireguardPeerNo(ndmsName, previousPublicKey))
+	}
+	cmds = append(cmds, payloads.CmdWireguardPeer(ndmsName, peerCfg), payloads.CmdSave())
+	_, err := o.transport.PostBatch(ctx, cmds)
 	if err != nil {
 		return fmt.Errorf("sync peer: %w", err)
 	}
