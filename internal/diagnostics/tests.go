@@ -963,10 +963,16 @@ func findTunnelDNS(dnsList string) string {
 	return ""
 }
 
+// cgnatNet is the carrier-grade NAT range (RFC 6598). Pre-parsed once
+// at package init so isCGNAT calls don't re-parse the literal each time.
+var cgnatNet = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("100.64.0.0/10")
+	return n
+}()
+
 // isCGNAT checks if the IP is in the 100.64.0.0/10 range (RFC 6598).
 func isCGNAT(ip net.IP) bool {
-	_, cgnat, _ := net.ParseCIDR("100.64.0.0/10")
-	return cgnat.Contains(ip)
+	return cgnatNet.Contains(ip)
 }
 
 func (r *Runner) testRestartCycle(ctx context.Context, t TunnelInfo) TestResult {
@@ -999,16 +1005,22 @@ func (r *Runner) testRestartCycle(ctx context.Context, t TunnelInfo) TestResult 
 	}
 	startDuration := time.Since(startStart)
 
-	// Wait for handshake (up to 15s)
+	// Wait for handshake (up to 15s) — abort early on context cancellation
+	// so an HTTP timeout doesn't keep the loop spinning.
 	handshakeOK := false
+waitLoop:
 	for i := 0; i < 15; i++ {
-		time.Sleep(time.Second)
+		select {
+		case <-ctx.Done():
+			break waitLoop
+		case <-time.After(time.Second):
+		}
 		result, err := exec.Run(ctx, "/opt/sbin/awg", "show", t.InterfaceName)
 		if err == nil && strings.Contains(result.Stdout, "latest handshake:") {
 			hs := extractField(result.Stdout, "latest handshake:")
 			if hs != "" && hs != "(none)" {
 				handshakeOK = true
-				break
+				break waitLoop
 			}
 		}
 	}

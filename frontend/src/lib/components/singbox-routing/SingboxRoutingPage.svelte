@@ -146,10 +146,14 @@
 	const wizRulesStore = singboxRouter.rules;
 	const wizOutboundsStore = singboxRouter.outbounds;
 	const wizSettingsStore = singboxRouter.settings;
+	// Settings is null until loadAll() (called from sub-tabs onMount) has
+	// completed at least once. Gate the WizardEntry on that to avoid a
+	// brief flash on initial page paint when stores still hold defaults.
 	const isEmpty = $derived(
+		$wizSettingsStore !== null &&
 		($wizRulesStore?.length ?? 0) === 0 &&
 		($wizOutboundsStore?.length ?? 0) === 0 &&
-		(!$wizSettingsStore?.policyName || $wizSettingsStore.policyName === '')
+		(!$wizSettingsStore.policyName || $wizSettingsStore.policyName === '')
 	);
 </script>
 

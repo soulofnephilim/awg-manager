@@ -40,6 +40,10 @@ type ruleSetCache struct {
 
 	mu      sync.Mutex
 	entries map[string]ruleSetCacheEntry
+	// urlLocks serialises downloads per URL so two concurrent Inspect
+	// calls don't both fetch the same remote rule-set. Lazily populated
+	// on first getOrDownload per URL.
+	urlLocks map[string]*sync.Mutex
 }
 
 type ruleSetCacheEntry struct {
@@ -58,11 +62,27 @@ func newRuleSetCache(cacheDir string) *ruleSetCache {
 	return &ruleSetCache{
 		cacheDir: cacheDir,
 		entries:  make(map[string]ruleSetCacheEntry),
+		urlLocks: make(map[string]*sync.Mutex),
 	}
 }
 
+// urlLock returns (creating if needed) the per-URL serialisation mutex.
+// Holding this mutex from cache-check through download-and-publish makes
+// concurrent getOrDownload calls for the same URL deduplicate to one
+// download.
+func (c *ruleSetCache) urlLock(url string) *sync.Mutex {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if l, ok := c.urlLocks[url]; ok {
+		return l
+	}
+	l := &sync.Mutex{}
+	c.urlLocks[url] = l
+	return l
+}
+
 // httpClient is package-level so tests can swap it via the unexported
-// ruleSetHTTPClient hook.
+// ruleSetHTTPClient hook. Do not swap from tests using t.Parallel().
 var ruleSetHTTPClient = &http.Client{Timeout: ruleSetDownloadTimeout}
 
 // getOrDownload returns the local file path for url, downloading and
@@ -77,6 +97,13 @@ func (c *ruleSetCache) getOrDownload(url, format string) (string, error) {
 		ext = ".json"
 	}
 	filename := cacheKey + ext
+
+	// Serialise downloads of the same URL — without this, two concurrent
+	// Inspect calls would both go to the network. Different URLs still
+	// download in parallel.
+	urlMu := c.urlLock(url)
+	urlMu.Lock()
+	defer urlMu.Unlock()
 
 	c.mu.Lock()
 	if entry, ok := c.entries[url]; ok && time.Now().Before(entry.expiresAt) {
@@ -145,7 +172,8 @@ func (c *ruleSetCache) getOrDownload(url, format string) (string, error) {
 
 // ruleSetMatchExec is the injectable exec hook for tests. Production
 // path runs sing-box for real. Tests assign a fake function that
-// returns canned stdout/stderr/err.
+// returns canned stdout/stderr/err. Do not swap from tests using
+// t.Parallel() — there is no mutex protecting the swap.
 var ruleSetMatchExec = func(binary string, args []string) (stdout, stderr string, err error) {
 	cmd := exec.Command(binary, args...)
 	var so, se bytes.Buffer
