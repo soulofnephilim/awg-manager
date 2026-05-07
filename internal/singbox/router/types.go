@@ -38,13 +38,14 @@ type Rule struct {
 }
 
 type RuleSet struct {
-	Tag            string `json:"tag"`
-	Type           string `json:"type"`
-	Format         string `json:"format"`
-	URL            string `json:"url,omitempty"`
-	UpdateInterval string `json:"update_interval,omitempty"`
-	DownloadDetour string `json:"download_detour,omitempty"`
-	Path           string `json:"path,omitempty"`
+	Tag            string           `json:"tag"`
+	Type           string           `json:"type"`
+	Format         string           `json:"format,omitempty"`
+	URL            string           `json:"url,omitempty"`
+	UpdateInterval string           `json:"update_interval,omitempty"`
+	DownloadDetour string           `json:"download_detour,omitempty"`
+	Path           string           `json:"path,omitempty"`
+	Rules          []map[string]any `json:"rules,omitempty"`
 }
 
 type Outbound struct {

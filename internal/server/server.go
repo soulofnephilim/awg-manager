@@ -952,6 +952,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/api/singbox/router/rules/move", guarded(rh.MoveRule))
 		mux.HandleFunc("/api/singbox/router/rulesets/list", guarded(rh.ListRuleSets))
 		mux.HandleFunc("/api/singbox/router/rulesets/add", guarded(rh.AddRuleSet))
+		mux.HandleFunc("/api/singbox/router/rulesets/update", guarded(rh.UpdateRuleSet))
 		mux.HandleFunc("/api/singbox/router/rulesets/delete", guarded(rh.DeleteRuleSet))
 		mux.HandleFunc("/api/singbox/router/rulesets/refresh", guarded(rh.RefreshRuleSet))
 		mux.HandleFunc("/api/singbox/router/outbounds/list", guarded(rh.ListOutbounds))

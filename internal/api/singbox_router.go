@@ -83,13 +83,20 @@ type SingboxRouterRulesListResponse struct {
 
 // SingboxRouterRuleSetDTO mirrors router.RuleSet.
 type SingboxRouterRuleSetDTO struct {
-	Tag            string `json:"tag" example:"geosite-cn"`
-	Type           string `json:"type" example:"remote"`
-	Format         string `json:"format" example:"binary"`
-	URL            string `json:"url,omitempty" example:"https://cdn.example.com/geosite-cn.srs"`
-	UpdateInterval string `json:"update_interval,omitempty" example:"24h"`
-	DownloadDetour string `json:"download_detour,omitempty" example:"direct"`
-	Path           string `json:"path,omitempty" example:"/opt/etc/singbox/rulesets/geosite-cn.srs"`
+	Tag            string           `json:"tag" example:"geosite-cn"`
+	Type           string           `json:"type" example:"remote"`
+	Format         string           `json:"format,omitempty" example:"binary"`
+	URL            string           `json:"url,omitempty" example:"https://cdn.example.com/geosite-cn.srs"`
+	UpdateInterval string           `json:"update_interval,omitempty" example:"24h"`
+	DownloadDetour string           `json:"download_detour,omitempty" example:"direct"`
+	Path           string           `json:"path,omitempty" example:"/opt/etc/singbox/rulesets/geosite-cn.srs"`
+	Rules          []map[string]any `json:"rules,omitempty"`
+}
+
+// SingboxRouterRuleSetUpdateRequest is the body for POST /singbox/router/rulesets/update.
+type SingboxRouterRuleSetUpdateRequest struct {
+	Tag     string                  `json:"tag" example:"geosite-cn"`
+	RuleSet SingboxRouterRuleSetDTO `json:"ruleSet"`
 }
 
 // SingboxRouterRuleSetsListResponse is the envelope for GET /singbox/router/rulesets/list.
@@ -594,6 +601,44 @@ func (h *SingboxRouterHandler) AddRuleSet(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := h.svc.AddRuleSet(r.Context(), rs); err != nil {
+		h.handleErr(w, "request", err)
+		return
+	}
+	response.Success(w, map[string]bool{"ok": true})
+}
+
+// UpdateRuleSet replaces the ruleset identified by tag with new content.
+//
+//	@Summary		Update singbox-router ruleset
+//	@Description	Replaces the ruleset identified by tag with new content. Tag rename is not supported.
+//	@Tags			singbox-router
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxRouterRuleSetUpdateRequest	true	"Tag + new RuleSet payload"
+//	@Success		200		{object}	OkResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/router/rulesets/update [post]
+func (h *SingboxRouterHandler) UpdateRuleSet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Tag     string         `json:"tag"`
+		RuleSet router.RuleSet `json:"ruleSet"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	if body.Tag == "" {
+		response.BadRequest(w, "tag is required")
+		return
+	}
+	if err := h.svc.UpdateRuleSet(r.Context(), body.Tag, body.RuleSet); err != nil {
 		h.handleErr(w, "request", err)
 		return
 	}

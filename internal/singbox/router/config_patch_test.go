@@ -17,6 +17,75 @@ func TestRuleSetAddDuplicate(t *testing.T) {
 	}
 }
 
+func TestRuleSetUpdate(t *testing.T) {
+	cfg := NewEmptyConfig()
+	cfg.Route.RuleSet = []RuleSet{
+		{Tag: "geosite-youtube", Type: "remote", Format: "binary", URL: "https://example.com/yt.srs", UpdateInterval: "24h"},
+	}
+
+	// Successful update — replace URL.
+	next := RuleSet{Tag: "geosite-youtube", Type: "remote", Format: "binary", URL: "https://example.com/yt-new.srs", UpdateInterval: "24h"}
+	if err := cfg.UpdateRuleSet("geosite-youtube", next); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if cfg.Route.RuleSet[0].URL != "https://example.com/yt-new.srs" {
+		t.Errorf("URL not updated, got %q", cfg.Route.RuleSet[0].URL)
+	}
+
+	// Not found.
+	missing := RuleSet{Tag: "missing", Type: "remote", Format: "binary", URL: "u", UpdateInterval: "24h"}
+	err := cfg.UpdateRuleSet("missing", missing)
+	if !errors.Is(err, ErrRuleSetNotFound) {
+		t.Errorf("expected ErrRuleSetNotFound, got %v", err)
+	}
+
+	// Tag rename rejected.
+	renamed := RuleSet{Tag: "geosite-renamed", Type: "remote", Format: "binary", URL: "u", UpdateInterval: "24h"}
+	err = cfg.UpdateRuleSet("geosite-youtube", renamed)
+	if err == nil {
+		t.Error("expected tag-rename to be rejected, got nil")
+	}
+}
+
+func TestRuleSetInlineValidation(t *testing.T) {
+	cfg := NewEmptyConfig()
+
+	// Empty rules rejected.
+	err := cfg.AddRuleSet(RuleSet{Tag: "in-empty", Type: "inline"})
+	if err == nil || !contains(err.Error(), "rules required") {
+		t.Errorf("expected 'rules required' error, got %v", err)
+	}
+
+	// Rule with no known matcher rejected.
+	err = cfg.AddRuleSet(RuleSet{Tag: "in-bad", Type: "inline", Rules: []map[string]any{{"unknown_field": "x"}}})
+	if err == nil || !contains(err.Error(), "no known matcher") {
+		t.Errorf("expected 'no known matcher' error, got %v", err)
+	}
+
+	// Rule with empty domain_suffix array rejected.
+	err = cfg.AddRuleSet(RuleSet{Tag: "in-empty-arr", Type: "inline", Rules: []map[string]any{{"domain_suffix": []any{}}}})
+	if err == nil {
+		t.Error("expected error for empty domain_suffix array, got nil")
+	}
+
+	// Valid inline rule_set.
+	err = cfg.AddRuleSet(RuleSet{Tag: "in-ok", Type: "inline", Rules: []map[string]any{
+		{"domain_suffix": []any{".example.com"}},
+	}})
+	if err != nil {
+		t.Fatalf("valid inline: %v", err)
+	}
+}
+
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRuleSetDeleteWithReferences(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.Route.RuleSet = []RuleSet{{Tag: "geosite-youtube"}}

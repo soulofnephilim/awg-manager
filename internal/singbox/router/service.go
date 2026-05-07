@@ -31,6 +31,7 @@ type Service interface {
 
 	ListRuleSets(ctx context.Context) ([]RuleSet, error)
 	AddRuleSet(ctx context.Context, rs RuleSet) error
+	UpdateRuleSet(ctx context.Context, tag string, rs RuleSet) error
 	DeleteRuleSet(ctx context.Context, tag string, force bool) error
 	RefreshRuleSet(ctx context.Context, tag string) error
 
@@ -695,13 +696,26 @@ func (s *ServiceImpl) AddRuleSet(ctx context.Context, rs RuleSet) error {
 	if rs.Type == "" {
 		rs.Type = "remote"
 	}
-	if rs.Format == "" {
+	if rs.Format == "" && rs.Type != "inline" {
 		rs.Format = "binary"
 	}
-	if rs.UpdateInterval == "" {
+	if rs.UpdateInterval == "" && rs.Type == "remote" {
 		rs.UpdateInterval = "24h"
 	}
 	return s.withConfig(ctx, "rulesets", func(c *RouterConfig) error { return c.AddRuleSet(rs) })
+}
+
+func (s *ServiceImpl) UpdateRuleSet(ctx context.Context, tag string, rs RuleSet) error {
+	if rs.Type == "" {
+		rs.Type = "remote"
+	}
+	if rs.Format == "" && rs.Type != "inline" {
+		rs.Format = "binary"
+	}
+	if rs.UpdateInterval == "" && rs.Type == "remote" {
+		rs.UpdateInterval = "24h"
+	}
+	return s.withConfig(ctx, "rulesets", func(c *RouterConfig) error { return c.UpdateRuleSet(tag, rs) })
 }
 
 func (s *ServiceImpl) DeleteRuleSet(ctx context.Context, tag string, force bool) error {

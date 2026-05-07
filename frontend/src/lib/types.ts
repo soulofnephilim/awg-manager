@@ -1245,12 +1245,13 @@ export interface SingboxRouterInspectRequest {
 
 export interface SingboxRouterRuleSet {
 	tag: string;
-	type: 'remote' | 'local';
-	format: 'binary' | 'source';
+	type: 'remote' | 'local' | 'inline';
+	format?: 'binary' | 'source';
 	url?: string;
 	update_interval?: string;
 	download_detour?: string;
 	path?: string;
+	rules?: Record<string, unknown>[];
 }
 
 export interface SingboxRouterOutbound {
