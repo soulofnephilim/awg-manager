@@ -744,9 +744,14 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 	}
 
 	wasNativeRunning := false
-	if s.nwgOperator != nil && s.isNativeWG(stored) {
+	wasKernelRunning := false
+	switch {
+	case s.nwgOperator != nil && s.isNativeWG(stored):
 		stateInfo := s.nwgOperator.GetState(ctx, stored)
 		wasNativeRunning = stateInfo.State == tunnel.StateRunning || stateInfo.State == tunnel.StateStarting
+	case s.legacyOperator != nil:
+		stateInfo := s.state.GetState(ctx, tunnelID)
+		wasKernelRunning = stateInfo.State == tunnel.StateRunning || stateInfo.State == tunnel.StateStarting
 	}
 
 	// Capture the old peer's public key BEFORE overwriting Interface/Peer.
@@ -804,6 +809,18 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 			if err := s.nwgOperator.Start(ctx, stored); err != nil {
 				s.logWarn("replace-config", tunnelID, "Start after peer sync failed: "+err.Error())
 			}
+		}
+	}
+
+	// Kernel-backend tunnels: hot-apply the new conf to a running interface
+	// via `awg setconf`. setconf carries WGDEVICE_REPLACE_PEERS, so the
+	// kernel atomically swaps the entire peer set — no orphan-peer cleanup
+	// needed (unlike NDMS). When the tunnel is stopped, skip — the new
+	// conf will be applied on next Start.
+	if !s.isNativeWG(stored) && s.legacyOperator != nil && wasKernelRunning {
+		confPath := tunnel.NewNames(tunnelID).ConfPath
+		if err := s.legacyOperator.ApplyConfig(ctx, tunnelID, confPath); err != nil {
+			s.logWarn("replace-config", tunnelID, "ApplyConfig failed: "+err.Error())
 		}
 	}
 
