@@ -120,8 +120,11 @@
 		return '';
 	});
 
-	const policyMissingIssue = $derived(
-		(status?.issues ?? []).find((i) => i.kind === 'policy-missing'),
+	// True when settings reference a policy that no longer exists in NDMS
+	// (manual deletion, NDMS reset, etc.). Distinct from "never configured":
+	// here we have a stale name that needs an explicit recovery action.
+	const policyMissing = $derived(
+		!!settings?.policyName && status?.policyExists === false,
 	);
 
 	const policyOptions = $derived<DropdownOption[]>(
@@ -137,9 +140,7 @@
 		}),
 	);
 
-	const visibleIssues = $derived(
-		(status?.issues ?? []).filter((i) => i.kind !== 'policy-missing'),
-	);
+	const visibleIssues = $derived(status?.issues ?? []);
 
 	const outboundsCount = $derived(status?.outboundCompositeCount ?? 0);
 
@@ -188,9 +189,20 @@
 				</div>
 			{/if}
 
-			{#if policyMissingIssue}
-				<div class="dep-warning issue-error">
-					<span>{policyMissingIssue.message}</span>
+			{#if policyMissing}
+				<div class="dep-warning issue-error policy-missing-row">
+					<span>
+						Policy <strong>«{settings?.policyName}»</strong> не найдена в NDMS —
+						возможно, удалена вручную. Маршрутизация не запустится без неё.
+					</span>
+					<Button
+						variant="primary"
+						size="sm"
+						onclick={openCreateModal}
+						disabled={creatingPolicy || busy}
+					>
+						Создать «awgm-router»
+					</Button>
 				</div>
 			{/if}
 
@@ -346,6 +358,17 @@
 		border-radius: 3px;
 		font-size: 0.8rem;
 		font-family: var(--font-mono, ui-monospace, monospace);
+	}
+	.policy-missing-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+	.policy-missing-row > span {
+		flex: 1 1 auto;
+		min-width: 0;
 	}
 	.policy-block {
 		display: flex;
