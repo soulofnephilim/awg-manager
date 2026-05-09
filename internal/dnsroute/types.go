@@ -24,6 +24,7 @@ type DomainList struct {
 	UpdatedAt        string         `json:"updatedAt"`
 	LastDedupeReport *DedupeReport  `json:"lastDedupeReport,omitempty"`
 	Backend          string         `json:"backend,omitempty"`      // "" or "ndms" = NDMS, "hydraroute" = HydraRoute Neo
+	IconURL          string         `json:"iconUrl,omitempty"`      // optional URL of custom icon for this rule (e.g. Qure CDN PNG or user-supplied)
 	HRRouteMode      string         `json:"hrRouteMode,omitempty"`  // "interface" or "policy" (hydraroute only)
 	HRPolicyName     string         `json:"hrPolicyName,omitempty"` // policy name for policy mode
 	// HRPolicyInterfaces lists NDMS interface names (e.g. "Wireguard0",
