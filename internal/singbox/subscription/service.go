@@ -553,7 +553,14 @@ func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*S
 		return nil, fmt.Errorf("add outbound: %w", err)
 	}
 	if err := s.mutator.AddOutbound(sub.SelectorTag, groupBody); err != nil {
-		_ = s.mutator.RemoveOutbound(tag) // rollback the partial member add
+		// Rollback the partial member add. If rollback itself fails
+		// the config slot now contains an unreferenced member outbound
+		// (sing-box runs fine, but no code path will reap it). Surface
+		// that explicitly so the caller can advise a full subscription
+		// refresh/delete to clean the slot.
+		if rbErr := s.mutator.RemoveOutbound(tag); rbErr != nil {
+			return nil, fmt.Errorf("rebuild group outbound: %w (rollback also failed, leaving orphan outbound %q in sing-box config: %v)", err, tag, rbErr)
+		}
 		return nil, fmt.Errorf("rebuild group outbound: %w", err)
 	}
 
