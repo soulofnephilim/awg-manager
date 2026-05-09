@@ -1683,6 +1683,32 @@ class ApiClient {
 		);
 	}
 
+	async addSubscriptionMember(id: string, shareLink: string): Promise<Subscription> {
+		return this.request<Subscription>(
+			`/singbox/subscriptions/members/add?id=${encodeURIComponent(id)}`,
+			{
+				method: 'POST',
+				body: JSON.stringify({ shareLink }),
+			},
+		);
+	}
+
+	/**
+	 * Remove one member from an inline subscription. Returns the updated
+	 * subscription, or null when removing the last member tore down the
+	 * whole subscription (the caller should navigate away in that case).
+	 */
+	async removeSubscriptionMember(id: string, memberTag: string): Promise<Subscription | null> {
+		const data = await this.request<{ deleted: boolean; subscription?: Subscription }>(
+			`/singbox/subscriptions/members/remove?id=${encodeURIComponent(id)}`,
+			{
+				method: 'POST',
+				body: JSON.stringify({ memberTag }),
+			},
+		);
+		return data.deleted ? null : (data.subscription ?? null);
+	}
+
 	// #endregion
 }
 

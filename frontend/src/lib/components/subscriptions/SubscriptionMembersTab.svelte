@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import { goto } from '$app/navigation';
 	import type { Subscription, SubscriptionMember } from '$lib/types';
 	import { api } from '$lib/api/client';
-	import { Button } from '$lib/components/ui';
+	import { Button, Modal } from '$lib/components/ui';
 	import { triggerDelayCheck } from '$lib/stores/singbox';
 	import SubscriptionMemberCard from './SubscriptionMemberCard.svelte';
 
@@ -21,6 +22,53 @@
 	let lastAutoDelayCheckNonce = 0;
 	let confirmClearOrphans = $state(false);
 	let clearingOrphans = $state(false);
+	let addOpen = $state(false);
+	let addLink = $state('');
+	let adding = $state(false);
+	let addError = $state('');
+	let removingTag = $state<string | null>(null);
+	let pendingRemove = $state<SubscriptionMember | null>(null);
+
+	async function addMember(): Promise<void> {
+		const link = addLink.trim();
+		if (!link || adding) return;
+		adding = true;
+		addError = '';
+		try {
+			await api.addSubscriptionMember(subscription.id, link);
+			addLink = '';
+			addOpen = false;
+			onUpdated();
+		} catch (e) {
+			addError = e instanceof Error ? e.message : 'Не удалось добавить сервер';
+		} finally {
+			adding = false;
+		}
+	}
+
+	function requestRemove(member: SubscriptionMember): void {
+		pendingRemove = member;
+	}
+
+	async function confirmRemove(): Promise<void> {
+		if (!pendingRemove || removingTag) return;
+		const tag = pendingRemove.tag;
+		removingTag = tag;
+		lastError = '';
+		try {
+			const updated = await api.removeSubscriptionMember(subscription.id, tag);
+			pendingRemove = null;
+			if (updated === null) {
+				goto('/?tab=subscriptions');
+				return;
+			}
+			onUpdated();
+		} catch (e) {
+			lastError = e instanceof Error ? e.message : 'Не удалось удалить сервер';
+		} finally {
+			removingTag = null;
+		}
+	}
 
 	// Derive member list from members[] when available; fall back to stubs
 	// built from memberTags[] for subscriptions persisted before this change.
@@ -115,7 +163,11 @@
 		<div class="val mono">{subscription.selectorTag}</div>
 	</div>
 	<div class="actions">
-		{#if !subscription.isInline}
+		{#if subscription.isInline}
+			<Button variant="primary" size="sm" onclick={() => (addOpen = true)}>
+				+ Добавить сервер
+			</Button>
+		{:else}
 			<Button variant="primary" size="sm" disabled={refreshing} loading={refreshing} onclick={refresh}>
 				{refreshing ? 'Обновляем...' : 'Обновить сейчас'}
 			</Button>
@@ -146,16 +198,127 @@
 	<div class="hint">Выберите активный сервер. Selector направит трафик в выбранный outbound.</div>
 	<div class="grid">
 		{#each memberList as member (member.tag)}
-			<SubscriptionMemberCard
-				{member}
-				active={member.tag === subscription.activeMember}
-				switching={switching === member.tag}
-				disabled={switching !== null}
-				onclick={() => pickActive(member.tag)}
-			/>
+			<div class="member-slot">
+				<SubscriptionMemberCard
+					{member}
+					active={member.tag === subscription.activeMember}
+					switching={switching === member.tag}
+					disabled={switching !== null}
+					onclick={() => pickActive(member.tag)}
+				/>
+				{#if subscription.isInline}
+					<button
+						type="button"
+						class="member-remove"
+						title="Удалить сервер"
+						aria-label="Удалить сервер {member.label || member.tag}"
+						disabled={removingTag !== null}
+						onclick={(e) => {
+							e.stopPropagation();
+							requestRemove(member);
+						}}
+					>
+						<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<line x1="18" y1="6" x2="6" y2="18" />
+							<line x1="6" y1="6" x2="18" y2="18" />
+						</svg>
+					</button>
+				{/if}
+			</div>
 		{/each}
 	</div>
 {/if}
+
+<Modal
+	open={addOpen}
+	title="Добавить сервер"
+	size="md"
+	onclose={() => {
+		if (adding) return;
+		addOpen = false;
+		addLink = '';
+		addError = '';
+	}}
+>
+	<form
+		class="add-form"
+		onsubmit={(e) => {
+			e.preventDefault();
+			void addMember();
+		}}
+	>
+		<label class="add-row">
+			<span class="add-lbl">Share-link сервера</span>
+			<input
+				class="add-inp"
+				type="text"
+				bind:value={addLink}
+				placeholder="vless://... or trojan://... or hysteria2://..."
+				autocomplete="off"
+				required
+			/>
+		</label>
+		{#if addError}<div class="err">{addError}</div>{/if}
+	</form>
+	{#snippet actions()}
+		<Button
+			variant="ghost"
+			disabled={adding}
+			onclick={() => {
+				addOpen = false;
+				addLink = '';
+				addError = '';
+			}}
+		>
+			Отмена
+		</Button>
+		<Button variant="primary" disabled={adding || !addLink.trim()} loading={adding} onclick={addMember}>
+			{adding ? 'Добавляем...' : 'Добавить'}
+		</Button>
+	{/snippet}
+</Modal>
+
+<Modal
+	open={pendingRemove !== null}
+	title="Удалить сервер?"
+	size="md"
+	onclose={() => {
+		if (removingTag) return;
+		pendingRemove = null;
+	}}
+>
+	{#if pendingRemove}
+		<p>
+			Сервер
+			<strong>{pendingRemove.label || `${pendingRemove.server}:${pendingRemove.port}`}</strong>
+			будет удалён из подписки.
+		</p>
+		{#if memberList.length === 1}
+			<p class="warn">
+				Это последний сервер в подписке. После удаления подписка
+				целиком будет удалена вместе с её Proxy NDMS и
+				selector / urltest outbound'ом.
+			</p>
+		{/if}
+	{/if}
+	{#snippet actions()}
+		<Button
+			variant="ghost"
+			disabled={removingTag !== null}
+			onclick={() => (pendingRemove = null)}
+		>
+			Отмена
+		</Button>
+		<Button
+			variant="danger"
+			disabled={removingTag !== null}
+			loading={removingTag !== null}
+			onclick={confirmRemove}
+		>
+			{removingTag !== null ? 'Удаляем...' : 'Удалить'}
+		</Button>
+	{/snippet}
+</Modal>
 
 {#if subscription.orphanTags.length > 0}
 	<section class="orphans">
@@ -267,4 +430,43 @@
 			flex-wrap: wrap;
 		}
 	}
+
+	.member-slot { position: relative; }
+	.member-remove {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+		width: 22px;
+		height: 22px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: 50%;
+		color: var(--color-text-muted);
+		cursor: pointer;
+		transition: color 120ms, border-color 120ms, background 120ms;
+		z-index: 1;
+	}
+	.member-remove:hover {
+		color: var(--color-error, #ef4444);
+		border-color: var(--color-error, #ef4444);
+		background: rgba(239, 68, 68, 0.08);
+	}
+	.member-remove:disabled { cursor: not-allowed; opacity: 0.5; }
+
+	.add-form { display: flex; flex-direction: column; gap: 0.5rem; }
+	.add-row { display: flex; flex-direction: column; gap: 0.3rem; }
+	.add-lbl { font-size: 0.85rem; color: var(--color-text-muted); }
+	.add-inp {
+		padding: 0.5rem 0.7rem;
+		background: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: 4px;
+		color: var(--color-text-primary);
+		font-family: var(--font-mono, ui-monospace, monospace);
+		font-size: 0.82rem;
+	}
+	.warn { color: #d29922; font-size: 0.85rem; }
 </style>

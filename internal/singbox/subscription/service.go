@@ -131,6 +131,20 @@ func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult,
 		// MaskURL on errors (there's no URL to mask). The same
 		// downstream parser (Clash YAML / sing-box JSON / share-links)
 		// handles whatever the user pasted.
+		//
+		// After the initial Create-time parse populates MemberTags,
+		// the source of truth for an inline subscription becomes the
+		// stored Members slice — manual Add/Remove member CRUD
+		// directly mutates that slice, and re-parsing sub.Inline would
+		// clobber those edits (Inline is preserved as the original
+		// seed only). So skip re-parsing on subsequent Refresh calls.
+		if len(sub.MemberTags) > 0 {
+			res := &RefreshResult{When: time.Now()}
+			if err := s.store.UpdateState(id, *res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
 		body = []byte(sub.Inline)
 		ct = "text/plain; charset=utf-8"
 	} else {
@@ -277,7 +291,13 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	mu := s.lockSub(id)
 	mu.Lock()
 	defer mu.Unlock()
+	return s.deleteLocked(ctx, id)
+}
 
+// deleteLocked is the lock-free body of Delete. Callers MUST already hold
+// the per-subscription mutex. Used by RemoveMember to drop a subscription
+// when its last member is taken out (caller already holds the lock).
+func (s *Service) deleteLocked(ctx context.Context, id string) error {
 	sub, err := s.store.Get(id)
 	if err != nil {
 		return err
@@ -462,6 +482,181 @@ func (s *Service) SetActiveMember(ctx context.Context, id, memberTag string) err
 	}
 
 	return nil
+}
+
+// ErrManualMemberOnURLSub is returned by AddManualMember / RemoveMember
+// when called on a URL-backed (non-inline) subscription. Manual member
+// CRUD is currently scoped to inline subscriptions because the URL diff
+// pipeline owns the truth of which members exist; mixing manual entries
+// in would race the next refresh.
+var ErrManualMemberOnURLSub = errors.New("subscription: member CRUD is only allowed on inline subscriptions")
+
+// ErrShareLinkInvalid is returned when AddManualMember could not parse
+// the supplied share-link into exactly one outbound.
+var ErrShareLinkInvalid = errors.New("subscription: share-link did not parse to a single outbound")
+
+// ErrMemberDuplicate is returned when AddManualMember would create a
+// member with a tag that already exists for this subscription. Tags are
+// derived from the server identity (StableTag), so the same vless://
+// twice produces the same tag.
+var ErrMemberDuplicate = errors.New("subscription: member already exists")
+
+// ErrMemberNotFound is returned by RemoveMember when the supplied tag
+// does not match any of the subscription's current members.
+var ErrMemberNotFound = errors.New("subscription: member not found")
+
+// AddManualMember parses a single share-link, validates it, and adds it
+// to an inline subscription as a new member. Re-uses the same StableTag
+// derivation as the URL refresh path so adding the same server twice
+// short-circuits with ErrMemberDuplicate.
+//
+// On selector-mode subs the new member becomes available for picking;
+// on urltest-mode subs it joins the auto-test pool. Active member is
+// preserved (caller chooses whether to switch).
+func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*Subscription, error) {
+	mu := s.lockSub(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	sub, err := s.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !sub.IsInline() {
+		return nil, ErrManualMemberOnURLSub
+	}
+
+	parsed := vlink.ParseBatch([]string{shareLink})
+	if len(parsed.Outbounds) != 1 {
+		return nil, ErrShareLinkInvalid
+	}
+	out := parsed.Outbounds[0]
+	tag := StableTag(sub.ID, out)
+
+	for _, existing := range sub.MemberTags {
+		if existing == tag {
+			return nil, ErrMemberDuplicate
+		}
+	}
+
+	// Fail-closed write order: mutate sing-box config (idempotent
+	// upserts) BEFORE persisting to storage. If either AddOutbound
+	// call fails, roll back any partial config change so storage and
+	// sing-box stay aligned.
+	newTags := append([]string{}, sub.MemberTags...)
+	newTags = append(newTags, tag)
+	subForBuild := *sub
+	subForBuild.MemberTags = newTags
+	groupBody := BuildGroupOutbound(subForBuild, newTags, sub.ActiveMember)
+
+	if err := s.mutator.AddOutbound(tag, replaceTag(out.Outbound, tag)); err != nil {
+		return nil, fmt.Errorf("add outbound: %w", err)
+	}
+	if err := s.mutator.AddOutbound(sub.SelectorTag, groupBody); err != nil {
+		_ = s.mutator.RemoveOutbound(tag) // rollback the partial member add
+		return nil, fmt.Errorf("rebuild group outbound: %w", err)
+	}
+
+	newMembers := append([]MemberInfo{}, sub.Members...)
+	newMembers = append(newMembers, toMemberInfo(tag, out))
+	if err := s.store.SetMembers(id, newMembers, sub.OrphanTags); err != nil {
+		return nil, err
+	}
+
+	if err := s.mutator.Reload(ctx); err != nil {
+		return nil, fmt.Errorf("reload: %w", err)
+	}
+	updated, err := s.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// RemoveMember drops a single member from an inline subscription. When
+// the removed member is the last one, the entire subscription tears
+// down (proxy/inbound/selector teardown) — there is no meaningful empty
+// subscription. When the removed member was the active selector member,
+// the active selector is auto-bumped to the next remaining member and a
+// Clash API switch is issued so traffic does not stall on a dangling
+// reference.
+//
+// Returns (nil, nil) when the subscription was deleted (last-member case);
+// returns (updatedSub, nil) otherwise.
+func (s *Service) RemoveMember(ctx context.Context, id, memberTag string) (*Subscription, error) {
+	mu := s.lockSub(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	sub, err := s.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !sub.IsInline() {
+		return nil, ErrManualMemberOnURLSub
+	}
+
+	idx := -1
+	for i, m := range sub.Members {
+		if m.Tag == memberTag {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, ErrMemberNotFound
+	}
+
+	// Last member → full subscription teardown.
+	if len(sub.Members) == 1 {
+		if err := s.deleteLocked(ctx, id); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	// Fail-closed: rebuild the selector pointing at the SHRUNK member
+	// list FIRST. If that AddOutbound fails, the original member outbound
+	// is still in config and the original selector is unchanged — no
+	// orphan, no storage write happened, caller can retry safely.
+	newTags := append([]string{}, sub.MemberTags[:idx]...)
+	newTags = append(newTags, sub.MemberTags[idx+1:]...)
+	newActive := sub.ActiveMember
+	if newActive == memberTag {
+		newActive = newTags[0] // SetMembers will mirror this; pre-compute for the rebuild
+	}
+	groupBody := BuildGroupOutbound(*sub, newTags, newActive)
+	if err := s.mutator.AddOutbound(sub.SelectorTag, groupBody); err != nil {
+		return nil, fmt.Errorf("rebuild group outbound: %w", err)
+	}
+
+	// Selector now references newTags only; safe to drop the old member
+	// outbound. RemoveOutbound is idempotent.
+	s.mutator.RemoveOutbound(memberTag)
+
+	newMembers := append([]MemberInfo{}, sub.Members[:idx]...)
+	newMembers = append(newMembers, sub.Members[idx+1:]...)
+	if err := s.store.SetMembers(id, newMembers, sub.OrphanTags); err != nil {
+		return nil, err
+	}
+
+	updated, err := s.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	// SetMembers auto-bumps ActiveMember to the first remaining tag if
+	// the prior active was removed. Mirror that to the live Clash API
+	// for selector mode so connections don't stall on a missing tag.
+	// urltest mode auto-routes by latency — Clash API is not used.
+	if sub.ActiveMember == memberTag && updated.EffectiveMode() == ModeSelector && updated.ActiveMember != "" {
+		_ = s.mutator.SelectClashProxy(updated.SelectorTag, updated.ActiveMember)
+	}
+
+	if err := s.mutator.Reload(ctx); err != nil {
+		return updated, fmt.Errorf("reload: %w", err)
+	}
+	return updated, nil
 }
 
 // DeleteOrphans removes orphan-flagged outbounds from sing-box config and

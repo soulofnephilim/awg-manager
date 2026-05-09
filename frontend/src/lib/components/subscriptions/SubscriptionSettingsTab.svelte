@@ -118,7 +118,7 @@
 					: subscription.members.length < 5
 						? `${subscription.members.length} сервера`
 						: `${subscription.members.length} серверов`}
-				· редактирование списка появится позже
+				· редактирование во вкладке «Серверы»
 			</div>
 		</div>
 	{:else}

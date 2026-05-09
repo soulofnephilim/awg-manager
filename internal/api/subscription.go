@@ -126,6 +126,27 @@ type ActiveMemberRequest struct {
 	MemberTag string `json:"memberTag"`
 }
 
+// AddMemberRequest is the body for POST /api/singbox/subscriptions/members/add.
+// Inline subscriptions only — manual CRUD is rejected on URL-backed
+// subscriptions (the URL refresh diff owns the truth there).
+type AddMemberRequest struct {
+	ShareLink string `json:"shareLink" example:"vless://...@h.example:443?security=tls&sni=h"`
+}
+
+// RemoveMemberRequest is the body for POST /api/singbox/subscriptions/members/remove.
+// Removing the last member tears the whole subscription down (no
+// meaningful empty subscription); the response carries deleted=true in
+// that case so the UI can navigate away.
+type RemoveMemberRequest struct {
+	MemberTag string `json:"memberTag"`
+}
+
+// RemoveMemberResponseData is the data envelope for remove-member.
+type RemoveMemberResponseData struct {
+	Deleted      bool             `json:"deleted"`
+	Subscription *SubscriptionDTO `json:"subscription,omitempty"`
+}
+
 // toDTO converts a domain Subscription to its API representation.
 func toSubscriptionDTO(s subscription.Subscription) SubscriptionDTO {
 	hh := make([]SubscriptionHeader, len(s.Headers))
@@ -437,4 +458,100 @@ func (h *SubscriptionHandler) OrphansDelete(w http.ResponseWriter, r *http.Reque
 	response.Success(w, struct {
 		OK bool `json:"ok"`
 	}{true})
+}
+
+// AddMember handles POST /api/singbox/subscriptions/members/add?id=
+//
+//	@Summary		Add a manual member to an inline subscription
+//	@Tags			subscriptions
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			id		query		string			true	"Subscription ID"
+//	@Param			body	body		AddMemberRequest	true	"Share-link"
+//	@Success		200		{object}	SubscriptionResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		409		{object}	APIErrorEnvelope
+//	@Router			/singbox/subscriptions/members/add [post]
+func (h *SubscriptionHandler) AddMember(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+		return
+	}
+	var req AddMemberRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
+		return
+	}
+	sub, err := h.svc.AddManualMember(r.Context(), id, req.ShareLink)
+	if err != nil {
+		switch {
+		case errors.Is(err, subscription.ErrManualMemberOnURLSub):
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "MEMBER_CRUD_ON_URL_SUB")
+		case errors.Is(err, subscription.ErrShareLinkInvalid):
+			response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_SHARE_LINK")
+		case errors.Is(err, subscription.ErrMemberDuplicate):
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "MEMBER_DUPLICATE")
+		default:
+			response.InternalError(w, err.Error())
+		}
+		return
+	}
+	response.Success(w, toSubscriptionDTO(*sub))
+}
+
+// RemoveMember handles POST /api/singbox/subscriptions/members/remove?id=
+//
+//	@Summary		Remove a member from an inline subscription
+//	@Description	Removing the last member tears the whole subscription
+//	@Description	down. The response indicates whether the subscription
+//	@Description	itself was deleted via deleted=true.
+//	@Tags			subscriptions
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			id		query		string				true	"Subscription ID"
+//	@Param			body	body		RemoveMemberRequest	true	"Member tag"
+//	@Success		200		{object}	APIEnvelope
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Router			/singbox/subscriptions/members/remove [post]
+func (h *SubscriptionHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+		return
+	}
+	var req RemoveMemberRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
+		return
+	}
+	sub, err := h.svc.RemoveMember(r.Context(), id, req.MemberTag)
+	if err != nil {
+		switch {
+		case errors.Is(err, subscription.ErrManualMemberOnURLSub):
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "MEMBER_CRUD_ON_URL_SUB")
+		case errors.Is(err, subscription.ErrMemberNotFound):
+			response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "MEMBER_NOT_FOUND")
+		default:
+			response.InternalError(w, err.Error())
+		}
+		return
+	}
+	resp := RemoveMemberResponseData{Deleted: sub == nil}
+	if sub != nil {
+		dto := toSubscriptionDTO(*sub)
+		resp.Subscription = &dto
+	}
+	response.Success(w, resp)
 }

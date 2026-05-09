@@ -460,6 +460,128 @@ func TestService_Update_RejectsClearURLAndAddingURLToInline(t *testing.T) {
 	}
 }
 
+func TestService_AddManualMember_AppendsToInline(t *testing.T) {
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	svc := NewService(store, &fakeMutator{})
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label:   "manual",
+		Inline:  "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h1.example:443?security=tls&sni=h\n",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	original := len(sub.MemberTags)
+
+	updated, err := svc.AddManualMember(context.Background(), sub.ID,
+		"trojan://p@h2.example:443?security=tls&sni=h")
+	if err != nil {
+		t.Fatalf("AddManualMember: %v", err)
+	}
+	if len(updated.MemberTags) != original+1 {
+		t.Errorf("expected %d members, got %d", original+1, len(updated.MemberTags))
+	}
+}
+
+func TestService_AddManualMember_RejectsDuplicate(t *testing.T) {
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	svc := NewService(store, &fakeMutator{})
+	link := "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h1.example:443?security=tls&sni=h"
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label:   "manual",
+		Inline:  link + "\n",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, err = svc.AddManualMember(context.Background(), sub.ID, link)
+	if !errors.Is(err, ErrMemberDuplicate) {
+		t.Errorf("expected ErrMemberDuplicate, got %v", err)
+	}
+}
+
+func TestService_AddManualMember_RejectsURLSub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=h\n"))
+	}))
+	defer srv.Close()
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	svc := NewService(store, &fakeMutator{})
+	sub, err := svc.Create(context.Background(), CreateInput{Label: "url", URL: srv.URL, Enabled: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, err = svc.AddManualMember(context.Background(), sub.ID, "trojan://p@h.example:443?security=tls&sni=h")
+	if !errors.Is(err, ErrManualMemberOnURLSub) {
+		t.Errorf("expected ErrManualMemberOnURLSub, got %v", err)
+	}
+}
+
+func TestService_RemoveMember_DeletesSubOnLastMember(t *testing.T) {
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	svc := NewService(store, &fakeMutator{})
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label:   "manual",
+		Inline:  "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h1.example:443?security=tls&sni=h\n",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(sub.MemberTags) != 1 {
+		t.Fatalf("expected 1 member, got %d", len(sub.MemberTags))
+	}
+
+	updated, err := svc.RemoveMember(context.Background(), sub.ID, sub.MemberTags[0])
+	if err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+	if updated != nil {
+		t.Errorf("expected nil (subscription deleted), got %+v", updated)
+	}
+	if _, getErr := store.Get(sub.ID); getErr == nil {
+		t.Errorf("subscription should be deleted from store")
+	}
+}
+
+func TestService_RemoveMember_BumpsActiveOnRemoval(t *testing.T) {
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	mutator := &fakeMutator{}
+	svc := NewService(store, mutator)
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label: "manual",
+		Inline: "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h1.example:443?security=tls&sni=h\n" +
+			"trojan://p@h2.example:443?security=tls&sni=h\n",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(sub.MemberTags) != 2 {
+		t.Fatalf("expected 2 members, got %d", len(sub.MemberTags))
+	}
+	activeBefore := sub.ActiveMember
+	updated, err := svc.RemoveMember(context.Background(), sub.ID, activeBefore)
+	if err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("expected updated subscription, got nil")
+	}
+	if updated.ActiveMember == activeBefore {
+		t.Errorf("ActiveMember should have moved off the removed tag")
+	}
+	if updated.ActiveMember == "" || updated.ActiveMember != updated.MemberTags[0] {
+		t.Errorf("ActiveMember should be the first remaining tag, got %q", updated.ActiveMember)
+	}
+	// Selector mode: Clash API should have been hit to switch the live
+	// session off the deleted tag.
+	if len(mutator.selectedSelector) == 0 {
+		t.Errorf("expected SelectClashProxy call after active-member removal")
+	}
+}
+
 func TestService_SetActiveMember_RejectsURLTestMode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(
