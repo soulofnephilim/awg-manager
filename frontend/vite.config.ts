@@ -1,5 +1,6 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 /**
@@ -45,8 +46,12 @@ export default defineConfig(({ mode }) => {
 		plugins: [stubDevRoutes(), tailwindcss(), sveltekit()],
 		resolve: {
 			alias: {
-				'node:dns/promises': '/src/lib/shims/node-dns-promises.ts',
-				'dns/promises': '/src/lib/shims/node-dns-promises.ts'
+				// Filesystem-absolute paths so esbuild's optimize-deps can
+				// resolve the shim during pre-bundle. The previous "/src/..."
+				// pseudo-root only works through Vite's own resolver and
+				// crashed esbuild with "Cannot read file: /src/...".
+				'node:dns/promises': fileURLToPath(new URL('./src/lib/shims/node-dns-promises.ts', import.meta.url)),
+				'dns/promises': fileURLToPath(new URL('./src/lib/shims/node-dns-promises.ts', import.meta.url))
 			}
 		},
 		server: {
