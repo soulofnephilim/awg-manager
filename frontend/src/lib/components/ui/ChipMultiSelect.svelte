@@ -28,6 +28,7 @@
 
     let open = $state(false);
     let triggerEl = $state<HTMLButtonElement | null>(null);
+    let containerEl = $state<HTMLDivElement | null>(null);
     let panelEl = $state<HTMLDivElement | null>(null);
     let panelTop = $state(0);
     let panelLeft = $state(0);
@@ -57,8 +58,9 @@
     }
 
     function recomputePlacement() {
-        if (!triggerEl) return;
-        const r = triggerEl.getBoundingClientRect();
+        const el = containerEl ?? triggerEl;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
         panelTop = r.bottom + 4;
         panelLeft = r.left;
         panelWidth = r.width;
@@ -94,13 +96,22 @@
         if (open) recomputePlacement();
     }
 
+    function handleKeydown(e: KeyboardEvent) {
+        if (e.key === 'Escape' && open) {
+            open = false;
+            triggerEl?.focus();
+        }
+    }
+
     $effect(() => {
         if (!open) return;
         document.addEventListener('mousedown', handleOutsideClick);
+        document.addEventListener('keydown', handleKeydown);
         window.addEventListener('scroll', handleScroll, true);
         window.addEventListener('resize', handleScroll);
         return () => {
             document.removeEventListener('mousedown', handleOutsideClick);
+            document.removeEventListener('keydown', handleKeydown);
             window.removeEventListener('scroll', handleScroll, true);
             window.removeEventListener('resize', handleScroll);
         };
@@ -108,7 +119,7 @@
 </script>
 
 <div class="picker">
-    <div class="chips">
+    <div class="chips" bind:this={containerEl}>
         {#if values.length === 0}
             <span class="placeholder">{placeholder}</span>
         {/if}
