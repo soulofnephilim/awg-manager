@@ -8,10 +8,23 @@
 		rule?: SingboxRouterRule;
 		outboundOptions: OutboundGroup[];
 		availableRuleSets: SingboxRouterRuleSet[];
+		/**
+		 * Pre-populated rule_set tags for the add-rule path (when `rule` is
+		 * undefined). Used by the deep-link prefill flow from rule set cards.
+		 * Ignored when `rule` is provided (edit mode reads rule.rule_set).
+		 */
+		initialRuleSetTags?: string[];
 		onClose: () => void;
 		onSave: (rule: SingboxRouterRule) => Promise<void> | void;
 	}
-	let { rule, outboundOptions, availableRuleSets, onClose, onSave }: Props = $props();
+	let {
+		rule,
+		outboundOptions,
+		availableRuleSets,
+		initialRuleSetTags,
+		onClose,
+		onSave,
+	}: Props = $props();
 
 	const outboundDropdownOptions = $derived<DropdownOption[]>([
 		{ value: '', label: '— выберите —' },
@@ -27,7 +40,7 @@
 	// svelte-ignore state_referenced_locally
 	let sourceIpCidrStr = $state((rule?.source_ip_cidr ?? []).join('\n'));
 	// svelte-ignore state_referenced_locally
-	let ruleSetTags = $state<string[]>(rule?.rule_set ?? []);
+	let ruleSetTags = $state<string[]>(rule?.rule_set ?? initialRuleSetTags ?? []);
 	const ruleSetOptions = $derived<ChipOption[]>(
 		availableRuleSets.map((rs) => ({ value: rs.tag, label: rs.tag })),
 	);

@@ -255,7 +255,7 @@
 
 {#if addMode}
 	<RuleEditModal
-		rule={prefillRuleSet ? { action: 'route', rule_set: [prefillRuleSet] } : undefined}
+		initialRuleSetTags={prefillRuleSet ? [prefillRuleSet] : undefined}
 		{outboundOptions}
 		availableRuleSets={ruleSets}
 		onClose={() => { addMode = false; prefillRuleSet = null; }}
