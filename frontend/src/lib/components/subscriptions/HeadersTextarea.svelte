@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { DEFAULT_PRESET, HAPP_PRESET } from './headersParser';
+	import { DEFAULT_PRESET, HAPP_PRESET, MIHOMO_PRESET } from './headersParser';
 	import { Dropdown } from '$lib/components/ui';
 
 	interface Props {
@@ -24,11 +24,13 @@
 		<Dropdown
 			placeholder="Подставить пресет"
 			options={[
-				{ value: 'default', label: 'По умолчанию (Clash / mihomo)' },
+				{ value: 'default', label: 'По умолчанию (sing-box)' },
+				{ value: 'mihomo', label: 'Clash / mihomo' },
 				{ value: 'happ', label: 'Happ iOS (если требует провайдер)' },
 			]}
 			onchange={(v) => {
 				if (v === 'happ') applyPreset(HAPP_PRESET);
+				else if (v === 'mihomo') applyPreset(MIHOMO_PRESET);
 				else if (v === 'default') applyPreset(DEFAULT_PRESET);
 			}}
 		/>

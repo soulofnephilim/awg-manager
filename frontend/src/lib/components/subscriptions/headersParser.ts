@@ -20,12 +20,16 @@ export function serializeHeaders(headers: SubscriptionHeader[]): string {
 }
 
 // DEFAULT_PRESET is applied automatically when the user opens the
-// "create subscription" modal. A Clash/mihomo User-Agent makes most
-// providers respond with Clash YAML or base64 share-links — both
-// formats our parser understands. Without this hint many providers
-// (e.g. those that branch on UA) fall back to V2Ray-native JSON or
-// reject the request, neither of which we can consume.
-export const DEFAULT_PRESET = `User-Agent: mihomo/v1.19.20`;
+// "create subscription" modal. A sing-box User-Agent makes most
+// providers respond with sing-box JSON config (single, array of
+// configs, or array of outbounds) — formats our parser supports for
+// vless / trojan / ss / hysteria2 outbound types.
+export const DEFAULT_PRESET = `User-Agent: sing-box/v1.14.20`;
+
+// MIHOMO_PRESET stays available for providers that branch on a
+// Clash/mihomo UA and only emit Clash YAML or base64 share-links.
+// Use it when the default sing-box UA returns nothing useful.
+export const MIHOMO_PRESET = `User-Agent: mihomo/v1.19.20`;
 
 // HAPP_PRESET stays available for providers that gate access on the
 // vendor-specific Happ iOS headers. Note: sites that branch on this
