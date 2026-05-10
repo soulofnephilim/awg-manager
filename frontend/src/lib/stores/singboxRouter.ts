@@ -1,5 +1,9 @@
-import { writable } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { api } from '$lib/api/client';
+import { awgTags } from './awgTags';
+import { subscriptionsStore } from './subscriptions';
+import { singboxTunnels } from './singbox';
+import { buildOutboundOptions, type OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
 import type {
 	SingboxRouterStatus,
 	SingboxRouterSettings,
@@ -24,6 +28,22 @@ function createSingboxRouterStore() {
 	const dnsGlobals = writable<SingboxRouterDNSGlobals>({ final: '', strategy: '' });
 	const loading = writable(false);
 	const error = writable<string | null>(null);
+
+	// options — unified outbound dropdown groups for sub-tabs and wizard.
+	// Combines awgTags + sing-box tunnels + composite outbounds, with
+	// subscription labels mixed in for source='subscription' composites.
+	// Defensive: components subscribing during cold-load see [] groups.
+	const options = derived(
+		[outbounds, singboxTunnels, awgTags, subscriptionsStore],
+		([$outbounds, $sb, $awg, $subs]) =>
+			buildOutboundOptions(
+				$awg.data,
+				$sb.data,
+				$outbounds,
+				true,
+				$subs.data,
+			),
+	);
 
 	async function loadAll(): Promise<void> {
 		loading.set(true);
@@ -102,6 +122,7 @@ function createSingboxRouterStore() {
 		dnsServers: { subscribe: dnsServers.subscribe },
 		dnsRules: { subscribe: dnsRules.subscribe },
 		dnsGlobals: { subscribe: dnsGlobals.subscribe },
+		options: { subscribe: options.subscribe },
 		loading: { subscribe: loading.subscribe },
 		error: { subscribe: error.subscribe },
 		loadAll,
