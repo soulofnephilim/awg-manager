@@ -1419,6 +1419,7 @@ export interface TunnelReferencedError {
 export type WizardStep =
 	| 'presets'
 	| 'tunnel'
+	| 'policy'
 	| 'devices'
 	| 'summary'
 	| 'applying'

@@ -2,10 +2,12 @@
 	import { singboxWizard } from '$lib/stores/singboxWizard';
 	import { singboxRouter } from '$lib/stores/singboxRouter';
 	import { api } from '$lib/api/client';
-	import type { WizardStep } from '$lib/types';
+	import type { WizardStep, SingboxRouterDNSType, SingboxRouterDNSStrategy } from '$lib/types';
 	import { runWizard, WizardError } from './wizardOrchestrator';
+	import type { OrchestratorApi } from './wizardOrchestrator';
 	import StepPresets from './StepPresets.svelte';
 	import StepTunnel from './StepTunnel.svelte';
+	import StepPolicy from './StepPolicy.svelte';
 	import StepDevices from './StepDevices.svelte';
 	import StepSummary from './StepSummary.svelte';
 	import StepApplying from './StepApplying.svelte';
@@ -16,7 +18,7 @@
 	const wizardState = singboxWizard.state;
 	const presetsStore = singboxRouter.presets;
 
-	const STEPS: WizardStep[] = ['presets', 'tunnel', 'devices', 'summary'];
+	const STEPS: WizardStep[] = ['presets', 'tunnel', 'policy', 'devices', 'summary'];
 
 	const stepIdx = $derived(STEPS.indexOf($wizardState.step));
 	const presets = $derived($presetsStore);
@@ -42,7 +44,13 @@
 				return s.presetIds.length > 0;
 			case 'tunnel':
 				return s.tunnelTag !== null;
+			case 'policy':
+				if (s.policyMode === 'create') return s.policyName.trim().length > 0;
+				return s.existingPolicyName !== null;
 			case 'devices':
+				// For 'existing' mode, empty selection is a valid "remove all from policy"
+				// intent. For 'create' mode, require at least 1 device (StepDevices defaults to []).
+				if (s.policyMode === 'existing') return true;
 				return s.deviceMacs.length > 0;
 			case 'summary':
 				return true;
@@ -51,12 +59,47 @@
 		}
 	}
 
+	const orchestratorApi: OrchestratorApi = {
+		singboxRouterListPolicies: () => api.singboxRouterListPolicies(),
+		singboxRouterCreatePolicy: (description: string) =>
+			api.singboxRouterCreatePolicy(description),
+		singboxRouterGetSettings: () => api.singboxRouterGetSettings(),
+		singboxRouterPutSettings: (settings) =>
+			api.singboxRouterPutSettings({
+				enabled: settings.enabled ?? false,
+				policyName: settings.policyName,
+				refreshMode: settings.refreshMode as 'interval' | 'daily' | undefined,
+				refreshIntervalHours: settings.refreshIntervalHours,
+				refreshDailyTime: settings.refreshDailyTime,
+			}),
+		assignDeviceToPolicy: (mac: string, policy: string) =>
+			api.assignDeviceToPolicy(mac, policy),
+		singboxRouterListDNSServers: () => api.singboxRouterListDNSServers(),
+		singboxRouterAddDNSServer: (server) =>
+			api.singboxRouterAddDNSServer({
+				...server,
+				type: server.type as SingboxRouterDNSType,
+				domain_strategy: server.domain_strategy as SingboxRouterDNSStrategy | undefined,
+			}),
+		singboxRouterApplyPreset: (id: string, outbound: string) =>
+			api.singboxRouterApplyPreset(id, outbound),
+		singboxRouterListDNSRules: () => api.singboxRouterListDNSRules(),
+		singboxRouterAddDNSRule: (rule) => api.singboxRouterAddDNSRule(rule),
+		singboxRouterUpdateDNSRule: (index, rule) => api.singboxRouterUpdateDNSRule(index, rule),
+		singboxRouterEnable: () => api.singboxRouterEnable(),
+		singboxDaemonStatus: async () => {
+			const s = await api.singboxGetStatus();
+			return { running: s.running };
+		},
+	};
+
 	async function apply(): Promise<void> {
+		singboxWizard.clearLog();
 		singboxWizard.setStep('applying');
 		singboxWizard.clearError();
 		try {
 			await runWizard($wizardState, {
-				api: api as unknown as import('./wizardOrchestrator').OrchestratorApi,
+				api: orchestratorApi,
 				presets,
 				onProgress: (label, status) => {
 					if (status === 'running') {
@@ -97,13 +140,22 @@
 						></div>
 					{/each}
 				</div>
-				<button type="button" class="x" onclick={close} aria-label="Закрыть">[x]</button>
+				<button
+					type="button"
+					class="x"
+					onclick={close}
+					disabled={$wizardState.step === 'applying'}
+					aria-label="Закрыть"
+					title={$wizardState.step === 'applying' ? 'Дождитесь завершения' : 'Закрыть'}
+				>[x]</button>
 			</header>
 			<div class="body">
 				{#if $wizardState.step === 'presets'}
 					<StepPresets {presets} />
 				{:else if $wizardState.step === 'tunnel'}
 					<StepTunnel onAdvance={nextStep} />
+				{:else if $wizardState.step === 'policy'}
+					<StepPolicy />
 				{:else if $wizardState.step === 'devices'}
 					<StepDevices />
 				{:else if $wizardState.step === 'summary'}
@@ -116,7 +168,7 @@
 					<StepError onRetry={apply} />
 				{/if}
 			</div>
-			{#if $wizardState.step === 'presets' || $wizardState.step === 'tunnel' || $wizardState.step === 'devices' || $wizardState.step === 'summary'}
+			{#if $wizardState.step === 'presets' || $wizardState.step === 'tunnel' || $wizardState.step === 'policy' || $wizardState.step === 'devices' || $wizardState.step === 'summary'}
 				<footer class="foot">
 					{#if $wizardState.step === 'presets'}
 						<button type="button" class="btn ghost" onclick={close}>Отмена</button>
@@ -171,6 +223,7 @@
 	.seg.active { background: var(--color-accent); }
 	.seg.err { background: #f85149; }
 	.x { background: transparent; border: 0; color: var(--color-text-muted); cursor: pointer; font-family: monospace; font-size: 0.85rem; }
+	.x:disabled { opacity: 0.4; cursor: not-allowed; }
 	.body {
 		padding: 1.5rem;
 		overflow-y: auto;
