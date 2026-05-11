@@ -605,11 +605,28 @@ func patchBaseDomainResolver(basePath string) {
 	_ = writeJSONFile(basePath, m)
 }
 
-// patchBaseCacheFilePath rewrites a relative cache_file.path ("cache.db")
-// to the absolute writable location. Older installs had the relative form
-// which fails with "read-only file system" because sing-box resolves it
-// against CWD (which is "/" when the manager runs as a service on Entware).
-// Custom user-set paths (anything starting with "/") are left untouched.
+// legacyCacheFilePath is the hardcoded path some older sing-box docs/configs
+// suggested. It lives under a read-only Entware mount so cache writes
+// silently fail. We treat it as a known-bad migration target, not as a
+// legitimate user customization.
+const legacyCacheFilePath = "/opt/etc/sing-box/cache.db"
+
+// patchBaseCacheFilePath ensures experimental.cache_file is present with a
+// writable path. Three cases:
+//
+//  1. Block missing entirely — add it with enabled:true + defaultCacheDBPath.
+//     Older installs predating our cache_file work didn't include the block;
+//     adding it post-hoc gives them the same on-disk benefits as fresh installs.
+//
+//  2. Relative path ("cache.db") — sing-box resolves against CWD which is "/"
+//     when the manager runs as a service on Entware. Replace with absolute.
+//
+//  3. Legacy absolute path /opt/etc/sing-box/cache.db — known-bad value from
+//     older docs / pre-2.x installer drafts. Read-only on Entware. Replace
+//     with defaultCacheDBPath.
+//
+// Any OTHER user-set absolute path is left untouched (legitimate
+// customization).
 func patchBaseCacheFilePath(basePath string) {
 	raw, err := os.ReadFile(basePath)
 	if err != nil {
@@ -621,20 +638,37 @@ func patchBaseCacheFilePath(basePath string) {
 	}
 	exp, ok := m["experimental"].(map[string]any)
 	if !ok {
+		// experimental block missing entirely — out of scope for cache_file
+		// patcher. Other patches (clash_port etc.) handle their own gaps.
 		return
 	}
+
 	cf, ok := exp["cache_file"].(map[string]any)
 	if !ok {
+		// Case 1: block missing — add it.
+		exp["cache_file"] = map[string]any{
+			"enabled": true,
+			"path":    defaultCacheDBPath,
+		}
+		_ = writeJSONFile(basePath, m)
 		return
 	}
-	path, ok := cf["path"].(string)
-	if !ok || path == "" {
+
+	path, _ := cf["path"].(string)
+	switch {
+	case path == "":
+		// Empty/missing path — set to absolute default.
+		cf["path"] = defaultCacheDBPath
+	case !strings.HasPrefix(path, "/"):
+		// Case 2: relative path — rewrite to absolute.
+		cf["path"] = defaultCacheDBPath
+	case path == legacyCacheFilePath:
+		// Case 3: known-bad legacy absolute — replace.
+		cf["path"] = defaultCacheDBPath
+	default:
+		// Any other absolute path — legitimate user customization, leave alone.
 		return
 	}
-	if strings.HasPrefix(path, "/") {
-		return // user-customized absolute path — leave alone
-	}
-	cf["path"] = defaultCacheDBPath
 	_ = writeJSONFile(basePath, m)
 }
 

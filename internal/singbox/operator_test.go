@@ -449,3 +449,80 @@ func TestEnsureBaseConfig_LeavesAbsoluteCachePathUntouched(t *testing.T) {
 		t.Errorf("user-customized path overwritten: %v", cf["path"])
 	}
 }
+
+func TestPatchBaseCacheFilePath_AddsMissingBlock(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "00-base.json")
+	// experimental exists but no cache_file
+	stale := `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
+	if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
+		t.Fatal(err)
+	}
+	patchBaseCacheFilePath(p)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	exp := m["experimental"].(map[string]any)
+	cf, ok := exp["cache_file"].(map[string]any)
+	if !ok {
+		t.Fatal("cache_file block not added")
+	}
+	if cf["enabled"] != true {
+		t.Errorf("enabled=%v want true", cf["enabled"])
+	}
+	if got := cf["path"]; got != defaultCacheDBPath {
+		t.Errorf("path=%q want %q", got, defaultCacheDBPath)
+	}
+}
+
+func TestPatchBaseCacheFilePath_MigratesLegacyAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "00-base.json")
+	stale := `{"experimental":{"cache_file":{"enabled":true,"path":"/opt/etc/sing-box/cache.db"}}}`
+	if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
+		t.Fatal(err)
+	}
+	patchBaseCacheFilePath(p)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	exp := m["experimental"].(map[string]any)
+	cf := exp["cache_file"].(map[string]any)
+	if got := cf["path"]; got != defaultCacheDBPath {
+		t.Errorf("path=%q want %q (legacy should be replaced)", got, defaultCacheDBPath)
+	}
+}
+
+func TestPatchBaseCacheFilePath_PreservesUserCustomPath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "00-base.json")
+	custom := "/srv/sing-box/my-cache.db"
+	stale := `{"experimental":{"cache_file":{"enabled":true,"path":"` + custom + `"}}}`
+	if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
+		t.Fatal(err)
+	}
+	patchBaseCacheFilePath(p)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	exp := m["experimental"].(map[string]any)
+	cf := exp["cache_file"].(map[string]any)
+	if got := cf["path"]; got != custom {
+		t.Errorf("path=%q want %q (custom path should be preserved)", got, custom)
+	}
+}
