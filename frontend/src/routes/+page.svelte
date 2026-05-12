@@ -35,6 +35,8 @@
 
 	type TunnelTab = 'awg' | 'singbox' | 'subscriptions';
 	type AwgTunnelViewMode = 'cards' | 'compact' | 'list';
+	type ConnectivityCell = { connected: boolean; latency: number | null } | undefined;
+	type EndpointScope = 'managed' | 'system' | 'external';
 
 	const AWG_TUNNEL_VIEW_STORAGE_KEY = 'awg_tunnel_view_mode';
 	const AWG_MOBILE_VIEW_MAX_WIDTH = 760;
@@ -60,6 +62,8 @@
 	let awgList = $derived(tunnelSnap.data?.tunnels ?? []);
 	let externalList = $derived(tunnelSnap.data?.external ?? []);
 	let systemList = $derived(tunnelSnap.data?.system ?? []);
+	const awgConnectivityStore = tunnels.connectivityMap;
+	let awgConnectivityMap = $derived($awgConnectivityStore);
 	// Wait for both system info AND the first tunnels snapshot before leaving
 	// the loading state — otherwise sysInfo arrives first and the empty-state
 	// flashes until /api/tunnels/all lands.
@@ -106,6 +110,36 @@
 	let referencedTunnelName = $state<string>('');
 
 	let detailId = $state<string | null>(null);
+	let endpointVisibility = $state<Record<string, boolean>>({});
+
+	function endpointVisibilityKey(scope: EndpointScope, id: string): string {
+		return `${scope}:${id}`;
+	}
+
+	function endpointVisible(scope: EndpointScope, id: string): boolean {
+		return endpointVisibility[endpointVisibilityKey(scope, id)] ?? false;
+	}
+
+	function toggleEndpointVisible(scope: EndpointScope, id: string): void {
+		const key = endpointVisibilityKey(scope, id);
+		endpointVisibility = {
+			...endpointVisibility,
+			[key]: !endpointVisibility[key],
+		};
+	}
+
+	function endpointHost(endpoint?: string | null): string {
+		const value = endpoint ?? '';
+		const match = value.match(/^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/);
+		if (match) return match[1] || match[2] || value;
+		return value;
+	}
+
+	function endpointPort(endpoint?: string | null): string {
+		const value = endpoint ?? '';
+		const match = value.match(/:(\d+)$/);
+		return match ? match[1] : '';
+	}
 
 	function openDetail(id: string) {
 		detailId = id;
@@ -620,15 +654,33 @@
 		}
 	}
 
-	function managedStatusMeta(tunnel: TunnelListItem): string {
+	function managedStatusMeta(tunnel: TunnelListItem, connectivity?: ConnectivityCell): string {
 		if (tunnel.hasAddressConflict) {
 			return 'Дублирует адрес уже запущенного туннеля';
 		}
-		const route = tunnel.resolvedIspInterfaceLabel || tunnel.resolvedIspInterface || tunnel.ispInterfaceLabel || tunnel.ispInterface;
-		if (route) return route;
+		if (tunnel.status === 'running' || tunnel.status === 'broken') {
+			if ((tunnel.connectivityCheck?.method ?? 'http') === 'disabled') {
+				return 'Проверка связи выключена';
+			}
+			if (!connectivity) {
+				return tunnel.pingCheck.status === 'recovering' ? 'Проверка связи...' : 'Проверка...';
+			}
+			if (!connectivity.connected) return 'Нет связи';
+			if (connectivity.latency !== null) return `Пинг ${connectivity.latency} мс`;
+			return 'Связь есть';
+		}
 		if (tunnel.pingCheck.status === 'recovering') return 'Проверка связи восстанавливается';
 		if (tunnel.defaultRoute) return 'Туннель по умолчанию';
 		return tunnel.interfaceName || tunnel.id;
+	}
+
+	function managedRouteMeta(tunnel: TunnelListItem): string {
+		const iface = tunnel.resolvedIspInterface || tunnel.ispInterface || '';
+		const label = tunnel.resolvedIspInterfaceLabel || tunnel.ispInterfaceLabel || '';
+		if (label && iface) return label === iface ? label : `${label} (${iface})`;
+		if (label) return label;
+		if (iface) return iface;
+		return 'Маршрут не указан';
 	}
 
 	function systemStatusVariant(tunnel: SystemTunnel): 'success' | 'muted' {
@@ -993,6 +1045,8 @@
 					</div>
 
 					{#each awgList as tunnel (tunnel.id)}
+						{@const connectivity = awgConnectivityMap.get(tunnel.id)}
+						{@const isEndpointShown = endpointVisible('managed', tunnel.id)}
 						{@const rate = latestRate(tunnel.id)}
 						{@const spark = sparklineData(tunnel.id)}
 						<div class="awg-list-row">
@@ -1041,13 +1095,42 @@
 									/>
 									<span class="awg-list-status-text">{managedStatusLabel(tunnel)}</span>
 								</div>
-								<div class="awg-list-sub">{managedStatusMeta(tunnel)}</div>
+								<div
+									class="awg-list-sub"
+									class:awg-list-sub--ok={isManagedTunnelOn(tunnel) && connectivity?.connected && connectivity.latency !== null}
+									class:awg-list-sub--error={tunnel.hasAddressConflict || (isManagedTunnelOn(tunnel) && !!connectivity && !connectivity.connected)}
+								>
+									{managedStatusMeta(tunnel, connectivity)}
+								</div>
 							</div>
 							<div class="awg-list-cell" data-label="Endpoint">
-								<div class="awg-list-kv-primary awg-list-mono">{tunnel.endpoint || '—'}</div>
-								<div class="awg-list-sub">
-									{tunnel.resolvedIspInterfaceLabel || tunnel.resolvedIspInterface || tunnel.ispInterfaceLabel || tunnel.ispInterface || 'Маршрут не указан'}
+								<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
+									<span class="awg-endpoint-value" title={isEndpointShown ? endpointHost(tunnel.endpoint) : ''}>
+										{#if tunnel.endpoint}
+											{isEndpointShown ? endpointHost(tunnel.endpoint) : '•••••••••'}
+										{:else}
+											—
+										{/if}
+									</span>
+									{#if tunnel.endpoint}
+										<button
+											type="button"
+											class="awg-endpoint-eye"
+											onclick={() => toggleEndpointVisible('managed', tunnel.id)}
+											title={isEndpointShown ? 'Скрыть' : 'Показать'}
+										>
+											{#if isEndpointShown}
+												<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+											{:else}
+												<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+											{/if}
+										</button>
+									{/if}
+									{#if endpointPort(tunnel.endpoint)}
+										<span class="awg-endpoint-port">:{endpointPort(tunnel.endpoint)}</span>
+									{/if}
 								</div>
+								<div class="awg-list-sub">{managedRouteMeta(tunnel)}</div>
 							</div>
 							<div class="awg-list-cell awg-list-cell-rate" data-label="Throughput">
 								<button
@@ -1104,6 +1187,7 @@
 							<div class="awg-list-section-title">Системные · {visibleSystemList.length}</div>
 						</div>
 						{#each visibleSystemList as tunnel (tunnel.id)}
+							{@const isEndpointShown = endpointVisible('system', tunnel.id)}
 							{@const rate = latestRate(tunnel.id)}
 							{@const spark = sparklineData(tunnel.id)}
 							<div class="awg-list-row">
@@ -1143,7 +1227,32 @@
 									<div class="awg-list-sub">{tunnel.peer?.via || 'Маршрут не определён'}</div>
 								</div>
 								<div class="awg-list-cell" data-label="Endpoint">
-									<div class="awg-list-kv-primary awg-list-mono">{tunnel.peer?.endpoint || '—'}</div>
+								<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
+									<span class="awg-endpoint-value" title={isEndpointShown ? endpointHost(tunnel.peer?.endpoint) : ''}>
+										{#if tunnel.peer?.endpoint}
+											{isEndpointShown ? endpointHost(tunnel.peer.endpoint) : '•••••••••'}
+										{:else}
+											—
+										{/if}
+									</span>
+									{#if tunnel.peer?.endpoint}
+										<button
+											type="button"
+											class="awg-endpoint-eye"
+											onclick={() => toggleEndpointVisible('system', tunnel.id)}
+											title={isEndpointShown ? 'Скрыть' : 'Показать'}
+										>
+											{#if isEndpointShown}
+												<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+											{:else}
+												<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+											{/if}
+										</button>
+									{/if}
+									{#if endpointPort(tunnel.peer?.endpoint)}
+										<span class="awg-endpoint-port">:{endpointPort(tunnel.peer?.endpoint)}</span>
+									{/if}
+								</div>
 									<div class="awg-list-sub">{tunnel.address || '—'}</div>
 								</div>
 								<div class="awg-list-cell awg-list-cell-rate" data-label="Throughput">
@@ -1170,9 +1279,23 @@
 									{tunnel.status === 'up' && tunnel.uptime ? formatDuration(tunnel.uptime) : '—'}
 								</div>
 								<div class="awg-list-cell awg-list-cell-actions" data-label="Действия">
-									<Button variant="ghost" size="sm" href="/system-tunnels/{tunnel.id}">Изменить</Button>
-									<Button variant="ghost" size="sm" href="/system-tunnels/{tunnel.id}/test">Тест</Button>
-									<Button variant="ghost" size="sm" onclick={() => markAsServer(tunnel.id)}>В серверы</Button>
+									<a class="awg-action-btn" href="/system-tunnels/{tunnel.id}">
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+										Изменить
+									</a>
+									<a class="awg-action-btn" href="/system-tunnels/{tunnel.id}/test">
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg>
+										Тест
+									</a>
+									<button type="button" class="awg-action-btn" onclick={() => markAsServer(tunnel.id)}>
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+											<rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+											<rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+											<line x1="6" y1="6" x2="6.01" y2="6"/>
+											<line x1="6" y1="18" x2="6.01" y2="18"/>
+										</svg>
+										В серверы
+									</button>
 								</div>
 							</div>
 						{/each}
@@ -1183,6 +1306,7 @@
 							<div class="awg-list-section-title">Внешние · {externalList.length}</div>
 						</div>
 						{#each externalList as tunnel (tunnel.interfaceName)}
+							{@const isEndpointShown = endpointVisible('external', tunnel.interfaceName)}
 							<div class="awg-list-row">
 								<div class="awg-list-cell awg-list-cell-toggle" data-label="Тип">
 									<span class="awg-row-placeholder">ext</span>
@@ -1214,7 +1338,32 @@
 									<div class="awg-list-sub">Не управляется AWG Manager</div>
 								</div>
 								<div class="awg-list-cell" data-label="Endpoint">
-									<div class="awg-list-kv-primary awg-list-mono">{tunnel.endpoint || '—'}</div>
+									<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
+										<span class="awg-endpoint-value" title={isEndpointShown ? endpointHost(tunnel.endpoint) : ''}>
+											{#if tunnel.endpoint}
+												{isEndpointShown ? endpointHost(tunnel.endpoint) : '•••••••••'}
+											{:else}
+												—
+											{/if}
+										</span>
+										{#if tunnel.endpoint}
+											<button
+												type="button"
+												class="awg-endpoint-eye"
+												onclick={() => toggleEndpointVisible('external', tunnel.interfaceName)}
+												title={isEndpointShown ? 'Скрыть' : 'Показать'}
+											>
+												{#if isEndpointShown}
+													<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+												{:else}
+													<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+												{/if}
+											</button>
+										{/if}
+										{#if endpointPort(tunnel.endpoint)}
+											<span class="awg-endpoint-port">:{endpointPort(tunnel.endpoint)}</span>
+										{/if}
+									</div>
 									<div class="awg-list-sub">WG интерфейс</div>
 								</div>
 								<div class="awg-list-cell awg-list-cell-rate" data-label="Throughput">
@@ -1725,6 +1874,14 @@
 		text-overflow: ellipsis;
 	}
 
+	.awg-list-sub--ok {
+		color: var(--color-success);
+	}
+
+	.awg-list-sub--error {
+		color: var(--color-error);
+	}
+
 	.awg-list-dot {
 		padding: 0 0.25rem;
 	}
@@ -1765,6 +1922,48 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	.awg-endpoint-line {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		min-width: 0;
+	}
+
+	.awg-endpoint-value {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.awg-endpoint-eye {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.125rem;
+		border: none;
+		background: none;
+		color: var(--color-text-muted);
+		cursor: pointer;
+		border-radius: 6px;
+		flex-shrink: 0;
+		transition: color var(--t-fast) ease;
+	}
+
+	.awg-endpoint-eye:hover {
+		color: var(--color-text-secondary);
+	}
+
+	.awg-endpoint-eye:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+	}
+
+	.awg-endpoint-port {
+		flex-shrink: 0;
+		color: var(--color-text-muted);
 	}
 
 	.awg-list-cell-rate {

@@ -256,6 +256,8 @@
 	let tooltipX = $derived(tooltipFlip ? hoverX - TOOLTIP_W - 8 : hoverX + 8);
 	let tooltipY = $derived(Math.min(hoverRxY, hoverTxY) - TOOLTIP_H - 6);
 	let tooltipYClamped = $derived(Math.max(PAD_TOP, tooltipY));
+	let showChart = $derived(hasData);
+	let showChartOverlay = $derived(loading && hasData);
 </script>
 
 <Modal {open} title={tunnelName || tunnelId} size="xl" {onclose}>
@@ -303,149 +305,156 @@
 		</span>
 	</div>
 
-	{#if loading}
+	{#if showChart}
+		<div class="chart-panel" aria-busy={showChartOverlay}>
+			<div class="chart-wrap" class:chart-wrap--loading={showChartOverlay}>
+				<div class="chart-top">
+					<span class="max-rate">{formatBitRate(maxRate)}</span>
+				</div>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<svg
+					bind:this={svgEl}
+					class="chart-svg"
+					viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+					preserveAspectRatio="none"
+					role="img"
+					aria-label={`График трафика за период: ${periodLabel(selectedPeriod)}`}
+					onmousemove={handleMouseMove}
+					onmouseleave={handleMouseLeave}
+				>
+					<defs>
+						<linearGradient
+							id="rx-grad-modal"
+							x1="0"
+							y1={PAD_TOP}
+							x2="0"
+							y2={CHART_H - PAD_BOTTOM}
+							gradientUnits="userSpaceOnUse"
+						>
+							<stop offset="0%" stop-color="var(--accent, #60a5fa)" stop-opacity="0.55" />
+							<stop offset="100%" stop-color="var(--accent, #60a5fa)" stop-opacity="0" />
+						</linearGradient>
+						<linearGradient
+							id="tx-grad-modal"
+							x1="0"
+							y1={PAD_TOP}
+							x2="0"
+							y2={CHART_H - PAD_BOTTOM}
+							gradientUnits="userSpaceOnUse"
+						>
+							<stop offset="0%" stop-color="var(--success, #4ade80)" stop-opacity="0.55" />
+							<stop offset="100%" stop-color="var(--success, #4ade80)" stop-opacity="0" />
+						</linearGradient>
+					</defs>
+
+					<!-- RX first (background), TX on top so smaller series stays visible -->
+					<path d={rxArea} fill="url(#rx-grad-modal)" />
+					<path
+						d={rxLine}
+						fill="none"
+						stroke="var(--accent, #60a5fa)"
+						stroke-width="1.6"
+						stroke-linejoin="round"
+						stroke-linecap="round"
+					/>
+					<path d={txArea} fill="url(#tx-grad-modal)" />
+					<path
+						d={txLine}
+						fill="none"
+						stroke="var(--success, #4ade80)"
+						stroke-width="1.4"
+						stroke-linejoin="round"
+						stroke-linecap="round"
+						opacity="0.95"
+					/>
+
+					{#if hoverIndex !== null}
+						<g aria-hidden="true">
+							<!-- Vertical crosshair -->
+							<line
+								x1={hoverX}
+								y1={PAD_TOP}
+								x2={hoverX}
+								y2={CHART_H - PAD_BOTTOM}
+								stroke="var(--text-muted, #888)"
+								stroke-width="0.6"
+								stroke-dasharray="2,2"
+								opacity="0.8"
+							/>
+							<!-- Point dots -->
+							<circle
+								cx={hoverX}
+								cy={hoverRxY}
+								r="3.5"
+								fill="var(--accent, #60a5fa)"
+								stroke="var(--bg-primary, #1a1b26)"
+								stroke-width="1"
+							/>
+							<circle
+								cx={hoverX}
+								cy={hoverTxY}
+								r="3.5"
+								fill="var(--success, #4ade80)"
+								stroke="var(--bg-primary, #1a1b26)"
+								stroke-width="1"
+							/>
+							<!-- Tooltip -->
+							<g transform={`translate(${tooltipX}, ${tooltipYClamped})`}>
+								<rect
+									x="0"
+									y="0"
+									width={TOOLTIP_W}
+									height={TOOLTIP_H}
+									rx="4"
+									fill="var(--bg-secondary, #16161e)"
+									stroke="var(--border, #333)"
+									stroke-width="0.6"
+									opacity="0.96"
+								/>
+								<text
+									x="8"
+									y="16"
+									fill="var(--text-muted, #888)"
+									font-size="10"
+								>{hoverTime}</text>
+								<text
+									x="8"
+									y="32"
+									fill="var(--accent, #60a5fa)"
+									font-size="11"
+								>↓ {formatBitRate(rxRates[hoverIndex])}</text>
+								<text
+									x="8"
+									y="48"
+									fill="var(--success, #4ade80)"
+									font-size="11"
+								>↑ {formatBitRate(txRates[hoverIndex])}</text>
+							</g>
+						</g>
+					{/if}
+				</svg>
+				<div class="chart-bottom">
+					<span class="time">{timeStart}</span>
+					<span class="legend">
+						<span class="dot rx"></span>Прием: <span class="val rx">{formatBitRate(liveCurrentRx)}</span>
+						<span class="sep">·</span>
+						<span class="dot tx"></span>Передача: <span class="val tx">{formatBitRate(liveCurrentTx)}</span>
+					</span>
+					<span class="time">{timeEnd}</span>
+				</div>
+			</div>
+			{#if showChartOverlay}
+				<div class="chart-overlay">
+					<div class="chart-overlay-label">Обновляем график…</div>
+				</div>
+			{/if}
+		</div>
+	{:else if loading}
 		<div class="state-msg">Загрузка…</div>
 	{:else if error}
 		<div class="state-msg state-err">{error}</div>
 	{:else if !hasData}
 		<div class="state-msg">Недостаточно данных за выбранный период</div>
-	{:else}
-		<div class="chart-wrap">
-			<div class="chart-top">
-				<span class="max-rate">{formatBitRate(maxRate)}</span>
-			</div>
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<svg
-				bind:this={svgEl}
-				class="chart-svg"
-				viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-				preserveAspectRatio="none"
-				role="img"
-				aria-label={`График трафика за период: ${periodLabel(selectedPeriod)}`}
-				onmousemove={handleMouseMove}
-				onmouseleave={handleMouseLeave}
-			>
-				<defs>
-					<linearGradient
-						id="rx-grad-modal"
-						x1="0"
-						y1={PAD_TOP}
-						x2="0"
-						y2={CHART_H - PAD_BOTTOM}
-						gradientUnits="userSpaceOnUse"
-					>
-						<stop offset="0%" stop-color="var(--accent, #60a5fa)" stop-opacity="0.55" />
-						<stop offset="100%" stop-color="var(--accent, #60a5fa)" stop-opacity="0" />
-					</linearGradient>
-					<linearGradient
-						id="tx-grad-modal"
-						x1="0"
-						y1={PAD_TOP}
-						x2="0"
-						y2={CHART_H - PAD_BOTTOM}
-						gradientUnits="userSpaceOnUse"
-					>
-						<stop offset="0%" stop-color="var(--success, #4ade80)" stop-opacity="0.55" />
-						<stop offset="100%" stop-color="var(--success, #4ade80)" stop-opacity="0" />
-					</linearGradient>
-				</defs>
-
-				<!-- RX first (background), TX on top so smaller series stays visible -->
-				<path d={rxArea} fill="url(#rx-grad-modal)" />
-				<path
-					d={rxLine}
-					fill="none"
-					stroke="var(--accent, #60a5fa)"
-					stroke-width="1.6"
-					stroke-linejoin="round"
-					stroke-linecap="round"
-				/>
-				<path d={txArea} fill="url(#tx-grad-modal)" />
-				<path
-					d={txLine}
-					fill="none"
-					stroke="var(--success, #4ade80)"
-					stroke-width="1.4"
-					stroke-linejoin="round"
-					stroke-linecap="round"
-					opacity="0.95"
-				/>
-
-				{#if hoverIndex !== null}
-					<g aria-hidden="true">
-						<!-- Vertical crosshair -->
-						<line
-							x1={hoverX}
-							y1={PAD_TOP}
-							x2={hoverX}
-							y2={CHART_H - PAD_BOTTOM}
-							stroke="var(--text-muted, #888)"
-							stroke-width="0.6"
-							stroke-dasharray="2,2"
-							opacity="0.8"
-						/>
-						<!-- Point dots -->
-						<circle
-							cx={hoverX}
-							cy={hoverRxY}
-							r="3.5"
-							fill="var(--accent, #60a5fa)"
-							stroke="var(--bg-primary, #1a1b26)"
-							stroke-width="1"
-						/>
-						<circle
-							cx={hoverX}
-							cy={hoverTxY}
-							r="3.5"
-							fill="var(--success, #4ade80)"
-							stroke="var(--bg-primary, #1a1b26)"
-							stroke-width="1"
-						/>
-						<!-- Tooltip -->
-						<g transform={`translate(${tooltipX}, ${tooltipYClamped})`}>
-							<rect
-								x="0"
-								y="0"
-								width={TOOLTIP_W}
-								height={TOOLTIP_H}
-								rx="4"
-								fill="var(--bg-secondary, #16161e)"
-								stroke="var(--border, #333)"
-								stroke-width="0.6"
-								opacity="0.96"
-							/>
-							<text
-								x="8"
-								y="16"
-								fill="var(--text-muted, #888)"
-								font-size="10"
-							>{hoverTime}</text>
-							<text
-								x="8"
-								y="32"
-								fill="var(--accent, #60a5fa)"
-								font-size="11"
-							>↓ {formatBitRate(rxRates[hoverIndex])}</text>
-							<text
-								x="8"
-								y="48"
-								fill="var(--success, #4ade80)"
-								font-size="11"
-							>↑ {formatBitRate(txRates[hoverIndex])}</text>
-						</g>
-					</g>
-				{/if}
-			</svg>
-			<div class="chart-bottom">
-				<span class="time">{timeStart}</span>
-				<span class="legend">
-					<span class="dot rx"></span>Прием: <span class="val rx">{formatBitRate(liveCurrentRx)}</span>
-					<span class="sep">·</span>
-					<span class="dot tx"></span>Передача: <span class="val tx">{formatBitRate(liveCurrentTx)}</span>
-				</span>
-				<span class="time">{timeEnd}</span>
-			</div>
-		</div>
 	{/if}
 </Modal>
 
@@ -561,8 +570,17 @@
 		opacity: 0.4;
 	}
 
+	.chart-panel {
+		position: relative;
+	}
+
 	.chart-wrap {
 		border-radius: var(--radius);
+		transition: opacity var(--t-fast) ease;
+	}
+
+	.chart-wrap--loading {
+		opacity: 0.45;
 	}
 	.chart-svg {
 		display: block;
@@ -630,6 +648,25 @@
 		color: var(--text-muted);
 		opacity: 0.4;
 		margin: 0 4px;
+	}
+
+	.chart-overlay {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+	}
+
+	.chart-overlay-label {
+		padding: 0.375rem 0.75rem;
+		border: 1px solid var(--color-border);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--color-bg-secondary) 88%, transparent);
+		color: var(--color-text-secondary);
+		font-size: 0.75rem;
+		backdrop-filter: blur(6px);
 	}
 
 	.state-msg {
