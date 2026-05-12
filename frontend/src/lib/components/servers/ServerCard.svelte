@@ -3,7 +3,8 @@
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
 	import { formatBytes } from '$lib/utils/format';
-	import { comparePeerFields, type PeerSortKey } from '$lib/utils/peerSort';
+	import { comparePeerFields } from '$lib/utils/peerSort';
+	import { peerSort } from '$lib/stores/peerSort';
 	import { PeerTable, ConfGeneratorModal, PeerSortControls } from '$lib/components/servers';
 	import { Button } from '$lib/components/ui';
 
@@ -28,8 +29,6 @@
 	let ascParams = $state<ASCParams | null>(null);
 	let loadingConfig = $state(false);
 
-	let sortBy = $state<PeerSortKey>('name');
-	let sortAsc = $state(true);
 	let searchQuery = $state('');
 
 	// Computed stats
@@ -67,9 +66,9 @@
 					online: b.online,
 					lastHandshake: b.lastHandshake || null,
 				},
-				sortBy,
+				$peerSort.sortBy,
 			);
-			return sortAsc ? cmp : -cmp;
+			return $peerSort.sortAsc ? cmp : -cmp;
 		});
 
 		return sorted;
@@ -142,8 +141,6 @@
 			<div class="peers-header">
 				<span class="peers-title">Клиенты ({onlineCount}/{totalPeers} онлайн)</span>
 				<PeerSortControls
-					bind:sortBy
-					bind:sortAsc
 					bind:searchQuery
 					showSearch={(server.peers ?? []).length >= 5}
 				/>

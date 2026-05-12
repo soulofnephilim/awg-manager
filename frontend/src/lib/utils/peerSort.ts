@@ -18,8 +18,12 @@ export interface PeerSortFields {
 }
 
 export function parseIPv4(ip: string): number {
-	const parts = ip.split('.').map(Number);
-	return ((parts[0] ?? 0) << 24) + ((parts[1] ?? 0) << 16) + ((parts[2] ?? 0) << 8) + (parts[3] ?? 0);
+	const bare = ip.split('/')[0] ?? '';
+	const parts = bare.split('.').map((s) => {
+		const n = Number(s);
+		return Number.isFinite(n) && n >= 0 && n <= 255 ? n : 0;
+	});
+	return (parts[0] ?? 0) * 0x1000000 + (parts[1] ?? 0) * 0x10000 + (parts[2] ?? 0) * 0x100 + (parts[3] ?? 0);
 }
 
 export function comparePeerFields(a: PeerSortFields, b: PeerSortFields, sortBy: PeerSortKey): number {

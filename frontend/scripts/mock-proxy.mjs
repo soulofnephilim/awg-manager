@@ -198,6 +198,71 @@ const FAKE_INSTALL_STDERR = `Collected errors:
 opkg_install_cmd: failed.
 exit code 255`;
 
+// ── Managed WG server fixture (peer sort UI test) ──────────────
+// Mirrors a realistic 11-client server. IPs are deliberately not in
+// the storage order, and span 10.0.0.2..10.0.0.13 so lexicographic
+// vs numeric sort diverge ("10.0.0.10" < "10.0.0.2" as strings).
+const MANAGED_PEERS_FIXTURE = [
+	{ ip: '10.0.0.5',  name: 'Macbook Pro' },
+	{ ip: '10.0.0.7',  name: 'iPhone',          rx: 118213447, tx: 6973850, handshakeMinAgo: 2, endpoint: '192.168.2.101:51515' },
+	{ ip: '10.0.0.8',  name: 'iPad' },
+	{ ip: '10.0.0.9',  name: 'Office laptop' },
+	{ ip: '10.0.0.10', name: 'NUC' },
+	{ ip: '10.0.0.11', name: 'TV box' },
+	{ ip: '10.0.0.12', name: 'Reserve phone',   rx: 9326 },
+	{ ip: '10.0.0.2',  name: 'Server one' },
+	{ ip: '10.0.0.3',  name: 'Server two' },
+	{ ip: '10.0.0.4',  name: 'Server three' },
+	{ ip: '10.0.0.13', name: 'Guest device' },
+];
+
+function mockPubkey(i) {
+	// 43 chars + '=' → 44, matches real WG pubkey length so any UI truncation behaves realistically.
+	return `MOCK${String(i).padStart(2, '0')}${'A'.repeat(37)}=`;
+}
+
+function mockManagedServer() {
+	return {
+		interfaceName: 'Wireguard1',
+		description: 'Mock home server',
+		address: '10.0.0.1',
+		mask: '255.255.255.0',
+		listenPort: 51821,
+		endpoint: '203.0.113.42:51821',
+		dns: '8.8.8.8',
+		mtu: 1420,
+		natEnabled: true,
+		policy: 'default',
+		peers: MANAGED_PEERS_FIXTURE.map((p, i) => ({
+			publicKey: mockPubkey(i + 1),
+			privateKey: '',
+			presharedKey: '',
+			description: p.name,
+			tunnelIP: `${p.ip}/32`,
+			dns: '',
+			enabled: true,
+		})),
+	};
+}
+
+function mockManagedStats() {
+	const now = Date.now();
+	return {
+		status: 'up',
+		peers: MANAGED_PEERS_FIXTURE.map((p, i) => {
+			const online = p.handshakeMinAgo !== undefined;
+			return {
+				publicKey: mockPubkey(i + 1),
+				endpoint: p.endpoint ?? '0.0.0.0:0',
+				rxBytes: p.rx ?? 0,
+				txBytes: p.tx ?? 0,
+				lastHandshake: online ? new Date(now - p.handshakeMinAgo * 60_000).toISOString() : '',
+				online,
+			};
+		}),
+	};
+}
+
 async function fetchJSON(path, init) {
 	const r = await fetch(`${UPSTREAM}${path}`, init);
 	const text = await r.text();
@@ -1074,6 +1139,21 @@ const server = http.createServer(async (req, res) => {
 			} catch (e) {
 				send(res, 400, { success: false, error: { code: 'INVALID_REQUEST', message: String(e) } });
 			}
+		});
+		return;
+	}
+
+	// ── Managed WG server with 11 peers (exercises peer sort UI) ──
+	// IPs are intentionally not in monotonic order so that "По IP" can be
+	// visually distinguished from "in storage order" and from a naive
+	// lexicographic sort (which would put 10.0.0.10 before 10.0.0.2).
+	if (req.method === 'GET' && path === '/servers/all') {
+		fetchJSON('/servers/all').then(({ status, body }) => {
+			if (body && typeof body === 'object' && body.data && typeof body.data === 'object') {
+				body.data.managed = [mockManagedServer()];
+				body.data.managedStats = { Wireguard1: mockManagedStats() };
+			}
+			send(res, status, body);
 		});
 		return;
 	}

@@ -13,7 +13,8 @@
 		PeerConfModal,
 		PeerSortControls
 	} from '$lib/components/servers';
-	import { comparePeerFields, type PeerSortKey } from '$lib/utils/peerSort';
+	import { comparePeerFields } from '$lib/utils/peerSort';
+	import { peerSort } from '$lib/stores/peerSort';
 
 	interface Props {
 		server: ManagedServer;
@@ -39,8 +40,6 @@
 	let confirmDelete = $state(false);
 	let confirmDeletePeerKey = $state<string | null>(null);
 
-	let sortBy = $state<PeerSortKey>('name');
-	let sortAsc = $state(true);
 	let searchQuery = $state('');
 
 	function getPeerStats(publicKey: string): ManagedPeerStats | undefined {
@@ -79,9 +78,9 @@
 					online: sb?.online ?? null,
 					lastHandshake: sb?.lastHandshake ?? null,
 				},
-				sortBy,
+				$peerSort.sortBy,
 			);
-			return sortAsc ? cmp : -cmp;
+			return $peerSort.sortAsc ? cmp : -cmp;
 		});
 
 		return sorted;
@@ -348,8 +347,6 @@
 			<span class="peers-title">Клиенты {#if stats}({onlineCount}/{(server.peers ?? []).length} онлайн){:else}({(server.peers ?? []).length}){/if}</span>
 			<div class="peers-controls">
 				<PeerSortControls
-					bind:sortBy
-					bind:sortAsc
 					bind:searchQuery
 					showSearch={(server.peers ?? []).length >= 5}
 				/>
