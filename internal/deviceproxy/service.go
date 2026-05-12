@@ -15,12 +15,13 @@ import (
 // startup in main.go. Nil fields are tolerated — Service degrades and
 // logs where applicable.
 type Deps struct {
-	Store        *Store
-	Singbox      SingboxOperator     // nil → treated as "no sb tunnels, no apply"
-	NDMSQuery    NDMSInterfaceQuery  // nil → ListenInterface resolution fails explicitly
-	Bus          *events.Bus         // nil → no event subscriptions or publishes
-	AWGOutbounds AWGOutboundsCatalog // nil → AWG-related selector members empty
-	AppLogger    logging.AppLogger   // nil → silent in UI logs
+	Store                 *Store
+	Singbox               SingboxOperator              // nil → treated as "no sb tunnels, no apply"
+	SubscriptionOutbounds SubscriptionOutboundsCatalog // nil → no subscription selector/urltest outbounds
+	NDMSQuery             NDMSInterfaceQuery           // nil → ListenInterface resolution fails explicitly
+	Bus                   *events.Bus                  // nil → no event subscriptions or publishes
+	AWGOutbounds          AWGOutboundsCatalog          // nil → AWG-related selector members empty
+	AppLogger             logging.AppLogger            // nil → silent in UI logs
 }
 
 // AWGOutboundsCatalog is the narrow contract Service needs from the
@@ -38,6 +39,21 @@ type AWGTagInfo struct {
 	Label string
 	Kind  string
 	Iface string
+}
+
+// SubscriptionOutboundsCatalog is the narrow contract Service needs from
+// the sing-box subscription service. It exposes subscription selector/urltest
+// outbounds that can be used as device-proxy targets.
+type SubscriptionOutboundsCatalog interface {
+	ListDeviceProxyOutbounds() []SubscriptionOutboundInfo
+}
+
+// SubscriptionOutboundInfo describes a subscription selector/urltest outbound
+// that can be selected by device-proxy.
+type SubscriptionOutboundInfo struct {
+	Tag    string
+	Label  string
+	Detail string
 }
 
 // SingboxOperator is the narrow contract Service needs from
@@ -239,6 +255,19 @@ func (s *Service) ForceApply(ctx context.Context) error {
 
 	cfg := s.d.Store.Get()
 
+	if cfg.Enabled && s.d.Singbox != nil {
+		active, err := s.d.Singbox.GetSelectorActive(ctx, "device-proxy-selector")
+		if err != nil {
+			return fmt.Errorf("force apply read active selector: %w", err)
+		}
+		if active != "" && active != cfg.SelectedOutbound {
+			cfg.SelectedOutbound = active
+			if err := s.d.Store.Save(cfg); err != nil {
+				return fmt.Errorf("force apply persist active selector: %w", err)
+			}
+		}
+	}
+
 	spec, err := s.buildSpec(ctx, cfg)
 	if err != nil {
 		return err
@@ -247,6 +276,12 @@ func (s *Service) ForceApply(ctx context.Context) error {
 	if s.d.Singbox != nil {
 		if err := s.d.Singbox.ApplyDeviceProxy(ctx, spec); err != nil {
 			return fmt.Errorf("force apply: %w", err)
+		}
+
+		if cfg.Enabled && cfg.SelectedOutbound != "" {
+			if err := s.d.Singbox.SetSelectorDefault(ctx, "device-proxy-selector", cfg.SelectedOutbound); err != nil {
+				return fmt.Errorf("force apply selector: %w", err)
+			}
 		}
 	}
 
@@ -313,6 +348,13 @@ func (s *Service) buildSpec(ctx context.Context, cfg Config) (ExternalSpec, erro
 	if s.d.Singbox != nil {
 		spec.SBTags = s.d.Singbox.TunnelTags()
 	}
+
+	// Sing-box subscription selector/urltest tags
+	if s.d.SubscriptionOutbounds != nil {
+		for _, t := range s.d.SubscriptionOutbounds.ListDeviceProxyOutbounds() {
+			spec.SBTags = append(spec.SBTags, t.Tag)
+		}
+	}
 	return spec, nil
 }
 
@@ -347,7 +389,7 @@ func (s *Service) GetRuntimeState(ctx context.Context) RuntimeState {
 // Outbound describes one selectable proxy target exposed to the UI.
 type Outbound struct {
 	Tag    string `json:"tag"`
-	Kind   string `json:"kind"`   // "direct" | "singbox" | "awg"
+	Kind   string `json:"kind"` // "direct" | "singbox" | "awg"
 	Label  string `json:"label"`
 	Detail string `json:"detail"` // extra info for UI (kernel iface, protocol, etc)
 }
@@ -370,6 +412,21 @@ func (s *Service) listOutboundsLocked(ctx context.Context) []Outbound {
 		sort.Strings(tags)
 		for _, tag := range tags {
 			out = append(out, Outbound{Tag: tag, Kind: "singbox", Label: tag})
+		}
+	}
+
+	if s.d.SubscriptionOutbounds != nil {
+		subs := append([]SubscriptionOutboundInfo(nil), s.d.SubscriptionOutbounds.ListDeviceProxyOutbounds()...)
+		sort.Slice(subs, func(i, j int) bool {
+			return subs[i].Label < subs[j].Label
+		})
+		for _, sub := range subs {
+			out = append(out, Outbound{
+				Tag:    sub.Tag,
+				Kind:   "singbox",
+				Label:  sub.Label,
+				Detail: sub.Detail,
+			})
 		}
 	}
 
@@ -557,7 +614,9 @@ func (s *Service) SubscribeBus(ctx context.Context) func() {
 				if !ok {
 					continue
 				}
-				if payload.Resource != "tunnels" && payload.Resource != "singbox.tunnels" {
+				if payload.Resource != "tunnels" &&
+					payload.Resource != "singbox.tunnels" &&
+					payload.Resource != "singbox.subscriptions" {
 					continue
 				}
 			}
