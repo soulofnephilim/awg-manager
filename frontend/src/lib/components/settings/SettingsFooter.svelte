@@ -15,7 +15,12 @@
 		'@Clawa1984', '@beautiful_lion', '@Link_Sergey', '@Dannis_CH', '@vano_milah',
 		'@VylenSV', '@verbee09', '@EfimovYuriy', '@vumaximov', '@Maximus',
 		'@VlZlVlZ', '@sergeinesl', '@unclownartist', '@game47', '@A_Valerich',
-		'@Влад*** С***н', '@Space_Voyager_Telegram', '@Brown2Fox', '@Mr_SiB',
+		'@Влад*** С***н', '@Space_Voyager_Telegram', '@Brown2Fox', '@Mr_SiB', '@Anch665',
+		'@TorTik59', '@kdeveloper', '@genomedon', '@byVladimirB', '@Jona_home',
+		'@voveg', '@Vitaly', '@Dude_47', '@aleksandr_nurov', '@sincezver',
+		'@Novosat', '@Evgenii', '@ayastrebov', '@dany_massiv', '@Litvix',
+		'@Evko', '@gen****@m****u', '@Frinstall', '@ev**************y@g*******m', '@IARESI',
+		'@ig*****@g*******m', '@Да**** Т***в', '@vi*****@g*******.m', '@ku*******@g*******m',
 	];
 
 	let open = $state(false);
