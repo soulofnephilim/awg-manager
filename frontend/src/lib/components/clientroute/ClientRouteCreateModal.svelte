@@ -41,6 +41,11 @@
 	let selectedTunnel = $state('');
 	let selectedFallback = $state<'drop' | 'bypass'>('drop');
 
+	// Snapshot initial state for isDirty detection
+	let initialSelectedDevice = $state<{ ip: string; name: string } | null>(null);
+	let initialSelectedTunnel = $state('');
+	let initialSelectedFallback = $state<'drop' | 'bypass'>('drop');
+
 	let filteredDevices = $derived(
 		devices.filter((d) => {
 			const q = searchText.toLowerCase();
@@ -67,6 +72,16 @@
 
 	let title = $derived(editing ? 'Редактирование правила' : 'VPN для устройства');
 
+	// isDirty: compare with snapshot (device IPs must match, names can differ)
+	let isDirty = $derived.by(() => {
+		const deviceChanged =
+			selectedDevice?.ip !== initialSelectedDevice?.ip ||
+			selectedDevice?.name !== initialSelectedDevice?.name;
+		return deviceChanged ||
+			selectedTunnel !== initialSelectedTunnel ||
+			selectedFallback !== initialSelectedFallback;
+	});
+
 	$effect(() => {
 		if (!open) {
 			wasOpen = false;
@@ -79,10 +94,18 @@
 			selectedDevice = { ip: editing.clientIp, name: editing.clientHostname };
 			selectedTunnel = editing.tunnelId;
 			selectedFallback = editing.fallback;
+			// Capture snapshot for isDirty
+			initialSelectedDevice = { ip: editing.clientIp, name: editing.clientHostname };
+			initialSelectedTunnel = editing.tunnelId;
+			initialSelectedFallback = editing.fallback;
 		} else {
 			selectedDevice = null;
 			selectedTunnel = availableTunnels[0]?.id ?? '';
 			selectedFallback = 'drop';
+			// Capture snapshot for isDirty (create mode defaults)
+			initialSelectedDevice = null;
+			initialSelectedTunnel = selectedTunnel;
+			initialSelectedFallback = 'drop';
 		}
 		searchText = '';
 	});
@@ -112,7 +135,7 @@
 	}
 </script>
 
-<Modal {open} {title} size="md" {onclose}>
+<Modal {open} {title} size="md" {onclose} hasUnsavedChanges={() => isDirty}>
 	<div class="form-sections">
 		<!-- Device list -->
 		<div class="section" class:field-error={deviceError}>

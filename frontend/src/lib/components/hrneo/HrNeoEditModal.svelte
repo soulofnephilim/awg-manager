@@ -68,6 +68,17 @@
 	let attempted = $state(false);
 	let wasOpen = $state(false);
 
+	// Snapshot initial state for isDirty detection
+	let initialName = $state('');
+	let initialDomainsText = $state('');
+	let initialCidrText = $state('');
+	let initialMode = $state<'interface' | 'policy'>('interface');
+	let initialTunnelId = $state('');
+	let initialPolicyChoice = $state<'existing' | 'new'>('existing');
+	let initialExistingPolicyName = $state('');
+	let initialNewPolicyName = $state('');
+	let initialNewPolicyIfaces = $state<AccessPolicyInterface[]>([]);
+
 	let isNew = $derived(rule === null);
 	let title = $derived(isNew ? 'Новое HR правило' : `Редактирование: ${rule?.name ?? ''}`);
 
@@ -133,6 +144,16 @@
 				);
 				tunnelId = match?.id ?? tunnels[0]?.id ?? '';
 			}
+			// Capture snapshot for isDirty
+			initialName = rule.name;
+			initialDomainsText = domainsText;
+			initialCidrText = cidrText;
+			initialMode = mode;
+			initialTunnelId = tunnelId;
+			initialPolicyChoice = policyChoice;
+			initialExistingPolicyName = existingPolicyName;
+			initialNewPolicyName = newPolicyName;
+			initialNewPolicyIfaces = [...newPolicyIfaces];
 		} else {
 			name = '';
 			domainsText = '';
@@ -154,6 +175,16 @@
 			if (!existingPolicyName) existingPolicyName = policies[0]?.name ?? '';
 			newPolicyName = '';
 			newPolicyIfaces = [];
+			// Capture snapshot for isDirty (create mode)
+			initialName = '';
+			initialDomainsText = '';
+			initialCidrText = '';
+			initialMode = mode;
+			initialTunnelId = tunnelId;
+			initialPolicyChoice = policyChoice;
+			initialExistingPolicyName = existingPolicyName;
+			initialNewPolicyName = newPolicyName;
+			initialNewPolicyIfaces = [];
 		}
 	});
 
@@ -253,6 +284,28 @@
 		return activeNewPolicyIfaces.length > 0;
 	});
 
+	// isDirty: deep comparison with snapshot
+	let isDirty = $derived.by(() => {
+		const compareIfaces = (a: AccessPolicyInterface[], b: AccessPolicyInterface[]) => {
+			if (a.length !== b.length) return true;
+			return a.some((aIface, i) => {
+				const bIface = b[i];
+				return aIface.name !== bIface.name || aIface.denied !== bIface.denied;
+			});
+		};
+		return (
+			name !== initialName ||
+			domainsText !== initialDomainsText ||
+			cidrText !== initialCidrText ||
+			mode !== initialMode ||
+			tunnelId !== initialTunnelId ||
+			policyChoice !== initialPolicyChoice ||
+			existingPolicyName !== initialExistingPolicyName ||
+			newPolicyName !== initialNewPolicyName ||
+			compareIfaces(newPolicyIfaces, initialNewPolicyIfaces)
+		);
+	});
+
 	// Local InterfaceList callbacks for the new-policy flow — accumulate
 	// changes; the actual `ip policy permit` calls happen at Save time.
 	function newPermit(iface: string, order: number) {
@@ -300,7 +353,7 @@
 	}
 </script>
 
-<Modal {open} {title} size="lg" {onclose}>
+<Modal {open} {title} size="lg" {onclose} hasUnsavedChanges={() => isDirty}>
 	<!-- Preset bar -->
 	<div class="preset-bar">
 		<div class="preset-bar-left">

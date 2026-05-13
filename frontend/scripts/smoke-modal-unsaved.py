@@ -74,6 +74,48 @@ SCENARIOS.extend([
 ])
 
 
+def _open_dns_create_manual(p: Page):
+    """DNS tab has '+ Добавить' dropdown -> 'Создать вручную' menu item."""
+    p.locator('button:has-text("+ Добавить")').first.click(timeout=4000)
+    p.wait_for_timeout(400)
+    p.locator('.dropdown-item:has-text("Создать вручную")').first.click(timeout=4000)
+
+
+SCENARIOS.extend([
+    Scenario(
+        name="DnsRouteEditModal_create",
+        navigate=lambda p: (goto(p, "/routing"), click_tab(p, "NDMS")),
+        trigger=_open_dns_create_manual,
+        input_selector='.modal-card input[type="text"]',
+    ),
+    Scenario(
+        name="IpRouteEditModal_create",
+        navigate=lambda p: (goto(p, "/routing"), click_tab(p, "IP-адреса")),
+        trigger=lambda p: p.locator('button:has-text("+ Новое правило")').first.click(timeout=4000),
+        input_selector='.modal-card input[type="text"]',
+    ),
+    Scenario(
+        name="ClientRouteCreateModal",
+        navigate=lambda p: (goto(p, "/routing"), click_tab(p, "VPN для устройств")),
+        trigger=lambda p: p.locator('button:has-text("+ Создать")').first.click(timeout=4000),
+        input_selector='.device-row',  # Click first device to make form dirty
+        typed_value='',  # Not used for button click
+    ),
+    Scenario(
+        name="PolicyCreateModal",
+        navigate=lambda p: (goto(p, "/routing"), click_tab(p, "Политики")),
+        trigger=lambda p: p.locator('button:has-text("+ Создать")').first.click(timeout=4000),
+        input_selector='.modal-card input[type="text"]',
+    ),
+    Scenario(
+        name="HrNeoEditModal_create",
+        navigate=lambda p: (goto(p, "/routing"), click_tab(p, "HR NEO")),
+        trigger=lambda p: p.locator('button:has-text("+ Новое правило")').first.click(timeout=4000),
+        input_selector='.modal-card input[type="text"]',
+    ),
+])
+
+
 def goto(page: Page, path: str):
     page.goto(f"{BASE}{path}")
     page.wait_for_load_state("domcontentloaded")
@@ -112,7 +154,12 @@ def run_scenario(page: Page, sc: Scenario) -> str:
         assert_modal_open(page)
 
         # Type something to mark the form dirty.
-        page.locator(sc.input_selector).first.fill(sc.typed_value, timeout=3000)
+        # For .device-row (button), use click(); for text inputs, use fill().
+        elem = page.locator(sc.input_selector).first
+        if 'device-row' in sc.input_selector:
+            elem.click(timeout=3000)
+        else:
+            elem.fill(sc.typed_value, timeout=3000)
         page.wait_for_timeout(200)
 
         # Backdrop while dirty -> ConfirmModal appears.

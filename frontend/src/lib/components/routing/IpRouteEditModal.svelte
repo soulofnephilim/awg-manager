@@ -25,6 +25,13 @@
 	let isInitialized = $state(false);
 	let attempted = $state(false);
 
+	// Snapshot initial state for isDirty detection
+	let initialName = $state('');
+	let initialTunnelID = $state('');
+	let initialFallback = $state<'' | 'reject'>('');
+	let initialSubnetsText = $state('');
+	let initialIconUrl = $state<string | undefined>(undefined);
+
 	// Reset form when modal opens (only once per open, not on every poll tick)
 	$effect(() => {
 		if (open) {
@@ -36,12 +43,24 @@
 					fallback = route.fallback || '';
 					subnetsText = (route.subnets ?? []).join('\n');
 					iconUrl = route.iconUrl;
+					// Capture snapshot for isDirty
+					initialName = route.name;
+					initialTunnelID = route.tunnelID;
+					initialFallback = route.fallback || '';
+					initialSubnetsText = subnetsText;
+					initialIconUrl = route.iconUrl;
 				} else {
 					name = '';
 					tunnelID = tunnels.length > 0 ? tunnels[0].id : '';
 					fallback = '';
 					subnetsText = '';
 					iconUrl = undefined;
+					// Capture snapshot for isDirty (create mode defaults)
+					initialName = '';
+					initialTunnelID = tunnelID;
+					initialFallback = '';
+					initialSubnetsText = '';
+					initialIconUrl = undefined;
 				}
 				isInitialized = true;
 			}
@@ -66,6 +85,15 @@
 	let nameError = $derived(attempted && name.trim() === '');
 	let tunnelError = $derived(attempted && tunnelID === '');
 	let subnetError = $derived(attempted && parsedSubnets.length === 0);
+
+	// isDirty: compare with snapshot (edit mode) or defaults (create mode)
+	let isDirty = $derived(
+		name !== initialName ||
+		tunnelID !== initialTunnelID ||
+		fallback !== initialFallback ||
+		subnetsText !== initialSubnetsText ||
+		iconUrl !== initialIconUrl
+	);
 
 	let userTunnels = $derived(tunnels.filter(t => t.type === 'managed'));
 	let systemTunnels = $derived(tunnels.filter(t => t.type === 'system'));
@@ -156,7 +184,7 @@
 	}
 </script>
 
-<Modal {open} {title} size="lg" onclose={onclose}>
+<Modal {open} {title} size="lg" onclose={onclose} hasUnsavedChanges={() => isDirty}>
 	<!-- Name -->
 	<div class="form-group" class:field-error={nameError}>
 		<!-- svelte-ignore a11y_label_has_associated_control -->

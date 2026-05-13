@@ -14,6 +14,9 @@
 	const VALID_PATTERN = /^[a-zA-Z0-9_-]*$/;
 	const MAX_LEN = 256;
 
+	// Snapshot initial state for isDirty detection
+	let initialDescription = $state('');
+
 	let isValid = $derived(description.trim().length > 0 && description.trim().length <= MAX_LEN && VALID_PATTERN.test(description.trim()));
 	let attempted = $state(false);
 
@@ -26,10 +29,15 @@
 		return '';
 	});
 
+	// isDirty: compare with snapshot (create mode)
+	let isDirty = $derived(description !== initialDescription);
+
 	$effect(() => {
 		if (open) {
 			description = '';
 			attempted = false;
+			// Capture snapshot for isDirty (create mode defaults)
+			initialDescription = '';
 		}
 	});
 
@@ -43,7 +51,7 @@
 	}
 </script>
 
-<Modal {open} title="Создать политику" size="sm" {onclose}>
+<Modal {open} title="Создать политику" size="sm" {onclose} hasUnsavedChanges={() => isDirty}>
 	<div class="form-group" class:field-error={descriptionError !== ''}>
 		<label class="field-label">
 			Описание

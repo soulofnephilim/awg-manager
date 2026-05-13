@@ -48,6 +48,18 @@
 	let isInitialized = $state(false);
 	let attempted = $state(false);
 
+	// Snapshot initial state for isDirty detection
+	let initialName = $state('');
+	let initialManualDomains = $state<string[]>([]);
+	let initialSubscriptions = $state<DnsRouteSubscription[]>([]);
+	let initialRoutes = $state<DnsRouteTarget[]>([]);
+	let initialBackend = $state<'ndms' | 'hydraroute'>('ndms');
+	let initialHrRouteMode = $state<'interface' | 'policy'>('interface');
+	let initialHrPolicyName = $state('');
+	let initialExcludesText = $state('');
+	let initialHrInterfaceId = $state('');
+	let initialIconUrl = $state<string | undefined>(undefined);
+
 	let nameError = $derived(attempted && name.trim() === '');
 	let routeError = $derived(attempted && routes.length === 0);
 
@@ -67,6 +79,17 @@
 					excludesText = (route.excludes ?? []).join('\n');
 					hrInterfaceId = (isHR && route.routes?.[0]?.tunnelId) || tunnels[0]?.id || '';
 					iconUrl = route.iconUrl;
+					// Capture snapshot for isDirty
+					initialName = route.name;
+					initialManualDomains = [...(route.manualDomains ?? [])];
+					initialSubscriptions = (route.subscriptions ?? []).map((s) => ({ ...s }));
+					initialRoutes = (route.routes ?? []).map((r) => ({ ...r }));
+					initialBackend = backend;
+					initialHrRouteMode = hrRouteMode;
+					initialHrPolicyName = hrPolicyName;
+					initialExcludesText = excludesText;
+					initialHrInterfaceId = hrInterfaceId;
+					initialIconUrl = iconUrl;
 				} else {
 					name = '';
 					manualDomains = [];
@@ -78,6 +101,17 @@
 					excludesText = '';
 					hrInterfaceId = tunnels[0]?.id || '';
 					iconUrl = undefined;
+					// Capture snapshot for isDirty (create mode defaults)
+					initialName = '';
+					initialManualDomains = [];
+					initialSubscriptions = [];
+					initialRoutes = [];
+					initialBackend = backend;
+					initialHrRouteMode = 'interface';
+					initialHrPolicyName = '';
+					initialExcludesText = '';
+					initialHrInterfaceId = hrInterfaceId;
+					initialIconUrl = undefined;
 				}
 				newSubUrl = '';
 				newRouteTunnelId = '';
@@ -104,6 +138,37 @@
 	let groupCount = $derived(Math.ceil(totalDomains / 300) || 0);
 
 	let canSave = $derived(name.trim() !== '' && (isInterfaceMode ? !!hrInterfaceId : routes.length > 0));
+
+	// isDirty: deep comparison with snapshot (edit mode) or with defaults (create mode)
+	let isDirty = $derived.by(() => {
+		const compareRoutes = (a: DnsRouteTarget[], b: DnsRouteTarget[]) => {
+			if (a.length !== b.length) return true;
+			return a.some((aRoute, i) => {
+				const bRoute = b[i];
+				return aRoute.tunnelId !== bRoute.tunnelId || aRoute.fallback !== bRoute.fallback;
+			});
+		};
+		const compareSubscriptions = (a: DnsRouteSubscription[], b: DnsRouteSubscription[]) => {
+			if (a.length !== b.length) return true;
+			return a.some((aSub, i) => b[i]?.url !== aSub.url);
+		};
+		const compareDomains = (a: string[], b: string[]) => {
+			if (a.length !== b.length) return true;
+			return a.some((val, i) => b[i] !== val);
+		};
+		return (
+			name !== initialName ||
+			compareDomains(manualDomains, initialManualDomains) ||
+			compareSubscriptions(subscriptions, initialSubscriptions) ||
+			compareRoutes(routes, initialRoutes) ||
+			backend !== initialBackend ||
+			hrRouteMode !== initialHrRouteMode ||
+			hrPolicyName !== initialHrPolicyName ||
+			excludesText !== initialExcludesText ||
+			hrInterfaceId !== initialHrInterfaceId ||
+			iconUrl !== initialIconUrl
+		);
+	});
 
 	// Handlers
 	function handleDomainsChange(domains: string[]) {
@@ -222,7 +287,7 @@
 	}
 </script>
 
-<Modal {open} {title} size="lg" onclose={onclose}>
+<Modal {open} {title} size="lg" onclose={onclose} hasUnsavedChanges={() => isDirty}>
 	<!-- Name -->
 	<div class="form-group" class:field-error={nameError}>
 		<!-- svelte-ignore a11y_label_has_associated_control -->
