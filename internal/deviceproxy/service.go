@@ -194,7 +194,7 @@ func (s *Service) SaveInstance(ctx context.Context, in Instance) error {
 		return err
 	}
 	if err := s.applyInstancesLocked(ctx); err != nil {
-		_ = s.restoreSnapshot(prev)
+		_ = s.restoreSnapshot(ctx, prev)
 		return err
 	}
 	return nil
@@ -216,7 +216,7 @@ func (s *Service) DeleteInstance(ctx context.Context, id string) error {
 		return err
 	}
 	if err := s.applyInstancesLocked(ctx); err != nil {
-		_ = s.restoreSnapshot(prev)
+		_ = s.restoreSnapshot(ctx, prev)
 		return err
 	}
 	return nil
@@ -284,10 +284,12 @@ func (s *Service) applyInstancesLocked(ctx context.Context) error {
 	return nil
 }
 
-// restoreSnapshot attempts to roll the Store back to a previous snapshot.
-// It deletes any extra instances and restores missing ones. Best-effort:
-// errors during rollback are logged via appLog but not returned.
-func (s *Service) restoreSnapshot(snap Snapshot) error {
+// restoreSnapshot attempts to roll the Store back to a previous snapshot
+// and re-apply the restored snapshot to sing-box so the runtime matches
+// storage. Best-effort: errors during rollback (storage or reapply) are
+// logged via appLog but not returned — the caller already has the
+// original error from the failed mutation.
+func (s *Service) restoreSnapshot(ctx context.Context, snap Snapshot) error {
 	current := s.d.Store.Snapshot()
 
 	// Delete instances present in current but missing in previous.
@@ -315,6 +317,12 @@ func (s *Service) restoreSnapshot(snap Snapshot) error {
 		}
 	}
 
+	// Re-apply restored snapshot to sing-box so runtime matches storage.
+	// Best-effort: if this also fails, log via appLog — there's nothing
+	// more we can do at this layer, the next Reconcile will retry.
+	if err := s.applyInstancesLocked(ctx); err != nil {
+		s.appLog.Warn("rollback", "reapply", fmt.Sprintf("post-rollback reapply failed: %v", err))
+	}
 	return nil
 }
 
