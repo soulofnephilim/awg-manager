@@ -16,7 +16,7 @@ dist/
 Thumbs.db
 
 # Frontend
-frontend/node_modules/
+node_modules/
 frontend/build/
 frontend/.svelte-kit/
 frontend/static/openapi.yaml
