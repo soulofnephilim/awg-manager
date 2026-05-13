@@ -60,6 +60,7 @@
 	];
 
 	const singboxInstalled = $derived($singboxStatus.data?.installed ?? false);
+	const isDirty = $derived(kind !== 'choose');
 
 	$effect(() => {
 		if (open) {
@@ -167,7 +168,7 @@
 	}
 </script>
 
-<Modal {open} title={titleByKind[kind]} size="lg" onclose={close}>
+<Modal {open} title={titleByKind[kind]} size="lg" onclose={close} hasUnsavedChanges={() => isDirty}>
 	{#if kind === 'choose'}
 		<p class="lead">Что добавить?</p>
 		<div class="kind-grid">

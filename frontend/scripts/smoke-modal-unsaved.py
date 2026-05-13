@@ -202,7 +202,28 @@ def _make_refresh_settings_dirty(p: Page):
         p.wait_for_timeout(400)
 
 
+def _open_wizard_choose_step0(p: Page):
+    """Open AddTunnelWizard with preselect='choose', starting at step 0 (clean state)."""
+    # Click "+ Добавить" button on Sing-box tab (opens with preselect='choose')
+    p.locator('button:has-text("+ Добавить")').first.click(timeout=4000)
+    p.wait_for_timeout(500)
+
+
+def _make_wizard_dirty(p: Page):
+    """Make the wizard dirty by clicking a kind card to advance to step 1."""
+    # Click the first kind card to advance to step 1
+    p.locator('.kind-card').first.click(timeout=4000)
+    p.wait_for_timeout(500)
+
+
 SCENARIOS.extend([
+    Scenario(
+        name="AddTunnelWizard_choose",
+        navigate=lambda p: (goto(p, "/"), click_tab(p, "Sing-box")),
+        trigger=_open_wizard_choose_step0,
+        input_selector='',  # Not used since we have a custom make_dirty
+        make_dirty=_make_wizard_dirty,
+    ),
     Scenario(
         name="RuleEditModal_singbox",
         navigate=_nav_singbox_subtab("Правила"),
