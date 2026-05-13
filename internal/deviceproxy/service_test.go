@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/events"
@@ -441,4 +442,51 @@ func TestService_Reconcile_MissingTargetDisables(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestService_SaveInstance_PortCollisionAcrossInstances(t *testing.T) {
+	sb := &fakeSingboxOperator{running: true}
+	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
+	s := NewService(Deps{Store: store, Singbox: sb})
+
+	// Save instance A on port 1099 (enabled).
+	instA := Instance{
+		ID: "a", Name: "A",
+		Enabled: true, ListenAll: true, Port: 1099,
+		SelectedOutbound: "direct",
+	}
+	if err := s.SaveInstance(context.Background(), instA); err != nil {
+		t.Fatalf("save A: %v", err)
+	}
+
+	// Try to save instance B with same port (enabled) → should fail.
+	instB := Instance{
+		ID: "b", Name: "B",
+		Enabled: true, ListenAll: true, Port: 1099,
+		SelectedOutbound: "direct",
+	}
+	err := s.SaveInstance(context.Background(), instB)
+	if err == nil {
+		t.Fatalf("expected port-collision error for B, got nil")
+	}
+	if !contains(err.Error(), "port 1099") || !contains(err.Error(), "another") {
+		t.Errorf("error should mention port and another instance, got: %v", err)
+	}
+
+	// Disabled B with same port → should succeed (disabled instances don't collide).
+	instBDisabled := instB
+	instBDisabled.Enabled = false
+	if err := s.SaveInstance(context.Background(), instBDisabled); err != nil {
+		t.Fatalf("save disabled B: %v", err)
+	}
+
+	// Re-saving A with same port (self) → should succeed (excluded by ID).
+	if err := s.SaveInstance(context.Background(), instA); err != nil {
+		t.Fatalf("re-save A: %v", err)
+	}
+}
+
+// contains is a tiny helper for substring assertions.
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
