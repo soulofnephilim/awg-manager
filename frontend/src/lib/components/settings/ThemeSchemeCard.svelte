@@ -9,7 +9,7 @@
 		type ThemePreset,
 	} from '$lib/stores/theme';
 
-	const PRESET_ORDER: ThemePreset[] = ['legacy', 'neo', 'custom'];
+	const PRESET_ORDER: ThemePreset[] = ['legacy', 'neo', 'mint', 'custom'];
 	const LEGACY_MODE_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
 		{ value: 'dark', label: 'Тёмная' },
 		{ value: 'light', label: 'Светлая' },
@@ -263,11 +263,11 @@
 	}
 
 	.theme-grid {
-		--theme-grid-max: 61rem;
+		--theme-grid-max: 81rem;
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
 		gap: 0.75rem;
-		width: min(100%, var(--theme-grid-max));
+		/* width: min(100%, var(--theme-grid-max)); */
 		max-width: 100%;
 		margin-inline-start: 0;
 		margin-inline-end: auto;

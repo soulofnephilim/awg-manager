@@ -131,9 +131,12 @@
 		return map[upperLabel] ?? upperLabel;
 	}
 
+	/** Для Neo вторая ветка визуально тёмная, но `mode` остаётся dark ради color-scheme — в шапке показываем legacyMode */
+	const themeDisplayMode = $derived(theme.preset === 'neo' ? theme.legacyMode : theme.mode);
+
 	const themeButtonLabel = $derived.by(() => {
-		const currentModeLabel = theme.mode === 'light' ? 'светлая' : 'тёмная';
-		const nextModeLabel = theme.mode === 'light' ? 'тёмную' : 'светлую';
+		const currentModeLabel = themeDisplayMode === 'light' ? 'светлая' : 'тёмная';
+		const nextModeLabel = themeDisplayMode === 'light' ? 'тёмную' : 'светлую';
 		return `Переключить ${theme.label} на ${nextModeLabel} тему. Сейчас ${currentModeLabel}.`;
 	});
 </script>
@@ -227,7 +230,7 @@
 
 			{#if theme.preset !== 'custom'}
 				<IconButton ariaLabel={themeButtonLabel} onclick={onToggleThemeMode}>
-					{#if theme.mode === 'dark'}
+					{#if themeDisplayMode === 'dark'}
 						<svg
 							viewBox="0 0 24 24"
 							fill="none"

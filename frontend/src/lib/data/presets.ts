@@ -389,7 +389,8 @@ export const SERVICE_PRESETS: ServicePreset[] = [
 			// Карты / навигация / справочники
 			'gismeteo.ru', '2gis.ru', '2gis.com',
 			// Домены
-			'ru', 'su', 'ru.com', 'xn--p1ai',
+			'ru', 'su', 'ru.com', 'xn--p1ai', 'xn--p1acf', 'xn--80adxhks', 
+			'tatar', 'xn--d1acj3b', 'xn--80asehdb', 'xn--80aswg', 'xn--c1avg'
 		],
 		notice: 'Основной источник — itdoginfo/allow-domains (Russia outside-raw). Дополнительно включены домены банков, госуслуг, Yandex/VK, WB/Ozon и операторов связи — для обхода VPN на российских сервисах, блокирующих иностранные IP.',
 	},

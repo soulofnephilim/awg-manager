@@ -38,15 +38,21 @@
 				'SingBox-туннели и подписки',
 				'Серверы WireGuard и DeviceProxy',
 				'Маршрутизация: политики, клиенты, DNS и IP',
-				'Системный мониторинг',
 				'Веб-терминал и режим списка для AWG',
+				'Системный мониторинг',
 			],
 		},
 		{
 			value: 'expert',
 			title: USAGE_LEVEL_LABELS.expert,
 			summary: 'Полный набор функций для тонкой настройки',
-			includes: ['Всё из уровня "Расширенный"', 'HydraRoute Neo', 'Sing-box Router'],
+			includes: [
+				'Всё из уровня "Расширенный"', 
+			    'HydraRoute Neo', 
+				'Sing-box Router', 
+				'Настройка цветовой схемы',
+				'Создание API-ключа'
+			],
 		},
 	];
 
