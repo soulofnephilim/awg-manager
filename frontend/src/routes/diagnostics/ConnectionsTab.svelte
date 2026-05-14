@@ -90,11 +90,11 @@
 	}
 </script>
 
-{#if data}
-	<ConnectionsStats stats={data.stats} />
+{#if data || loading}
+	<ConnectionsStats stats={data?.stats ?? null} showSkeleton={loading && !data} />
 
 	<!-- Filter row 1: tunnel chips -->
-	{#if Object.keys(data.tunnels).length > 0}
+	{#if data && Object.keys(data.tunnels).length > 0}
 		<div class="filter-row">
 			<button
 				type="button"
@@ -119,6 +119,12 @@
 				</button>
 			{/each}
 		</div>
+	{:else if loading && !data}
+		<div class="filter-row" aria-hidden="true">
+			<span class="chip chip-active chip-skel-static">
+				ALL <span class="chip-count"><span class="chip-count-skel"></span></span>
+			</span>
+		</div>
 	{/if}
 
 	<!-- Filter row 2: proto chips + search + counter -->
@@ -142,16 +148,24 @@
 		/>
 		<span class="counter">
 			<span class="live-dot" class:live-dot-loading={loading}></span>
-			{#if data.fetchedAt}
-				{new Date(data.fetchedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ·
+			{#if loading && !data}
+				<span class="counter-skel-line" aria-hidden="true">
+					<span class="counter-skel-seg counter-skel-time"></span>
+					<span class="counter-skel-seg counter-skel-pair"></span>
+				</span>
+			{:else if data}
+				{#if data.fetchedAt}
+					{new Date(data.fetchedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ·
+				{/if}
+				{data.pagination.total} из {data.stats.total}
 			{/if}
-			{data.pagination.total} из {data.stats.total}
 		</span>
 	</div>
 
 	<ConnectionsTable
-		connections={data.connections}
-		pagination={data.pagination}
+		connections={data?.connections ?? []}
+		pagination={data?.pagination ?? { total: 0, offset: 0, limit: 50, returned: 0 }}
+		showSkeleton={loading && !data}
 		{sortBy}
 		{sortDir}
 		onSortChange={handleSortChange}
@@ -230,6 +244,42 @@
 
 	.chip-led-vpn {
 		background: var(--color-accent);
+	}
+
+	.chip-skel-static {
+		pointer-events: none;
+	}
+
+	.chip-count-skel {
+		display: inline-block;
+		width: 1.625rem;
+		height: 10px;
+		border-radius: 4px;
+		background: color-mix(in srgb, currentColor 22%, transparent);
+		animation: pulse 1s ease-in-out infinite;
+		vertical-align: middle;
+	}
+
+	.counter-skel-line {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+	}
+
+	.counter-skel-seg {
+		display: inline-block;
+		height: 10px;
+		border-radius: 4px;
+		background: var(--color-border);
+		animation: pulse 1s ease-in-out infinite;
+	}
+
+	.counter-skel-time {
+		width: 4.5rem;
+	}
+
+	.counter-skel-pair {
+		width: 5.5rem;
 	}
 
 	@media (max-width: 640px) {
