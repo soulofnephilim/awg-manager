@@ -220,6 +220,24 @@ func (s *Service) rciSetNAT(ctx context.Context, ifaceName string, enabled bool)
 	})
 }
 
+// rciSetPrivateKey installs an explicit WireGuard private key on the
+// interface via RCI. Verified against NDMS 4.x: POST returns "set private
+// key." status and the next /show/interface/<name>.wireguard.public-key
+// reflects the public key derived from the supplied private key. Used
+// during Restore to install the backup's keypair so previously-distributed
+// client .conf files keep working.
+func (s *Service) rciSetPrivateKey(ctx context.Context, ifaceName, privateKey string) error {
+	return s.rciPost(ctx, map[string]interface{}{
+		"interface": map[string]interface{}{
+			ifaceName: map[string]interface{}{
+				"wireguard": map[string]interface{}{
+					"private-key": privateKey,
+				},
+			},
+		},
+	})
+}
+
 // rciSetHotspotPolicy applies an ip hotspot policy to the interface.
 // policy is "permit", "deny", or an IP Policy profile name. For "none"
 // use rciClearHotspotPolicy.
