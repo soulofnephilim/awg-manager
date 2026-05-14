@@ -24,22 +24,3 @@ export function mergePastedShareList(
 	return { next, caret: selectionStart + normalized.length };
 }
 
-/** Share schemes for IDE-style highlighting (longest first inside alternation). */
-const HIGHLIGHT_PROTO =
-	'(naive\\+https://|naive\\+http://|hysteria2://|vless://|hy2://|trojan://|ss://)';
-
-/**
- * Escape HTML, then wrap known share schemes in <span class="share-link-proto">…</span>
- * for use under a transparent textarea. Boundaries: line start, after newline/CR, or after space/tab/NBSP.
- */
-export function escapeAndHighlightShareProtocols(raw: string): string {
-	const esc = raw
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;');
-	const re = new RegExp(
-		`(?:^|(?<=[\\n\\r])|(?<=[ \\t\\u00a0]))(${HIGHLIGHT_PROTO})`,
-		'gi',
-	);
-	return esc.replace(re, '<span class="share-link-proto">$1</span>');
-}

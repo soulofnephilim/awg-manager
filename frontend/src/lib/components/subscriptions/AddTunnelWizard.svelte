@@ -337,7 +337,7 @@
 					<span class="lbl">Ссылки на серверы (по одной на строку)</span>
 					<ShareLinksTextarea
 						bind:value={inlineText}
-						placeholder={`vless://...\ntrojan://...\nhysteria2://...`}
+						placeholder={`vless://...\ntrojan://...\nhysteria2://...\nnaive+https://\nss://...`}
 						rows={6}
 						onpaste={(e) => onShareListPaste(e, () => inlineText, (v) => (inlineText = v))}
 					/>
