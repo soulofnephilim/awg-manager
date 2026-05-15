@@ -17,17 +17,17 @@
 	interface Props {
 		server: WireguardServer;
 		isBuiltIn: boolean;
-		wanIP: string;
 		onUnmark?: (id: string) => void;
 	}
 
-	let { server, isBuiltIn, wanIP, onUnmark }: Props = $props();
+	let { server, isBuiltIn, onUnmark }: Props = $props();
 
 	let confModalOpen = $state(false);
 	let confPeerKey = $state('');
 	let serverConfig = $state<WireguardServerConfig | null>(null);
 	let ascParams = $state<ASCParams | null>(null);
 	let loadingConfig = $state(false);
+	let wanIP = $state('');
 
 	let searchQuery = $state('');
 
@@ -78,12 +78,14 @@
 		confPeerKey = publicKey;
 		loadingConfig = true;
 		try {
-			const [config, asc] = await Promise.all([
+			const [config, asc, ip] = await Promise.all([
 				api.getServerConfig(server.id),
-				api.getASCParams(server.id).catch(() => null)
+				api.getASCParams(server.id).catch(() => null),
+				api.getWANIP().catch(() => ''),
 			]);
 			serverConfig = config;
 			ascParams = asc;
+			wanIP = ip;
 			confModalOpen = true;
 		} catch (e) {
 			notifications.error('Не удалось загрузить конфигурацию');

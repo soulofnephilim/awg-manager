@@ -258,10 +258,6 @@ func (h *ServersHandler) writeAll(w http.ResponseWriter, r *http.Request) {
 		"servers":      list,
 		"managed":      managedList,
 		"managedStats": managedStats,
-		"wanIP":        "",
-	}
-	if ip, err := testing.GetWANIPWithFallback(ctx, h.queries.WANInterfaceAddress); err == nil {
-		payload["wanIP"] = ip
 	}
 	response.Success(w, payload)
 }

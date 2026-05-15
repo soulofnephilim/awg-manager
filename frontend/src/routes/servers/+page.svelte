@@ -25,7 +25,6 @@
 	let serverList = $derived(snap.data?.servers ?? []);
 	let managedServers: ManagedServer[] = $derived(snap.data?.managed ?? []);
 	let managedStatsMap: Record<string, ManagedServerStats> = $derived(snap.data?.managedStats ?? {});
-	let wanIP = $derived(snap.data?.wanIP ?? '');
 	let loading = $derived(snap.lastFetchedAt === 0);
 	let routerIP = $derived($systemInfo.data?.routerIP ?? '');
 
@@ -174,12 +173,11 @@
 						onOpenASC={() => openManagedASC(activeManaged!.interfaceName)}
 					/>
 				{:else if activeItem?.kind === 'system' && activeServer}
-					<ServerCard
-						server={activeServer}
-						isBuiltIn={activeServer.description === 'Wireguard VPN Server'}
-						{wanIP}
-						onUnmark={unmarkServer}
-					/>
+				<ServerCard
+					server={activeServer}
+					isBuiltIn={activeServer.description === 'Wireguard VPN Server'}
+					onUnmark={unmarkServer}
+				/>
 				{/if}
 			</main>
 		</div>

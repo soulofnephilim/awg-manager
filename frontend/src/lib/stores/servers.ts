@@ -6,7 +6,6 @@ export interface ServersSnapshot {
 	servers: WireguardServer[];
 	managed: ManagedServer[];
 	managedStats: Record<string, ManagedServerStats>;
-	wanIP: string;
 }
 
 async function fetchServers(): Promise<ServersSnapshot> {
