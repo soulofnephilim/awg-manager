@@ -74,7 +74,12 @@
 			monitoringStore.setSnapshot(snap);
 			lastFetchedAtTs = Date.now();
 		} catch {
-			notifications.error('Не удалось загрузить матрицу мониторинга');
+			// Suppress error notification when cached data is visible — the user
+			// sees stale data and the next auto-refresh will retry silently.
+			// Show the error only when there is nothing at all to display.
+			if (!$monitoringStore.snapshot) {
+				notifications.error('Не удалось загрузить матрицу мониторинга');
+			}
 		} finally {
 			lastRefreshTs = Date.now();
 			nextAutoRefreshTs = lastRefreshTs + AUTO_REFRESH_MS;
@@ -87,6 +92,7 @@
 	}
 
 	onMount(() => {
+		monitoringStore.loadCached();
 		triggerAutoRefresh();
 		progressTimer = setInterval(() => {
 			nowTs = Date.now();
@@ -179,7 +185,10 @@
 			{/if}
 		</span>
 		<div class="meta-actions">
-			{#if updatedTimeLabel}
+			{#if $monitoringStore.stale && refreshing}
+				<span class="stale-badge">обновляется...</span>
+			{/if}
+			{#if updatedTimeLabel && !$monitoringStore.stale}
 				<span class="updated-clock">
 					<span class="clock-dot" class:clock-dot-loading={refreshing}></span>
 					{updatedTimeLabel}
@@ -207,7 +216,7 @@
 		<MatrixStatusStrip snapshot={$monitoringStore.snapshot} />
 		<MatrixGrid snapshot={$monitoringStore.snapshot} onCellClick={openCell} />
 	{:else if !$monitoringStore.loaded}
-		<div class="loading"><LoadingSpinner size="lg" message="Загрузка матрицы..." /></div>
+		<div class="loading"><LoadingSpinner size="lg" message="Получение данных мониторинга..." /></div>
 	{:else}
 		<EmptyState
 			title="Нет данных мониторинга"
@@ -267,6 +276,13 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.5rem;
+	}
+
+	.stale-badge {
+		font-size: 11px;
+		color: var(--color-text-muted);
+		opacity: 0.7;
+		font-style: italic;
 	}
 
 	.updated-clock {
