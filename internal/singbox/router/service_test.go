@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -150,6 +151,27 @@ func TestEnable_PolicyMissing_Refused(t *testing.T) {
 	err := svc.Enable(context.Background())
 	if !errors.Is(err, ErrPolicyMissing) {
 		t.Errorf("want ErrPolicyMissing, got %v", err)
+	}
+}
+
+func TestEnable_PolicyMissing_MessageContainsPolicyName(t *testing.T) {
+	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{PolicyName: "Policy2"})
+	policies := &fakeAccessPolicyProvider{markErr: query.ErrPolicyMarkNotFound}
+	fe := &fakeExec{}
+	svc := newTestService(t, Deps{
+		Settings: settingsStore,
+		Policies: policies,
+		IPTables: newTestIPTables(fe),
+	})
+	err := svc.Enable(context.Background())
+	if !errors.Is(err, ErrPolicyMissing) {
+		t.Fatalf("expected ErrPolicyMissing, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `"Policy2"`) {
+		t.Errorf("error message should contain policy name, got: %s", err.Error())
+	}
+	if !strings.Contains(err.Error(), "fwmark") {
+		t.Errorf("error message should mention fwmark, got: %s", err.Error())
 	}
 }
 

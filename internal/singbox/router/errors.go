@@ -19,5 +19,5 @@ var (
 	ErrDNSInvalidServer          = errors.New("dns rule references unknown server tag")
 
 	ErrPolicyNotConfigured = errors.New("router policy not configured (settings.policyName is empty)")
-	ErrPolicyMissing       = errors.New("router policy not found in NDMS")
+	ErrPolicyMissing       = errors.New("policy has no fwmark in NDMS (deleted or has no permitted interface)")
 )

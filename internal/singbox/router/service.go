@@ -373,7 +373,7 @@ func (s *ServiceImpl) Enable(ctx context.Context) error {
 	}
 	mark, err := s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName)
 	if err != nil || mark == "" {
-		return ErrPolicyMissing
+		return fmt.Errorf("policy %q: %w", sr.PolicyName, ErrPolicyMissing)
 	}
 
 	if err := EnsureTProxyModule(ctx); err != nil {
