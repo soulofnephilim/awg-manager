@@ -11,6 +11,7 @@
 		type PreflightStatus,
 	} from '$lib/components/routing/singboxRouter';
 	import { ConfirmModal } from '$lib/components/ui';
+	import { notifications } from '$lib/stores/notifications';
 
 	const presetsStore = singboxRouter.presets;
 	const optionsStore = singboxRouter.options;
@@ -114,6 +115,8 @@
 			const settings = await api.singboxRouterGetSettings();
 			await api.singboxRouterPutSettings({ ...settings, policyName: '' });
 			await singboxRouter.loadAll();
+		} catch (e) {
+			notifications.error(`Не удалось сбросить политику: ${(e as Error).message}`);
 		} finally {
 			confirmResetOpen = false;
 		}
