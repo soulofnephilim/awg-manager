@@ -61,14 +61,6 @@ func All() []Preset {
 		simpleGeosite("reddit", "Reddit", CatSocial, "reddit"),
 	)
 
-	// Developer
-	out = append(out,
-		simpleGeosite("github", "GitHub", CatDeveloper, "github"),
-		simpleGeosite("gitlab", "GitLab", CatDeveloper, "gitlab"),
-		simpleGeosite("docker", "Docker", CatDeveloper, "docker"),
-		vernetteGeosite("linkedin", "LinkedIn", CatDeveloper, "linkedin", "linkedin"),
-	)
-
 	// Стриминг / медиа
 	out = append(out,
 		vernetteGeosite("netflix", "Netflix", CatMedia, "netflix", "netflix"),
@@ -109,7 +101,15 @@ func All() []Preset {
 		// slot. vernette publishes it as "claude.srs", but we keep our
 		// user-facing ID as "anthropic" for continuity.
 		vernetteGeosite("anthropic", "Anthropic / Claude", CatAI, "anthropic", "claude"),
-		vernetteGeosite("gemini", "Gemini", CatAI, "googlegemini", "gemini"),
+		// gemini: keep legacy tag "geosite-google-gemini" for backward
+		// compatibility with already-applied configs; URL migrates to vernette.
+		Preset{
+			ID: "gemini", Name: "Gemini",
+			Category: CatAI,
+			IconSlug: "googlegemini",
+			RuleSets: []RuleRef{{Tag: "geosite-google-gemini", URL: vernetteSRSRoot + "gemini.srs"}},
+			Rules:    []RuleLink{{RuleSetRef: "geosite-google-gemini", ActionTarget: "tunnel"}},
+		},
 		vernetteGeosite("copilot", "GitHub Copilot", CatAI, "githubcopilot", "copilot"),
 		vernetteGeosite("grok", "Grok (xAI)", CatAI, "x", "grok"),
 		simpleGeosite("perplexity", "Perplexity", CatAI, "perplexity"),
@@ -121,6 +121,14 @@ func All() []Preset {
 			Rules:    []RuleLink{{RuleSetRef: "geosite-category-ai-!cn", ActionTarget: "tunnel"}},
 			Notice:   "ChatGPT, Claude, Gemini, Perplexity и другие (кроме китайских)",
 		},
+	)
+
+	// Developer
+	out = append(out,
+		simpleGeosite("github", "GitHub", CatDeveloper, "github"),
+		simpleGeosite("gitlab", "GitLab", CatDeveloper, "gitlab"),
+		simpleGeosite("docker", "Docker", CatDeveloper, "docker"),
+		vernetteGeosite("linkedin", "LinkedIn", CatDeveloper, "linkedin", "linkedin"),
 	)
 
 	// Cloud / enterprise

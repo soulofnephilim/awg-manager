@@ -113,15 +113,16 @@ func TestAll_NewPresets(t *testing.T) {
 	newPresets := map[string]struct {
 		file     string
 		category string
+		tag      string
 	}{
-		"roblox":                {"roblox", CatGaming},
-		"nintendo":              {"nintendo", CatGaming},
-		"linkedin":              {"linkedin", CatDeveloper},
-		"copilot":               {"copilot", CatAI},
-		"gemini":                {"gemini", CatAI},
-		"grok":                  {"grok", CatAI},
-		"rkn":                   {"rkn", CatBlock},
-		"unavailable-in-russia": {"unavailable-in-russia", CatBlock},
+		"roblox":                {"roblox", CatGaming, "geosite-roblox"},
+		"nintendo":              {"nintendo", CatGaming, "geosite-nintendo"},
+		"linkedin":              {"linkedin", CatDeveloper, "geosite-linkedin"},
+		"copilot":               {"copilot", CatAI, "geosite-copilot"},
+		"gemini":                {"gemini", CatAI, "geosite-google-gemini"},
+		"grok":                  {"grok", CatAI, "geosite-grok"},
+		"rkn":                   {"rkn", CatBlock, "geosite-rkn"},
+		"unavailable-in-russia": {"unavailable-in-russia", CatBlock, "geosite-unavailable-in-russia"},
 	}
 	presets := All()
 	byID := make(map[string]Preset, len(presets))
@@ -140,6 +141,13 @@ func TestAll_NewPresets(t *testing.T) {
 		wantURL := vernetteSRSRoot + want.file + ".srs"
 		if len(p.RuleSets) == 0 || p.RuleSets[0].URL != wantURL {
 			t.Errorf("preset %q URL: got %v, want %s", id, p.RuleSets, wantURL)
+		}
+		if len(p.RuleSets) == 0 {
+			t.Errorf("preset %q has no RuleSets", id)
+			continue
+		}
+		if p.RuleSets[0].Tag != want.tag {
+			t.Errorf("preset %q tag: got %s, want %s", id, p.RuleSets[0].Tag, want.tag)
 		}
 	}
 }
