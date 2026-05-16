@@ -128,7 +128,7 @@
 		position: absolute;
 		top: calc(100% + 6px);
 		right: 0;
-		z-index: 50;
+		z-index: var(--z-page-overlay);
 		min-width: 280px;
 		padding: 14px;
 		background: var(--color-bg-secondary);

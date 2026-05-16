@@ -123,7 +123,7 @@
 	.sticky-header {
 		position: sticky;
 		top: 56px;
-		z-index: 50;
+		z-index: var(--z-sticky-secondary);
 		display: flex;
 		justify-content: space-between;
 		align-items: center;

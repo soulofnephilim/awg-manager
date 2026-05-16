@@ -2777,7 +2777,7 @@
 	.unsupported-overlay {
 		position: fixed;
 		inset: 0;
-		z-index: 100;
+		z-index: var(--z-full-overlay);
 		background: rgba(0, 0, 0, 0.85);
 		display: flex;
 		align-items: center;

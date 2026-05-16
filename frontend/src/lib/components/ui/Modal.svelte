@@ -179,7 +179,7 @@
     .modal-backdrop {
         position: fixed;
         inset: 0;
-        z-index: 200;
+        z-index: var(--z-modal);
         display: flex;
         align-items: center;
         justify-content: center;

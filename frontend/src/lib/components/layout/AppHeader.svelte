@@ -356,7 +356,7 @@
 	.app-header {
 		position: sticky;
 		top: 0;
-		z-index: 100;
+		z-index: var(--z-sticky-header);
 		background: var(--color-bg-secondary);
 		border-bottom: 1px solid var(--color-border);
 	}
@@ -581,7 +581,7 @@
 			position: fixed;
 			inset: 56px 0 0 0;
 			background: rgba(0, 0, 0, 0.4);
-			z-index: 99;
+			z-index: var(--z-drawer-backdrop);
 		}
 
 		.mobile-nav {
@@ -594,7 +594,7 @@
 			background: var(--color-bg-secondary);
 			border-bottom: 1px solid var(--color-border);
 			padding: 0.5rem 0;
-			z-index: 100;
+			z-index: var(--z-drawer);
 			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 		}
 

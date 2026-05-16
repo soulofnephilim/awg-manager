@@ -60,7 +60,7 @@
 		position: fixed;
 		inset: 0;
 		background: rgba(0, 0, 0, 0.4);
-		z-index: 90;
+		z-index: var(--z-drawer-backdrop);
 		animation: fade-in 150ms ease;
 	}
 
@@ -74,7 +74,7 @@
 		background: var(--color-bg-secondary);
 		border-left: 1px solid var(--color-border);
 		box-shadow: -2px 0 16px rgba(0, 0, 0, 0.3);
-		z-index: 100;
+		z-index: var(--z-drawer);
 		animation: slide-in-right 200ms ease;
 		display: flex;
 		flex-direction: column;

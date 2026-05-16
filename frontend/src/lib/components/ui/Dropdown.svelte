@@ -443,11 +443,11 @@
   .chevron svg { width: 16px; height: 16px; }
 
   /* Panel is portaled to <body> with position: fixed, so it escapes any
-     ancestor overflow clipping (modal body, side drawer, etc). z-index
-     1000 sits above Modal (200) and SideDrawer (100). */
+     ancestor overflow clipping (modal body, side drawer, etc). The
+     --z-floating tier sits above Modal and SideDrawer — see app.css. */
   :global(.dropdown-panel) {
     position: fixed;
-    z-index: 1000;
+    z-index: var(--z-floating);
     background: var(--color-bg-secondary);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);

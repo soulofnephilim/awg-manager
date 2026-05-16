@@ -51,7 +51,7 @@
 <style>
   .menu {
     position: fixed;
-    z-index: 1000;
+    z-index: var(--z-floating);
     min-width: 200px;
     background: var(--color-bg-secondary);
     border: 1px solid var(--color-border);

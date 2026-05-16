@@ -260,7 +260,7 @@
     }
     .panel {
         position: fixed;
-        z-index: 1000;
+        z-index: var(--z-floating);
         background: var(--bg-tertiary, var(--surface-bg));
         border: 1px solid var(--border-bright, var(--border));
         border-radius: 4px;

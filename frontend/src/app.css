@@ -138,6 +138,20 @@
   --radius-md: var(--radius-sm);
   --radius-lg: var(--radius);
   --radius-xl: var(--radius);
+
+  /* ─── Z-index scale (single source of truth for stacking) ───
+     Local stacking (z:1–10) lives in components and is intentionally not
+     tokenized — it's contained inside its own stacking context. These
+     tokens cover the global layering only. */
+  --z-sticky-secondary: 50; /* TunnelEditHeader sub-sticky under AppHeader */
+  --z-page-overlay: 60;     /* tab dropdowns, popovers, member-pickers */
+  --z-sticky-header: 80;    /* AppHeader sticky bar */
+  --z-drawer-backdrop: 90;  /* hamburger / drawer dimming layer */
+  --z-drawer: 100;          /* hamburger panel, SideDrawer panel */
+  --z-full-overlay: 150;    /* full-screen blocking screens (e.g. kernel-unavailable) */
+  --z-modal: 200;           /* Modal */
+  --z-floating: 1000;       /* Floating-UI portal'd dropdowns, context menus */
+  --z-toast: 1000;          /* Toast container — same tier as floating */
 }
 
 /* ─── Light theme override ─── */
@@ -463,7 +477,7 @@ label {
 	position: fixed;
 	bottom: 1rem;
 	right: 1rem;
-	z-index: 1000;
+	z-index: var(--z-toast);
 	display: flex;
 	flex-direction: column;
 	gap: 0.5rem;

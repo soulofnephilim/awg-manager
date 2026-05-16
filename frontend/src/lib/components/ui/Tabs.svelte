@@ -176,12 +176,28 @@
         onchange(id);
     }
 
-</script>
+    // Close dropdown on outside click or ESC. Document-level listeners
+    // (vs. a backdrop element) avoid dimming the page and keep the z-stack
+    // flat — see app.css z-index scale.
+    $effect(() => {
+        if (!dropdownOpen) return;
+        function handleOutside(e: MouseEvent) {
+            if (!containerEl?.contains(e.target as Node)) {
+                dropdownOpen = false;
+            }
+        }
+        function handleKey(e: KeyboardEvent) {
+            if (e.key === 'Escape') dropdownOpen = false;
+        }
+        document.addEventListener('mousedown', handleOutside);
+        document.addEventListener('keydown', handleKey);
+        return () => {
+            document.removeEventListener('mousedown', handleOutside);
+            document.removeEventListener('keydown', handleKey);
+        };
+    });
 
-{#if dropdownOpen}
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-    <div class="backdrop" onclick={() => dropdownOpen = false} onkeydown={() => {}}></div>
-{/if}
+</script>
 
 <div class="overflow-tabs" class:has-dropdown={dropdownOpen} bind:this={containerEl}>
     <!-- Hidden measurement row: renders all tabs offscreen to measure widths -->
@@ -253,25 +269,20 @@
 </div>
 
 <style>
-    .backdrop {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.3);
-        z-index: 40;
-    }
-
+    /* Resting z-index 41 is intentionally raw, not a token. It creates a
+       stacking context so sibling Tabs (on /routing — page-level + inner)
+       paint in a predictable order, while staying BELOW
+       --z-sticky-secondary (50) so sub-stickys like TunnelEditHeader paint
+       over idle tab chips. When the dropdown opens, .has-dropdown bumps to
+       --z-page-overlay so the dropdown lifts above sub-stickys. */
     .overflow-tabs {
         position: relative;
         z-index: 41;
         margin-bottom: 1rem;
     }
 
-    /* When an instance opens its dropdown, lift its stacking context above
-       any sibling Tabs instances (e.g. /routing has both a page-level Tabs
-       and SingboxRoutingPage's inner Tabs — without this, the later DOM
-       sibling paints over the earlier one's dropdown at z-index 41). */
     .overflow-tabs.has-dropdown {
-        z-index: 100;
+        z-index: var(--z-page-overlay);
     }
 
     .measure-row {
@@ -416,7 +427,7 @@
         border-radius: var(--radius);
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
         min-width: 180px;
-        z-index: 50;
+        z-index: var(--z-page-overlay);
         overflow: hidden;
     }
 
