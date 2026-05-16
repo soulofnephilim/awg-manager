@@ -94,49 +94,56 @@
 					{#each sortedTunnels as t (t.id)}
 						<th class="th-tunnel">
 							<div class="tunnel-head">
-								{#if isSystem(t)}
-									<span class="tunnel-system" title="Системный туннель роутера — pingcheck управляется в системе">
-										{t.name}
-									</span>
-								{:else if isSingbox(t)}
-									<span class="tunnel-system" title="Sing-box туннель — мониторинг через Clash urltest, NDMS pingcheck не применяется">
-										{t.name}
-									</span>
-								{:else}
-									<a href={tunnelHref(t)} class="tunnel-link" title="Открыть настройки pingcheck">
-										{t.name}
-										<span class="settings-icon" aria-hidden="true">›</span>
-									</a>
-								{/if}
-								<button
-									type="button"
-									class="exclude-toggle"
-									class:is-excluded={isExcluded(t.id)}
-									onclick={() => onToggleTunnelExcluded(t.id, !isExcluded(t.id), t.name)}
-									title={tunnelMatrixToggleTitle(t.id)}
-									aria-label={tunnelMatrixToggleTitle(t.id)}
-									aria-pressed={isExcluded(t.id)}
-								>
-									<span class="toggle-track" aria-hidden="true">
-										<span class="toggle-thumb"></span>
-									</span>
-									<span class="toggle-text">{#if isExcluded(t.id)}выкл{:else}вкл{/if}</span>
-								</button>
+								<div class="tunnel-title-row">
+									{#if isSystem(t)}
+										<span class="tunnel-system" title="Системный туннель роутера — pingcheck управляется в системе">
+											{t.name}
+										</span>
+									{:else if isSingbox(t)}
+										<span class="tunnel-system" title="Sing-box туннель — мониторинг через Clash urltest, NDMS pingcheck не применяется">
+											{t.name}
+										</span>
+									{:else}
+										<a href={tunnelHref(t)} class="tunnel-link tunnel-name" title="Открыть настройки pingcheck">
+											{t.name}
+											<span class="settings-icon" aria-hidden="true">›</span>
+										</a>
+									{/if}
+								</div>
+
+								<div class="tunnel-toggle-row">
+									<button
+										type="button"
+										class="exclude-toggle"
+										class:is-excluded={isExcluded(t.id)}
+										onclick={() => onToggleTunnelExcluded(t.id, !isExcluded(t.id), t.name)}
+										title={tunnelMatrixToggleTitle(t.id)}
+										aria-label={tunnelMatrixToggleTitle(t.id)}
+										aria-pressed={isExcluded(t.id)}
+									>
+										<span class="toggle-track" aria-hidden="true">
+											<span class="toggle-thumb"></span>
+										</span>
+										<span class="toggle-text">{#if isExcluded(t.id)}выкл{:else}вкл{/if}</span>
+									</button>
+								</div>
 							</div>
 							{#if t.source === 'singbox' && t.clashDelay && t.clashDelay > 0}
-								<Badge
-									variant={latencyTier(t.clashDelay)}
-									size="sm"
-									mono
-									title={`Источник: urltest группа "${t.urltestGroup ?? ''}"`}
-								>
-									<span class="clash-num">clash: <span class="clash-val">{t.clashDelay}</span>ms</span>
-									<LatencySparkline
-										history={$latencyHistory.get(t.singboxTag ?? '') ?? []}
-										width={36}
-										height={10}
-									/>
-								</Badge>
+								<div class="tunnel-badge-row">
+									<Badge
+										variant={latencyTier(t.clashDelay)}
+										size="sm"
+										mono
+										title={`Источник: urltest группа "${t.urltestGroup ?? ''}"`}
+									>
+										<span class="clash-num">clash: <span class="clash-val">{t.clashDelay}</span>ms</span>
+										<LatencySparkline
+											history={$latencyHistory.get(t.singboxTag ?? '') ?? []}
+											width={36}
+											height={10}
+										/>
+									</Badge>
+								</div>
 							{/if}
 						</th>
 					{/each}
@@ -239,6 +246,88 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.25rem;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+
+	.tunnel-title-row {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.tunnel-toggle-row {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.tunnel-badge-row {
+		display: flex;
+		justify-content: center;
+		width: 100%;
+		margin-top: 6px;
+	}
+
+	@media (max-width: 768px) {
+		.th-tunnel {
+			padding: 0.5rem 0.5rem 0.625rem;
+			text-align: center;
+			vertical-align: middle;
+		}
+
+		.th-tunnel > .tunnel-head {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			gap: 6px;
+			width: 100%;
+			min-width: 0;
+			margin: 0 auto;
+		}
+
+		.th-tunnel > .tunnel-head > .tunnel-title-row,
+		.th-tunnel > .tunnel-head > .tunnel-toggle-row {
+			display: flex;
+			justify-content: center;
+			align-items: center;
+			width: 100%;
+			min-width: 0;
+			margin: 0 auto;
+			text-align: center;
+		}
+
+		.th-tunnel > .tunnel-head > .tunnel-title-row > .tunnel-link,
+		.th-tunnel > .tunnel-head > .tunnel-title-row > .tunnel-system {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			max-width: 100%;
+			min-width: 0;
+			margin: 0 auto;
+			text-align: center;
+		}
+
+		.th-tunnel > .tunnel-head > .tunnel-title-row > .tunnel-name,
+		.th-tunnel > .tunnel-head > .tunnel-title-row > .tunnel-link {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.exclude-toggle {
+			margin: 0 auto;
+		}
+
+		.th-tunnel > .tunnel-badge-row {
+			display: flex;
+			justify-content: center;
+			align-items: center;
+			width: 100%;
+			min-width: 0;
+			margin-top: 6px;
+			text-align: center;
+		}
 	}
 
 	.tunnel-link {
