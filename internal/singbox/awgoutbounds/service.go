@@ -2,6 +2,7 @@
 package awgoutbounds
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -47,8 +48,15 @@ var _ Service = (*ServiceImpl)(nil)
 func (s *ServiceImpl) SyncAWGOutbounds(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.writeFile(ctx); err != nil {
+	written, err := s.writeFile(ctx)
+	if err != nil {
 		return err
+	}
+	// Skip the reload when nothing changed — the orchestrator path debounces
+	// internally, but the legacy direct-Reload path would otherwise SIGHUP
+	// sing-box on every redundant tunnels-invalidation.
+	if !written {
+		return nil
 	}
 	if s.deps.Orch != nil {
 		return nil
@@ -64,7 +72,8 @@ func (s *ServiceImpl) SyncAWGOutbounds(ctx context.Context) error {
 func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.writeFile(ctx)
+	_, err := s.writeFile(ctx)
+	return err
 }
 
 // SubscribeBus listens for events that change the AWG-tunnel set
@@ -124,38 +133,53 @@ func (s *ServiceImpl) ListTags(ctx context.Context) ([]TagInfo, error) {
 }
 
 // writeFile is the shared body used by Sync + Reconcile. Caller holds mu.
-func (s *ServiceImpl) writeFile(ctx context.Context) error {
+// Returns (written, err): written=false means the marshalled payload was
+// byte-identical to the previous successful write, so callers must skip
+// downstream reloads too.
+//
+// The skip drops the 4–5 redundant SIGHUPs that NDMS-hook driven `tunnels`
+// invalidations would otherwise cause during a single NWG ping-check restart
+// cycle: the tunnel catalog is unchanged, so the file content is too.
+func (s *ServiceImpl) writeFile(ctx context.Context) (bool, error) {
 	entries, err := s.enumerate(ctx)
 	if err != nil {
 		s.logWarn("enumerate", "", err.Error())
-		return err
+		return false, err
+	}
+	data, mErr := marshalEntries(entries)
+	if mErr != nil {
+		s.logWarn("marshal", "15-awg.json", mErr.Error())
+		return false, mErr
+	}
+	// First write always proceeds (lastBytes == nil) so the file is created
+	// on boot even when the entry set is empty.
+	if s.lastBytes != nil && bytes.Equal(data, s.lastBytes) {
+		s.logInfo("sync", "15-awg.json", "skipped (unchanged)")
+		return false, nil
 	}
 	if s.deps.Orch != nil {
-		data, mErr := marshalEntries(entries)
-		if mErr != nil {
-			s.logWarn("marshal", "15-awg.json", mErr.Error())
-			return mErr
-		}
 		if err := s.deps.Orch.Save(orchestrator.SlotAwg, data); err != nil {
 			s.logWarn("save", "15-awg.json", err.Error())
-			return err
+			return false, err
 		}
+		s.lastBytes = data
 		s.logInfo("sync", "15-awg.json", fmt.Sprintf("%d outbounds written", len(entries)))
-		return nil
+		return true, nil
 	}
 	if s.deps.Singbox == nil {
 		// Without a Singbox controller we don't know the config dir;
 		// skip the write rather than guess. Sync errors never block
 		// the caller (per spec: "sync errors never block CRUD").
-		return nil
+		return false, nil
 	}
 	path := filepath.Join(s.deps.Singbox.ConfigDir(), "15-awg.json")
 	if err := saveFile(path, entries); err != nil {
 		s.logWarn("save", path, err.Error())
-		return err
+		return false, err
 	}
+	s.lastBytes = data
 	s.logInfo("sync", "15-awg.json", fmt.Sprintf("%d outbounds written", len(entries)))
-	return nil
+	return true, nil
 }
 
 func (s *ServiceImpl) logInfo(action, target, msg string) {

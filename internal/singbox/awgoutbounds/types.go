@@ -76,6 +76,13 @@ type ServiceImpl struct {
 	deps Deps
 	mu   sync.Mutex
 
+	// lastBytes is the marshalled payload of the previous successful
+	// writeFile. Used to skip identical re-writes that would otherwise
+	// arm a redundant sing-box reload (cascading from NDMS-hook driven
+	// `tunnels` invalidations during NWG ping-check restart cycles).
+	// nil before the first write; updated only on success. Guarded by mu.
+	lastBytes []byte
+
 	// sysClassNet allows tests to redirect kernel-iface presence checks
 	// to a tempdir. Empty in production = "/sys/class/net".
 	sysClassNet string

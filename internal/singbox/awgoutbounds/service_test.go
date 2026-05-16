@@ -95,8 +95,30 @@ func TestSync_Idempotent(t *testing.T) {
 			t.Fatalf("Sync iteration %d: %v", i, err)
 		}
 	}
-	if sb.reloadCalls != 3 {
-		t.Errorf("want 3 reload calls (one per Sync), got %d", sb.reloadCalls)
+	// First Sync writes + reloads; iterations 2 and 3 see identical
+	// marshalled payload and skip both write and reload.
+	if sb.reloadCalls != 1 {
+		t.Errorf("want 1 reload call (first Sync only; identical content skipped), got %d", sb.reloadCalls)
+	}
+}
+
+// TestSync_RewritesOnChange covers the inverse of TestSync_Idempotent:
+// when the catalog changes between Syncs, writeFile must re-emit and reload.
+// Guards against an over-aggressive skip that would freeze the file.
+func TestSync_RewritesOnChange(t *testing.T) {
+	store := &fakeAWGStore{tunnels: []AWGTunnelInfo{{ID: "a", Name: "A", BackendIface: "t2s0"}}}
+	s, sb := newSvcWithIface(t, store, nil, "t2s0", "t2s1")
+
+	if err := s.SyncAWGOutbounds(context.Background()); err != nil {
+		t.Fatalf("Sync #1: %v", err)
+	}
+	// Add a second tunnel and Sync again — payload differs, must reload.
+	store.tunnels = append(store.tunnels, AWGTunnelInfo{ID: "b", Name: "B", BackendIface: "t2s1"})
+	if err := s.SyncAWGOutbounds(context.Background()); err != nil {
+		t.Fatalf("Sync #2: %v", err)
+	}
+	if sb.reloadCalls != 2 {
+		t.Errorf("want 2 reload calls (initial + post-change), got %d", sb.reloadCalls)
 	}
 }
 
