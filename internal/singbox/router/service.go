@@ -37,7 +37,6 @@ type Service interface {
 	AddRuleSet(ctx context.Context, rs RuleSet) error
 	UpdateRuleSet(ctx context.Context, tag string, rs RuleSet) error
 	DeleteRuleSet(ctx context.Context, tag string, force bool) error
-	RefreshRuleSet(ctx context.Context, tag string) error
 
 	ListCompositeOutbounds(ctx context.Context) ([]CompositeOutboundView, error)
 	AddCompositeOutbound(ctx context.Context, o Outbound) error
@@ -887,24 +886,6 @@ func (s *ServiceImpl) DeleteRuleSet(ctx context.Context, tag string, force bool)
 	return s.withConfig(ctx, "rulesets", func(c *RouterConfig) error { return c.DeleteRuleSet(tag, force) })
 }
 
-
-func (s *ServiceImpl) RefreshRuleSet(ctx context.Context, tag string) error {
-	cfg, err := s.loadRouterConfig()
-	if err != nil {
-		return err
-	}
-	found := false
-	for _, rs := range cfg.Route.RuleSet {
-		if rs.Tag == tag {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("rule set %q not found", tag)
-	}
-	return s.deps.Singbox.Reload()
-}
 
 func (s *ServiceImpl) ListCompositeOutbounds(ctx context.Context) ([]CompositeOutboundView, error) {
 	cfg, err := s.loadRouterConfig()

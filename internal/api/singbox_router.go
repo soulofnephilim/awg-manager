@@ -219,11 +219,6 @@ type SingboxRouterRuleSetDeleteRequest struct {
 	Force bool   `json:"force" example:"false"`
 }
 
-// SingboxRouterRuleSetRefreshRequest is the body for POST /singbox/router/rulesets/refresh.
-type SingboxRouterRuleSetRefreshRequest struct {
-	Tag string `json:"tag" example:"geosite-cn"`
-}
-
 // SingboxRouterOutboundUpdateRequest is the body for POST /singbox/router/outbounds/update.
 type SingboxRouterOutboundUpdateRequest struct {
 	Tag      string                   `json:"tag" example:"my-selector"`
@@ -677,38 +672,6 @@ func (h *SingboxRouterHandler) DeleteRuleSet(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := h.svc.DeleteRuleSet(r.Context(), body.Tag, body.Force); err != nil {
-		h.handleErr(w, "request", err)
-		return
-	}
-	response.Success(w, map[string]bool{"ok": true})
-}
-
-// RefreshRuleSet re-downloads the ruleset identified by tag.
-//
-//	@Summary		Refresh singbox-router ruleset
-//	@Description	Re-downloads the remote ruleset identified by tag and updates its content/timestamp.
-//	@Tags			singbox-router
-//	@Accept			json
-//	@Produce		json
-//	@Security		CookieAuth
-//	@Param			body	body		SingboxRouterRuleSetRefreshRequest	true	"Ruleset tag to re-download"
-//	@Success		200		{object}	OkResponse
-//	@Failure		400		{object}	APIErrorEnvelope
-//	@Failure		500		{object}	APIErrorEnvelope
-//	@Router			/singbox/router/rulesets/refresh [post]
-func (h *SingboxRouterHandler) RefreshRuleSet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		response.MethodNotAllowed(w)
-		return
-	}
-	var body struct {
-		Tag string `json:"tag"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		response.BadRequest(w, err.Error())
-		return
-	}
-	if err := h.svc.RefreshRuleSet(r.Context(), body.Tag); err != nil {
 		h.handleErr(w, "request", err)
 		return
 	}

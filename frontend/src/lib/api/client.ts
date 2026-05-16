@@ -1705,13 +1705,6 @@ class ApiClient {
 		});
 	}
 
-	async singboxRouterRefreshRuleSet(tag: string): Promise<void> {
-		await this.request('/singbox/router/rulesets/refresh', {
-			method: 'POST',
-			body: JSON.stringify({ tag }),
-		});
-	}
-
 	async singboxRouterListOutbounds(): Promise<SingboxRouterOutbound[]> {
 		return this.request('/singbox/router/outbounds/list');
 	}

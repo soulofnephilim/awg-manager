@@ -1043,7 +1043,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/api/singbox/router/rulesets/add", guarded(rh.AddRuleSet))
 		mux.HandleFunc("/api/singbox/router/rulesets/update", guarded(rh.UpdateRuleSet))
 		mux.HandleFunc("/api/singbox/router/rulesets/delete", guarded(rh.DeleteRuleSet))
-		mux.HandleFunc("/api/singbox/router/rulesets/refresh", guarded(rh.RefreshRuleSet))
 		mux.HandleFunc("/api/singbox/router/outbounds/list", guarded(rh.ListOutbounds))
 		mux.HandleFunc("/api/singbox/router/outbounds/add", guarded(rh.AddOutbound))
 		mux.HandleFunc("/api/singbox/router/outbounds/update", guarded(rh.UpdateOutbound))
