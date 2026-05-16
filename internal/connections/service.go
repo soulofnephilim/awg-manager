@@ -1,10 +1,10 @@
 package connections
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -16,9 +16,10 @@ import (
 
 // ndmsClient is the subset of *transport.Client used by this service.
 // Both endpoints we read (/show/ip/hotspot and /show/object-group/fqdn) are
-// ad-hoc raw RCI reads with no benefit from typed Stores.
+// ad-hoc raw RCI reads decoded once — GetStream avoids buffering the full
+// response body into memory before parsing.
 type ndmsClient interface {
-	GetRaw(ctx context.Context, path string) ([]byte, error)
+	GetStream(ctx context.Context, path string, fn func(io.Reader) error) error
 }
 
 // compile-time check: *transport.Client must satisfy ndmsClient
@@ -206,12 +207,6 @@ func (s *Service) buildTunnelMap(ctx context.Context) map[string]tunnelInfo {
 func (s *Service) resolveClientNames(ctx context.Context) map[string]string {
 	result := make(map[string]string)
 
-	raw, err := s.ndms.GetRaw(ctx, "/show/ip/hotspot")
-	if err != nil {
-		s.appLog.Warn("resolve-clients", "ndms.hotspot", err.Error())
-		return result
-	}
-
 	var resp struct {
 		Host []struct {
 			MAC      string `json:"mac"`
@@ -219,8 +214,11 @@ func (s *Service) resolveClientNames(ctx context.Context) map[string]string {
 			Hostname string `json:"hostname"`
 		} `json:"host"`
 	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		s.appLog.Warn("resolve-clients", "ndms.hotspot", "parse hotspot response: "+err.Error())
+	err := s.ndms.GetStream(ctx, "/show/ip/hotspot", func(r io.Reader) error {
+		return json.NewDecoder(r).Decode(&resp)
+	})
+	if err != nil {
+		s.appLog.Warn("resolve-clients", "ndms.hotspot", err.Error())
 		return result
 	}
 
@@ -243,14 +241,14 @@ func (s *Service) resolveClientNames(ctx context.Context) map[string]string {
 // any error returns an empty map without surfacing the error to the caller —
 // the connections list still works without rule attribution.
 func (s *Service) fetchIPRules(ctx context.Context) map[string][]RuleHit {
-	raw, err := s.ndms.GetRaw(ctx, "/show/object-group/fqdn")
+	var groups []runtimeGroup
+	err := s.ndms.GetStream(ctx, "/show/object-group/fqdn", func(r io.Reader) error {
+		var parseErr error
+		groups, parseErr = parseObjectGroupRuntime(r)
+		return parseErr
+	})
 	if err != nil {
 		s.appLog.Warn("fetch-rules", "ndms.object-group/fqdn", err.Error())
-		return nil
-	}
-	groups, err := parseObjectGroupRuntime(bytes.NewReader(raw))
-	if err != nil {
-		s.appLog.Warn("fetch-rules", "object-group/fqdn", "parse runtime: "+err.Error())
 		return nil
 	}
 	return buildIPRuleMap(ctx, groups, s.lister)

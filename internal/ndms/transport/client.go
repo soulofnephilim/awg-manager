@@ -187,3 +187,39 @@ func (c *Client) GetRaw(ctx context.Context, path string) ([]byte, error) {
 	}
 	return body, nil
 }
+
+// GetStream performs GET {baseURL}{path} and calls fn with the response body
+// reader directly, without buffering the full response into memory. fn is
+// invoked only on HTTP 200; the body is closed automatically after fn returns.
+// Use instead of GetRaw when the caller immediately decodes the body (e.g.
+// json.NewDecoder) and does not need to retain the raw bytes.
+func (c *Client) GetStream(ctx context.Context, path string, fn func(io.Reader) error) error {
+	if err := c.sem.Acquire(ctx); err != nil {
+		c.appLog.Error("GET", path, fmt.Sprintf("semaphore: %v", err))
+		return fmt.Errorf("rci GET %s: %w", path, err)
+	}
+	defer c.sem.Release()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		c.appLog.Error("GET", path, fmt.Sprintf("build request: %v", err))
+		return fmt.Errorf("rci GET %s: %w", path, err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.appLog.Error("GET", path, fmt.Sprintf("transport: %v", err))
+		return fmt.Errorf("rci GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		c.appLog.Error("GET", path, fmt.Sprintf("status %d", resp.StatusCode))
+		return &HTTPError{Method: "GET", Path: path, Status: resp.StatusCode, Body: body}
+	}
+	if err := fn(resp.Body); err != nil {
+		c.appLog.Error("GET", path, fmt.Sprintf("process: %v", err))
+		return fmt.Errorf("rci GET %s: %w", path, err)
+	}
+	return nil
+}
