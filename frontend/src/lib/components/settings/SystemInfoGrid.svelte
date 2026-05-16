@@ -18,6 +18,7 @@
 	let nowTs = $state(Date.now());
 	let progressTimer: ReturnType<typeof setInterval> | null = null;
 	const DETAILS_KEY = 'awgm.settings.system.detailsOpen';
+	const COLLAPSED_KEY = 'awgm.settings.system.collapsed';
 	const details = $derived(systemInfo.routerDetails);
 	const routerMainTitle = $derived.by(() => {
 		const base = details?.modelDisplay || details?.model || systemInfo.kernelModuleModel || '—';
@@ -75,15 +76,23 @@
 	let collapsed = $state(false);
 
 	if (browser) {
-		const saved = localStorage.getItem(DETAILS_KEY);
-		detailsOpen = saved === '1';
+		const savedDetails = localStorage.getItem(DETAILS_KEY);
+		detailsOpen = savedDetails === '1';
 
-		collapsed = window.innerWidth <= 900;
+		const savedCollapsed = localStorage.getItem(COLLAPSED_KEY);
+		collapsed = savedCollapsed === null
+			? window.innerWidth <= 900
+			: savedCollapsed === '1';
 	}
 
 	$effect(() => {
 		if (!browser) return;
 		localStorage.setItem(DETAILS_KEY, detailsOpen ? '1' : '0');
+	});
+
+	$effect(() => {
+		if (!browser) return;
+		localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0');
 	});
 
 	const isBasic = $derived(usageLevel === 'basic');
@@ -111,7 +120,7 @@
 	});
 </script>
 
-<div class="card">
+<div class="card sysinfo-heading-card">
 	<div class="head-row">
 		<button
 			type="button"
@@ -120,18 +129,10 @@
 			aria-expanded={!collapsed}
 			aria-label={collapsed ? 'Развернуть информацию о системе' : 'Свернуть информацию о системе'}
 		>
+			<span class="collapse-marker system-collapse-marker" aria-hidden="true">
+				{collapsed ? '▸' : '▾'}
+			</span>
 			<span class="section-label">Система</span>
-			<svg
-				class="collapse-chevron"
-				class:rotated={!collapsed}
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				aria-hidden="true"
-			>
-				<polyline points="6 9 12 15 18 9" />
-			</svg>
 		</button>
 		{#if !isBasic}
 			<div class="head-actions">
@@ -220,7 +221,12 @@
 	</div>
 	{#if isExpert && details}
 		<details class="more-box" bind:open={detailsOpen}>
-			<summary>Подробнее</summary>
+			<summary class="more-summary">
+				<span class="collapse-marker" aria-hidden="true">
+					{detailsOpen ? '▾' : '▸'}
+				</span>
+				<span>Подробнее</span>
+			</summary>
 			<div class="more-grid">
 				<div class="setting-row"><span class="info-key">Build Date</span><span class="info-val">{details.firmwareBuildDate || '—'}</span></div>
 				<div class="setting-row"><span class="info-key">Канал</span><span class="info-val">{details.firmwareSandbox || '—'}</span></div>
@@ -260,10 +266,19 @@
 		justify-content: space-between;
 	}
 
+	.sysinfo-heading-card {
+		padding-top: 0.5rem;
+		padding-bottom: 0.75rem;
+	}
+
+	.section-label {
+		margin-bottom: 0;
+	}
+
 	.section-collapse-btn {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.35rem;
+		gap: 0.25rem;
 		background: none;
 		border: none;
 		padding: 0;
@@ -272,17 +287,19 @@
 		pointer-events: none;
 	}
 
-	.collapse-chevron {
-		display: none;
-		width: 14px;
-		height: 14px;
-		color: var(--color-text-muted);
-		transition: transform 0.2s ease;
+	.collapse-marker {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.125rem;
 		flex-shrink: 0;
+		color: var(--color-text-muted);
+		font-size: 1.125rem;
+		line-height: 1;
 	}
 
-	.collapse-chevron.rotated {
-		transform: rotate(180deg);
+	.system-collapse-marker {
+		display: none;
 	}
 
 	.collapsible-body {
@@ -298,12 +315,12 @@
 			padding: 0.125rem;
 		}
 
-		.section-collapse-btn:hover .section-label {
+		.section-collapse-btn:hover {
 			color: var(--color-text-primary);
 		}
 
-		.collapse-chevron {
-			display: block;
+		.system-collapse-marker {
+			display: inline-flex;
 		}
 
 		.collapsible-body {
@@ -320,6 +337,25 @@
 			opacity: 0;
 			pointer-events: none;
 		}
+	}
+
+	.collapsible-body > .setting-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		column-gap: 0.75rem;
+	}
+
+	.collapsible-body > .setting-row:first-child {
+		margin-top: 0.65rem;
+		border-top: 1px solid var(--color-border);
+		padding-top: 0.75rem;
+	}
+
+	.collapsible-body > .setting-row .info-val {
+		min-width: 0;
+		justify-self: end;
+		word-break: break-word;
 	}
 
 	.head-actions {
@@ -451,16 +487,51 @@
 		padding-top: 0.4rem;
 	}
 
-	.more-box summary {
+	.more-summary {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
 		cursor: pointer;
-		font-size: 0.75rem;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
 		color: var(--color-text-muted);
+		list-style: none;
+	}
+
+	.more-summary::marker {
+		content: '';
+	}
+
+	.more-summary::-webkit-details-marker {
+		display: none;
 	}
 
 	.more-grid {
 		display: flex;
 		flex-direction: column;
-		margin-top: 0.4rem;
+		margin-top: 0.5rem;
+	}
+
+	.more-grid > .setting-row:not(.detail-row):first-child {
+		margin-top: 0;
+		border-top: 1px solid var(--color-border);
+		padding-top: 0.5rem;
+	}
+
+	.more-grid > .setting-row:not(.detail-row) {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		column-gap: 0.75rem;
+	}
+
+	.more-grid > .setting-row:not(.detail-row) .info-val {
+		min-width: 0;
+		justify-self: end;
+		text-align: right;
+		word-break: break-word;
 	}
 
 	.mesh-list {
