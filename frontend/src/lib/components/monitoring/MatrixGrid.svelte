@@ -50,6 +50,25 @@
 		return cellByKey.get(`${targetId}|${tunnelId}`) ?? null;
 	}
 
+	const GOOGLE_CONNECTIVITY_HOST = 'connectivitycheck.gstatic.com';
+
+	function isGoogleConnectivityTarget(target: MonitoringTarget): boolean {
+		return target.host === GOOGLE_CONNECTIVITY_HOST || target.name === GOOGLE_CONNECTIVITY_HOST;
+	}
+
+	function mobileTargetName(target: MonitoringTarget): string {
+		return isGoogleConnectivityTarget(target) ? 'Google' : target.name;
+	}
+
+	function mobileHostDomain(host: string): string {
+		const parts = host.split('.');
+		return parts.length > 2 ? parts.slice(-2).join('.') : host;
+	}
+
+	function mobileTargetHost(target: MonitoringTarget): string {
+		return isGoogleConnectivityTarget(target) ? mobileHostDomain(target.host) : target.host;
+	}
+
 	function isExcluded(tunnelId: string): boolean {
 		return excludedTunnelIds.has(tunnelId);
 	}
@@ -127,8 +146,20 @@
 				{#each snapshot.targets as target (target.id)}
 					<tr>
 						<th class="td-target" scope="row">
-							<span class="target-name">{target.name}</span>
-							<span class="target-host">{target.host}</span>
+							{#if isGoogleConnectivityTarget(target)}
+								<div class="target-desktop">
+									<span class="target-name">{target.name}</span>
+									<span class="target-host">{target.host}</span>
+								</div>
+
+								<div class="target-mobile-google" title={target.host}>
+									<div class="target-name">{mobileTargetName(target)}</div>
+									<div class="target-host">{mobileTargetHost(target)}</div>
+								</div>
+							{:else}
+								<span class="target-name">{target.name}</span>
+								<span class="target-host">{target.host}</span>
+							{/if}
 						</th>
 						{#each sortedTunnels as tunnel (tunnel.id)}
 							{@const cell = findCell(target.id, tunnel.id)}
@@ -327,6 +358,34 @@
 		font-family: var(--font-mono);
 		font-size: 11px;
 		color: var(--color-text-muted);
+	}
+
+	.target-desktop {
+		display: block;
+	}
+
+	.target-mobile-google {
+		display: none;
+	}
+
+	.target-mobile-google .target-host {
+		overflow-wrap: anywhere;
+		line-height: 1.25;
+	}
+
+	@media (max-width: 768px) {
+		.target-mobile-google {
+			display: block;
+		}
+
+		.target-desktop {
+			display: none;
+		}
+
+		.target-host {
+			overflow-wrap: anywhere;
+			line-height: 1.25;
+		}
 	}
 
 	.td-cell {
