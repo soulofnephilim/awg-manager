@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui';
+	import { api } from '$lib/api/client';
+	import type { AWGTunnel, TunnelListItem } from '$lib/types';
 	import {
 		parseAWG,
 		detectVersion,
@@ -19,6 +21,7 @@
 		type AwgVerdict,
 		type AwgSummaryRow,
 	} from '$lib/utils/awgConfAnalyzer';
+	import { onMount } from 'svelte';
 
 	let raw = $state('');
 	let error = $state('');
@@ -31,6 +34,12 @@
 	let camouflage = $state<'LOW' | 'MEDIUM' | 'HIGH'>('LOW');
 	let fileInput: HTMLInputElement | undefined = $state();
 
+	let tunnels = $state<TunnelListItem[]>([]);
+	let selectedTunnelId = $state('');
+	let tunnelsLoading = $state(false);
+	let tunnelLoading = $state(false);
+	let tunnelLoadError = $state('');
+
 	function analyze() {
 		error = '';
 		parsed = null;
@@ -39,6 +48,7 @@
 		awgScores = null;
 		verdict = null;
 		fixes = [];
+		tunnelLoadError = '';
 
 		const t = raw.trim();
 		if (!t) {
@@ -77,6 +87,66 @@
 		verdict = null;
 		fixes = [];
 		camouflage = 'LOW';
+		selectedTunnelId = '';
+		tunnelLoadError = '';
+	}
+
+	function awgTunnelToConf(t: AWGTunnel): string {
+		const i = t.interface;
+		const p = t.peer;
+
+		const lines: string[] = [
+			'[Interface]',
+			i.privateKey ? `PrivateKey = ${i.privateKey}` : '',
+			i.address ? `Address = ${i.address}` : '',
+			i.dns ? `DNS = ${i.dns}` : '',
+			i.mtu ? `MTU = ${i.mtu}` : '',
+			i.jc != null ? `Jc = ${i.jc}` : '',
+			i.jmin != null ? `Jmin = ${i.jmin}` : '',
+			i.jmax != null ? `Jmax = ${i.jmax}` : '',
+			i.s1 != null ? `S1 = ${i.s1}` : '',
+			i.s2 != null ? `S2 = ${i.s2}` : '',
+			i.s3 != null ? `S3 = ${i.s3}` : '',
+			i.s4 != null ? `S4 = ${i.s4}` : '',
+			i.h1 ? `H1 = ${i.h1}` : '',
+			i.h2 ? `H2 = ${i.h2}` : '',
+			i.h3 ? `H3 = ${i.h3}` : '',
+			i.h4 ? `H4 = ${i.h4}` : '',
+			i.i1 ? `I1 = ${i.i1}` : '',
+			i.i2 ? `I2 = ${i.i2}` : '',
+			i.i3 ? `I3 = ${i.i3}` : '',
+			i.i4 ? `I4 = ${i.i4}` : '',
+			i.i5 ? `I5 = ${i.i5}` : '',
+			'',
+			'[Peer]',
+			p.publicKey ? `PublicKey = ${p.publicKey}` : '',
+			p.presharedKey ? `PresharedKey = ${p.presharedKey}` : '',
+			p.endpoint ? `Endpoint = ${p.endpoint}` : '',
+			p.allowedIPs?.length ? `AllowedIPs = ${p.allowedIPs.join(', ')}` : '',
+			p.persistentKeepalive != null ? `PersistentKeepalive = ${p.persistentKeepalive}` : '',
+		];
+
+		return lines.filter((line) => line !== '').join('\n');
+	}
+
+	async function analyzeSelectedTunnel() {
+		if (!selectedTunnelId) {
+			tunnelLoadError = 'Выберите туннель';
+			return;
+		}
+
+		tunnelLoading = true;
+		tunnelLoadError = '';
+
+		try {
+			const tunnel = await api.getTunnel(selectedTunnelId);
+			raw = awgTunnelToConf(tunnel);
+			analyze();
+		} catch (e) {
+			tunnelLoadError = e instanceof Error ? e.message : String(e);
+		} finally {
+			tunnelLoading = false;
+		}
 	}
 
 	function onPickFile(e: Event) {
@@ -110,6 +180,20 @@
 		e.preventDefault();
 		analyze();
 	}
+
+	onMount(async () => {
+		tunnelsLoading = true;
+		tunnelLoadError = '';
+		try {
+			const snap = await api.getTunnelsAll();
+			tunnels = (snap.tunnels ?? []).filter((t) => t.id && t.type !== 'singbox');
+		} catch (e) {
+			tunnelLoadError = e instanceof Error ? e.message : String(e);
+			tunnels = [];
+		} finally {
+			tunnelsLoading = false;
+		}
+	});
 
 	let parsedLines = $derived.by(() => {
 		if (!parsed) return [] as { key: string; value: string }[];
@@ -179,6 +263,39 @@
 
 	<div class="layout">
 		<div class="col-input">
+			<div class="existing-tunnel-box">
+				<div class="existing-tunnel-head">
+					<span class="existing-tunnel-title">Существующий AWG-туннель</span>
+					<span class="existing-tunnel-note">или вставьте .conf ниже</span>
+				</div>
+				<div class="existing-tunnel-row">
+					<select
+						class="existing-tunnel-select"
+						bind:value={selectedTunnelId}
+						disabled={tunnelsLoading || tunnelLoading || tunnels.length === 0}
+					>
+						<option value="">
+							{tunnelsLoading ? 'Загрузка туннелей…' : tunnels.length ? 'Выберите туннель' : 'Нет AWG-туннелей'}
+						</option>
+						{#each tunnels as t (t.id)}
+							<option value={t.id}>
+								{t.name || t.id} · {t.endpoint || t.interfaceName || t.id}
+							</option>
+						{/each}
+					</select>
+					<Button
+						variant="secondary"
+						onclick={analyzeSelectedTunnel}
+						disabled={!selectedTunnelId || tunnelLoading}
+					>
+						{tunnelLoading ? 'Загрузка…' : 'Анализировать'}
+					</Button>
+				</div>
+				{#if tunnelLoadError}
+					<div class="warn" role="alert">{tunnelLoadError}</div>
+				{/if}
+			</div>
+
 			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 			<label
 				class="drop"
@@ -1015,6 +1132,78 @@
 		.ring {
 			width: 100px;
 			height: 100px;
+		}
+	}
+
+	/* Existing AWG tunnel selector */
+	.existing-tunnel-box {
+		margin-bottom: 12px;
+		padding: 12px 14px;
+		border-radius: 10px;
+		background: var(--bg-secondary);
+		border: 1px dashed var(--color-border);
+	}
+
+	.existing-tunnel-head {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		margin-bottom: 10px;
+	}
+
+	.existing-tunnel-title {
+		font-size: 12px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-primary);
+	}
+
+	.existing-tunnel-note {
+		font-size: 11px;
+		color: var(--text-tertiary);
+	}
+
+	.existing-tunnel-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.existing-tunnel-select {
+		flex: 1;
+		min-width: 0;
+		padding: 8px 10px;
+		border-radius: 8px;
+		border: 1px solid var(--color-border);
+		background: var(--bg-primary, rgba(0, 0, 0, 0.15));
+		color: var(--text-primary);
+		font-size: 13px;
+		line-height: 1.4;
+		outline: none;
+	}
+
+	.existing-tunnel-select:focus {
+		border-color: var(--color-accent, #8b5cf6);
+	}
+
+	.existing-tunnel-select:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
+	@media (max-width: 640px) {
+		.existing-tunnel-row {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.existing-tunnel-select {
+			width: 100%;
+		}
+
+		.existing-tunnel-row :global(button) {
+			width: 100%;
 		}
 	}
 </style>

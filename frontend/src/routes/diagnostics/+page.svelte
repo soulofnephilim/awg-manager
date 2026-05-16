@@ -8,12 +8,25 @@
 	import { PageContainer, PageHeader } from '$lib/components/layout';
 	import { Tabs } from '$lib/components/ui';
 	import { LogsTerminal } from '$lib/components/diagnostics';
-	import { usageLevel } from '$lib/stores/settings';
+	import { settings, usageLevel } from '$lib/stores/settings';
 	import ConnectionsTab from './ConnectionsTab.svelte';
 	import ChecksTab from './ChecksTab.svelte';
 	import AwgConfigAnalyzerTab from './AwgConfigAnalyzerTab.svelte';
 
 	type ActiveTab = 'logs' | 'connections' | 'checks' | 'awgConfig';
+
+	function initialDiagnosticsTab(): ActiveTab {
+		const tab = $page.url.searchParams.get('tab');
+
+		if (tab === 'connections') return 'connections';
+		if (tab === 'checks') return 'checks';
+		if (tab === 'awgConfig') return 'awgConfig';
+
+		// legacy aliases, чтобы первый render тоже сразу попадал в checks
+		if (tab === 'tests' || tab === 'dnscheck') return 'checks';
+
+		return 'logs';
+	}
 
 	function singboxKind(protocol: string, security?: string): string {
 		if (protocol === 'vless' && security === 'reality') return 'xray';
@@ -23,7 +36,7 @@
 		return protocol;
 	}
 
-	let activeTab = $state<ActiveTab>('logs');
+	let activeTab = $state<ActiveTab>(initialDiagnosticsTab());
 	let tunnels = $state<DiagnosticsTargetSeed[]>([]);
 
 	const diagnosticsTabs = $derived.by((): { id: ActiveTab; label: string }[] => {
@@ -39,6 +52,10 @@
 	});
 
 	$effect(() => {
+		// Пока настройки не загружены usageLevel имеет fallback 'advanced'
+		// и guard может преждевременно сбросить awgConfig на logs + вычистить URL.
+		// Ждём загрузки settings — Tabs сам восстановит вкладку из URL.
+		if ($settings === null) return;
 		if ($usageLevel === 'expert') return;
 		if (activeTab === 'awgConfig') {
 			activeTab = 'logs';
