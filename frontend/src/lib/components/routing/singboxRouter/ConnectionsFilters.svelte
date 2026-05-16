@@ -55,7 +55,7 @@
 	]);
 </script>
 
-<div class="col">
+<div class="filters-panel">
 	<input
 		type="text"
 		class="search"
@@ -64,49 +64,48 @@
 		oninput={onSearchInput}
 	/>
 
-	<div class="filter-row">
-		<span class="filter-label">Outbound</span>
-		<div class="filter-control">
+	<div class="filters-grid">
+		<label class="filter-field">
+			<span>Outbound</span>
 			<Dropdown
 				value={filters.outbound}
 				options={outboundDropdown}
 				onchange={(v) => onChange({ ...filters, outbound: v })}
 				fullWidth
 			/>
-		</div>
-	</div>
+		</label>
 
-	<div class="filter-row">
-		<span class="filter-label">Network</span>
-		<div class="filter-control">
+		<label class="filter-field">
+			<span>Network</span>
 			<Dropdown
 				value={filters.network}
 				options={networkDropdown}
 				onchange={(v) => onChange({ ...filters, network: v })}
 				fullWidth
 			/>
-		</div>
-	</div>
+		</label>
 
-	<div class="filter-row">
-		<span class="filter-label">Rule</span>
-		<div class="filter-control">
+		<label class="filter-field">
+			<span>Rule</span>
 			<Dropdown
 				value={filters.rule}
 				options={ruleDropdown}
 				onchange={(v) => onChange({ ...filters, rule: v })}
 				fullWidth
 			/>
-		</div>
+		</label>
 	</div>
 </div>
 
 <style>
-	.col {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
+	.filters-panel {
+		display: grid;
+		gap: 12px;
+		padding: 12px;
 		margin-bottom: 12px;
+		background: var(--color-bg-secondary);
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
 	}
 	.search {
 		padding: 6px 10px;
@@ -116,20 +115,35 @@
 		border-radius: 6px;
 		color: var(--text-primary, #e8e6e3);
 	}
-	.filter-row {
-		display: flex;
-		align-items: center;
+	.filters-grid {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: 12px;
+		width: 100%;
+		align-items: end;
 	}
-	.filter-label {
-		flex: 0 0 96px;
-		font-size: 12px;
-		color: var(--text-secondary, #b8b6b3);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-	}
-	.filter-control {
-		flex: 1;
+	.filter-field {
+		display: grid;
+		gap: 6px;
 		min-width: 0;
+	}
+	.filter-field span {
+		color: var(--text-secondary, #b8b6b3);
+		font-size: 12px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		white-space: nowrap;
+	}
+	.filter-field :global(select) {
+		width: 100%;
+		min-width: 0;
+	}
+
+	@media (max-width: 768px) {
+		.filters-grid {
+			grid-template-columns: 1fr;
+			gap: 8px;
+		}
 	}
 </style>

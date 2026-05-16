@@ -144,19 +144,19 @@
 </script>
 
 <div class="totals">
-	<span class="totals-text">
-		<span class="totals-count">
-			Всего: <strong class="num">{filteredConns.length}</strong>
-			{#if filteredConns.length !== snapshot.connectionsTotal}
-				<span class="muted">из <span class="num">{snapshot.connectionsTotal}</span></span>
-			{/if}
-			соединений
-		</span>
-		<span class="dot">·</span>
-		<span class="totals-bytes num">↑ {formatBytes(totalUp)}</span>
-		<span class="dot">·</span>
-		<span class="totals-bytes num">↓ {formatBytes(totalDown)}</span>
+	<span class="totals-count">
+		Всего: <strong class="num">{filteredConns.length}</strong>
+		{#if filteredConns.length !== snapshot.connectionsTotal}
+			<span class="muted">из <span class="num">{snapshot.connectionsTotal}</span></span>
+		{/if}
+		соединений
 	</span>
+
+	<span class="totals-bytes">
+		<span class="num">↑ {formatBytes(totalUp)}</span>
+		<span class="num">↓ {formatBytes(totalDown)}</span>
+	</span>
+
 	<span class="status status-{statusLabel.cls}">
 		<span class="dot-icon">{statusLabel.dot}</span> {statusLabel.text}
 	</span>
@@ -178,28 +178,100 @@
 
 <style>
 	.totals {
-		display: flex; justify-content: space-between; align-items: center;
-		padding: 8px 12px; margin-bottom: 12px;
+		display: flex;
+		align-items: baseline;
+		gap: 0;
+		padding: 8px 12px;
 		background: var(--color-bg-secondary);
 		border: 1px solid var(--color-border);
 		border-radius: 6px;
 		font-size: 13px;
 		min-height: 36px;
+		margin-bottom: 12px;
 	}
 	.muted { color: var(--color-text-muted); }
-	.dot { color: var(--color-text-muted); margin: 0 6px; }
 	.num { font-variant-numeric: tabular-nums; }
-	.totals-text { display: inline-flex; align-items: baseline; gap: 0; white-space: nowrap; }
-	.totals-count { display: inline-block; min-width: 220px; }
-	.totals-bytes { display: inline-block; min-width: 100px; }
-	.status {
-		display: inline-flex; align-items: center; gap: 4px;
-		font-size: 12px;
-		min-width: 160px;
-		justify-content: flex-end;
+	.totals-count {
+		display: inline-block;
+		min-width: 220px;
+	}
+	.totals-bytes {
+		display: inline-flex;
+		gap: 8px;
+		min-width: 180px;
+		white-space: nowrap;
 		font-variant-numeric: tabular-nums;
+	}
+	.status {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		min-width: 160px;
+		margin-left: auto;
+		justify-content: flex-end;
+		font-size: 12px;
+		font-variant-numeric: tabular-nums;
+		flex-shrink: 0;
 	}
 	.status-ok .dot-icon { color: #3d9970; }
 	.status-warn .dot-icon { color: #dab856; }
 	.status-err .dot-icon { color: #ff6b6b; }
+
+	@media (max-width: 768px) {
+		.totals {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			grid-template-areas:
+				"count count"
+				"bytes status";
+			align-items: center;
+			gap: 6px 8px;
+			padding: 8px 10px;
+		}
+
+		.totals-count {
+			grid-area: count;
+			min-width: 0;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.totals-bytes {
+			grid-area: bytes;
+			min-width: 0;
+			display: inline-flex;
+			gap: 10px;
+			overflow: hidden;
+			white-space: nowrap;
+			font-variant-numeric: tabular-nums;
+		}
+
+		.status {
+			grid-area: status;
+			min-width: 0;
+			margin-left: 0;
+			justify-content: flex-end;
+			align-self: center;
+			font-size: 11px;
+			white-space: nowrap;
+		}
+	}
+
+	@media (max-width: 480px) {
+		.totals {
+			padding: 6px 8px;
+			gap: 4px 6px;
+		}
+
+		.totals-count,
+		.totals-bytes,
+		.status {
+			font-size: 10px;
+		}
+
+		.totals-bytes {
+			gap: 8px;
+		}
+	}
 </style>

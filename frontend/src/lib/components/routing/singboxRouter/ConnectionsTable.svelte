@@ -139,16 +139,12 @@
 </div>
 
 <style>
-	/* Fixed height + overflow:auto creates the scrolling ancestor required
-	   by position:sticky on .t th below. If a parent ever wraps this in
-	   another scroll container, sticky will still work — but if a parent
-	   removes the height/overflow combo here, the header stops sticking. */
-	.wrap { overflow: auto; height: 540px; }
+	.wrap { overflow: auto; max-height: 540px; }
 	.t {
 		width: 100%;
 		border-collapse: collapse;
 		font-size: 13px;
-		table-layout: fixed;
+		table-layout: auto;
 	}
 	.t th, .t td {
 		padding: 6px 10px;
