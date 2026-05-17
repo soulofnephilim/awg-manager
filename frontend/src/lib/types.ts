@@ -1210,6 +1210,24 @@ export interface SingboxRouterSettings {
 	refreshMode?: 'interval' | 'daily';
 	refreshIntervalHours?: number;
 	refreshDailyTime?: string;
+	// WAN-binding discriminator (mirrors backend storage):
+	//   wanAutoDetect=true  + wanInterface=""    → sing-box auto_detect_interface
+	//   wanAutoDetect=false + wanInterface="X"   → sing-box default_interface=X
+	// All other combinations are invalid; backend validator rejects them.
+	wanAutoDetect: boolean;
+	wanInterface?: string; // kernel system-name (e.g. "ppp0"); empty when wanAutoDetect=true
+}
+
+// WAN interface for the sing-box router WAN-binding picker. `name` is
+// the kernel system-name (stable across NDMS re-creation) and is what
+// gets persisted into SingboxRouterSettings.wanInterface. `up` is
+// info-only — never gates selection (UI shows all, user picks).
+export interface SingboxRouterWANInterface {
+	name: string;
+	id: string;
+	label: string;
+	up: boolean;
+	priority: number;
 }
 
 export interface SingboxRouterIssue {

@@ -146,6 +146,18 @@ type Route struct {
 	RuleSet []RuleSet `json:"rule_set,omitempty"`
 	Rules   []Rule    `json:"rules,omitempty"`
 	Final   string    `json:"final,omitempty"`
+	// AutoDetectInterface controls whether sing-box picks the outbound
+	// interface from the system default route. Pointer so the unset
+	// value stays out of JSON — an explicit `false` would override the
+	// sing-box default for users who haven't opted in to the new field
+	// (configs written before v2.10.6).
+	AutoDetectInterface *bool `json:"auto_detect_interface,omitempty"`
+	// DefaultInterface pins outbound traffic to a specific kernel
+	// interface (e.g. "ppp0", "eth3"). Mutually exclusive with
+	// AutoDetectInterface in EnsureRouteWAN: setting one clears the
+	// other so the emitted config never carries both. NEVER stores
+	// NDMS interface ID — kernel name is the stable identifier.
+	DefaultInterface string `json:"default_interface,omitempty"`
 }
 
 type DomainResolver struct {

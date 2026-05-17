@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hoaxisr/awg-manager/internal/accesspolicy"
+	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 )
@@ -114,4 +115,34 @@ func (a *routerAccessPolicyAdapter) CreatePolicy(ctx context.Context, descriptio
 		DeviceCount:  0,
 		IsOurDefault: p.Description == "awgm-router",
 	}, nil
+}
+
+// Compile-time guarantee for the WAN-interface lister.
+var _ router.WANInterfaceLister = (*routerWANInterfaceAdapter)(nil)
+
+// routerWANInterfaceAdapter bridges ndmsquery.InterfaceStore's ListWAN
+// (returns []wan.Interface) into router.WANInterfaceLister (returns
+// []router.WANInterfaceInfo). router can't import internal/ndms
+// directly — would cycle through internal/tunnel/wan — so the
+// projection lives in main alongside the other router adapters.
+type routerWANInterfaceAdapter struct {
+	store *ndmsquery.InterfaceStore
+}
+
+func (a *routerWANInterfaceAdapter) ListWAN(ctx context.Context) ([]router.WANInterfaceInfo, error) {
+	ifaces, err := a.store.ListWAN(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]router.WANInterfaceInfo, 0, len(ifaces))
+	for _, iface := range ifaces {
+		out = append(out, router.WANInterfaceInfo{
+			Name:     iface.Name,
+			ID:       iface.ID,
+			Label:    iface.Label,
+			Up:       iface.Up,
+			Priority: iface.Priority,
+		})
+	}
+	return out, nil
 }

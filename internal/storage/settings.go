@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 17
+	CurrentSchemaVersion = 18
 	DefaultPort          = 2222
 	DefaultInterface     = "br0"
 )
@@ -111,6 +111,9 @@ func (s *SettingsStore) Load() (*Settings, error) {
 		if settings.SchemaVersion < 17 {
 			s.migrateToV17(&settings)
 		}
+		if settings.SchemaVersion < 18 {
+			s.migrateToV18(&settings)
+		}
 	}
 
 	// Self-heal duplicated managed servers — see dedupManagedServers comment.
@@ -162,6 +165,7 @@ func (s *SettingsStore) defaultSettings() *Settings {
 			Enabled:         false,
 			RefreshMode:     "interval",
 			RefreshInterval: 24,
+			WANAutoDetect:   true, // sing-box auto_detect_interface by default
 		},
 	}
 }
@@ -314,6 +318,17 @@ func (s *SettingsStore) migrateToV17(settings *Settings) {
 		settings.Logging.SingboxMaxEntries = 5000
 	}
 	settings.SchemaVersion = 17
+}
+
+// migrateToV18 sets WANAutoDetect=true on existing installs to preserve
+// the prior implicit behavior (no WAN binding in the config meant sing-box
+// picked the route automatically — the same effect as
+// auto_detect_interface=true that v18 makes explicit). WANInterface stays
+// empty, which is the only valid combination for WANAutoDetect=true.
+func (s *SettingsStore) migrateToV18(settings *Settings) {
+	settings.SingboxRouter.WANAutoDetect = true
+	settings.SingboxRouter.WANInterface = ""
+	settings.SchemaVersion = 18
 }
 
 // dedupManagedServers returns servers with duplicate InterfaceName entries

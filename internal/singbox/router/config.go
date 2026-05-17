@@ -276,6 +276,35 @@ func (c *RouterConfig) EnsureSystemRules() {
 	}
 }
 
+// EnsureRouteWAN applies the WAN-binding discriminator to route.
+// Exactly one of `auto_detect_interface` / `default_interface` is written
+// to the emitted config — never both — so sing-box never sees a
+// contradictory state.
+//
+//   - autoDetect == true  → AutoDetectInterface = &true,
+//     DefaultInterface = "".
+//     kernelName MUST be empty here (validated upstream by
+//     ValidateSingboxRouterSettings); the field is accepted as an
+//     argument purely for the symmetric signature.
+//   - autoDetect == false → DefaultInterface = kernelName,
+//     AutoDetectInterface = nil.
+//     kernelName MUST be a non-empty kernel system-name (e.g. "ppp0").
+//     Same upstream validator enforces non-emptiness; this method does
+//     not second-guess the caller.
+//
+// Called from Enable() after EnsureSystemRules. Re-running with the same
+// arguments is a no-op idempotent update.
+func (c *RouterConfig) EnsureRouteWAN(autoDetect bool, kernelName string) {
+	if autoDetect {
+		t := true
+		c.Route.AutoDetectInterface = &t
+		c.Route.DefaultInterface = ""
+		return
+	}
+	c.Route.AutoDetectInterface = nil
+	c.Route.DefaultInterface = kernelName
+}
+
 // SetRouteFinal updates route.final. Caller must validate the tag refers
 // to a known outbound (or sing-box built-in: "direct", "block").
 // Setting to "" is rejected — use "direct" for default fallback.

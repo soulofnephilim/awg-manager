@@ -38,6 +38,23 @@ type SingboxRouterSettings struct {
 	RefreshMode     string `json:"refreshMode,omitempty"`
 	RefreshInterval int    `json:"refreshIntervalHours,omitempty"`
 	RefreshDaily    string `json:"refreshDailyTime,omitempty"`
+	// WANAutoDetect is the discriminator for the WAN-binding mode.
+	// true (default) → sing-box uses route.auto_detect_interface; the
+	// WANInterface field is ignored and must be empty (enforced by
+	// validateSingboxRouterSettings).
+	// false → sing-box pins outbound traffic to WANInterface via
+	// route.default_interface; WANInterface must be a non-empty kernel
+	// system-name (enforced by the same validator).
+	// Two-field shape on purpose: an empty WANInterface string alone is
+	// ambiguous ("not chosen yet" vs "auto"); the explicit bool makes
+	// the intent unambiguous in storage and in every consumer.
+	WANAutoDetect bool `json:"wanAutoDetect"`
+	// WANInterface is the kernel system-name of the user-pinned WAN
+	// (e.g. "ppp0", "eth3"). NEVER stores the NDMS interface ID — NDMS
+	// IDs (ISP, PPPoE0, …) can change on interface re-creation, kernel
+	// system-names don't. The UI layer translates between the two.
+	// Only meaningful when WANAutoDetect == false.
+	WANInterface string `json:"wanInterface,omitempty"`
 }
 
 // ManagedServer represents the user-created WireGuard server interface.

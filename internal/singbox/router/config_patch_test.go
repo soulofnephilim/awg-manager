@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 func TestRuleSetAddDuplicate(t *testing.T) {
@@ -410,5 +412,88 @@ func TestCompositeOutboundDeleteReferenced(t *testing.T) {
 	}
 	if err := cfg.DeleteCompositeOutbound("fast", true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnsureRouteWAN_AutoDetectMode(t *testing.T) {
+	cfg := NewEmptyConfig()
+	// Pre-populate stale state to confirm EnsureRouteWAN clears it.
+	cfg.Route.DefaultInterface = "ppp_stale"
+	cfg.EnsureRouteWAN(true, "")
+
+	if cfg.Route.AutoDetectInterface == nil || !*cfg.Route.AutoDetectInterface {
+		t.Errorf("expected AutoDetectInterface=&true, got %+v", cfg.Route.AutoDetectInterface)
+	}
+	if cfg.Route.DefaultInterface != "" {
+		t.Errorf("expected DefaultInterface cleared, got %q", cfg.Route.DefaultInterface)
+	}
+}
+
+func TestEnsureRouteWAN_PinnedMode(t *testing.T) {
+	cfg := NewEmptyConfig()
+	// Pre-populate stale state to confirm EnsureRouteWAN clears it.
+	truePtr := true
+	cfg.Route.AutoDetectInterface = &truePtr
+	cfg.EnsureRouteWAN(false, "ppp0")
+
+	if cfg.Route.AutoDetectInterface != nil {
+		t.Errorf("expected AutoDetectInterface cleared, got %+v", *cfg.Route.AutoDetectInterface)
+	}
+	if cfg.Route.DefaultInterface != "ppp0" {
+		t.Errorf("expected DefaultInterface=ppp0, got %q", cfg.Route.DefaultInterface)
+	}
+}
+
+func TestEnsureRouteWAN_JSONShape(t *testing.T) {
+	// Verify emitted JSON has exactly one of `auto_detect_interface` /
+	// `default_interface` — never both, never neither.
+	autoCfg := NewEmptyConfig()
+	autoCfg.EnsureRouteWAN(true, "")
+	autoBytes, _ := json.Marshal(autoCfg.Route)
+	autoStr := string(autoBytes)
+	if !contains(autoStr, `"auto_detect_interface":true`) {
+		t.Errorf("auto mode: expected auto_detect_interface:true in JSON, got %s", autoStr)
+	}
+	if contains(autoStr, "default_interface") {
+		t.Errorf("auto mode: default_interface must not appear in JSON, got %s", autoStr)
+	}
+
+	pinnedCfg := NewEmptyConfig()
+	pinnedCfg.EnsureRouteWAN(false, "eth3")
+	pinnedBytes, _ := json.Marshal(pinnedCfg.Route)
+	pinnedStr := string(pinnedBytes)
+	if !contains(pinnedStr, `"default_interface":"eth3"`) {
+		t.Errorf("pinned mode: expected default_interface:eth3 in JSON, got %s", pinnedStr)
+	}
+	if contains(pinnedStr, "auto_detect_interface") {
+		t.Errorf("pinned mode: auto_detect_interface must not appear in JSON, got %s", pinnedStr)
+	}
+}
+
+func TestValidateSingboxRouterSettings(t *testing.T) {
+	cases := []struct {
+		name      string
+		auto      bool
+		iface     string
+		wantError bool
+	}{
+		{"auto + empty   = OK", true, "", false},
+		{"pinned + ppp0  = OK", false, "ppp0", false},
+		{"auto + ppp0    = ERROR (contradictory)", true, "ppp0", true},
+		{"pinned + empty = ERROR (no target)", false, "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateSingboxRouterSettings(storage.SingboxRouterSettings{
+				WANAutoDetect: c.auto,
+				WANInterface:  c.iface,
+			})
+			if c.wantError && err == nil {
+				t.Errorf("expected error, got nil")
+			}
+			if !c.wantError && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
 	}
 }

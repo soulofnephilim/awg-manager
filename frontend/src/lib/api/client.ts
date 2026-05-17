@@ -70,6 +70,7 @@ import type {
 	SingboxRouterOutbound,
 	SingboxRouterPreset,
 	RouterPolicy,
+	SingboxRouterWANInterface,
 	SingboxRouterDNSServer,
 	SingboxRouterDNSRule,
 	SingboxRouterDNSGlobals,
@@ -1769,6 +1770,10 @@ class ApiClient {
 			method: 'POST',
 			body: JSON.stringify({ description: description ?? 'awgm-router' }),
 		});
+	}
+
+	async singboxRouterListWANInterfaces(): Promise<SingboxRouterWANInterface[]> {
+		return this.request<SingboxRouterWANInterface[]>('/singbox/router/wan-interfaces');
 	}
 
 	async singboxRouterListDNSServers(): Promise<SingboxRouterDNSServer[]> {

@@ -1021,6 +1021,7 @@ func main() {
 		SingboxTunnels:         &routerSingboxTunnelAdapter{src: singboxOp},
 		SubscriptionComposites: router.NewSubscriptionCompositesAdapter(subAdapter),
 		Orch:                   sbOrch,
+		WANInterfaces:          &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces},
 	})
 	tunnelService.SetAWGSyncer(awgoutboundsSvc)
 	tunnelService.SetDeviceProxyRefChecker(deviceProxySvc)
