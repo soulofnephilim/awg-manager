@@ -58,6 +58,15 @@ type SingboxRouterSettingsData struct {
 	RefreshMode     string `json:"refreshMode,omitempty" example:"interval"`
 	RefreshInterval int    `json:"refreshIntervalHours,omitempty" example:"24"`
 	RefreshDaily    string `json:"refreshDailyTime,omitempty" example:"03:00"`
+	// WANAutoDetect / WANInterface form a two-field discriminator:
+	//   true  + ""    → sing-box auto_detect_interface
+	//   false + "ppp0"→ sing-box default_interface=ppp0
+	// Other combinations are rejected by the backend validator.
+	// Example below shows the PINNED case as it's the more interesting
+	// shape to document (auto case has WANInterface omitted via omitempty
+	// and wanAutoDetect=true); both examples are intentionally consistent.
+	WANAutoDetect bool   `json:"wanAutoDetect" example:"false"`
+	WANInterface  string `json:"wanInterface,omitempty" example:"ppp0"`
 }
 
 // SingboxRouterSettingsResponse is the envelope for GET /singbox/router/settings.

@@ -1110,6 +1110,31 @@ function newSub(input) {
 // ── Wizard mock state ──────────────────────────────────────────
 let mockEngineRunning = false;
 let mockSBPolicyExists = false;
+
+// Sing-box router settings state. Defaults mirror what
+// storage.defaultSettings() produces on a fresh install — WANAutoDetect=true
+// + WANInterface="" is the only valid auto-mode combo. Mutated by
+// POST/PUT /singbox/router/settings so the user's WAN-binding toggle
+// in dev-mock survives a page reload within the same session.
+let mockSBSettings = {
+	enabled: false,
+	policyName: '',
+	refreshMode: 'interval',
+	refreshIntervalHours: 24,
+	wanAutoDetect: true,
+	wanInterface: '',
+};
+
+// WAN interfaces returned by GET /singbox/router/wan-interfaces. Mix of
+// up/down + types so the dev UI shows real variety. `name` is the kernel
+// system-name that gets persisted into wanInterface; `id` is the NDMS
+// interface ID (what NDMS shows in its UI); `label` is the human-friendly
+// display string. The picker in EngineStatusCard shows all three.
+const mockWANInterfaces = [
+	{ name: 'ppp0', id: 'PPPoE0', label: 'Letai (PPPoE)', up: true, priority: 700000 },
+	{ name: 'eth3', id: 'ISP', label: 'Ethernet ISP', up: false, priority: 600000 },
+	{ name: 'usb0', id: 'UsbModem0', label: 'Резервный 4G', up: true, priority: 500000 },
+];
 let mockBoundDevices = new Set();
 let mockDNSServers = [
 	{
@@ -2594,6 +2619,55 @@ const server = http.createServer(async (req, res) => {
 	if (req.method === 'POST' && path === '/singbox/router/policies') {
 		mockSBPolicyExists = true;
 		send(res, 200, { success: true, data: { name: 'SBRouter', description: 'wizard' } });
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/singbox/router/wan-interfaces') {
+		send(res, 200, { success: true, data: mockWANInterfaces });
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/singbox/router/settings') {
+		send(res, 200, { success: true, data: mockSBSettings });
+		return;
+	}
+
+	if ((req.method === 'POST' || req.method === 'PUT') && path === '/singbox/router/settings') {
+		let raw = '';
+		req.on('data', (c) => (raw += c));
+		req.on('end', () => {
+			try {
+				const payload = JSON.parse(raw || '{}');
+				// Mirror backend's ValidateSingboxRouterSettings — reject the
+				// two contradictory discriminator combos. Keeps the dev UI
+				// honest: a toggle bug that would produce {auto:true, iface:"x"}
+				// surfaces here instead of silently saving an invalid state.
+				if (payload.wanAutoDetect === true && payload.wanInterface) {
+					send(res, 400, {
+						success: false,
+						error: {
+							code: 'INVALID_REQUEST',
+							message: `wanAutoDetect=true requires wanInterface to be empty (got "${payload.wanInterface}")`,
+						},
+					});
+					return;
+				}
+				if (payload.wanAutoDetect === false && !payload.wanInterface) {
+					send(res, 400, {
+						success: false,
+						error: {
+							code: 'INVALID_REQUEST',
+							message: 'wanAutoDetect=false requires wanInterface to be set to a kernel interface name',
+						},
+					});
+					return;
+				}
+				mockSBSettings = { ...mockSBSettings, ...payload };
+				send(res, 200, { success: true, data: { ok: true } });
+			} catch (e) {
+				send(res, 400, { success: false, error: { code: 'INVALID_REQUEST', message: String(e) } });
+			}
+		});
 		return;
 	}
 

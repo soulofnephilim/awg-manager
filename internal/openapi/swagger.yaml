@@ -2810,6 +2810,20 @@ definitions:
       refreshMode:
         example: interval
         type: string
+      wanAutoDetect:
+        description: |-
+          WANAutoDetect / WANInterface form a two-field discriminator:
+            true  + ""    → sing-box auto_detect_interface
+            false + "ppp0"→ sing-box default_interface=ppp0
+          Other combinations are rejected by the backend validator.
+          Example below shows the PINNED case as it's the more interesting
+          shape to document (auto case has WANInterface omitted via omitempty
+          and wanAutoDetect=true); both examples are intentionally consistent.
+        example: false
+        type: boolean
+      wanInterface:
+        example: ppp0
+        type: string
     type: object
   api.SingboxRouterSettingsResponse:
     properties:
@@ -2881,6 +2895,34 @@ definitions:
       mac:
         example: aa:bb:cc:dd:ee:ff
         type: string
+    type: object
+  api.SingboxRouterWANInterfaceDTO:
+    properties:
+      id:
+        example: PPPoE0
+        type: string
+      label:
+        example: Резервный канал
+        type: string
+      name:
+        example: ppp0
+        type: string
+      priority:
+        example: 700000
+        type: integer
+      up:
+        example: true
+        type: boolean
+    type: object
+  api.SingboxRouterWANInterfacesListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.SingboxRouterWANInterfaceDTO'
+        type: array
+      success:
+        example: true
+        type: boolean
     type: object
   api.SingboxStatusData:
     properties:
@@ -3326,6 +3368,9 @@ definitions:
         type: string
       singbox:
         $ref: '#/definitions/api.SystemInfoSingbox'
+      slowRequestThresholdMs:
+        example: 0
+        type: integer
       supportsExtendedASC:
         example: true
         type: boolean
@@ -8833,6 +8878,28 @@ paths:
       security:
       - CookieAuth: []
       summary: Get sing-box router status
+      tags:
+      - singbox-router
+  /singbox/router/wan-interfaces:
+    get:
+      description: Returns all router WAN interfaces (no up/down filtering) used by
+        the WAN-binding picker in singbox-router settings. Always a JSON array, never
+        null. The `name` field is the kernel system-name and is the value that should
+        be persisted into `wanInterface`.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterWANInterfacesListResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List WAN interfaces
       tags:
       - singbox-router
   /singbox/status:

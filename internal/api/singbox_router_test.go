@@ -41,6 +41,9 @@ func (m *mockRouterSvc) GetSettings(ctx context.Context) (storage.SingboxRouterS
 func (m *mockRouterSvc) UpdateSettings(ctx context.Context, s storage.SingboxRouterSettings) error {
 	return nil
 }
+func (m *mockRouterSvc) ListWANInterfaces(ctx context.Context) ([]router.WANInterfaceInfo, error) {
+	return nil, nil
+}
 func (m *mockRouterSvc) ListRules(ctx context.Context) ([]router.Rule, error) { return nil, nil }
 func (m *mockRouterSvc) AddRule(ctx context.Context, rule router.Rule) error  { return nil }
 func (m *mockRouterSvc) UpdateRule(ctx context.Context, index int, rule router.Rule) error {
