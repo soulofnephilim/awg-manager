@@ -26,11 +26,21 @@ const (
 	// conntrack tracks the DNAT for established flows, ACKs are
 	// auto-translated, and sing-box's accept()ed socket handles them
 	// like any normal TCP connection. SKeen ships the same split.
-	RedirectPort  = 51272
-	Fwmark        = 0x1
-	RoutingTable  = 100
-	ChainName     = "AWGM-TPROXY"
-	RedirectChain = "AWGM-REDIRECT"
+	RedirectPort     = 51272
+	Fwmark           = 0x1
+	RoutingTable     = 100
+	ChainName        = "AWGM-TPROXY"
+	RedirectChain    = "AWGM-REDIRECT"
+	// DNSNoPolicyChain re-marks DNS-port-53 packets that arrive with
+	// mark=0 (no NDMS access policy assigned) up to the bridge's NDMS
+	// catch-all mark, so NDMS's own _NDM_HOTSPOT_DNSREDIR fires and
+	// REDIRECTs the DNS query to its per-policy ndnproxy. Without this,
+	// sing-box's hijack-dns side-effect transparent listener at every
+	// router LAN-IP:53 silently drops the query (no TPROXY ancillary
+	// data → drop without log) and the client sees DNS timeout. The
+	// chain itself is empty — rules are emitted directly under
+	// PREROUTING per-bridge from LANBridges in buildRestoreInput.
+	DNSNoPolicyChain = "AWGM-DNS-NOPOLICY"
 	// IPRulePriority is the fixed `ip rule` priority for our fwmark rule.
 	// Above NDMS policy rules (~100-200) and below system main/default
 	// (32766/32767). Hard-coded so Install is fully idempotent and so
@@ -145,6 +155,13 @@ type RestoreInputSpec struct {
 	// Empty list = no extra exclusions (router still works, just exposes
 	// the WAN-IP loop edge case).
 	WANIPs []string
+
+	// LANBridges enumerates (bridge, NDMS catch-all mark) pairs for the
+	// DNS-NOPOLICY mangle rules. Discovered by DiscoverLANBridges() — see
+	// lanbridges.go for the discovery algorithm and the why. Empty list
+	// = skip DNS-NOPOLICY entirely (no bridges where the fall-through is
+	// applicable on this router).
+	LANBridges []LANBridgeMark
 }
 
 var bypassCIDRs = []string{
@@ -216,6 +233,28 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 		fmt.Fprintf(&b, "-A PREROUTING -m connmark --mark %s -m conntrack ! --ctstate INVALID -j %s\n",
 			spec.PolicyMark, ChainName)
 	}
+
+	// ---- DNS-NOPOLICY: re-mark mark=0 DNS up to bridge's NDMS catch-all ----
+	// For each (bridge, mark) discovered in mangle _NDM_HOTSPOT_PREROUTING_MANGL,
+	// emit a packet-MARK rule on PREROUTING that fires only when:
+	//   - packet arrived on that bridge (-i bridge),
+	//   - current MARK is 0 (i.e., a MAC-RETURN-override in NDMS's
+	//     hotspot chain skipped this device, so NDMS catch-all never
+	//     ran for it),
+	//   - destination port is 53 (DNS only — other no-policy traffic
+	//     stays at mark=0, keeping the "no-policy" semantics intact),
+	//   - packet type is unicast (don't touch mDNS / link-local multicast).
+	// Re-marking ONLY this single packet (no CONNMARK save) means
+	// subsequent flow packets retain mark=0; only the DNS query gets
+	// elevated. NDMS's existing _NDM_HOTSPOT_DNSREDIR rule for that
+	// mark then REDIRECTs the query to its per-policy ndnproxy port.
+	for _, bm := range spec.LANBridges {
+		fmt.Fprintf(&b, "-A PREROUTING -i %s -m mark --mark 0x0 -m pkttype --pkt-type unicast -p udp --dport 53 -m comment --comment %q -j MARK --set-mark %s\n",
+			bm.Bridge, DNSNoPolicyChain, bm.Mark)
+		fmt.Fprintf(&b, "-A PREROUTING -i %s -m mark --mark 0x0 -m pkttype --pkt-type unicast -p tcp --dport 53 -m comment --comment %q -j MARK --set-mark %s\n",
+			bm.Bridge, DNSNoPolicyChain, bm.Mark)
+	}
+
 	b.WriteString("COMMIT\n")
 
 	// ---- *nat table: TCP via REDIRECT ----
@@ -364,12 +403,20 @@ if [ "$mangle_ok" -eq 0 ] || [ "$nat_ok" -eq 0 ]; then
     | grep -E -- '-[jg] %[6]s($| )' \
     | sed 's/-A PREROUTING/-D PREROUTING/' \
     | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
+  # Scrub DNS-NOPOLICY direct PREROUTING rules (identified by comment
+  # tag, not by jump target — these are -j MARK rules, not chain
+  # jumps). Same drop-and-restore approach as above, just matched
+  # via the iptables-save comment serialisation.
+  /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
+    | grep -F -- '--comment "%[7]s"' \
+    | sed 's/-A PREROUTING/-D PREROUTING/' \
+    | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
   /opt/sbin/iptables-restore --noflush < %[1]q
   /opt/sbin/ip rule add fwmark 0x%[3]x table %[4]d priority %[5]d 2>/dev/null || true
   /opt/sbin/ip route add local 0.0.0.0/0 dev lo table %[4]d 2>/dev/null || true
   logger -t awgm-tproxy "netfilter.d: restored AWGM chains after NDMS reload"
 fi
-`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain)
+`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain, DNSNoPolicyChain)
 	return os.WriteFile(netfilterHookPath, []byte(script), 0755)
 }
 
@@ -416,6 +463,34 @@ func (it *IPTables) Uninstall(ctx context.Context) error {
 func (it *IPTables) removeSourceHooks(ctx context.Context) {
 	it.removeSourceHooksFromTable(ctx, "mangle", ChainName)
 	it.removeSourceHooksFromTable(ctx, "nat", RedirectChain)
+	// DNS-NOPOLICY uses direct PREROUTING rules (no intermediate chain
+	// jump), identified by their `-m comment --comment AWGM-DNS-NOPOLICY`
+	// tag. Same pattern XKeen uses for its own tagged rules.
+	it.removeCommentTaggedRulesFromTable(ctx, "mangle", "PREROUTING", DNSNoPolicyChain)
+}
+
+// removeCommentTaggedRulesFromTable scrubs every rule in `chain` whose
+// iptables-save output contains the given comment tag. Used for
+// DNS-NOPOLICY where rules are direct PREROUTING entries (not jumps
+// to a custom chain). The grep+sed pattern is the same approach as
+// XKeen's removal logic — robust to rule ordering and matcher changes
+// as long as the `-m comment --comment <tag>` survives serialisation.
+func (it *IPTables) removeCommentTaggedRulesFromTable(ctx context.Context, table, chain, tag string) {
+	result, err := sysexec.Run(ctx, sysiptables.Binary, "-w", "-t", table, "-S", chain)
+	if err != nil || result == nil {
+		return
+	}
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		if !strings.Contains(line, `--comment "`+tag+`"`) && !strings.Contains(line, `--comment `+tag) {
+			continue
+		}
+		if !strings.HasPrefix(line, "-A "+chain+" ") {
+			continue
+		}
+		delLine := "-D " + strings.TrimPrefix(line, "-A ")
+		args := append([]string{"-w", "-t", table}, strings.Fields(delLine)...)
+		_, _ = sysexec.Run(ctx, sysiptables.Binary, args...)
+	}
 }
 
 func (it *IPTables) removeSourceHooksFromTable(ctx context.Context, table, chain string) {

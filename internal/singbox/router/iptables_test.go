@@ -523,3 +523,170 @@ func TestBuildRestoreInput_EmptyWANIPs_NoExclusions(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildRestoreInput_LANBridges_DNSNoPolicyRules(t *testing.T) {
+	// LAN bridges with matching NDMS catch-all marks → DNS-NOPOLICY
+	// rules in mangle PREROUTING that re-mark mark=0 DNS to the
+	// bridge's catch-all mark.
+	spec := RestoreInputSpec{
+		PolicyMark: "0xffffaad",
+		LANBridges: []LANBridgeMark{
+			{Bridge: "br0", Mark: "0xffffaab"},
+			{Bridge: "br1", Mark: "0xffffaab"},
+		},
+	}
+	input := buildRestoreInput(spec)
+
+	expected := []string{
+		`-A PREROUTING -i br0 -m mark --mark 0x0 -m pkttype --pkt-type unicast -p udp --dport 53 -m comment --comment "AWGM-DNS-NOPOLICY" -j MARK --set-mark 0xffffaab`,
+		`-A PREROUTING -i br0 -m mark --mark 0x0 -m pkttype --pkt-type unicast -p tcp --dport 53 -m comment --comment "AWGM-DNS-NOPOLICY" -j MARK --set-mark 0xffffaab`,
+		`-A PREROUTING -i br1 -m mark --mark 0x0 -m pkttype --pkt-type unicast -p udp --dport 53 -m comment --comment "AWGM-DNS-NOPOLICY" -j MARK --set-mark 0xffffaab`,
+		`-A PREROUTING -i br1 -m mark --mark 0x0 -m pkttype --pkt-type unicast -p tcp --dport 53 -m comment --comment "AWGM-DNS-NOPOLICY" -j MARK --set-mark 0xffffaab`,
+	}
+	for _, line := range expected {
+		if !strings.Contains(input, line) {
+			t.Errorf("missing DNS-NOPOLICY line: %q\nin:\n%s", line, input)
+		}
+	}
+}
+
+func TestBuildRestoreInput_LANBridges_DifferentMarksPerBridge(t *testing.T) {
+	// Sanity: per-bridge mark wired through correctly when bridges
+	// have different NDMS catch-all marks (e.g. different LAN policies
+	// per bridge). Each bridge gets its OWN re-mark target.
+	spec := RestoreInputSpec{
+		PolicyMark: "0xffffaad",
+		LANBridges: []LANBridgeMark{
+			{Bridge: "br0", Mark: "0xffffaab"},
+			{Bridge: "br1", Mark: "0xffffab0"},
+		},
+	}
+	input := buildRestoreInput(spec)
+
+	if !strings.Contains(input, "-i br0 -m mark --mark 0x0 -m pkttype --pkt-type unicast -p udp --dport 53 -m comment --comment \"AWGM-DNS-NOPOLICY\" -j MARK --set-mark 0xffffaab") {
+		t.Errorf("br0 should use mark 0xffffaab")
+	}
+	if !strings.Contains(input, "-i br1 -m mark --mark 0x0 -m pkttype --pkt-type unicast -p udp --dport 53 -m comment --comment \"AWGM-DNS-NOPOLICY\" -j MARK --set-mark 0xffffab0") {
+		t.Errorf("br1 should use mark 0xffffab0")
+	}
+}
+
+func TestBuildRestoreInput_NoLANBridges_NoDNSNoPolicyRules(t *testing.T) {
+	// Empty LANBridges → no DNS-NOPOLICY rules emitted at all.
+	// Caller (Service.Enable) skips DNS fallback entirely on routers
+	// without hotspot LAN configuration.
+	spec := RestoreInputSpec{
+		PolicyMark: "0xffffaad",
+		LANBridges: nil,
+	}
+	input := buildRestoreInput(spec)
+
+	for _, marker := range []string{"AWGM-DNS-NOPOLICY", "--set-mark"} {
+		if strings.Contains(input, marker) {
+			t.Errorf("DNS-NOPOLICY artifact %q leaked into output when LANBridges empty:\n%s", marker, input)
+		}
+	}
+}
+
+func TestEqualLANBridges(t *testing.T) {
+	a := []LANBridgeMark{{Bridge: "br0", Mark: "0xffffaab"}, {Bridge: "br1", Mark: "0xffffaab"}}
+	b := []LANBridgeMark{{Bridge: "br0", Mark: "0xffffaab"}, {Bridge: "br1", Mark: "0xffffaab"}}
+	c := []LANBridgeMark{{Bridge: "br0", Mark: "0xffffaab"}, {Bridge: "br1", Mark: "0xffffab0"}}  // different mark
+	d := []LANBridgeMark{{Bridge: "br0", Mark: "0xffffaab"}}                                       // shorter
+	e := []LANBridgeMark{{Bridge: "br1", Mark: "0xffffaab"}, {Bridge: "br0", Mark: "0xffffaab"}}  // different order
+
+	if !equalLANBridges(a, b) {
+		t.Error("identical slices must compare equal")
+	}
+	if equalLANBridges(a, c) {
+		t.Error("differing mark must not compare equal")
+	}
+	if equalLANBridges(a, d) {
+		t.Error("differing length must not compare equal")
+	}
+	if equalLANBridges(a, e) {
+		t.Error("differing order must not compare equal (caller relies on stable order)")
+	}
+	if !equalLANBridges(nil, nil) {
+		t.Error("nil/nil must compare equal")
+	}
+	if !equalLANBridges([]LANBridgeMark{}, nil) {
+		t.Error("empty and nil must compare equal")
+	}
+}
+
+func TestHotspotCatchAllRegexp_RealisticParse(t *testing.T) {
+	// Realistic snapshot of `iptables -t mangle -S _NDM_HOTSPOT_PREROUTING_MANGL`
+	// from a router with three bridges in NDMS hotspot (br0/br1) plus a
+	// WireGuard "bridge" (nwg2) and a MAC-RETURN entry. Only the catch-all
+	// `-i X -j MARK --set-xmark Y/...` lines should match — MAC-specific
+	// and CONNMARK/RETURN lines must NOT.
+	snapshot := `-N _NDM_HOTSPOT_PREROUTING_MANGL
+-A _NDM_HOTSPOT_PREROUTING_MANGL -m mac --mac-source 50:FF:20:B4:F4:37 -j RETURN
+-A _NDM_HOTSPOT_PREROUTING_MANGL -m mac --mac-source B0:4A:B4:74:80:F8 -j RETURN
+-A _NDM_HOTSPOT_PREROUTING_MANGL -m mac --mac-source 80:B6:55:60:28:FE -j MARK --set-xmark 0xffffaab/0xffffffff
+-A _NDM_HOTSPOT_PREROUTING_MANGL -m mac --mac-source 80:B6:55:60:28:FE -j CONNMARK --save-mark --nfmask 0xffffffff --ctmask 0xffffffff
+-A _NDM_HOTSPOT_PREROUTING_MANGL -m mac --mac-source 80:B6:55:60:28:FE -j RETURN
+-A _NDM_HOTSPOT_PREROUTING_MANGL -i br0 -j MARK --set-xmark 0xffffaab/0xffffffff
+-A _NDM_HOTSPOT_PREROUTING_MANGL -i br0 -j CONNMARK --save-mark --nfmask 0xffffffff --ctmask 0xffffffff
+-A _NDM_HOTSPOT_PREROUTING_MANGL -i br0 -j RETURN
+-A _NDM_HOTSPOT_PREROUTING_MANGL -i nwg2 -j MARK --set-xmark 0xffffaab/0xffffffff
+-A _NDM_HOTSPOT_PREROUTING_MANGL -i nwg2 -j CONNMARK --save-mark --nfmask 0xffffffff --ctmask 0xffffffff
+-A _NDM_HOTSPOT_PREROUTING_MANGL -i nwg2 -j RETURN
+-A _NDM_HOTSPOT_PREROUTING_MANGL -i br1 -j MARK --set-xmark 0xffffaab/0xffffffff`
+
+	matched := make(map[string]string)
+	for _, line := range strings.Split(snapshot, "\n") {
+		m := hotspotCatchAllRegexp.FindStringSubmatch(line)
+		if m != nil {
+			matched[m[1]] = m[2]
+		}
+	}
+
+	want := map[string]string{
+		"br0":  "0xffffaab",
+		"nwg2": "0xffffaab",
+		"br1":  "0xffffaab",
+	}
+	if len(matched) != len(want) {
+		t.Errorf("matched %d ifaces, want %d: %+v", len(matched), len(want), matched)
+	}
+	for iface, mark := range want {
+		if matched[iface] != mark {
+			t.Errorf("iface %s: got mark %q, want %q", iface, matched[iface], mark)
+		}
+	}
+	// CONNMARK and MAC-source rules must NOT match.
+	for _, line := range strings.Split(snapshot, "\n") {
+		if strings.Contains(line, "CONNMARK") || strings.Contains(line, "RETURN") || strings.Contains(line, "mac-source") {
+			if hotspotCatchAllRegexp.FindStringSubmatch(line) != nil {
+				t.Errorf("false positive on: %s", line)
+			}
+		}
+	}
+}
+
+func TestSplitLines(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"a", []string{"a"}},
+		{"a\nb\nc", []string{"a", "b", "c"}},
+		{"a\nb\n", []string{"a", "b"}}, // trailing \n produces no empty entry
+		{"\na", []string{"a"}},         // leading \n produces no empty entry
+	}
+	for _, c := range cases {
+		got := splitLines(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("splitLines(%q): got %d lines, want %d (%+v vs %+v)", c.in, len(got), len(c.want), got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("splitLines(%q)[%d]: got %q, want %q", c.in, i, got[i], c.want[i])
+			}
+		}
+	}
+}

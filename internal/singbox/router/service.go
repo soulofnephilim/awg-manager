@@ -237,8 +237,9 @@ func (a *routerLoggerAdapter) Info(msg string) {
 type ServiceImpl struct {
 	deps           Deps
 	mu             sync.Mutex
-	currentMark    string   // last-installed iptables mark; used by Reconcile to detect change
-	currentWANIPs  []string // last-collected WAN IPs; used by Reconcile to detect change
+	currentMark       string          // last-installed iptables mark; used by Reconcile to detect change
+	currentWANIPs     []string        // last-collected WAN IPs; used by Reconcile to detect change
+	currentLANBridges []LANBridgeMark // last-discovered LAN-bridge (name, NDMS mark) pairs; reconcile triggers re-install when this changes (e.g. user changed Keenetic hotspot policy or added a new bridge)
 
 	// inspectCache backs the route-inspector's rule_set match path. Lazy
 	// constructed on first Inspect call so dev-machine builds (no
@@ -462,7 +463,22 @@ func (s *ServiceImpl) Enable(ctx context.Context) error {
 		return fmt.Errorf("collect WAN IPs: %w", err)
 	}
 
-	if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{PolicyMark: mark, WANIPs: wanIPs}); err != nil {
+	// Discover LAN bridges where NDMS hotspot catch-all marks traffic
+	// — these are exactly the bridges where a mark=0 (no-policy) device
+	// can exist. DNS-NOPOLICY rules re-mark its DNS up to NDMS's
+	// catch-all mark so the existing _NDM_HOTSPOT_DNSREDIR REDIRECTs it
+	// to the per-policy ndnproxy. Empty result = no qualifying bridges
+	// = skip the DNS-NOPOLICY logic entirely (Install proceeds without it).
+	lanBridges, _ := DiscoverLANBridges(ctx)
+	if len(lanBridges) == 0 {
+		s.deps.Log.Warnf("router: no NDMS hotspot LAN bridges discovered; DNS fallback for no-policy devices skipped")
+	}
+
+	if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
+		PolicyMark: mark,
+		WANIPs:     wanIPs,
+		LANBridges: lanBridges,
+	}); err != nil {
 		// Stop sing-box from listening on the now-orphan TPROXY port,
 		// but DO NOT corrupt the persisted user config. With orchestrator
 		// wired we just park the slot back under disabled/ — sing-box
@@ -479,6 +495,7 @@ func (s *ServiceImpl) Enable(ctx context.Context) error {
 	}
 	s.currentMark = mark
 	s.currentWANIPs = wanIPs
+	s.currentLANBridges = lanBridges
 
 	settings.SingboxRouter = sr
 	if err := s.deps.Settings.Save(settings); err != nil {
@@ -683,6 +700,7 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	}
 	s.currentMark = ""
 	s.currentWANIPs = nil
+	s.currentLANBridges = nil
 
 	if s.deps.Orch != nil {
 		// Move 20-router.json under disabled/ — sing-box's non-recursive
@@ -756,18 +774,22 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 
 	markChanged := mark != s.currentMark
 	wanIPsChanged := !slices.Equal(s.currentWANIPs, wanIPs)
+	lanBridges, _ := DiscoverLANBridges(ctx)
+	lanBridgesChanged := !equalLANBridges(s.currentLANBridges, lanBridges)
 
-	if markChanged || wanIPsChanged {
+	if markChanged || wanIPsChanged || lanBridgesChanged {
 		s.mu.Lock()
 		if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
 			PolicyMark: mark,
 			WANIPs:     wanIPs,
+			LANBridges: lanBridges,
 		}); err != nil {
 			s.mu.Unlock()
 			return err
 		}
 		s.currentMark = mark
 		s.currentWANIPs = wanIPs
+		s.currentLANBridges = lanBridges
 		s.mu.Unlock()
 	}
 
