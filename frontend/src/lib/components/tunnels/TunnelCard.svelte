@@ -14,6 +14,7 @@
 	import { getTrafficRates, subscribeTraffic, loadHistory } from '$lib/stores/traffic';
 	import ConnectivitySettingsModal from './ConnectivitySettingsModal.svelte';
 import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsModal.svelte';
+import PingButton from './PingButton.svelte';
 
 	interface Props {
 		tunnel: TunnelListItem;
@@ -94,18 +95,6 @@ import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsMod
 		return connData.connected ? 'connected' : 'disconnected';
 	});
 	let latencyMs = $derived(connData?.latency ?? null);
-
-	function latencyTier(ms: number): 'good' | 'warn' | 'high' | 'bad' {
-		if (ms < 80) return 'good';
-		if (ms < 130) return 'warn';
-		if (ms < 200) return 'high';
-		return 'bad';
-	}
-
-	let latencyClass = $derived.by(() => {
-		if (latencyMs === null || connectivity !== 'connected') return '';
-		return `latency-${latencyTier(latencyMs)}`;
-	});
 
 	let manualChecking = $state(false);
 	async function checkConnectivityManual(): Promise<void> {
@@ -251,12 +240,9 @@ import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsMod
 		return 'idle';
 	});
 
-	let showLatency = $derived(
-		!isCheckDisabled &&
-		connectivity === 'connected' &&
-		latencyMs !== null &&
-		borderState !== 'recovering'
-	);
+	/** Ping only when tunnel is up, stable, and connectivity check is enabled. */
+	let showPingButton = $derived(!isCheckDisabled && borderState === 'running');
+
 </script>
 
 {#if view === 'list'}
@@ -318,45 +304,28 @@ import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsMod
 		{#if statusHint}
 			<div class="list-note list-status-hint" class:recovering={borderState === 'recovering'}>{statusHint}</div>
 		{/if}
-		{#if tunnel.status === 'running' || tunnel.status === 'broken'}
-			<div class="connectivity-row" class:recovering={borderState === 'recovering'}>
-			{#if showLatency}
-				<span class="latency-value {latencyClass}">{latencyMs}ms</span>
-				{/if}
-				<button
-					class="connectivity-gear"
-					onclick={() => connectivitySettingsOpen = true}
-					title="Настройки проверки связности"
-				>
-					<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" /></svg>
-				</button>
-				{#if !isCheckDisabled}
-					<button
-						class="connectivity-btn"
-						class:connected={connectivity === 'connected'}
-						class:disconnected={connectivity === 'disconnected'}
-						class:checking={manualChecking}
-						onclick={checkConnectivityManual}
-							title={connectivity === 'connected'
-								? 'Связь OK'
-								: connectivity === 'disconnected'
-									? 'Нет связи. Нажмите для проверки'
-									: 'Проверка связи...'}
-						>
-							{#if manualChecking}
-								<span class="connectivity-spinner"></span>
-							{:else if connectivity === 'connected'}
-								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></svg>
-							{:else}
-								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="2" y1="2" x2="22" y2="22"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 4.17-2.65"/><path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76"/></svg>
-							{/if}
-						</button>
-					{/if}
-				</div>
+	{#if tunnel.status === 'running' || tunnel.status === 'broken'}
+		<div class="connectivity-row" class:recovering={borderState === 'recovering'}>
+			{#if showPingButton}
+				<PingButton
+					{connectivity}
+					{latencyMs}
+					checking={manualChecking}
+					onclick={checkConnectivityManual}
+				/>
 			{/if}
+			<button
+				class="connectivity-gear"
+				onclick={() => connectivitySettingsOpen = true}
+				title="Настройки проверки связности"
+			>
+				<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" /></svg>
+			</button>
 		</div>
+	{/if}
+</div>
 
-		<div class="list-cell list-cell-endpoint">
+<div class="list-cell list-cell-endpoint">
 			<span class="list-label">Endpoint</span>
 			<div class="kv-endpoint">
 				<span class="kv-value truncate" title={showEndpoint ? serverHost : ''}>{showEndpoint ? (serverHost || '—') : '•••••••••'}</span>
@@ -496,43 +465,27 @@ import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsMod
 					/>
 				</span>
 				</div>
-				<!-- row 2: ping + gear + wifi (only when running) -->
-				{#if tunnel.status === 'running' || tunnel.status === 'broken'}
-			<div class="dense-toolbar-bottom" class:recovering={borderState === 'recovering'}>
-			{#if showLatency}
-				<span class="latency-value {latencyClass}">{latencyMs}ms</span>
-				{/if}
-						<button
-							class="connectivity-gear"
-							onclick={() => connectivitySettingsOpen = true}
-							title="Настройки проверки связности"
-						>
-							<svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" /></svg>
-						</button>
-						{#if !isCheckDisabled}
-							<button
-								class="connectivity-btn"
-								class:connected={connectivity === 'connected'}
-								class:disconnected={connectivity === 'disconnected'}
-								class:checking={manualChecking}
-								onclick={checkConnectivityManual}
-								title={connectivity === 'connected'
-									? 'Связь OK'
-									: connectivity === 'disconnected'
-										? 'Нет связи. Нажмите для проверки'
-										: 'Проверка связи...'}
-							>
-								{#if manualChecking}
-									<span class="connectivity-spinner"></span>
-								{:else if connectivity === 'connected'}
-									<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></svg>
-								{:else}
-									<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="2" y1="2" x2="22" y2="22"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 4.17-2.65"/><path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76"/></svg>
-								{/if}
-							</button>
-						{/if}
-					</div>
-				{/if}
+			<!-- row 2: ping + gear (only when running) -->
+			{#if tunnel.status === 'running' || tunnel.status === 'broken'}
+		<div class="dense-toolbar-bottom" class:recovering={borderState === 'recovering'}>
+					{#if showPingButton}
+						<PingButton
+							{connectivity}
+							{latencyMs}
+							checking={manualChecking}
+							size="sm"
+							onclick={checkConnectivityManual}
+						/>
+					{/if}
+					<button
+						class="connectivity-gear"
+						onclick={() => connectivitySettingsOpen = true}
+						title="Настройки проверки связности"
+					>
+						<svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" /></svg>
+					</button>
+				</div>
+			{/if}
 			</div>
 			{:else}
 				<div class="head-left">
@@ -585,45 +538,28 @@ import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsMod
 				{#if view !== 'compact' && statusHint}
 					<span class="status-hint">{statusHint}</span>
 				{/if}
-				{#if tunnel.status === 'running' || tunnel.status === 'broken'}
-					<div class="connectivity-row" class:recovering={borderState === 'recovering'}>
-			{#if showLatency}
-				<span class="latency-value {latencyClass}">{latencyMs}ms</span>
-				{/if}
-						<button
-							class="connectivity-gear"
-							onclick={() => connectivitySettingsOpen = true}
-							title="Настройки проверки связности"
-						>
-							<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" /></svg>
-						</button>
-						{#if !isCheckDisabled}
-							<button
-								class="connectivity-btn"
-								class:connected={connectivity === 'connected'}
-								class:disconnected={connectivity === 'disconnected'}
-								class:checking={manualChecking}
-								onclick={checkConnectivityManual}
-								title={connectivity === 'connected'
-									? 'Связь OK'
-									: connectivity === 'disconnected'
-										? 'Нет связи. Нажмите для проверки'
-										: 'Проверка связи...'}
-							>
-								{#if manualChecking}
-									<span class="connectivity-spinner"></span>
-								{:else if connectivity === 'connected'}
-									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></svg>
-								{:else}
-									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="2" y1="2" x2="22" y2="22"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 4.17-2.65"/><path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76"/></svg>
-								{/if}
-							</button>
-						{/if}
-						</div>
+			{#if tunnel.status === 'running' || tunnel.status === 'broken'}
+				<div class="connectivity-row" class:recovering={borderState === 'recovering'}>
+					{#if showPingButton}
+						<PingButton
+							{connectivity}
+							{latencyMs}
+							checking={manualChecking}
+							onclick={checkConnectivityManual}
+						/>
 					{/if}
+					<button
+						class="connectivity-gear"
+						onclick={() => connectivitySettingsOpen = true}
+						title="Настройки проверки связности"
+					>
+						<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" /></svg>
+					</button>
 				</div>
 			{/if}
 		</div>
+	{/if}
+</div>
 
 		<!-- Details -->
 		<div class="details">
@@ -1121,31 +1057,10 @@ import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsMod
 		border-radius: var(--radius-sm);
 	}
 
-	.card.view-dense .dense-toolbar-bottom .latency-value {
-		font-size: 9px;
-		line-height: 1;
-		font-family: var(--font-mono);
-		color: var(--color-text-muted);
-		transition: color 0.4s ease;
-	}
-
-	.card.view-dense .dense-toolbar-bottom.recovering .connectivity-btn,
-	.connectivity-row.recovering .connectivity-btn {
-		color: var(--color-broken);
-		transition: color 0.4s ease;
-	}
-
-	.card.view-dense .dense-toolbar-bottom .connectivity-gear,
-	.card.view-dense .dense-toolbar-bottom .connectivity-btn {
+	.card.view-dense .dense-toolbar-bottom .connectivity-gear {
 		width: 16px;
 		height: 16px;
 		padding: 0;
-	}
-
-	.card.view-dense .dense-toolbar-bottom .connectivity-spinner {
-		width: 8px;
-		height: 8px;
-		border-width: 1.5px;
 	}
 
 	.card.view-dense .dense-toolbar-top .led {
@@ -1418,88 +1333,21 @@ import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsMod
 		gap: 5px;
 	}
 
-	.latency-value {
-		font-variant-numeric: tabular-nums;
-		font-size: 12px;
-		font-weight: 500;
-		color: var(--color-text-muted);
-		transition: color 0.4s ease;
-	}
-
-	.latency-value.latency-good,
-	.card.view-dense .dense-toolbar-bottom .latency-value.latency-good {
-		color: var(--color-success);
-	}
-
-	.latency-value.latency-warn,
-	.card.view-dense .dense-toolbar-bottom .latency-value.latency-warn {
-		color: var(--color-warning);
-	}
-
-	.latency-value.latency-high,
-	.card.view-dense .dense-toolbar-bottom .latency-value.latency-high {
-		color: var(--color-broken);
-	}
-
-	.latency-value.latency-bad,
-	.card.view-dense .dense-toolbar-bottom .latency-value.latency-bad {
-		color: var(--color-error);
-	}
-
-	.connectivity-gear,
-	.connectivity-btn {
+	.connectivity-gear {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		border: none;
 		cursor: pointer;
-		transition: color var(--t-fast) ease, background var(--t-fast) ease;
-	}
-
-	.connectivity-gear {
 		padding: 2px;
 		background: none;
 		color: var(--color-text-muted);
 		border-radius: var(--radius-sm);
+		transition: color var(--t-fast) ease;
 	}
 
 	.connectivity-gear:hover {
 		color: var(--color-accent);
-	}
-
-	.connectivity-btn {
-		width: 24px;
-		height: 24px;
-		border-radius: var(--radius-sm);
-		background: var(--color-bg-tertiary);
-		color: var(--color-text-muted);
-	}
-
-	.connectivity-btn:hover {
-		background: var(--color-border);
-	}
-
-	.connectivity-btn.connected {
-		background: var(--color-success-tint);
-		color: var(--color-success);
-	}
-
-	.connectivity-btn.disconnected {
-		background: var(--color-error-tint);
-		color: var(--color-error);
-	}
-
-	.connectivity-spinner {
-		width: 10px;
-		height: 10px;
-		border: 2px solid currentColor;
-		border-top-color: transparent;
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
-
-	@keyframes spin {
-		to { transform: rotate(360deg); }
 	}
 
 	/* Details */

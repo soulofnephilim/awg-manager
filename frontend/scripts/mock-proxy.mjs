@@ -951,6 +951,13 @@ function buildSingboxTrafficEvent() {
 	return merged;
 }
 
+/** Clamp mock latency to 10..600 ms (0 = timeout). */
+function mockDelayJitter(base, spread = 70) {
+	if (Math.random() < 0.05) return 0;
+	const jitter = Math.round((Math.random() - 0.5) * spread);
+	return Math.max(10, Math.min(600, base + jitter));
+}
+
 function currentSingboxDelays() {
 	const tunnelDelays = MOCK_SINGBOX_TUNNELS.map((t, i) => {
 		if (t.tag === 'trojan-jp-timeout') {
@@ -959,9 +966,10 @@ function currentSingboxDelays() {
 		if (t.tag === 'hysteria-sg-off') {
 			return { tag: t.tag, delay: 0 };
 		}
+		const seed = 40 + (i * 113) % 560;
 		return {
 			tag: t.tag,
-			delay: 70 + i * 35 + Math.floor(Math.random() * 45),
+			delay: mockDelayJitter(seed, 55),
 		};
 	});
 
@@ -982,13 +990,13 @@ function currentSingboxDelays() {
 				continue;
 			}
 
-			// Active member has better latency; others are slightly higher.
+			// Spread 10..600 ms by tag; active member biased lower.
 			const isActive = tag === sub.activeMember;
-			const base = isActive ? 62 : 96;
 			let acc = 0;
-			for (let j = 0; j < tag.length; j++) acc += tag.charCodeAt(j);
-			const jitter = acc % 57; // deterministic by tag
-			subDelays.push({ tag, delay: base + jitter });
+			for (let j = 0; j < tag.length; j++) acc = ((acc << 5) - acc + tag.charCodeAt(j)) | 0;
+			const spread = Math.abs(acc) % 591;
+			const base = isActive ? 15 + (spread % 140) : 120 + (spread % 481);
+			subDelays.push({ tag, delay: mockDelayJitter(base, 45) });
 		}
 	}
 
@@ -1900,19 +1908,14 @@ const mockProxies = {
 	},
 };
 const mockProxyDelays = {
-	'vless-1': 45,
-	'vless-2': 78,
-	'vless-3': 180,
-	'vless-4': 320,
+	'vless-1': 48,
+	'vless-2': 135,
+	'vless-3': 285,
+	'vless-4': 520,
 };
 function randomizeDelays() {
 	for (const k of Object.keys(mockProxyDelays)) {
-		const base = mockProxyDelays[k];
-		if (Math.random() < 0.05) {
-			mockProxyDelays[k] = 0; // 5% timeout
-		} else {
-			mockProxyDelays[k] = Math.max(10, base + Math.round((Math.random() - 0.5) * 40));
-		}
+		mockProxyDelays[k] = mockDelayJitter(mockProxyDelays[k]);
 	}
 }
 

@@ -7,6 +7,7 @@
 	import { notifications } from '$lib/stores/notifications';
 	import { api } from '$lib/api/client';
 	import { TunnelCard, ExternalTunnelCard, AdoptTunnelDialog, SystemTunnelCard, TunnelReferencedModal } from '$lib/components/tunnels';
+	import PingButton from '$lib/components/tunnels/PingButton.svelte';
 	import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsModal.svelte';
 	import { PageContainer, PageHeader, LoadingSpinner, EmptyState, WelcomeBanner } from '$lib/components/layout';
 	import {
@@ -119,6 +120,7 @@
 	);
 
 	let toggleLoading = $state<Record<string, boolean>>({});
+	let pingChecking = $state<Record<string, boolean>>({});
 	let deleteLoading = $state<Record<string, boolean>>({});
 	let deleteConfirmId = $state<string | null>(null);
 	let referencedDetails = $state<import('$lib/types').TunnelReferencedError | null>(null);
@@ -215,6 +217,19 @@
 			notifications.success(`Туннель ${id} перенесён в серверы.`);
 		} catch (e) {
 			notifications.error(e instanceof Error ? e.message : 'Ошибка переноса в серверы');
+		}
+	}
+
+	async function checkPing(id: string) {
+		if (pingChecking[id]) return;
+		pingChecking[id] = true;
+		try {
+			const result = await api.checkConnectivity(id);
+			tunnels.updateConnectivity(id, result.connected, result.latency ?? null);
+		} catch {
+			tunnels.updateConnectivity(id, false, null);
+		} finally {
+			pingChecking[id] = false;
 		}
 	}
 
@@ -823,12 +838,12 @@
 		return ['running', 'starting', 'broken'].includes(tunnel.status);
 	}
 
-	function latencyTier(ms: number | null): 'good' | 'warn' | 'high' | 'bad' {
-		if (ms === null) return 'good';
-		if (ms < 80) return 'good';
-		if (ms < 130) return 'warn';
-		if (ms < 200) return 'high';
-		return 'bad';
+	function showManagedPing(tunnel: TunnelListItem): boolean {
+		return (
+			tunnel.status === 'running' &&
+			tunnel.pingCheck.status !== 'recovering' &&
+			(tunnel.connectivityCheck?.method ?? 'http') !== 'disabled'
+		);
 	}
 
 	function managedStatusVariant(tunnel: TunnelListItem): 'success' | 'error' | 'warning' | 'muted' {
@@ -863,25 +878,6 @@
 			default:
 				return tunnel.status || '—';
 		}
-	}
-
-	function managedStatusMeta(tunnel: TunnelListItem, connectivity?: ConnectivityCell): string {
-		if (tunnel.hasAddressConflict) {
-			return 'Дублирует адрес уже запущенного туннеля';
-		}
-		if (tunnel.status === 'running' || tunnel.status === 'broken') {
-			if ((tunnel.connectivityCheck?.method ?? 'http') === 'disabled') {
-				return 'Проверка связи выключена';
-			}
-			if (tunnel.pingCheck.status === 'recovering') {
-				return 'Восстановление...';
-			}
-			if (!connectivity) return 'Проверка...';
-			if (!connectivity.connected) return 'Нет связи';
-			if (connectivity.latency !== null) return `Пинг ${connectivity.latency} мс`;
-			return 'Связь есть';
-		}
-		return '';
 	}
 
 	function managedRouteMeta(tunnel: TunnelListItem): string {
@@ -1257,11 +1253,17 @@
 						<span class="awg-list-head-actions">Действия</span>
 					</div>
 
-					{#each awgList as tunnel (tunnel.id)}
-						{@const connectivity = awgConnectivityMap.get(tunnel.id)}
-						{@const isEndpointShown = endpointVisible('managed', tunnel.id)}
-						{@const rate = latestRate(tunnel.id)}
-						{@const spark = sparklineData(tunnel.id)}
+				{#each awgList as tunnel (tunnel.id)}
+					{@const connectivity = awgConnectivityMap.get(tunnel.id)}
+					{@const isEndpointShown = endpointVisible('managed', tunnel.id)}
+					{@const rate = latestRate(tunnel.id)}
+					{@const spark = sparklineData(tunnel.id)}
+					{@const isActive = isManagedTunnelOn(tunnel)}
+					{@const checkDisabled = (tunnel.connectivityCheck?.method ?? 'http') === 'disabled'}
+					{@const connState = !isActive ? 'idle'
+						: connectivity === undefined ? 'checking'
+						: connectivity.connected ? 'connected' : 'disconnected'}
+					{@const showPing = showManagedPing(tunnel)}
 						<div class="awg-list-row">
 						<div
 							class="awg-list-cell awg-list-cell-toggle"
@@ -1305,26 +1307,28 @@
 								</div>
 							</div>
 							<div class="awg-list-cell awg-list-cell-status" data-label="Статус">
-								<div class="awg-list-status-line">
+								<div class="awg-list-status-stack">
+									<div class="awg-list-status-line">
 									<StatusDot
 										variant={managedStatusVariant(tunnel)}
 										pulse={tunnel.status === 'running' && tunnel.pingCheck.status === 'recovering'}
 										ariaLabel={managedStatusLabel(tunnel)}
 									/>
 									<span class="awg-list-status-text">{managedStatusLabel(tunnel)}</span>
-								</div>
-						{#if managedStatusMeta(tunnel, connectivity)}
-						<div
-						class="awg-list-sub"
-						class:awg-list-sub--ok={isManagedTunnelOn(tunnel) && connectivity?.connected && connectivity.latency !== null && latencyTier(connectivity.latency) === 'good' && tunnel.pingCheck.status !== 'recovering'}
-						class:awg-list-sub--warn={isManagedTunnelOn(tunnel) && connectivity?.connected && connectivity.latency !== null && latencyTier(connectivity.latency) === 'warn' && tunnel.pingCheck.status !== 'recovering'}
-						class:awg-list-sub--high={isManagedTunnelOn(tunnel) && connectivity?.connected && connectivity.latency !== null && latencyTier(connectivity.latency) === 'high' && tunnel.pingCheck.status !== 'recovering'}
-						class:awg-list-sub--bad={isManagedTunnelOn(tunnel) && connectivity?.connected && connectivity.latency !== null && latencyTier(connectivity.latency) === 'bad' && tunnel.pingCheck.status !== 'recovering'}
-						class:awg-list-sub--error={tunnel.hasAddressConflict || (isManagedTunnelOn(tunnel) && !!connectivity && !connectivity.connected && tunnel.pingCheck.status !== 'recovering')}
-					>
-							{managedStatusMeta(tunnel, connectivity)}
-						</div>
-						{/if}
+									</div>
+									{#if tunnel.hasAddressConflict}
+								<div class="awg-list-sub awg-list-sub--error">Дублирует адрес уже запущенного туннеля</div>
+							{:else if showPing}
+								<PingButton
+									connectivity={connState}
+									latencyMs={connectivity?.latency ?? null}
+									checking={pingChecking[tunnel.id] ?? false}
+									onclick={() => checkPing(tunnel.id)}
+								/>
+							{:else if isActive && checkDisabled}
+								<div class="awg-list-sub">Проверка связи выключена</div>
+							{/if}
+							</div>
 							</div>
 							<div class="awg-list-cell" data-label="Endpoint">
 								<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
@@ -2320,26 +2324,6 @@
 		text-overflow: ellipsis;
 	}
 
-	.awg-list-sub--ok {
-		color: var(--color-success);
-		transition: color 0.4s ease;
-	}
-
-	.awg-list-sub--warn {
-		color: var(--color-warning);
-		transition: color 0.4s ease;
-	}
-
-	.awg-list-sub--high {
-		color: var(--color-broken);
-		transition: color 0.4s ease;
-	}
-
-	.awg-list-sub--bad {
-		color: var(--color-error);
-		transition: color 0.4s ease;
-	}
-
 	.awg-list-sub--error {
 		color: var(--color-error);
 	}
@@ -2387,8 +2371,21 @@
 		color: var(--color-text-muted);
 	}
 
+	.awg-list-status-stack {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.25rem;
+		min-width: 0;
+	}
+
+	.awg-list-status-stack :global(.ping-btn) {
+		width: auto;
+		max-width: 100%;
+	}
+
 	.awg-list-status-line {
-		display: inline-flex;
+		display: flex;
 		align-items: center;
 		gap: 0.5rem;
 	}

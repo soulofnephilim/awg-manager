@@ -134,6 +134,17 @@
   --color-muted-tint: color-mix(in srgb, var(--color-text-secondary) 12%, transparent);
   --color-muted-border: color-mix(in srgb, var(--color-text-secondary) 30%, transparent);
 
+  /* Latency tier palette — thresholds differ per UI; colors are shared. */
+  --latency-color-ok: var(--color-success);
+  --latency-color-slow: var(--color-warning);
+  --latency-color-fail: var(--color-error);
+  --latency-bar-ok: color-mix(in srgb, var(--color-success) 72%, transparent);
+  --latency-bar-slow: color-mix(in srgb, var(--color-warning) 72%, transparent);
+  --latency-bar-fail: color-mix(in srgb, var(--color-error) 72%, transparent);
+  --latency-dot-ok-shadow: var(--color-success-border);
+  --latency-dot-slow-shadow: var(--color-warning-border);
+  --latency-dot-fail-shadow: var(--color-error-border);
+
   /* Override Tailwind utility radii to match our scale */
   --radius-md: var(--radius-sm);
   --radius-lg: var(--radius);

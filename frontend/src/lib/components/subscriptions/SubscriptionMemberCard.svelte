@@ -122,7 +122,11 @@
 				onclick={runTest}
 				onkeydown={onTestKeydown}
 			>
-				{testing ? '...' : delayText}
+				<span>{testing ? '...' : delayText}</span>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+					<path d="M23 4v6h-6M1 20v-6h6" />
+					<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+				</svg>
 			</span>
 		</div>
 		<div class="c c-name" data-label="Сервер">
@@ -230,7 +234,11 @@
 			onkeydown={onTestKeydown}
 			title="Проверить delay"
 		>
-			{testing ? '...' : delayText}
+			<span>{testing ? '...' : delayText}</span>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+				<path d="M23 4v6h-6M1 20v-6h6" />
+				<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+			</svg>
 		</span>
 		<div class="spark {delayState}">
 			{#if history.length === 0}
@@ -357,11 +365,36 @@
 		font-size: 0.7rem;
 		font-family: var(--font-mono, ui-monospace, monospace);
 		cursor: pointer;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-variant-numeric: tabular-nums;
 	}
-	.delay-btn.is-disabled { opacity: 0.5; cursor: wait; }
-	.delay-btn.ok    { color: #3fb950; }
-	.delay-btn.slow  { color: #d29922; }
-	.delay-btn.fail  { color: #f85149; }
+	.delay-btn svg {
+		width: 11px;
+		height: 11px;
+		opacity: 0.5;
+		flex-shrink: 0;
+		transition: opacity 0.15s, transform 0.3s;
+	}
+	.delay-btn:hover:not(.is-disabled) svg {
+		opacity: 1;
+	}
+	.delay-btn.is-disabled {
+		opacity: 0.5;
+		cursor: wait;
+	}
+	.delay-btn.is-disabled svg {
+		animation: delay-spin 1s linear infinite;
+	}
+	@keyframes delay-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+	.delay-btn.ok    { color: var(--latency-color-ok); }
+	.delay-btn.slow  { color: var(--latency-color-slow); }
+	.delay-btn.fail  { color: var(--latency-color-fail); }
 	.spark {
 		flex: 1;
 		display: flex;
@@ -374,9 +407,9 @@
 		background: var(--color-bg-tertiary);
 		border-radius: 1px;
 	}
-	.spark.ok .bar   { background: #3fb950; }
-	.spark.slow .bar { background: #d29922; }
-	.spark.fail .bar { background: #f85149; }
+	.spark.ok .bar   { background: var(--latency-bar-ok); }
+	.spark.slow .bar { background: var(--latency-bar-slow); }
+	.spark.fail .bar { background: var(--latency-bar-fail); }
 	.bar.empty       { opacity: 0.3; }
 	.server-line {
 		font-size: 0.72rem;
@@ -474,13 +507,13 @@
 		background: var(--color-bg-tertiary);
 	}
 	.spark-mini.ok .bar {
-		background: #3fb950;
+		background: var(--latency-bar-ok);
 	}
 	.spark-mini.slow .bar {
-		background: #d29922;
+		background: var(--latency-bar-slow);
 	}
 	.spark-mini.fail .bar {
-		background: #f85149;
+		background: var(--latency-bar-fail);
 	}
 	.spark-mini.unknown .bar,
 	.spark-mini .bar.empty {

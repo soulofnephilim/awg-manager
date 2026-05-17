@@ -494,13 +494,13 @@
 		font-family: ui-monospace, monospace;
 	}
 	.delay-good {
-		color: var(--color-success, #22c55e);
+		color: var(--latency-color-ok);
 	}
 	.delay-warn {
-		color: var(--color-warning, #f59e0b);
+		color: var(--latency-color-slow);
 	}
 	.delay-bad {
-		color: var(--color-error, #dc2626);
+		color: var(--latency-color-fail);
 	}
 	.delay-muted {
 		color: var(--color-text-muted, var(--muted-text));

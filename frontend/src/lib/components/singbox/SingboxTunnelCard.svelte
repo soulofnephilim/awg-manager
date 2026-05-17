@@ -198,7 +198,11 @@
 				title="Обновить delay"
 				disabled={checking}
 			>
-				{checking ? '...' : latText}
+				<span>{checking ? '...' : latText}</span>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+					<path d="M23 4v6h-6M1 20v-6h6" />
+					<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+				</svg>
 			</button>
 		</div>
 		<div class="list-cell list-cell-name" data-label="Туннель">
@@ -553,10 +557,10 @@
 		position: relative;
 		transition: border-color 0.2s;
 	}
-	.card.ok { border-color: rgba(16, 185, 129, 0.3); }
-	.card.slow { border-color: rgba(245, 158, 11, 0.3); }
-	.card.fail { border-color: rgba(239, 68, 68, 0.3); }
-	.card.stopped { border-color: rgba(148, 163, 184, 0.4); opacity: 0.7; }
+	.card.ok { border-color: var(--color-success-border); }
+	.card.slow { border-color: var(--color-warning-border); }
+	.card.fail { border-color: var(--color-error-border); }
+	.card.stopped { border-color: var(--color-muted-border); opacity: 0.7; }
 
 	.led-wrap {
 		position: absolute;
@@ -572,10 +576,10 @@
 		border-radius: 50%;
 		background: var(--text-muted);
 	}
-	.dot.ok { background: #10b981; box-shadow: 0 0 6px rgba(16, 185, 129, 0.6); }
-	.dot.slow { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.6); }
-	.dot.fail { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.6); }
-	.dot.stopped { background: #94a3b8; }
+	.dot.ok   { background: var(--latency-color-ok); box-shadow: 0 0 6px var(--latency-dot-ok-shadow); }
+	.dot.slow { background: var(--latency-color-slow); box-shadow: 0 0 6px var(--latency-dot-slow-shadow); }
+	.dot.fail { background: var(--latency-color-fail); box-shadow: 0 0 6px var(--latency-dot-fail-shadow); }
+	.dot.stopped { background: var(--color-text-muted); }
 
 	.lat-btn {
 		background: none;
@@ -597,10 +601,10 @@
 		background: var(--bg-tertiary);
 		border-color: var(--border);
 	}
-	.lat-btn.ok { color: #10b981; }
-	.lat-btn.slow { color: #fbbf24; }
-	.lat-btn.fail { color: #ef4444; }
-	.lat-btn.stopped { color: #94a3b8; }
+	.lat-btn.ok   { color: var(--latency-color-ok); }
+	.lat-btn.slow { color: var(--latency-color-slow); }
+	.lat-btn.fail { color: var(--latency-color-fail); }
+	.lat-btn.stopped { color: var(--color-text-muted); }
 	.lat-btn svg {
 		width: 11px;
 		height: 11px;
@@ -724,7 +728,7 @@
 		border-radius: 1px;
 		min-height: 2px;
 	}
-	.spark.fail .bar { background: rgba(239, 68, 68, 0.4); height: 100% !important; }
+	.spark.fail .bar { background: var(--latency-bar-fail); height: 100% !important; }
 	.spark.unknown .bar,
 	.spark .bar.empty {
 		background: var(--border);

@@ -150,9 +150,9 @@
         min-width: 60px;
         text-align: right;
     }
-    .delay.ok      { color: #3fb950; }
-    .delay.slow    { color: #d29922; }
-    .delay.fail    { color: #f85149; }
+    .delay.ok      { color: var(--latency-color-ok); }
+    .delay.slow    { color: var(--latency-color-slow); }
+    .delay.fail    { color: var(--latency-color-fail); }
     .delay.unknown { color: var(--color-text-muted); }
     .err {
         padding: 0.5rem 0.75rem;

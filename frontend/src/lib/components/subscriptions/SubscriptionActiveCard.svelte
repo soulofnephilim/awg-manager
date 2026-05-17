@@ -262,7 +262,11 @@
                         title="Обновить delay"
                         disabled={checking}
                     >
-                        {checking ? '...' : latText}
+                        <span>{checking ? '...' : latText}</span>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M23 4v6h-6M1 20v-6h6" />
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                        </svg>
                     </button>
                 {/if}
             </div>
@@ -431,7 +435,11 @@
             title="Обновить delay"
             disabled={checking}
         >
-            {checking ? '...' : latText}
+            <span>{checking ? '...' : latText}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M23 4v6h-6M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
         </button>
     </div>
 
@@ -693,9 +701,9 @@
         border-radius: 999px;
         background: var(--color-bg-tertiary);
     }
-    .dot.ok      { background: #3fb950; box-shadow: 0 0 0 3px rgba(63,185,80,0.22); }
-    .dot.slow    { background: #d29922; box-shadow: 0 0 0 3px rgba(210,153,34,0.22); }
-    .dot.fail    { background: #f85149; box-shadow: 0 0 0 3px rgba(248,81,73,0.22); }
+    .dot.ok      { background: var(--latency-color-ok); box-shadow: 0 0 6px var(--latency-dot-ok-shadow); }
+    .dot.slow    { background: var(--latency-color-slow); box-shadow: 0 0 6px var(--latency-dot-slow-shadow); }
+    .dot.fail    { background: var(--latency-color-fail); box-shadow: 0 0 6px var(--latency-dot-fail-shadow); }
     .lat-btn {
         padding: 0.15rem 0.5rem;
         border-radius: 4px;
@@ -706,11 +714,35 @@
         font-size: 0.7rem;
         font-family: var(--font-mono, ui-monospace, monospace);
         cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-variant-numeric: tabular-nums;
     }
-    .lat-btn:disabled { opacity: 0.5; }
-    .lat-btn.ok   { color: #3fb950; }
-    .lat-btn.slow { color: #d29922; }
-    .lat-btn.fail { color: #f85149; }
+    .lat-btn svg {
+        width: 11px;
+        height: 11px;
+        opacity: 0.5;
+        flex-shrink: 0;
+        transition: opacity 0.15s, transform 0.3s;
+    }
+    .lat-btn:hover:not(:disabled) svg {
+        opacity: 1;
+    }
+    .lat-btn:disabled {
+        opacity: 0.5;
+    }
+    .lat-btn.checking svg {
+        animation: lat-spin 1s linear infinite;
+    }
+    @keyframes lat-spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+    .lat-btn.ok   { color: var(--latency-color-ok); }
+    .lat-btn.slow { color: var(--latency-color-slow); }
+    .lat-btn.fail { color: var(--latency-color-fail); }
     .title-row {
         display: flex;
         align-items: center;
@@ -837,9 +869,9 @@
         height: 28px;
     }
     .bar { flex: 1; background: var(--color-bg-tertiary); border-radius: 1px; }
-    .spark.ok .bar    { background: #3fb950; }
-    .spark.slow .bar  { background: #d29922; }
-    .spark.fail .bar  { background: #f85149; }
+    .spark.ok .bar    { background: var(--latency-bar-ok); }
+    .spark.slow .bar  { background: var(--latency-bar-slow); }
+    .spark.fail .bar  { background: var(--latency-bar-fail); }
     .bar.empty        { opacity: 0.3; }
     .actions {
         display: flex;
@@ -1021,13 +1053,13 @@
         background: var(--color-bg-tertiary);
     }
     .spark-mini.ok .bar {
-        background: #3fb950;
+        background: var(--latency-bar-ok);
     }
     .spark-mini.slow .bar {
-        background: #d29922;
+        background: var(--latency-bar-slow);
     }
     .spark-mini.fail .bar {
-        background: #f85149;
+        background: var(--latency-bar-fail);
     }
     .spark-mini.unknown .bar,
     .spark-mini .bar.empty {

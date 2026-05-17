@@ -200,7 +200,11 @@
 							onkeydown={onDelayKeydown}
 							title="Обновить delay"
 						>
-							{testingDelay ? '...' : delayText}
+							<span>{testingDelay ? '...' : delayText}</span>
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+								<path d="M23 4v6h-6M1 20v-6h6" />
+								<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+							</svg>
 						</button>
 					{:else}
 						<span class="delay-dash">—</span>
@@ -485,19 +489,41 @@
 		font-size: 0.72rem;
 		font-family: var(--font-mono, ui-monospace, monospace);
 		cursor: pointer;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-variant-numeric: tabular-nums;
+	}
+	.lat-btn svg {
+		width: 11px;
+		height: 11px;
+		opacity: 0.5;
+		flex-shrink: 0;
+		transition: opacity 0.15s, transform 0.3s;
+	}
+	.lat-btn:hover:not(:disabled) svg {
+		opacity: 1;
 	}
 	.lat-btn.is-checking {
 		opacity: 0.55;
 		cursor: wait;
 	}
+	.lat-btn.is-checking svg {
+		animation: lat-spin 1s linear infinite;
+	}
+	@keyframes lat-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
 	.lat-btn.ok {
-		color: #3fb950;
+		color: var(--latency-color-ok);
 	}
 	.lat-btn.slow {
-		color: #d29922;
+		color: var(--latency-color-slow);
 	}
 	.lat-btn.fail {
-		color: #f85149;
+		color: var(--latency-color-fail);
 	}
 	.spark-mini {
 		display: flex;
@@ -515,13 +541,13 @@
 		background: var(--color-bg-tertiary);
 	}
 	.spark-mini.ok .bar {
-		background: #3fb950;
+		background: var(--latency-bar-ok);
 	}
 	.spark-mini.slow .bar {
-		background: #d29922;
+		background: var(--latency-bar-slow);
 	}
 	.spark-mini.fail .bar {
-		background: #f85149;
+		background: var(--latency-bar-fail);
 	}
 	.spark-mini.unknown .bar,
 	.spark-mini .bar.empty {
