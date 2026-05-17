@@ -74,12 +74,12 @@
 	}
 
 	// Matrix exclusions are intentionally available for all row sources
-	// (awg/system/singbox): this toggle controls visibility/probing in
-	// the monitoring matrix only, not per-source pingcheck engines.
-	function tunnelMatrixToggleTitle(tunnelId: string): string {
+	// (awg/system/singbox): controls visibility/probing in the monitoring
+	// matrix only, not per-source pingcheck engines.
+	function tunnelMatrixExcludeLabel(tunnelId: string): string {
 		return isExcluded(tunnelId)
-			? 'Показывать туннель в матрице мониторинга'
-			: 'Скрыть туннель из матрицы мониторинга';
+			? 'Вернуть туннель в матрицу мониторинга'
+			: 'Исключить туннель из матрицы мониторинга';
 	}
 </script>
 
@@ -112,20 +112,27 @@
 								</div>
 
 								<div class="tunnel-toggle-row">
-									<button
-										type="button"
-										class="exclude-toggle"
-										class:is-excluded={isExcluded(t.id)}
-										onclick={() => onToggleTunnelExcluded(t.id, !isExcluded(t.id), t.name)}
-										title={tunnelMatrixToggleTitle(t.id)}
-										aria-label={tunnelMatrixToggleTitle(t.id)}
-										aria-pressed={isExcluded(t.id)}
-									>
-										<span class="toggle-track" aria-hidden="true">
-											<span class="toggle-thumb"></span>
-										</span>
-										<span class="toggle-text">{#if isExcluded(t.id)}выкл{:else}вкл{/if}</span>
-									</button>
+									{#if isExcluded(t.id)}
+										<button
+											type="button"
+											class="exclude-btn exclude-btn-restore"
+											onclick={() => onToggleTunnelExcluded(t.id, false, t.name)}
+											title={tunnelMatrixExcludeLabel(t.id)}
+											aria-label={tunnelMatrixExcludeLabel(t.id)}
+										>
+											Вернуть
+										</button>
+									{:else}
+										<button
+											type="button"
+											class="exclude-btn"
+											onclick={() => onToggleTunnelExcluded(t.id, true, t.name)}
+											title={tunnelMatrixExcludeLabel(t.id)}
+											aria-label={tunnelMatrixExcludeLabel(t.id)}
+										>
+											Исключить
+										</button>
+									{/if}
 								</div>
 							</div>
 							{#if t.source === 'singbox' && t.clashDelay && t.clashDelay > 0}
@@ -315,7 +322,7 @@
 			white-space: nowrap;
 		}
 
-		.exclude-toggle {
+		.exclude-btn {
 			margin: 0 auto;
 		}
 
@@ -349,68 +356,42 @@
 		opacity: 0.7;
 	}
 
-	.exclude-toggle {
+	.exclude-btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		gap: 0.3125rem;
 		height: 22px;
-		padding: 0 0.375rem 0 0.25rem;
-		border-radius: 999px;
+		padding: 0 0.5rem;
+		border-radius: var(--radius-sm);
 		border: 1px solid var(--color-border);
 		background: var(--color-bg-secondary);
 		color: var(--color-text-muted);
 		font-size: 10px;
 		font-weight: 600;
 		letter-spacing: 0.02em;
-		text-transform: uppercase;
 		cursor: pointer;
 		transition:
 			background var(--t-fast) ease,
 			color var(--t-fast) ease,
 			border-color var(--t-fast) ease,
 			box-shadow var(--t-fast) ease;
+		white-space: nowrap;
 	}
-	.exclude-toggle:hover {
+	.exclude-btn:hover {
 		background: var(--color-bg-hover);
 		color: var(--color-text-primary);
 	}
-	.exclude-toggle:focus-visible {
+	.exclude-btn:focus-visible {
 		outline: none;
 		box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
 	}
-	.exclude-toggle.is-excluded {
+	.exclude-btn-restore {
 		border-color: color-mix(in srgb, var(--color-error) 45%, var(--color-border));
 		color: var(--color-error);
 	}
-	.toggle-track {
-		position: relative;
-		width: 24px;
-		height: 12px;
-		border-radius: 999px;
-		background: color-mix(in srgb, var(--color-success) 35%, var(--color-bg-secondary));
-		transition: background var(--t-fast) ease;
-	}
-	.toggle-thumb {
-		position: absolute;
-		top: 1px;
-		left: 13px;
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		background: color-mix(in srgb, var(--color-success) 75%, white);
-		transition: left var(--t-fast) ease, background var(--t-fast) ease;
-	}
-	.exclude-toggle.is-excluded .toggle-track {
-		background: color-mix(in srgb, var(--color-error) 35%, var(--color-bg-secondary));
-	}
-	.exclude-toggle.is-excluded .toggle-thumb {
-		left: 1px;
-		background: color-mix(in srgb, var(--color-error) 72%, white);
-	}
-	.toggle-text {
-		min-width: 3.2ch;
-		text-align: left;
+	.exclude-btn-restore:hover {
+		background: color-mix(in srgb, var(--color-error) 12%, var(--color-bg-hover));
+		color: var(--color-error);
 	}
 
 	.tunnel-system {
