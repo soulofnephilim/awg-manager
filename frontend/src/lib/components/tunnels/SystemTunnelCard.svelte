@@ -98,14 +98,6 @@
 
 	let chartHeight = $derived(view === 'compact' ? 76 : 100);
 
-	let sparklineRates = $derived.by(() => {
-		const n = Math.min(rxRates.length, txRates.length);
-		if (n === 0) return [];
-		const combined: number[] = [];
-		for (let i = 0; i < n; i++) combined.push(rxRates[i] + txRates[i]);
-		return combined.slice(-28);
-	});
-
 	let inlineRxRate = $derived(rxRates.length > 0 ? rxRates[rxRates.length - 1] : 0);
 	let inlineTxRate = $derived(txRates.length > 0 ? txRates[txRates.length - 1] : 0);
 
@@ -497,15 +489,15 @@
 					title="Открыть график трафика"
 				>
 					<TrafficSparkline
-						data={sparklineRates}
-						width={76}
-						height={20}
-						color="var(--color-accent)"
+						rxData={rxRates}
+						txData={txRates}
+						width={84}
+						height={22}
 					/>
-					<span class="traffic-inline-rates">
+					<div class="traffic-inline-rates">
 						<span class="traffic-inline-rate rx">↓ {formatBitRate(inlineRxRate)}</span>
 						<span class="traffic-inline-rate tx">↑ {formatBitRate(inlineTxRate)}</span>
-					</span>
+					</div>
 				</button>
 			{:else}
 				<div class="chart-section">
@@ -767,10 +759,10 @@
 	.traffic-inline {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 0.45rem;
 		width: 100%;
 		min-width: 0;
-		padding: 4px 6px;
+		padding: 5px 6px;
 		margin: 0;
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm);
@@ -794,12 +786,14 @@
 
 	.traffic-inline-rates {
 		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
-		gap: 6px 10px;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.08rem;
+		padding-block: 3px;
 		min-width: 0;
-		flex: 1;
+		flex-shrink: 0;
 		font-size: 10px;
+		line-height: 1.15;
 		font-family: var(--font-mono, monospace);
 		font-variant-numeric: tabular-nums;
 	}

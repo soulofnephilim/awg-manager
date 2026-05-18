@@ -4,9 +4,7 @@
 	import type { Subscription, SubscriptionMember } from '$lib/types';
 	import { api } from '$lib/api/client';
 	import { Button, Modal, Stat, StatStrip } from '$lib/components/ui';
-	import { singboxDelayHistory, singboxTraffic, triggerDelayCheck } from '$lib/stores/singbox';
-	import { subscribeTraffic } from '$lib/stores/traffic';
-	import { formatBytes } from '$lib/utils/format';
+	import { singboxDelayHistory, triggerDelayCheck } from '$lib/stores/singbox';
 	import { notifications } from '$lib/stores/notifications';
 	import SubscriptionMemberCard from './SubscriptionMemberCard.svelte';
 	import type { SingboxLayoutMode } from '$lib/constants/singboxLayout';
@@ -89,28 +87,12 @@
 			  })),
 	);
 
-	let memberTrafficTick = $state(0);
-	$effect(() => {
-		return subscribeTraffic(() => {
-			memberTrafficTick++;
-		});
-	});
-
 	const membersListStats = $derived.by(() => {
-		void memberTrafficTick;
-		let down = 0;
-		let up = 0;
 		let delaySum = 0;
 		let delayN = 0;
 		let minLatest = Infinity;
-		const trMap = $singboxTraffic;
 		const histMap = $singboxDelayHistory;
 		for (const m of memberList) {
-			const tr = trMap.get(m.tag);
-			if (tr) {
-				down += tr.download ?? 0;
-				up += tr.upload ?? 0;
-			}
 			const h = histMap.get(m.tag) ?? [];
 			const last = h.length > 0 ? h[h.length - 1] : 0;
 			if (typeof last === 'number' && last > 0) {
@@ -121,8 +103,6 @@
 		}
 		return {
 			count: memberList.length,
-			down,
-			up,
 			avgDelayMs: delayN > 0 ? Math.round(delaySum / delayN) : null,
 			minDelayMs: minLatest === Infinity ? null : Math.round(minLatest),
 		};
@@ -274,11 +254,6 @@
 			<StatStrip>
 				<Stat value={`${membersListStats.count}`} label="Серверов" sub="в подписке" />
 				<Stat
-					value={formatBytes(membersListStats.down + membersListStats.up)}
-					label="Суммарный трафик"
-					sub={`↓ ${formatBytes(membersListStats.down)} · ↑ ${formatBytes(membersListStats.up)}`}
-				/>
-				<Stat
 					value={membersListStats.avgDelayMs !== null ? `${membersListStats.avgDelayMs} ms` : '—'}
 					label="Средний delay"
 					sub="по последним проверкам"
@@ -296,7 +271,6 @@
 				<span>Delay</span>
 				<span>Сервер</span>
 				<span>Протокол</span>
-				<span>Трафик</span>
 				<span>Ping</span>
 				<span>Тег</span>
 				<span>Статус</span>
@@ -671,14 +645,13 @@
 			minmax(80px, 1fr)
 			minmax(0, 1.35fr)
 			minmax(0, 1fr)
-			minmax(140px, 1.1fr)
 			minmax(56px, 0.9fr)
 			minmax(0, 0.95fr)
 			minmax(88px, 1fr);
 		gap: 0 1rem;
 		align-items: center;
 		padding: 0.65rem 1rem;
-		min-width: 940px;
+		min-width: 800px;
 		border-bottom: 1px solid var(--color-border);
 	}
 	.member-list-table.with-inline-remove .sbx-member-list-row {
@@ -686,12 +659,11 @@
 			minmax(80px, 1fr)
 			minmax(0, 1.35fr)
 			minmax(0, 1fr)
-			minmax(140px, 1.1fr)
 			minmax(56px, 0.9fr)
 			minmax(0, 0.95fr)
 			minmax(88px, 1fr)
 			42px;
-		min-width: 980px;
+		min-width: 840px;
 	}
 	.sbx-member-list-row--head {
 		background: var(--color-bg-tertiary);
@@ -714,10 +686,10 @@
 		background: var(--color-bg-primary);
 		font-size: 0.78rem;
 		color: var(--color-text-muted);
-		min-width: 940px;
+		min-width: 800px;
 	}
 	.member-list-table.with-inline-remove .member-list-meta-row {
-		min-width: 980px;
+		min-width: 840px;
 	}
 	.member-list-meta-row .meta-lbl {
 		text-transform: uppercase;
@@ -747,10 +719,10 @@
 		padding: 0.15rem 1rem;
 		border-bottom: 1px solid var(--color-border);
 		cursor: pointer;
-		min-width: 940px;
+		min-width: 800px;
 	}
 	.member-list-table.with-inline-remove .member-list-line {
-		min-width: 980px;
+		min-width: 840px;
 	}
 	.member-list-line:last-child {
 		border-bottom: none;
@@ -773,7 +745,6 @@
 			minmax(80px, 1fr)
 			minmax(0, 1.35fr)
 			minmax(0, 1fr)
-			minmax(0, 1.1fr)
 			minmax(56px, 0.9fr)
 			minmax(0, 0.95fr)
 			minmax(88px, 1fr);

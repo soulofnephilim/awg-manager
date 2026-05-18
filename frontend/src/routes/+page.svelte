@@ -1380,18 +1380,23 @@
 								{tunnel.startedAt ? formatDuration(secondsSince(tunnel.startedAt)) : '—'}
 							</div>
 							<div class="awg-list-cell awg-list-cell-actions" data-label="Действия">
-								<a class="awg-action-btn" href="/tunnels/{tunnel.id}" title="Изменить туннель «{tunnel.name}»" aria-label="Изменить туннель «{tunnel.name}»">
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>									
+								<a
+									class="awg-action-btn"
+									href="/tunnels/{tunnel.id}"
+									title="Изменить туннель «{tunnel.name}»"
+									aria-label="Изменить туннель «{tunnel.name}»"
+								>
+									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
 								</a>
-						<button
-							type="button"
-							class="awg-action-btn awg-action-test"
-							title="Тест туннеля «{tunnel.name}»"
-							aria-label="Тест туннеля «{tunnel.name}»"
-							onclick={() => openAwgDiagnostics(tunnel.id, tunnel.name)}
-						>
-							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg>
-						</button>
+								<button
+									type="button"
+									class="awg-action-btn awg-action-test"
+									title="Тест туннеля «{tunnel.name}»"
+									aria-label="Тест туннеля «{tunnel.name}»"
+									onclick={() => openAwgDiagnostics(tunnel.id, tunnel.name)}
+								>
+									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg>
+								</button>
 								<button
 									type="button"
 									class="awg-action-btn awg-action-danger"
@@ -1404,7 +1409,7 @@
 										<span class="awg-action-spinner"></span>
 									{:else}
 										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-									{/if}									
+									{/if}
 								</button>
 							</div>
 						</div>
@@ -2222,12 +2227,12 @@
 			minmax(210px, 1.3fr)
 			110px
 			90px
-			minmax(240px, 1.2fr);
+			minmax(100px, 0.95fr);
 		gap: 14px;
 		align-items: center;
 		padding: 0.875rem 1rem;
 		border-bottom: 1px solid var(--color-border);
-		min-width: 1180px;
+		min-width: 1040px;
 	}
 
 	.awg-list-row:last-child {
@@ -2446,7 +2451,7 @@
 	.awg-list-cell-rate {
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
+		gap: 0.45rem;
 		width: 100%;
 	}
 
@@ -2454,7 +2459,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: flex-start;
-		gap: 0.75rem;
+		gap: 0.45rem;
 		width: 100%;
 		padding: 0;
 		margin: 0;
@@ -2479,10 +2484,14 @@
 	.awg-list-rate-text {
 		display: flex;
 		flex-direction: column;
-		gap: 0.1875rem;
+		align-items: flex-start;
+		gap: 0.08rem;
+		padding-block: 3px;
 		font-size: 0.6875rem;
+		line-height: 1.15;
 		text-align: left;
 		min-width: 0;
+		flex-shrink: 0;
 	}
 
 	.awg-list-cell-mono {
@@ -2505,8 +2514,9 @@
 	.awg-action-btn {
 		display: inline-flex;
 		align-items: center;
+		justify-content: center;
 		gap: 4px;
-		padding: 0.375rem 0.5rem;
+		padding: 0.375rem;
 		border-radius: 6px;
 		border: none;
 		background: transparent;
@@ -2583,9 +2593,9 @@
 				minmax(180px, 1.15fr)
 				100px
 				84px
-				minmax(220px, 1fr);
+				minmax(100px, 0.95fr);
 			gap: 12px;
-			min-width: 1080px;
+			min-width: 960px;
 		}
 	}
 
@@ -2599,10 +2609,10 @@
 				minmax(170px, 1.05fr)
 				92px
 				78px
-				minmax(190px, 0.95fr);
+				minmax(100px, 0.95fr);
 			padding: 0.8125rem 0.875rem;
 			gap: 10px;
-			min-width: 1180px;
+			min-width: 990px;
 		}
 
 		.awg-list-name-button,
@@ -3008,12 +3018,12 @@
 			minmax(76px, 0.95fr)
 			minmax(150px, 1.1fr)
 			minmax(128px, 0.95fr)
-			minmax(220px, 1.15fr);
+			minmax(100px, 0.95fr);
 		gap: 0.75rem 1rem;
 		align-items: center;
 		padding: 0.75rem 1rem;
 		border-bottom: 1px solid var(--color-border);
-		min-width: 1120px;
+		min-width: 1000px;
 	}
 	.singbox-tunnel-list-table :global(.sbx-tunnel-list-row:last-child) {
 		border-bottom: none;
@@ -3036,7 +3046,7 @@
 		margin-bottom: 1.25rem;
 	}
 	.singbox-sub-list-table :global(.sbx-sub-active-row) {
-		min-width: 1120px;
+		min-width: 920px;
 	}
 	.singbox-sub-list-table--inactive :global(.sbx-sub-inactive-row) {
 		min-width: 960px;
@@ -3064,8 +3074,8 @@
 			minmax(88px, 0.95fr)
 			minmax(148px, 1.1fr)
 			minmax(120px, 0.95fr)
-			minmax(220px, 1.15fr);
-		min-width: 1120px;
+			minmax(100px, 0.95fr);
+		min-width: 920px;
 	}
 	.singbox-sub-list-table--inactive .sbx-sub-inactive-head {
 		grid-template-columns:

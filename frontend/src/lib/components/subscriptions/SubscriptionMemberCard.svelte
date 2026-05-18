@@ -1,11 +1,7 @@
 <script lang="ts">
 	import type { SubscriptionMember } from '$lib/types';
 	import type { SingboxLayoutMode } from '$lib/constants/singboxLayout';
-	import { untrack } from 'svelte';
-	import { singboxDelayHistory, singboxTraffic, triggerDelayCheck } from '$lib/stores/singbox';
-	import { getTrafficRates, subscribeTraffic, loadHistory } from '$lib/stores/traffic';
-	import { TrafficSparkline } from '$lib/components/ui';
-	import { formatBytes } from '$lib/utils/format';
+	import { singboxDelayHistory, triggerDelayCheck } from '$lib/stores/singbox';
 
 	interface Props {
 		member: SubscriptionMember;
@@ -73,42 +69,6 @@
 	});
 
 	const heading = $derived(member.label || member.server);
-
-	const traffic = $derived($singboxTraffic.get(member.tag));
-
-	const trafficSparkSeries = $derived.by(() => {
-		const n = Math.min(rxRates.length, txRates.length);
-		if (n === 0) return { rx: [] as number[], tx: [] as number[] };
-		const take = Math.min(36, n);
-		const start = n - take;
-		return {
-			rx: rxRates.slice(start, n),
-			tx: txRates.slice(start, n),
-		};
-	});
-
-	let rxRates = $state<number[]>([]);
-	let txRates = $state<number[]>([]);
-	let memberTag = $derived(member.tag);
-
-	$effect(() => {
-		const tag = memberTag;
-		const update = () => {
-			const t = getTrafficRates(tag);
-			rxRates = t.rx;
-			txRates = t.tx;
-		};
-		update();
-		return subscribeTraffic(update);
-	});
-
-	let trafficHistoryLoaded = false;
-	$effect(() => {
-		const tag = memberTag;
-		if (trafficHistoryLoaded) return;
-		trafficHistoryLoaded = true;
-		untrack(() => loadHistory(tag));
-	});
 </script>
 
 {#if layout === 'list'}
@@ -144,20 +104,6 @@
 			<span class="badge tls">TLS</span>
 		{/if}
 	</div>
-		<div class="c c-traffic-mini" data-label="Трафик">
-			<div class="traffic-row-list">
-				<TrafficSparkline
-					rxData={trafficSparkSeries.rx}
-					txData={trafficSparkSeries.tx}
-					width={84}
-					height={22}
-				/>
-				<div class="traffic-mini-col mono">
-					<span class="traffic-rate rx">↓ {formatBytes(traffic?.download ?? 0)}</span>
-					<span class="traffic-rate tx">↑ {formatBytes(traffic?.upload ?? 0)}</span>
-				</div>
-			</div>
-		</div>
 		<div class="c c-ping-mini" data-label="Ping">
 			<div
 				class="spark-mini {delayState}"
@@ -519,23 +465,5 @@
 	.spark-mini .bar.empty {
 		opacity: 0.35;
 		height: 30% !important;
-	}
-	.c-traffic-mini {
-		min-width: 0;
-	}
-	.traffic-row-list {
-		display: flex;
-		align-items: center;
-		gap: 0.45rem;
-		min-width: 0;
-		width: 100%;
-	}
-	.traffic-mini-col {
-		display: flex;
-		flex-direction: column;
-		gap: 0.08rem;
-		font-size: 0.68rem;
-		line-height: 1.15;
-		flex-shrink: 0;
 	}
 </style>
