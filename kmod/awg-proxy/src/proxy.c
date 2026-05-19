@@ -79,8 +79,9 @@ static int create_listen_socket(struct socket **sock, u16 *port)
 static int create_remote_socket(struct socket **sock, __be32 ip, __be16 port,
 				const char *bind_iface)
 {
-	struct sockaddr_in addr;
 	int ret;
+
+	(void)ip; (void)port;  /* destination passed per-sendmsg, not via connect */
 
 	ret = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, IPPROTO_UDP,
 			       sock);
@@ -113,19 +114,37 @@ static int create_remote_socket(struct socket **sock, __be32 ip, __be16 port,
 		pr_info("awg_proxy: socket bound to %s\n", bind_iface);
 	}
 
-	memset(&addr, 0, sizeof(addr));
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = ip;
-	addr.sin_port = port;
-
-	ret = kernel_connect(*sock, (struct sockaddr *)&addr, sizeof(addr), 0);
-	if (ret) {
-		sock_release(*sock);
-		*sock = NULL;
-		return ret;
+	/* Bind to any local port so recvmsg has a port to listen on.
+	 * We intentionally do NOT call kernel_connect() — that triggers a
+	 * 0-byte UDP "probe" to the destination on some kernels (visible on
+	 * the wire as a malformed first packet from our source, a known
+	 * server-side fingerprint for proxy/scanner traffic). Instead, we
+	 * pass the destination addr explicitly in every sendmsg below. */
+	{
+		struct sockaddr_in local = {};
+		local.sin_family = AF_INET;
+		local.sin_addr.s_addr = htonl(INADDR_ANY);
+		local.sin_port = 0;
+		ret = kernel_bind(*sock, (struct sockaddr *)&local,
+				  sizeof(local));
+		if (ret) {
+			sock_release(*sock);
+			*sock = NULL;
+			return ret;
+		}
 	}
 
 	return 0;
+}
+
+/* Fill a sockaddr_in from the proxy's stored server endpoint. */
+static inline void proxy_server_addr(struct sockaddr_in *out,
+				     const struct awg_proxy *proxy)
+{
+	memset(out, 0, sizeof(*out));
+	out->sin_family = AF_INET;
+	out->sin_addr.s_addr = proxy->cfg.remote_ip;
+	out->sin_port = proxy->cfg.remote_port;
 }
 
 /* ---- send helpers ---- */
@@ -161,11 +180,14 @@ static void send_cps_packets(struct awg_proxy *proxy)
 	u8 (*bufs)[1500];
 	int lens[5];
 	u32 counters[5];
+	struct sockaddr_in dst;
 	int count, i, slot;
 
 	bufs = kmalloc(5 * 1500, GFP_KERNEL);
 	if (!bufs)
 		return;
+
+	proxy_server_addr(&dst, proxy);
 
 	/* Counters[k] = current counter + k, one per non-null template. */
 	for (i = 0; i < 5; i++)
@@ -179,9 +201,17 @@ static void send_cps_packets(struct awg_proxy *proxy)
 		if (lens[slot] <= 0)
 			continue;
 		sret = proxy_sendmsg(proxy->remote_sock, bufs[slot], lens[slot],
-				     NULL);
+				     &dst);
 		if (sret >= 0)
 			proxy->cps_counter++;
+		/* Inter-packet jitter to match reference's natural workqueue
+		 * scheduling cadence. Without this, our kthread blasts all
+		 * handshake-cycle packets back-to-back in <1ms — a server-side
+		 * fingerprint (sub-millisecond burst of 4+ UDP packets from one
+		 * source). It also gives Linux's IP-ID hash bucket a chance to
+		 * advance with `delta = prandom_u32_max(now - old)`, avoiding
+		 * a perfect +1 ID sequence that screams "bot/proxy" to any WAF. */
+		usleep_range(1500, 2500);
 	}
 	kfree(bufs);
 }
@@ -203,11 +233,14 @@ static void send_junk_packets(struct awg_proxy *proxy)
 {
 	u8 *junk;
 	int sizes[128]; /* jc max */
+	struct sockaddr_in dst;
 	int count, i;
 
 	junk = kmalloc(1500, GFP_KERNEL);
 	if (!junk)
 		return;
+
+	proxy_server_addr(&dst, proxy);
 
 	count = generate_junk(&proxy->cfg, junk, sizes, AWG_MAX_JC);
 	for (i = 0; i < count; i++) {
@@ -224,7 +257,9 @@ static void send_junk_packets(struct awg_proxy *proxy)
 		(void)kernel_setsockopt(proxy->remote_sock, IPPROTO_IP, IP_TOS,
 					(char *)&tos, sizeof(tos));
 
-		proxy_sendmsg(proxy->remote_sock, junk, sizes[i], NULL);
+		proxy_sendmsg(proxy->remote_sock, junk, sizes[i], &dst);
+		/* Inter-packet jitter — see send_cps_packets() for rationale. */
+		usleep_range(1500, 2500);
 	}
 
 	/* Restore default TOS=0 so the subsequent handshake init / steady-state
@@ -357,6 +392,9 @@ static int c2s_thread_fn(void *data)
 			int is_handshake = (msgType == WG_HANDSHAKE_INIT ||
 					    msgType == WG_HANDSHAKE_RESPONSE);
 			int tos;
+			struct sockaddr_in dst;
+
+			proxy_server_addr(&dst, proxy);
 
 			if (is_handshake) {
 				tos = AWG_HANDSHAKE_DSCP;
@@ -367,7 +405,7 @@ static int c2s_thread_fn(void *data)
 			}
 
 			sret = proxy_sendmsg(proxy->remote_sock, out,
-					     out_len, NULL);
+					     out_len, &dst);
 
 			if (is_handshake) {
 				tos = 0;
@@ -541,30 +579,18 @@ int awg_proxy_add(const char *config_line)
 	}
 
 	/*
-	 * ARP/neighbour warm-up.
+	 * Previously we sent a 0-byte UDP "probe" here to pre-warm the
+	 * ARP/neighbour cache so the first handshake burst wouldn't be
+	 * starved by arp_queue overflow. That probe turned out to be a
+	 * server-side fingerprint: any DPI/WAF flags a 0-byte UDP datagram
+	 * as the very first packet from a source as malformed/scanner
+	 * traffic, then accumulates that flag toward eventual blacklist.
 	 *
-	 * On the first sendmsg the kernel resolves the gateway MAC; until
-	 * resolution completes, outbound packets sit in arp_queue, whose
-	 * size on older kernels is only a handful of packets
-	 * (net.ipv4.neigh.default.unres_qlen). The first WG handshake is
-	 * a burst — up to 1 INIT + 5 CPS + Jc junk packets — sent without
-	 * pause, with INIT going LAST. Anything beyond unres_qlen is
-	 * silently dropped, and INIT is exactly the most expendable. The
-	 * peer never sees the handshake; WG kernel retries 5 s later
-	 * with the neighbour now cached. That is the "1 retry then it
-	 * works" pattern users have been reporting.
-	 *
-	 * Send a single zero-length probe here, while we still hold the
-	 * proxy_mutex and no thread is running, to drive the neighbour
-	 * resolution synchronously. The probe payload is empty (< 4
-	 * bytes) so any AmneziaWG peer will discard it as noise. We
-	 * intentionally ignore the return value: the only purpose of the
-	 * call is the side-effect of triggering ARP.
+	 * Removed in v1.1.6. To mitigate the ARP-queue race the inter-packet
+	 * jitter in send_cps_packets()/send_junk_packets() now spaces
+	 * handshake-cycle packets by ~2ms each, which is enough for the
+	 * gateway resolution to complete on a normal first-cycle.
 	 */
-	{
-		u8 probe = 0;
-		(void)proxy_sendmsg(p->remote_sock, &probe, 0, NULL);
-	}
 
 	p->active = true;
 
