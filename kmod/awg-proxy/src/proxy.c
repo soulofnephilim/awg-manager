@@ -260,6 +260,7 @@ static int c2s_thread_fn(void *data)
 		struct sockaddr_in from;
 		u8 *payload, *out;
 		int n, out_len, sendJunk;
+		u32 msgType;
 		u64 rand_val;
 
 		/* Receive from listen socket (WG sends here) */
@@ -304,7 +305,7 @@ static int c2s_thread_fn(void *data)
 		/* Transform WG -> AWG (handles all message types) */
 		out = transform_outbound(raw_buf, headroom, n,
 					 &proxy->cfg, rand_val,
-					 &out_len, &sendJunk);
+					 &out_len, &sendJunk, &msgType);
 
 		/* Send CPS + junk before handshake init if needed */
 		if (sendJunk) {
@@ -326,13 +327,44 @@ static int c2s_thread_fn(void *data)
 		}
 
 		/* Send transformed packet to remote AWG server.
+		 *
+		 * For handshake init/response, set IP TOS = AWG_HANDSHAKE_DSCP
+		 * to mirror amneziawg-linux-kernel-module: without this, some
+		 * middleboxes on the path to the AWG server silently drop
+		 * handshake packets, leaving local WG retrying forever while
+		 * the server side stays mute. Confirmed empirically by pcap
+		 * diff: kernel-AWG init goes out with TOS=0x88 and gets a
+		 * response; our previous TOS=0 sends got no reply at all.
+		 *
 		 * Capture and log negative returns so we can confirm in the
 		 * field whether handshake retries correlate with -ENOBUFS
 		 * (ARP queue overflow) or transient errors. The log is
 		 * ratelimited to keep dmesg usable on flaky links. */
 		{
-			int sret = proxy_sendmsg(proxy->remote_sock, out,
-						 out_len, NULL);
+			int sret;
+			int is_handshake = (msgType == WG_HANDSHAKE_INIT ||
+					    msgType == WG_HANDSHAKE_RESPONSE);
+			int tos;
+
+			if (is_handshake) {
+				tos = AWG_HANDSHAKE_DSCP;
+				(void)kernel_setsockopt(proxy->remote_sock,
+							IPPROTO_IP, IP_TOS,
+							(char *)&tos,
+							sizeof(tos));
+			}
+
+			sret = proxy_sendmsg(proxy->remote_sock, out,
+					     out_len, NULL);
+
+			if (is_handshake) {
+				tos = 0;
+				(void)kernel_setsockopt(proxy->remote_sock,
+							IPPROTO_IP, IP_TOS,
+							(char *)&tos,
+							sizeof(tos));
+			}
+
 			if (sret < 0) {
 				pr_warn_ratelimited("awg_proxy: send to %pI4:%d failed: %d\n",
 						    &proxy->cfg.remote_ip,
