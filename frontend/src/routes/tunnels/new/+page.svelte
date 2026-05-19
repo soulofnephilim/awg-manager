@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { tunnels } from '$lib/stores/tunnels';
@@ -16,6 +18,18 @@
 	import type { AmneziaPremiumCountry, AmneziaPremiumIssuedConfig, SystemInfo } from '$lib/types';
 
 	type TunnelImportTab = 'file' | 'paste' | 'vpn';
+
+	const PREMIUM_VPN_KEY_STORAGE = 'awgm.tunnels.new.premiumVpnKey';
+
+	function readStoredPremiumVpnKey(): string | null {
+		if (!browser) return null;
+		try {
+			const value = localStorage.getItem(PREMIUM_VPN_KEY_STORAGE)?.trim();
+			return value || null;
+		} catch {
+			return null;
+		}
+	}
 
 	function normalizeTunnelImportTab(raw: string | null): TunnelImportTab {
 		if (raw === 'file' || raw === 'paste' || raw === 'vpn') return raw;
@@ -50,6 +64,7 @@
 	let premiumError = $state('');
 	let premiumReissueConfirm = $state<{ code: string; label: string } | null>(null);
 	let premiumConfirmBusy = $state(false);
+	let hasStoredPremiumKey = $state(false);
 
 	type VpnPastePresentation =
 		| { kind: 'neutral'; label: string }
@@ -97,6 +112,62 @@
 			}
 		}).catch(() => {});
 	});
+
+	onMount(() => {
+		const stored = readStoredPremiumVpnKey();
+		if (!stored) return;
+		hasStoredPremiumKey = true;
+		vpnPasteInput = stored;
+		if (activeTab === 'vpn') {
+			void runVpnPasteAnalysis();
+		}
+	});
+
+	function savePremiumVpnKey() {
+		const key = vpnPasteInput.trim();
+		if (!key) {
+			notifications.error('Вставьте ключ vpn://');
+			return;
+		}
+		if (!isVpnLink(key)) {
+			notifications.error('Ожидается ссылка вида vpn://…');
+			return;
+		}
+		if (classifyVpnLink(key) === 'regular') {
+			notifications.error('Сохраняется только ключ Amnezia Premium');
+			return;
+		}
+		const portalBlock = vpnLinkUnsupportedPortalReason(key);
+		if (portalBlock) {
+			notifications.error(portalBlock);
+			return;
+		}
+		try {
+			localStorage.setItem(PREMIUM_VPN_KEY_STORAGE, key);
+			hasStoredPremiumKey = true;
+			notifications.success('Ключ сохранён');
+		} catch {
+			notifications.error('Не удалось сохранить ключ');
+		}
+	}
+
+	function clearStoredPremiumVpnKey() {
+		try {
+			localStorage.removeItem(PREMIUM_VPN_KEY_STORAGE);
+		} catch {
+			/* ignore */
+		}
+		hasStoredPremiumKey = false;
+		vpnPasteInput = '';
+		linkError = '';
+		linkPreview = '';
+		importContent = '';
+		premiumError = '';
+		premiumBusyDepth = 0;
+		premiumBusy = false;
+		resetPremiumCatalogState();
+		notifications.success('Сохранённый ключ удалён');
+	}
 
 	function handleFileSelect(event: Event) {
 		const input = event.target as HTMLInputElement;
@@ -536,6 +607,25 @@ AllowedIPs = 0.0.0.0/0"
 						<Button variant="secondary" size="md" onclick={() => fetchPremiumCatalog()} loading={premiumBusy} disabled={premiumBusy}>
 							Обновить список стран
 						</Button>
+						{#if hasStoredPremiumKey}
+							<Button
+								variant="outline-danger"
+								size="md"
+								onclick={clearStoredPremiumVpnKey}
+								disabled={premiumBusy}
+							>
+								Забыть ключ
+							</Button>
+						{:else}
+							<Button
+								variant="secondary"
+								size="md"
+								onclick={savePremiumVpnKey}
+								disabled={!vpnPasteInput.trim() || premiumBusy}
+							>
+								Запомнить ключ
+							</Button>
+						{/if}
 					</div>
 				{/if}
 				{#if premiumError}
