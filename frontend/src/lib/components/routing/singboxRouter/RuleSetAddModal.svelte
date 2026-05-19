@@ -3,6 +3,7 @@
 	import { Dropdown, type DropdownOption } from '$lib/components/ui';
 	import type { SingboxRouterRuleSet } from '$lib/types';
 	import type { OutboundGroup } from './outboundOptions';
+	import { parseInlineRuleList } from '$lib/utils/singboxInlineRules';
 
 	interface Props {
 		ruleSet?: SingboxRouterRuleSet;
@@ -12,6 +13,7 @@
 	}
 	let { ruleSet, outboundOptions, onClose, onSave }: Props = $props();
 
+	// ── constants ───────────────────────────────────────────────
 	const UPDATE_INTERVAL_OPTIONS: DropdownOption[] = [
 		{ value: '6h', label: '6h' },
 		{ value: '12h', label: '12h' },
@@ -19,6 +21,20 @@
 		{ value: '168h', label: '168h (неделя)' },
 	];
 
+	const DEFAULT_RULES_LIST = `# Домены
+openai.com
+chatgpt.com
+*.perplexity.ai
+https://gemini.google.com/app
+
+# IP/CIDR
+1.1.1.1
+8.8.8.0/24
+
+# Дополнительно
+keyword:youtube`;
+
+	// ── derived ────────────────────────────────────────────────
 	const downloadDetourOptions = $derived<DropdownOption[]>([
 		{ value: '', label: 'автоматически (direct)' },
 		...outboundOptions.flatMap((g) =>
@@ -27,6 +43,35 @@
 	]);
 
 	const isEditing = $derived(Boolean(ruleSet));
+
+	// ── inline preview derived ──────────────────────────────────
+	const listParsePreview = $derived.by(() => {
+		if (type !== 'inline' || inlineMode !== 'list') {
+			return { rules: [] as Record<string, unknown>[], warnings: [] as string[], errors: [] as string[] };
+		}
+		return parseInlineRuleList(rulesList);
+	});
+
+	// ── line numbers for rules-list textarea ─────────────────────
+	const rulesListLineNumbers = $derived.by(() => {
+		const count = Math.max(1, rulesList.split(/\r?\n/).length);
+		return Array.from({ length: count }, (_, i) => String(i + 1)).join('\n');
+	});
+
+	let rulesListTextarea = $state<HTMLTextAreaElement | null>(null);
+	let rulesListLineNumberGutter = $state<HTMLPreElement | null>(null);
+
+	function syncRulesListLineNumbersScroll(): void {
+		if (!rulesListTextarea || !rulesListLineNumberGutter) return;
+		rulesListLineNumberGutter.scrollTop = rulesListTextarea.scrollTop;
+	}
+
+	// ── form state ──────────────────────────────────────────────
+	// For inline rule sets: 'list' = smart-line-by-line, 'json' = raw JSON array
+	// svelte-ignore state_referenced_locally
+	let inlineMode: 'list' | 'json' = $state(ruleSet?.rules?.length ? 'json' : 'list');
+
+	let rulesList = $state(DEFAULT_RULES_LIST);
 
 	// svelte-ignore state_referenced_locally
 	let type: 'remote' | 'local' | 'inline' = $state(ruleSet?.type ?? 'remote');
@@ -58,16 +103,6 @@
 	let busy = $state(false);
 	let error = $state('');
 
-	// Snapshot initial state for isDirty detection
-	let initialType: 'remote' | 'local' | 'inline' = $state('remote');
-	let initialFormat: 'binary' | 'source' = $state('binary');
-	let initialTag = $state('');
-	let initialUrl = $state('');
-	let initialUpdateInterval = $state('24h');
-	let initialDownloadDetour = $state('');
-	let initialPath = $state('');
-	let initialRulesJson = $state('');
-
 	// Default rulesJson template for new rule sets (must match $state initializer above)
 	const DEFAULT_RULES_JSON = `[
   {
@@ -76,6 +111,18 @@
     ]
   }
 ]`;
+
+	// Snapshot initial state for isDirty detection
+	let initialInlineMode: 'list' | 'json' = $state('list');
+	let initialType: 'remote' | 'local' | 'inline' = $state('remote');
+	let initialFormat: 'binary' | 'source' = $state('binary');
+	let initialTag = $state('');
+	let initialUrl = $state('');
+	let initialUpdateInterval = $state('24h');
+	let initialDownloadDetour = $state('');
+	let initialPath = $state('');
+	let initialRulesList = $state('');
+	let initialRulesJson = $state('');
 
 	// Initialize snapshot when modal opens
 	$effect(() => {
@@ -88,6 +135,8 @@
 			initialDownloadDetour = ruleSet.download_detour ?? '';
 			initialPath = ruleSet.path ?? '';
 			initialRulesJson = ruleSet.rules?.length ? JSON.stringify(ruleSet.rules, null, 2) : '';
+			initialInlineMode = 'json';
+			initialRulesList = DEFAULT_RULES_LIST;
 		} else {
 			initialType = 'remote';
 			initialFormat = 'binary';
@@ -96,8 +145,9 @@
 			initialUpdateInterval = '24h';
 			initialDownloadDetour = '';
 			initialPath = '';
-			// Match the default $state value of rulesJson so isDirty starts false
 			initialRulesJson = DEFAULT_RULES_JSON;
+			initialInlineMode = 'list';
+			initialRulesList = DEFAULT_RULES_LIST;
 		}
 	});
 
@@ -110,6 +160,8 @@
 			updateInterval !== initialUpdateInterval ||
 			downloadDetour !== initialDownloadDetour ||
 			path !== initialPath ||
+			inlineMode !== initialInlineMode ||
+			rulesList !== initialRulesList ||
 			rulesJson !== initialRulesJson
 		);
 	});
@@ -137,18 +189,33 @@
 
 			let parsedRules: Record<string, unknown>[] | undefined;
 			if (type === 'inline') {
-				try {
-					const parsed = JSON.parse(rulesJson);
-					if (!Array.isArray(parsed) || parsed.length === 0) {
-						error = 'Для inline rule set нужен непустой JSON-массив правил';
+				if (inlineMode === 'json') {
+					try {
+						const parsed = JSON.parse(rulesJson);
+						if (!Array.isArray(parsed) || parsed.length === 0) {
+							error = 'Для inline rule set нужен непустой JSON-массив правил';
+							busy = false;
+							return;
+						}
+						parsedRules = parsed as Record<string, unknown>[];
+					} catch (e) {
+						error = `Некорректный JSON: ${(e as Error).message}`;
 						busy = false;
 						return;
 					}
-					parsedRules = parsed as Record<string, unknown>[];
-				} catch (e) {
-					error = `Некорректный JSON: ${(e as Error).message}`;
-					busy = false;
-					return;
+				} else {
+					const parsed = parseInlineRuleList(rulesList);
+					if (parsed.errors.length > 0) {
+						error = parsed.errors.join('\n');
+						busy = false;
+						return;
+					}
+					if (parsed.rules.length === 0) {
+						error = 'Нет валидных строк для inline rule set';
+						busy = false;
+						return;
+					}
+					parsedRules = parsed.rules;
 				}
 			}
 
@@ -221,14 +288,103 @@
 				<div class="hint">Абсолютный путь. Файл должен существовать на роутере.</div>
 			</label>
 		{:else}
-			<label class="field">
-				<div class="lbl">Правила (JSON-массив)</div>
-				<textarea class="rules-json" bind:value={rulesJson} rows="10" spellcheck="false"></textarea>
-				<div class="hint">
-					Массив объектов с матчерами sing-box: <code>domain_suffix</code>, <code>ip_cidr</code>,
-					<code>process_name</code>, <code>port</code> и др. Хорошо для маленьких пользовательских списков.
+			<div class="field">
+				<div class="lbl">Формат ввода</div>
+				<div class="segment">
+					<button class:active={inlineMode === 'list'} onclick={() => (inlineMode = 'list')} type="button">
+						Список
+					</button>
+					<button class:active={inlineMode === 'json'} onclick={() => (inlineMode = 'json')} type="button">
+						JSON
+					</button>
 				</div>
-			</label>
+			</div>
+
+			{#if inlineMode === 'list'}
+				<div class="field">
+					<div class="lbl">Список правил</div>
+					<div class="rules-editor">
+						<pre class="line-numbers" aria-hidden="true" bind:this={rulesListLineNumberGutter}>{rulesListLineNumbers}</pre>
+						<textarea
+							class="rules-json rules-list-textarea"
+							bind:this={rulesListTextarea}
+							bind:value={rulesList}
+							rows="12"
+							spellcheck="false"
+							wrap="off"
+							onscroll={syncRulesListLineNumbersScroll}
+						></textarea>
+					</div>
+				<details class="inline-help">
+					<summary>Подсказка по формату списка</summary>
+
+					<div class="inline-help-body">
+						<div>
+							<span class="help-label">Поддерживается:</span>
+							домены, URL, wildcard <code>*.example.com</code>, IP/CIDR,
+							<code>keyword:</code>, <code>regex:</code>.
+						</div>
+						<div>
+							<span class="help-label">Расширенные matchers:</span>
+							<code>port:</code>, <code>process:</code>, <code>package:</code>,
+							<code>network:</code>.
+						</div>
+						<div>
+							<span class="help-label">Осторожно:</span>
+							<code>port:443</code> создаёт отдельное правило для любого HTTPS-трафика,
+							а <code>process:</code> на Keenetic/Entware относится к локальным процессам,
+							не к LAN-клиентам.
+						</div>
+						<div>
+							<span class="help-label">Пока не поддерживается:</span>
+							исключения <code>@@</code>, <code>port_range:</code>, логические правила
+							<code>and/or</code> и произвольные JSON-поля sing-box. Для них используйте
+							режим <code>JSON</code>.
+						</div>
+					</div>
+				</details>
+				</div>
+
+				{#if listParsePreview.errors.length > 0}
+					<div class="parse-messages parse-messages-error">
+						<div class="parse-messages-title">Ошибки разбора</div>
+						<ul>
+							{#each listParsePreview.errors as msg}
+								<li>{msg}</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+				{#if listParsePreview.warnings.length > 0}
+					<div class="parse-messages parse-messages-warning">
+						<div class="parse-messages-title">Предупреждения</div>
+						<ul>
+							{#each listParsePreview.warnings as msg}
+								<li>{msg}</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+				{#if listParsePreview.rules.length > 0}
+					<div class="info">
+						Будет создано групп правил: {listParsePreview.rules.length}
+					</div>
+				{/if}
+				{#if listParsePreview.rules.length > 0}
+					<details class="json-preview">
+						<summary>Предпросмотр JSON</summary>
+						<pre>{JSON.stringify(listParsePreview.rules, null, 2)}</pre>
+					</details>
+				{/if}
+			{:else}
+				<label class="field">
+					<div class="lbl">Правила (JSON-массив)</div>
+					<textarea class="rules-json" bind:value={rulesJson} rows="10" spellcheck="false"></textarea>
+					<div class="hint">
+						Advanced mode: массив объектов с матчерами sing-box.
+					</div>
+				</label>
+			{/if}
 		{/if}
 
 		{#if error}<div class="error">{error}</div>{/if}
@@ -271,6 +427,41 @@
 		color: var(--muted-text);
 		line-height: 1.4;
 		margin-top: 0.25rem;
+	}
+	.inline-help {
+		margin-top: 0.35rem;
+		padding: 0.5rem 0.65rem;
+		border: 1px solid var(--border);
+		border-radius: 0.45rem;
+		background: var(--surface-1, rgba(255, 255, 255, 0.035));
+		color: var(--muted-text);
+		font-size: 0.8rem;
+		line-height: 1.45;
+	}
+
+	.inline-help summary {
+		cursor: pointer;
+		color: var(--text);
+		font-weight: 700;
+		outline: none;
+	}
+
+	.inline-help-body {
+		margin-top: 0.45rem;
+		display: grid;
+		gap: 0.28rem;
+	}
+
+	.inline-help code {
+		background: var(--surface-2, rgba(255, 255, 255, 0.06));
+		border-radius: 0.25rem;
+		padding: 0.05rem 0.25rem;
+		font-size: 0.78rem;
+	}
+
+	.help-label {
+		color: var(--text);
+		font-weight: 600;
 	}
 	.field input {
 		background: var(--bg);
@@ -333,9 +524,111 @@
 		color: var(--danger, #dc2626);
 		font-size: 0.85rem;
 	}
+	.warn {
+		color: var(--color-warning, #d97706);
+		font-size: 0.85rem;
+	}
+	.parse-messages {
+		padding: 0.55rem 0.65rem;
+		border: 1px solid var(--border);
+		border-radius: 0.45rem;
+		background: var(--surface-1, rgba(255, 255, 255, 0.035));
+		font-size: 0.82rem;
+		line-height: 1.4;
+	}
+
+	.parse-messages-title {
+		font-weight: 700;
+		margin-bottom: 0.35rem;
+	}
+
+	.parse-messages ul {
+		margin: 0;
+		padding-left: 1.1rem;
+		display: grid;
+		gap: 0.22rem;
+	}
+
+	.parse-messages li {
+		margin: 0;
+	}
+
+	.parse-messages-error {
+		border-color: var(--danger, #dc2626);
+		color: var(--danger, #dc2626);
+		background: rgba(220, 38, 38, 0.08);
+	}
+
+	.parse-messages-warning {
+		border-color: var(--color-warning, #d97706);
+		color: var(--color-warning, #d97706);
+		background: rgba(217, 119, 6, 0.08);
+	}
+	.info {
+		color: #10b981;
+		font-size: 0.85rem;
+	}
+	.json-preview {
+		margin: 0;
+	}
+	.json-preview summary {
+		cursor: pointer;
+		font-size: 0.85rem;
+		color: var(--accent, #3b82f6);
+		outline: none;
+	}
+	.json-preview pre {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		padding: 0.5rem 0.6rem;
+		font-size: 0.75rem;
+		overflow-x: auto;
+		margin-top: 0.25rem;
+	}
 	.actions {
 		display: flex;
 		justify-content: flex-end;
 		gap: 0.5rem;
 	}
+	.rules-editor {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		height: 16rem;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		overflow: hidden;
+		min-width: 0;
+		align-items: stretch;
+	}
+	.line-numbers {
+		margin: 0;
+		padding: 0.5rem 0.45rem 0.5rem 0.55rem;
+		border-right: 1px solid var(--border);
+		background: var(--bg);
+		color: var(--muted-text);
+		font-family: ui-monospace, monospace;
+		font-size: 0.8rem;
+		line-height: 1.45;
+		text-align: right;
+		user-select: none;
+		overflow: hidden;
+		min-width: 2.25rem;
+		white-space: pre;
+		height: 100%;
+		box-sizing: border-box;
+	}
+	.rules-list-textarea {
+		border: 0;
+		border-radius: 0;
+		background: transparent;
+		min-width: 0;
+		height: 100%;
+		overflow: auto;
+		resize: none;
+		white-space: pre;
+		box-sizing: border-box;
+	}
+
 </style>
