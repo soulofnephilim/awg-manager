@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { appLogEntries, singboxLogEntries, logStoreFor, type LogBucket, type LogStore } from '$lib/stores/logs';
   import { LoadingSpinner, EmptyState } from '$lib/components/layout';
   import { Button } from '$lib/components/ui';
@@ -17,7 +17,8 @@
   const STORAGE_KEY = 'awgm.diagnostics.logsFilter';
   const BUCKET_KEY = 'awgm.diagnostics.logsBucket';
   const PAGE_SIZE = 200;
-  const SCROLL_THRESHOLD = 80;
+  /** Min distance from top before auto-pause; also scales with viewport (see scrollPauseThreshold). */
+  const SCROLL_THRESHOLD_MIN = 80;
 
   function defaultFilter(): LogsFilter {
     return { search: '', group: '', subgroup: '', levels: [...ALL_LEVELS] };
@@ -67,7 +68,11 @@
   let filter = $state<LogsFilter>(loadFilter());
   let bucket = $state<LogBucket>(loadBucket());
   let paused = $state(false);
+  /** User clicked Pause — do not auto-resume when scrolled back to the top. */
+  let manualPause = $state(false);
   let bufferCount = $state(0);
+  let anchorScrollHeight = 0;
+  let anchorScrollTop = 0;
   let downloading = $state(false);
   let clearing = $state(false);
   let expanded = $state<Record<string, boolean>>({});
@@ -182,16 +187,43 @@
     window.removeEventListener('keydown', handleKeydown);
   });
 
+  function scrollPauseThreshold(): number {
+    if (!scrollEl) return SCROLL_THRESHOLD_MIN;
+    // ~¾ viewport: scrolling “a page or two” away from the live head pauses follow.
+    return Math.max(SCROLL_THRESHOLD_MIN, scrollEl.clientHeight * 0.75);
+  }
+
   function onScroll() {
     if (!scrollEl) return;
-    const top = scrollEl.scrollTop;
-    if (top > SCROLL_THRESHOLD) {
+    if (scrollEl.scrollTop > scrollPauseThreshold()) {
       paused = true;
-    } else {
+    } else if (!manualPause) {
       paused = false;
       bufferCount = 0;
     }
   }
+
+  // Keep the viewport anchored while paused — new SSE rows prepend at the top and
+  // would otherwise push content under the scroll position.
+  $effect.pre(() => {
+    void $activeStore.length;
+    if (scrollEl && paused && initialFetchDone) {
+      anchorScrollHeight = scrollEl.scrollHeight;
+      anchorScrollTop = scrollEl.scrollTop;
+    }
+  });
+
+  $effect(() => {
+    void $activeStore.length;
+    if (!initialFetchDone || !scrollEl || !paused) return;
+    void tick().then(() => {
+      if (!scrollEl || !paused) return;
+      const delta = scrollEl.scrollHeight - anchorScrollHeight;
+      if (delta > 0 && scrollEl.scrollTop > 0) {
+        scrollEl.scrollTop = anchorScrollTop + delta;
+      }
+    });
+  });
 
   $effect(() => {
     const len = $activeStore.length;
@@ -206,17 +238,19 @@
   });
 
   function togglePause() {
-    paused = !paused;
-    if (!paused) {
-      scrollEl?.scrollTo({ top: 0, behavior: 'smooth' });
-      bufferCount = 0;
+    if (paused) {
+      resumeAndScroll();
+    } else {
+      manualPause = true;
+      paused = true;
     }
   }
 
   function resumeAndScroll() {
-    scrollEl?.scrollTo({ top: 0, behavior: 'smooth' });
+    manualPause = false;
     paused = false;
     bufferCount = 0;
+    scrollEl?.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function applyFilter(f: LogsFilter) {
@@ -229,6 +263,9 @@
 
   async function setBucket(b: LogBucket) {
     if (b === bucket) return;
+    manualPause = false;
+    paused = false;
+    bufferCount = 0;
     bucket = b;
     saveBucket(b);
     // Reset filters on bucket switch — group sets are disjoint per bucket.

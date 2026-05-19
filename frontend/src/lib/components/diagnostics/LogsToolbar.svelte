@@ -353,7 +353,7 @@
 
     <span class="actions">
       <button type="button" class="chip" onclick={onTogglePause}>
-        {paused ? 'Resume' : 'Pause'}
+        {paused ? 'Продолжить' : 'Пауза'}
       </button>
       <button type="button" class="chip" onclick={onCopy} disabled={visibleEntries === 0}>
         Copy
