@@ -9,6 +9,7 @@
 		ChecksGroup,
 		ClientDnsCheck,
 	} from '$lib/components/diagnostics';
+	import { collectDiagnosticsEnvironmentSnapshot } from '$lib/utils/diagnostics-environment';
 	import {
 		GLOBAL_TARGET_ID,
 		type DiagTestEvent,
@@ -157,7 +158,17 @@
 	async function downloadReport() {
 		downloadingReport = true;
 		try {
-			await api.downloadDiagnosticsReport();
+			let environment: unknown;
+			try {
+				environment = await collectDiagnosticsEnvironmentSnapshot();
+			} catch (e) {
+				environment = {
+					source: 'frontend',
+					partial: true,
+					errors: [{ scope: 'environment', message: e instanceof Error ? e.message : String(e) }],
+				};
+			}
+			await api.downloadDiagnosticsReport(environment);
 		} catch (e) {
 			diagnosticsStore.fail((e as Error).message);
 		} finally {

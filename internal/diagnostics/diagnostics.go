@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +15,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
+	"github.com/hoaxisr/awg-manager/internal/sys/routerclock"
 	"github.com/hoaxisr/awg-manager/internal/sys/routerinfo"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/backend"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/service"
@@ -27,6 +26,8 @@ import (
 type Report struct {
 	Version         string               `json:"version"`
 	GeneratedAt     time.Time            `json:"generatedAt"`
+	RouterClock     RouterClockInfo      `json:"routerClock"`
+	Privacy         PrivacyInfo          `json:"privacy,omitempty"`
 	DurationMs      int64                `json:"durationMs"`
 	System          SystemInfo           `json:"system"`
 	WAN             WANInfo              `json:"wan"`
@@ -36,7 +37,20 @@ type Report struct {
 	JournalWarnings *JournalWarningsInfo `json:"journalWarnings,omitempty"`
 	Tunnels         []TunnelInfo         `json:"tunnels"`
 	Tests           []TestResult         `json:"tests"`
-	Logs            []logging.LogEntry   `json:"logs"`
+	Logs            []logging.LogEntry   `json:"logs,omitempty"`
+}
+
+type PrivacyInfo struct {
+	Sanitized bool     `json:"sanitized"`
+	Rules     []string `json:"rules,omitempty"`
+}
+
+type RouterClockInfo struct {
+	Time          time.Time `json:"time"`
+	Timezone      string    `json:"timezone"`
+	OffsetMinutes int       `json:"offsetMinutes"`
+	Source        string    `json:"source,omitempty"`
+	RawTZ         string    `json:"rawTZ,omitempty"`
 }
 
 // SystemInfo contains system-level diagnostics.
@@ -161,7 +175,7 @@ type IfaceInfo struct {
 
 // ConnectionInfo contains tunnel connection state (unified for kernel and nativewg).
 type ConnectionInfo struct {
-	RawOutput       string `json:"rawOutput"`
+	RawOutput       string `json:"rawOutput,omitempty"`
 	LatestHandshake string `json:"latestHandshake"`
 	TransferRx      string `json:"transferRx"`
 	TransferTx      string `json:"transferTx"`
@@ -578,55 +592,12 @@ func (r *Runner) execute(ctx context.Context) {
 	r.executeStream(ctx)
 }
 
-func routerLocalNow() time.Time {
-	now := time.Now()
-
-	out, err := exec.Command("date", "+%z").Output()
-	if err != nil {
-		return now
-	}
-
-	tz := strings.TrimSpace(string(out))
-	if len(tz) != 5 {
-		return now
-	}
-
-	sign := 1
-	switch tz[0] {
-	case '+':
-		sign = 1
-	case '-':
-		sign = -1
-	default:
-		return now
-	}
-
-	hours, err := strconv.Atoi(tz[1:3])
-	if err != nil {
-		return now
-	}
-	minutes, err := strconv.Atoi(tz[3:5])
-	if err != nil {
-		return now
-	}
-	if hours > 23 || minutes > 59 {
-		return now
-	}
-
-	offset := sign * ((hours * 60 * 60) + (minutes * 60))
-	loc := time.FixedZone(tz, offset)
-
-	return now.In(loc)
-}
-
 func (r *Runner) executeStream(ctx context.Context) {
 	start := time.Now()
-	generatedAt := routerLocalNow()
+	clock := routerclock.Get()
+	generatedAt := clock.Now
 	r.appLog.Info("run", "", "Diagnostics started")
-	report := &Report{
-		Version:     "1.0",
-		GeneratedAt: generatedAt,
-	}
+	report := newReport(generatedAt, clock)
 
 	singleTunnel := r.opts.TunnelID
 	isGlobalOnly := singleTunnel == "__global__"
@@ -663,6 +634,7 @@ func (r *Runner) executeStream(ctx context.Context) {
 
 		// Full report only available for complete runs, not quick single-target probes.
 		if singleTunnel == "" && !isGlobalOnly {
+			sanitizeReportPrivacy(report)
 			anonymize(report)
 			r.mu.Lock()
 			r.result = report
@@ -707,10 +679,24 @@ func (r *Runner) executeStream(ctx context.Context) {
 	allResults = r.runTestsWithEvents(ctx, report)
 
 	if singleTunnel == "" {
-		r.emitPhase("collect_logs", "Сбор логов...")
-		report.Logs = r.collectLogs()
-
 		r.emitPhase("collect_journal_warnings", "Сбор WARN/ERROR из журнала...")
 		report.JournalWarnings = r.collectJournalWarnings()
+		convertJournalWarningsToRouterTime(report.JournalWarnings, clock.Location)
+	}
+
+	convertReportTimesToRouterTime(report, clock.Location)
+}
+
+func newReport(generatedAt time.Time, clock routerclock.Info) *Report {
+	return &Report{
+		Version:     "1.0",
+		GeneratedAt: generatedAt,
+		RouterClock: RouterClockInfo{
+			Time:          generatedAt,
+			Timezone:      clock.ZoneName,
+			OffsetMinutes: clock.OffsetMinutes,
+			Source:        clock.Source,
+			RawTZ:         clock.RawTZ,
+		},
 	}
 }

@@ -244,8 +244,6 @@ func (r *Runner) collectKernelConnection(ctx context.Context, ti *TunnelInfo, if
 // collectNativeWGConnection populates Connection from RCI show interface JSON.
 // ndmsJSON is the already-collected JSON from the main loop (avoids duplicate RCI call).
 func (r *Runner) collectNativeWGConnection(ti *TunnelInfo, ndmsJSON string) {
-	ti.Connection.RawOutput = ndmsJSON
-
 	if ndmsJSON == "" {
 		return
 	}

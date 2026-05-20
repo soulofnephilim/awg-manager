@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +20,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
+	"github.com/hoaxisr/awg-manager/internal/sys/routerclock"
 	"github.com/hoaxisr/awg-manager/internal/sys/routerinfo"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/backend"
 )
@@ -457,7 +456,7 @@ func (h *SystemHandler) BuildSystemInfo() map[string]interface{} {
 func (h *SystemHandler) buildSystemInfo(disableMemorySaving bool, gcMemLimit, gogc string, kernelModuleExists, kernelModuleLoaded bool, kernelModuleModel, kernelModuleVersion string, isAarch64 bool, activeBackendType, routerIP string) map[string]interface{} {
 	singboxInstalled, singboxVersion := h.getSingboxInfoFast()
 	routerDetails := h.getRouterDetailsCached()
-	now, zoneName, zoneOffsetMinutes := routerClockNow()
+	clock := routerclock.Get()
 
 	return map[string]interface{}{
 		"version":                     h.version,
@@ -482,9 +481,9 @@ func (h *SystemHandler) buildSystemInfo(disableMemorySaving bool, gcMemLimit, go
 		"isAarch64":                   isAarch64,
 		"activeBackend":               activeBackendType,
 		"routerIP":                    routerIP,
-		"routerTime":                  now.Format(time.RFC3339),
-		"routerTimezone":              zoneName,
-		"routerTimezoneOffsetMinutes": zoneOffsetMinutes,
+		"routerTime":                  clock.Now.Format(time.RFC3339),
+		"routerTimezone":              clock.ZoneName,
+		"routerTimezoneOffsetMinutes": clock.OffsetMinutes,
 		"bootInProgress":              h.bootStatusFn != nil && h.bootStatusFn(),
 		"slowRequestThresholdMs":      h.slowRequestThresholdMs,
 		"backendAvailability": map[string]bool{
@@ -499,109 +498,6 @@ func (h *SystemHandler) buildSystemInfo(disableMemorySaving bool, gcMemLimit, go
 		},
 		"routerDetails": routerDetails,
 	}
-}
-
-// routerClockNow reads router TZ from Keenetic-style files (/etc/TZ or /var/TZ)
-// and returns local router time independent from Go process timezone setup.
-// Falls back to Go runtime zone when TZ files are unavailable/unparseable.
-func routerClockNow() (time.Time, string, int) {
-	if tz, ok := readRouterTZ(); ok {
-		if zoneName, offsetMinutes, ok := parsePOSIXTZ(tz); ok {
-			loc := time.FixedZone(zoneName, offsetMinutes*60)
-			now := time.Now().In(loc)
-			return now, zoneName, offsetMinutes
-		}
-	}
-
-	now := time.Now()
-	zoneName, zoneOffsetSeconds := now.Zone()
-	return now, zoneName, zoneOffsetSeconds / 60
-}
-
-func readRouterTZ() (string, bool) {
-	for _, p := range []string{"/etc/TZ", "/var/TZ"} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		s := strings.TrimSpace(string(b))
-		if s == "" {
-			continue
-		}
-		return s, true
-	}
-	return "", false
-}
-
-// parsePOSIXTZ parses a minimal POSIX TZ prefix (e.g. MSK-3, UTC0, EST5EDT).
-// POSIX sign is inverted vs UTC offset:
-//
-//	MSK-3 -> UTC+3, EST5 -> UTC-5.
-func parsePOSIXTZ(s string) (zoneName string, offsetMinutes int, ok bool) {
-	raw := strings.TrimSpace(s)
-	if raw == "" {
-		return "", 0, false
-	}
-
-	i := 0
-	for i < len(raw) {
-		c := raw[i]
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
-			i++
-			continue
-		}
-		break
-	}
-	if i == 0 {
-		return "", 0, false
-	}
-	zoneName = raw[:i]
-
-	if i >= len(raw) {
-		return "", 0, false
-	}
-
-	j := i
-	sign := 1
-	if raw[j] == '+' {
-		sign = 1
-		j++
-	} else if raw[j] == '-' {
-		sign = -1
-		j++
-	}
-	startHours := j
-	for j < len(raw) && raw[j] >= '0' && raw[j] <= '9' {
-		j++
-	}
-	if startHours == j {
-		return "", 0, false
-	}
-
-	hours, err := strconv.Atoi(raw[startHours:j])
-	if err != nil {
-		return "", 0, false
-	}
-	minutes := 0
-	if j < len(raw) && raw[j] == ':' {
-		j++
-		startMin := j
-		for j < len(raw) && raw[j] >= '0' && raw[j] <= '9' {
-			j++
-		}
-		if startMin == j {
-			return "", 0, false
-		}
-		minutes, err = strconv.Atoi(raw[startMin:j])
-		if err != nil || minutes < 0 || minutes > 59 {
-			return "", 0, false
-		}
-	}
-
-	// POSIX TZ value is "hours west of UTC", so invert sign for UTC offset.
-	totalPOSIXMinutes := sign * (hours*60 + minutes)
-	offsetMinutes = -totalPOSIXMinutes
-	return zoneName, offsetMinutes, true
 }
 
 // getRouterDetailsCached returns cached router details, refreshing in the

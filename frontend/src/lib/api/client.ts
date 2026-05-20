@@ -926,15 +926,27 @@ class ApiClient {
 		return this.request('/diagnostics/status');
 	}
 
-	async downloadDiagnosticsReport(): Promise<void> {
-		const response = await fetch('/api/diagnostics/result');
+	async downloadDiagnosticsReport(environment?: unknown): Promise<void> {
+		const response = await fetch('/api/diagnostics/result', { credentials: 'same-origin' });
 		if (!response.ok) throw new Error('Report not available');
-		const blob = await response.blob();
+		const filename = response.headers.get('Content-Disposition')
+			?.match(/filename="(.+)"/)?.[1] || 'diagnostics.json';
+		const text = await response.text();
+		let payloadText = text;
+		try {
+			const report = JSON.parse(text);
+			const merged = environment ? { ...report, environment } : report;
+			payloadText = JSON.stringify(merged, null, 2);
+		} catch {
+			// keep original payload text if parsing fails
+		}
+		const blob = new Blob([payloadText], {
+			type: 'application/json;charset=utf-8'
+		});
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
 		a.href = url;
-		a.download = response.headers.get('Content-Disposition')
-			?.match(/filename="(.+)"/)?.[1] || 'diagnostics.json';
+		a.download = filename;
 		a.click();
 		URL.revokeObjectURL(url);
 	}
