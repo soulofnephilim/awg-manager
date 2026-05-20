@@ -1,13 +1,27 @@
 import { describe, it, expect } from 'vitest';
 import {
 	analyzeInlineRuleListLossy,
+	isInlineRuleListEmpty,
 	parseInlineRuleList,
 	stringifyInlineRuleList,
+	toAsciiHostname,
 } from '$lib/utils/singboxInlineRules';
+
+describe('toAsciiHostname', () => {
+	it('converts IDN labels to punycode', () => {
+		expect(toAsciiHostname('рф')).toBe('xn--p1ai');
+		expect(toAsciiHostname('пример.рф')).toBe(new URL('http://пример.рф').hostname);
+	});
+
+	it('leaves ASCII hostnames unchanged (lowercased)', () => {
+		expect(toAsciiHostname('Example.COM')).toBe('example.com');
+		expect(toAsciiHostname('xn--p1ai')).toBe('xn--p1ai');
+	});
+});
 
 describe('parseInlineRuleList', () => {
 	// ── domains ────────────────────────────────────────────────
-	it('groups plain domain, wildcard and URL into domain+suffix groups', () => {
+	it('maps bare domain to domain_suffix without dot (not domain)', () => {
 		const input = [
 			'openai.com',
 			'*.perplexity.ai',
@@ -18,25 +32,33 @@ describe('parseInlineRuleList', () => {
 		expect(warnings).toHaveLength(0);
 		expect(rules).toHaveLength(1);
 		const g = rules[0];
-		expect(g['domain']).toEqual(['openai.com', 'gemini.google.com']);
-		expect(g['domain_suffix'] as string[]).toContain('.openai.com');
-		expect(g['domain_suffix'] as string[]).toContain('.gemini.google.com');
-		// *.perplexity.ai → extracted suffix "perplexity.ai" with leading dot
-		expect(g['domain_suffix'] as string[]).toContain('.perplexity.ai');
+		expect(g['domain']).toBeUndefined();
+		expect(g['domain_suffix'] as string[]).toContain('openai.com');
+		expect(g['domain_suffix'] as string[]).toContain('gemini.google.com');
+		expect(g['domain_suffix'] as string[]).toContain('perplexity.ai');
 	});
 
-	it('handles dot-prefix domain as domain_suffix only', () => {
+	it('maps dot-prefix line to domain_suffix with dot', () => {
 		const { rules, errors } = parseInlineRuleList('.example.com');
 		expect(errors).toHaveLength(0);
 		expect(rules).toEqual([{ domain_suffix: ['.example.com'] }]);
 	});
 
+	it('converts unicode domains to punycode in domain_suffix', () => {
+		const zone = toAsciiHostname('рф')!;
+		const host = toAsciiHostname('пример.рф')!;
+		expect(parseInlineRuleList('пример.рф').rules).toEqual([{ domain_suffix: [host] }]);
+		expect(parseInlineRuleList('*.рф').rules).toEqual([{ domain_suffix: [zone] }]);
+		expect(parseInlineRuleList('.рф').rules).toEqual([{ domain_suffix: ['.' + zone] }]);
+		expect(parseInlineRuleList(`domain:пример.рф`).rules).toEqual([{ domain: [host] }]);
+	});
+
 	// ── adblock ────────────────────────────────────────────────
-	it('parses ||claude.ai^ as claude.ai', () => {
+	it('parses ||claude.ai^ as suffix-only', () => {
 		const { rules, errors, warnings } = parseInlineRuleList('||claude.ai^');
 		expect(errors).toHaveLength(0);
 		expect(warnings).toHaveLength(0);
-		expect(rules).toEqual([{ domain: ['claude.ai'], domain_suffix: ['.claude.ai'] }]);
+		expect(rules).toEqual([{ domain_suffix: ['claude.ai'] }]);
 	});
 
 	it('warns on @@ exception and skips it', () => {
@@ -48,11 +70,11 @@ describe('parseInlineRuleList', () => {
 	});
 
 	// ── IP/CIDR ───────────────────────────────────────────────
-	it('creates separate ip_cidr group', () => {
+	it('creates separate ip_cidr group with /32 for bare IPv4', () => {
 		const input = ['1.1.1.1', '8.8.8.0/24'].join('\n');
 		const { rules, errors } = parseInlineRuleList(input);
 		expect(errors).toHaveLength(0);
-		expect(rules).toEqual([{ ip_cidr: ['1.1.1.1', '8.8.8.0/24'] }]);
+		expect(rules).toEqual([{ ip_cidr: ['1.1.1.1/32', '8.8.8.0/24'] }]);
 	});
 
 	// ── prefix fields ─────────────────────────────────────────
@@ -68,7 +90,6 @@ describe('parseInlineRuleList', () => {
 		expect(r.errors).toHaveLength(0);
 		expect(r.rules).toHaveLength(5);
 
-		// keyword + regex share one group when present together
 		expect(r.rules[0]).toEqual({ domain_keyword: ['youtube'], domain_regex: ['^(.+\\.)?example-cdn\\.'] });
 		expect(r.rules[1]).toEqual({ port: [443, 8443] });
 		expect(r.rules[2]).toEqual({ process_name: ['curl'] });
@@ -109,11 +130,19 @@ describe('parseInlineRuleList', () => {
 	});
 
 	// ── empty input ───────────────────────────────────────────
-	it('returns no-valid-lines error on empty input', () => {
+	it('returns no errors on empty input (empty is not a parse error)', () => {
 		const { rules, errors } = parseInlineRuleList('');
 		expect(rules).toHaveLength(0);
-		expect(errors).toHaveLength(1);
-		expect(errors[0]).toBe('Нет валидных строк для inline rule set');
+		expect(errors).toHaveLength(0);
+		expect(isInlineRuleListEmpty('')).toBe(true);
+	});
+
+	it('treats comment-only input as empty (no parse error)', () => {
+		const input = ['# comment', '// line', '; semi'].join('\n');
+		const { rules, errors } = parseInlineRuleList(input);
+		expect(rules).toHaveLength(0);
+		expect(errors).toHaveLength(0);
+		expect(isInlineRuleListEmpty(input)).toBe(true);
 	});
 
 	// ── comments ──────────────────────────────────────────────
@@ -133,7 +162,7 @@ describe('parseInlineRuleList', () => {
 	// ── inline comments ───────────────────────────────────────
 	it('strips inline trailing comments', () => {
 		const { rules } = parseInlineRuleList('openai.com # this is a comment');
-		expect(rules).toEqual([{ domain: ['openai.com'], domain_suffix: ['.openai.com'] }]);
+		expect(rules).toEqual([{ domain_suffix: ['openai.com'] }]);
 	});
 
 	// ── src_ip / source_ip ────────────────────────────────────
@@ -142,15 +171,15 @@ describe('parseInlineRuleList', () => {
 		const { rules, errors } = parseInlineRuleList(input);
 		expect(errors).toHaveLength(1);
 		expect(errors[0]).toContain('src_ip');
-		expect(rules).toEqual([{ source_ip_cidr: ['192.168.1.50', '10.0.0.1/24'] }]);
+		expect(rules).toEqual([{ source_ip_cidr: ['192.168.1.50/32', '10.0.0.1/24'] }]);
 	});
 
 	// ── dedup ─────────────────────────────────────────────────
 	it('deduplicates values within each group', () => {
 		const input = ['openai.com', 'openai.com', 'port:443,443'].join('\n');
 		const { rules } = parseInlineRuleList(input);
-		const g = rules.find((r) => (r as Record<string, unknown>).domain);
-		expect((g!['domain'] as string[])).toEqual(['openai.com']);
+		const g = rules.find((r) => (r as Record<string, unknown>).domain_suffix);
+		expect((g!['domain_suffix'] as string[])).toEqual(['openai.com']);
 	});
 
 	// ── domain:/suffix:/domain_suffix: prefixes ───────────────
@@ -159,14 +188,19 @@ describe('parseInlineRuleList', () => {
 		expect(rules).toEqual([{ domain: ['example.com'] }]);
 	});
 
-	it('handles domain_suffix with leading dot', () => {
+	it('handles domain_suffix: prefix with leading dot in JSON', () => {
 		const { rules } = parseInlineRuleList('domain_suffix:.example.com');
 		expect(rules).toEqual([{ domain_suffix: ['.example.com'] }]);
 	});
 
-	it('handles suffix with wildcard', () => {
+	it('handles domain_suffix: bare host as dotted suffix', () => {
+		const { rules } = parseInlineRuleList('domain_suffix:example.com');
+		expect(rules).toEqual([{ domain_suffix: ['.example.com'] }]);
+	});
+
+	it('handles suffix: wildcard as no-dot suffix', () => {
 		const { rules } = parseInlineRuleList('suffix:*.example.org');
-		expect(rules).toEqual([{ domain_suffix: ['.example.org'] }]);
+		expect(rules).toEqual([{ domain_suffix: ['example.org'] }]);
 	});
 
 	it('handles domain_keyword: and domain_regex: prefixes', () => {
@@ -184,7 +218,7 @@ describe('parseInlineRuleList', () => {
 	it('accepts valid bare IPv4 and CIDR', () => {
 		const { rules, errors } = parseInlineRuleList('1.2.3.4\n5.6.7.8/16');
 		expect(errors).toHaveLength(0);
-		expect(rules).toHaveLength(1);
+		expect(rules).toEqual([{ ip_cidr: ['1.2.3.4/32', '5.6.7.8/16'] }]);
 	});
 
 	// ── domain: invalid value ────────────────────────────────
@@ -195,7 +229,6 @@ describe('parseInlineRuleList', () => {
 	});
 
 	it('port token keeps valid entries after garbage token', () => {
-		// port:443abc is invalid, port:443 is still processed
 		const r = parseInlineRuleList('port:443,443abc,8443');
 		expect(r.errors).toHaveLength(1);
 		expect(r.errors[0]).toContain('443abc');
@@ -238,10 +271,10 @@ describe('parseInlineRuleList', () => {
 
 // ── IPv6 ───────────────────────────────────────────────────────
 describe('IPv6 support', () => {
-	it('accepts bare IPv6 address without CIDR', () => {
+	it('accepts bare IPv6 address as /128 in JSON', () => {
 		const { rules, errors } = parseInlineRuleList('2606:4700::1');
 		expect(errors).toHaveLength(0);
-		expect(rules).toEqual([{ ip_cidr: ['2606:4700::1'] }]);
+		expect(rules).toEqual([{ ip_cidr: ['2606:4700::1/128'] }]);
 	});
 
 	it('accepts IPv6 CIDR notation', () => {
@@ -253,7 +286,7 @@ describe('IPv6 support', () => {
 	it('accepts ip: prefix with IPv6 address', () => {
 		const { rules, errors } = parseInlineRuleList('ip:2606:4700::1');
 		expect(errors).toHaveLength(0);
-		expect(rules).toEqual([{ ip_cidr: ['2606:4700::1'] }]);
+		expect(rules).toEqual([{ ip_cidr: ['2606:4700::1/128'] }]);
 	});
 
 	it('rejects IPv6 CIDR with out-of-range mask (129)', () => {
@@ -277,18 +310,29 @@ describe('port_range (not yet supported)', () => {
 });
 
 describe('stringifyInlineRuleList', () => {
+	it('serializes /32 and /128 single-host CIDR as bare IP', () => {
+		expect(stringifyInlineRuleList([{ ip_cidr: ['1.1.1.1/32', '8.8.8.0/24'] }])).toBe(
+			'1.1.1.1\n8.8.8.0/24',
+		);
+		expect(stringifyInlineRuleList([{ ip_cidr: ['2606:4700::1/128'] }])).toBe('2606:4700::1');
+	});
+
 	it('serializes domain-only JSON as domain: line', () => {
 		const text = stringifyInlineRuleList([{ domain: ['example.com'] }]);
 		expect(text).toBe('domain:example.com');
 		expect(parseInlineRuleList(text).rules).toEqual([{ domain: ['example.com'] }]);
 	});
 
-	it('uses bare hostname when JSON has matching domain_suffix for that host', () => {
-		const rules = [{ domain: ['x.com'], domain_suffix: ['.x.com'] }];
+	it('serializes no-dot suffix as bare host line', () => {
+		const rules = [{ domain_suffix: ['x.com'] }];
 		const text = stringifyInlineRuleList(rules);
 		expect(text).toBe('x.com');
-		const p = parseInlineRuleList(text);
-		expect(p.rules).toEqual([{ domain: ['x.com'], domain_suffix: ['.x.com'] }]);
+		expect(parseInlineRuleList(text).rules).toEqual(rules);
+	});
+
+	it('serializes dotted suffix as dot-prefixed line', () => {
+		const text = stringifyInlineRuleList([{ domain_suffix: ['.example.com'] }]);
+		expect(text).toBe('.example.com');
 	});
 
 	it('round-trips typical list input through parse → stringify → parse', () => {
@@ -296,32 +340,20 @@ describe('stringifyInlineRuleList', () => {
 		const p1 = parseInlineRuleList(input);
 		expect(p1.errors).toHaveLength(0);
 		const text = stringifyInlineRuleList(p1.rules);
+		expect(text).toContain('1.1.1.1');
+		expect(text).not.toContain('/32');
 		const p2 = parseInlineRuleList(text);
 		expect(p2.errors).toHaveLength(0);
 		expect(p2.rules).toEqual(p1.rules);
 	});
 
-	it('keeps broader domain_suffix alongside domain (domain: when no matching suffix)', () => {
-		const rules = [{ domain: ['www.example.com'], domain_suffix: ['.example.com'] }];
+	it('keeps domain and broader suffix as separate lines', () => {
+		const rules = [{ domain: ['www.example.com'], domain_suffix: ['example.com'] }];
 		const text = stringifyInlineRuleList(rules);
-		expect(text).toBe(['domain:www.example.com', '.example.com'].join('\n'));
+		expect(text).toBe(['domain:www.example.com', 'example.com'].join('\n'));
 		const p = parseInlineRuleList(text);
 		expect(p.errors).toHaveLength(0);
-		expect(p.rules[0].domain).toEqual(['www.example.com']);
-		const suf = p.rules[0].domain_suffix as string[];
-		expect(suf).toContain('.example.com');
-		expect(suf).not.toContain('.www.example.com');
-	});
-
-	it('emits suffix-only rules as dot-prefixed lines', () => {
-		const text = stringifyInlineRuleList([{ domain_suffix: ['.example.com'] }]);
-		expect(text).toBe('.example.com');
-	});
-
-	it('emits bare IP and CIDR lines', () => {
-		const text = stringifyInlineRuleList([{ ip_cidr: ['1.1.1.1', '8.8.8.0/24'] }]);
-		expect(text).toBe(['1.1.1.1', '8.8.8.0/24'].join('\n'));
-		expect(parseInlineRuleList(text).rules).toEqual([{ ip_cidr: ['1.1.1.1', '8.8.8.0/24'] }]);
+		expect(p.rules[0]).toEqual(rules[0]);
 	});
 });
 

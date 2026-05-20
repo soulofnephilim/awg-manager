@@ -50,9 +50,9 @@ func TestInlineRuleSetMaterializer_CompilesLocalBinary(t *testing.T) {
 		Tag:  "geosite/example",
 		Type: "inline",
 		Rules: []map[string]any{
-			{"domain_suffix": []any{".example.com"}},
-			{"domain_suffix": []any{".example.com"}},
-			{"domain_suffix": []any{".example.org"}},
+			{"domain_suffix": []any{"example.com"}},
+			{"domain_suffix": []any{"example.com"}},
+			{"domain_suffix": []any{"example.org"}},
 		},
 	}
 	got, err := m.materializeRuleSet(rs)
@@ -106,7 +106,7 @@ func TestInlineRuleSetMaterializer_CompileErrorDoesNotPublishBinary(t *testing.T
 	_, err := m.materializeRuleSet(RuleSet{
 		Tag:   "bad",
 		Type:  "inline",
-		Rules: []map[string]any{{"domain_suffix": []any{".example.com"}}},
+		Rules: []map[string]any{{"domain_suffix": []any{"example.com"}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "bad rule") {
 		t.Fatalf("expected compile error with stderr, got %v", err)
@@ -130,7 +130,7 @@ func TestInlineRuleSetMaterializer_RestoresManagedLocalAsInline(t *testing.T) {
 	inline := RuleSet{
 		Tag:   "inline-a",
 		Type:  "inline",
-		Rules: []map[string]any{{"domain_suffix": []any{".example.com"}}},
+		Rules: []map[string]any{{"domain_suffix": []any{"example.com"}}},
 	}
 	local, err := m.materializeRuleSet(inline)
 	if err != nil {

@@ -19,16 +19,48 @@ function asNumberArray(v: unknown): number[] {
 	return v.filter((x): x is number => typeof x === 'number');
 }
 
-function normSuffixDotForm(s: string): string {
-	const t = s.trim().replace(/^\*\./, '').replace(/^\./, '');
-	return '.' + t;
+/** Host part without `*.` / leading `.` (for comparisons). */
+function hostBase(s: string): string {
+	return s.trim().replace(/^\*\./, '').replace(/^\./, '');
+}
+
+/** `domain_suffix` with leading dot (sing-box: explicit dot-suffix form). */
+function suffixDotted(s: string): string {
+	return '.' + hostBase(s);
+}
+
+/** Bare IPv4/IPv6 → canonical CIDR for JSON (`/32` / `/128`). */
+export function normalizeIpCidrForJson(s: string): string {
+	if (isValidSimpleIp(s)) return `${s}/32`;
+	if (isValidSimpleIpv6(s)) return `${s}/128`;
+	return s;
+}
+
+/** Single-host CIDR → bare IP for smart-list display. */
+export function formatIpCidrForList(cidr: string): string {
+	const slash = cidr.lastIndexOf('/');
+	if (slash < 0) return cidr;
+	const ip = cidr.slice(0, slash);
+	const mask = cidr.slice(slash + 1);
+	if (mask === '32' && isValidSimpleIp(ip)) return ip;
+	if (mask === '128' && isValidSimpleIpv6(ip)) return ip;
+	return cidr;
+}
+
+function addIpCidr(set: Set<string>, raw: string): void {
+	if (isValidIpCidr(raw)) {
+		set.add(normalizeIpCidrForJson(raw));
+	} else if (isValidSimpleIp(raw) || isValidSimpleIpv6(raw)) {
+		set.add(normalizeIpCidrForJson(raw));
+	}
 }
 
 /**
  * JSON rules → smart-list text.
- * - domain + matching `.host` suffix in the same rule → bare hostname (list adds both domain and suffix on parse).
- * - domain without matching suffix → `domain:host` (exact host only).
- * - suffix without paired domain → `.suffix` line.
+ * - `domain` only → `domain:host`
+ * - `domain_suffix` without dot → bare `host` (subtree / wildcard-style)
+ * - `domain_suffix` with dot → `.host` line
+ * - `domain` + matching no-dot suffix for same host → single bare `host`
  */
 export function stringifyInlineRuleList(rules: Record<string, unknown>[] | undefined): string {
 	if (!Array.isArray(rules) || rules.length === 0) return '';
@@ -36,19 +68,17 @@ export function stringifyInlineRuleList(rules: Record<string, unknown>[] | undef
 
 	for (const r of rules) {
 		const domains = asStringArray(r['domain']);
-		const suffixes = asStringArray(r['domain_suffix']).map(normSuffixDotForm);
-		const suffixSet = new Set(suffixes);
-		const implied = new Set(
-			domains.map((d) => '.' + d.replace(/^\*\./, '').replace(/^\./, '')),
-		);
-		const extraSuffixes = suffixes.filter((s) => !implied.has(s));
+		const suffixes = asStringArray(r['domain_suffix']);
+		const suffixNoDotSet = new Set(suffixes.filter((s) => !s.startsWith('.')).map(hostBase));
 
 		for (const d of domains) {
-			const dot = '.' + d.replace(/^\*\./, '').replace(/^\./, '');
-			if (suffixSet.has(dot)) lines.push(d);
+			if (suffixNoDotSet.has(hostBase(d))) lines.push(d);
 			else lines.push(`domain:${d}`);
 		}
-		for (const s of extraSuffixes) lines.push(s);
+		for (const s of suffixes) {
+			if (!s.startsWith('.') && domains.some((d) => hostBase(d) === hostBase(s))) continue;
+			lines.push(s);
+		}
 
 		const keywords = asStringArray(r['domain_keyword']);
 		for (const k of keywords) lines.push(`keyword:${k}`);
@@ -57,10 +87,10 @@ export function stringifyInlineRuleList(rules: Record<string, unknown>[] | undef
 		for (const rx of regexes) lines.push(`regex:${rx}`);
 
 		const ipCidrs = asStringArray(r['ip_cidr']);
-		for (const ip of ipCidrs) lines.push(ip);
+		for (const ip of ipCidrs) lines.push(formatIpCidrForList(ip));
 
 		const srcIpCidrs = asStringArray(r['source_ip_cidr']);
-		for (const ip of srcIpCidrs) lines.push(`src_ip:${ip}`);
+		for (const ip of srcIpCidrs) lines.push(`src_ip:${formatIpCidrForList(ip)}`);
 
 		const ports = asNumberArray(r['port']);
 		if (ports.length > 0) lines.push(`port:${ports.join(',')}`);
@@ -164,6 +194,26 @@ function real(val: string | undefined): boolean {
 	return !!val && val !== '';
 }
 
+/** Strip trailing inline comments: space-semicolon or space-hash */
+function stripInlineLine(s: string): string {
+	return s
+		.replace(/\s+;\s.*$/, '')
+		.replace(/\s+#\s.*$/, '')
+		.trim();
+}
+
+/** True when input has no non-comment, non-empty lines. */
+export function isInlineRuleListEmpty(input: string): boolean {
+	for (const rawLine of input.split(/\r?\n/)) {
+		const line = stripInlineLine(rawLine);
+		if (line === '' || line.startsWith(';') || line.startsWith('#') || line.startsWith('//')) {
+			continue;
+		}
+		return false;
+	}
+	return true;
+}
+
 export function parseInlineRuleList(input: string): InlineRuleParseResult {
 	const warnings: LogEntry[] = [];
 	const errors: LogEntry[] = [];
@@ -182,16 +232,8 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 
 	const lines = input.split(/\r?\n/);
 
-	/** Strip trailing inline comments: space-semicolon or space-hash */
-	function stripInline(s: string): string {
-		return s
-			.replace(/\s+;\s.*$/, '')
-			.replace(/\s+#\s.*$/, '')
-			.trim();
-	}
-
 	for (let i = 0; i < lines.length; i++) {
-		let line = stripInline(lines[i]);
+		let line = stripInlineLine(lines[i]);
 		const lineNum = i + 1;
 
 		// skip empty and full-line comments
@@ -273,7 +315,7 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 					if (!real(val)) { lg.err(`${rawKey} требует значение после двоеточия`); continue; }
 					for (const p of val.split(',').map((s) => s.trim()).filter(real)) {
 						if (isValidIpCidr(p) || isValidSimpleIp(p) || isValidSimpleIpv6(p)) {
-							ipCidrGroup.add(p);
+							addIpCidr(ipCidrGroup, p);
 						} else {
 							lg.err(`Некорректный IP/CIDR для ip: ${p}`);
 						}
@@ -283,8 +325,8 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 				case 'cidr':
 					if (!real(val)) { lg.err(`${rawKey} требует значение после двоеточия`); continue; }
 					for (const p of val.split(',').map((s) => s.trim()).filter(real)) {
-						if (isValidIpCidr(p)) {
-							ipCidrGroup.add(p);
+						if (isValidIpCidr(p) || isValidSimpleIp(p) || isValidSimpleIpv6(p)) {
+							addIpCidr(ipCidrGroup, p);
 						} else {
 							lg.err(`Некорректный CIDR для cidr: ${p}`);
 						}
@@ -296,7 +338,7 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 					if (!real(val)) { lg.err(`${rawKey} требует значение после двоеточия`); continue; }
 					for (const p of val.split(',').map((s) => s.trim()).filter(real)) {
 						if (isValidIpCidr(p) || isValidSimpleIp(p) || isValidSimpleIpv6(p)) {
-							sourceIpCidrGroup.add(p);
+							addIpCidr(sourceIpCidrGroup, p);
 						} else {
 							lg.err(`Некорректный IP/CIDR для src_ip: ${p}`);
 						}
@@ -318,22 +360,33 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 
 				case 'domain':
 					if (!real(val)) { lg.err(`${rawKey} требует значение после двоеточия`); continue; }
-					if (isValidDomain(val)) {
-						// Явный `domain:` — только sing-box domain (точное совпадение хоста), без domain_suffix
-						domainGroup.add(val);
-					} else {
-						lg.err(`Некорректный домен для domain: ${val}`);
+					{
+						const norm = normalizeDomainHost(val);
+						if (norm) {
+							domainGroup.add(norm);
+						} else {
+							lg.err(`Некорректный домен для domain: ${val}`);
+						}
 					}
 					continue;
 
 				case 'domain_suffix':
 				case 'suffix':
 					if (!real(val)) { lg.err(`${rawKey} требует значение после двоеточия`); continue; }
-					const normalizedSuffix = val.replace(/^\*\./, '').replace(/^\./, '');
-					if (isValidDomain(normalizedSuffix)) {
-						domainSuffixGroup.add('.' + normalizedSuffix);
+					if (val.startsWith('*.')) {
+						const norm = normalizeDomainHost(val.slice(2));
+						if (norm) {
+							domainSuffixGroup.add(norm);
+						} else {
+							lg.err(`Некорректный домен для ${rawKey}: ${val}`);
+						}
 					} else {
-						lg.err(`Некорректный домен для ${rawKey}: ${val}`);
+						const norm = normalizeDomainHost(val);
+						if (norm) {
+							domainSuffixGroup.add(suffixDotted(norm));
+						} else {
+							lg.err(`Некорректный домен для ${rawKey}: ${val}`);
+						}
 					}
 					continue;
 
@@ -352,43 +405,31 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 			try { domain = new URL(domain).hostname; } catch (_) { /* keep as-is */ }
 		}
 
-		// ".example.com" → domain_suffix ".example.com"
+		// ".example.com" → domain_suffix [".example.com"]
 		if (domain.startsWith('.')) {
-			const suf = domain.slice(1);
-			if (isValidDomain(suf)) {
-				domainSuffixGroup.add('.' + suf);
+			const norm = normalizeDomainHost(domain.slice(1));
+			if (norm) {
+				domainSuffixGroup.add('.' + norm);
 			} else {
 				lg.warn(`Невалидный домен (точка-префикс): ${domain}`);
 			}
 			continue;
 		}
 
-		// "*.example.com" → domain_suffix ".example.com"
+		// "*.example.com" → domain_suffix ["example.com"] (без точки)
 		if (domain.startsWith('*.')) {
-			const suf = domain.slice(2);
-			if (isValidDomain(suf)) {
-				domainSuffixGroup.add('.' + suf);
+			const norm = normalizeDomainHost(domain.slice(2));
+			if (norm) {
+				domainSuffixGroup.add(norm);
 			} else {
 				lg.warn(`Невалидный домен (wildcard): ${domain}`);
 			}
 			continue;
 		}
 
-		// CIDR notation "a.b.c.d/m"
-		if (isValidIpCidr(domain)) {
-			ipCidrGroup.add(domain);
-			continue;
-		}
-
-		// bare IPv4
-		if (isValidSimpleIp(domain)) {
-			ipCidrGroup.add(domain);
-			continue;
-		}
-
-		// bare IPv6 (no slash — single address)
-		if (isValidSimpleIpv6(domain)) {
-			ipCidrGroup.add(domain);
+		// CIDR or bare IP → ip_cidr with /32 or /128 for single hosts
+		if (isValidIpCidr(domain) || isValidSimpleIp(domain) || isValidSimpleIpv6(domain)) {
+			addIpCidr(ipCidrGroup, domain);
 			continue;
 		}
 
@@ -399,11 +440,13 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 			continue;
 		}
 
-		// plain valid domain
-		if (isValidDomain(domain)) {
-			domainGroup.add(domain);
-			domainSuffixGroup.add('.' + domain);
-			continue;
+		// plain valid domain → только domain_suffix без точки (поддерево), не domain
+		{
+			const norm = normalizeDomainHost(domain);
+			if (norm) {
+				domainSuffixGroup.add(norm);
+				continue;
+			}
 		}
 
 		lg.warn(`Не распознано как правило: ${line}`);
@@ -432,7 +475,7 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 	const warnMsgs = warnings.map((w) => `Строка ${w.line}: ${w.msg}`);
 	const errMsgs = errors.map((e) => `Строка ${e.line}: ${e.msg}`);
 
-	if (rules.length === 0 && errMsgs.length === 0 && warnMsgs.length === 0) {
+	if (rules.length === 0 && errMsgs.length === 0 && warnMsgs.length === 0 && !isInlineRuleListEmpty(input)) {
 		errMsgs.push('Нет валидных строк для inline rule set');
 	}
 
@@ -445,8 +488,26 @@ export function parseInlineRuleList(input: string): InlineRuleParseResult {
 
 const DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
-function isValidDomain(s: string): boolean {
+function isAsciiDomainHost(s: string): boolean {
 	return DOMAIN_RE.test(s);
+}
+
+/** Unicode/IDN hostname → punycode (sing-box expects ASCII). */
+export function toAsciiHostname(host: string): string | null {
+	const trimmed = host.trim();
+	if (!trimmed || /[\s/:#]/.test(trimmed)) return null;
+	try {
+		const ascii = new URL(`http://${trimmed}`).hostname;
+		if (!ascii || !isAsciiDomainHost(ascii)) return null;
+		return ascii;
+	} catch {
+		return null;
+	}
+}
+
+/** Normalize host (strip `*.`/`.`) and convert to punycode when needed. */
+function normalizeDomainHost(host: string): string | null {
+	return toAsciiHostname(hostBase(host));
 }
 
 function isValidIpCidr(s: string): boolean {

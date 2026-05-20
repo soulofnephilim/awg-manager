@@ -1,5 +1,26 @@
+import { formatIpCidrForList, toAsciiHostname } from '$lib/utils/singboxInlineRules';
+
 const GEOSITE_RE = /^geosite:([A-Za-z0-9_-]+)$/i;
 const GEOIP_RE = /^geoip:([A-Za-z0-9_-]+)$/i;
+
+/** Geosite .dat RootDomain lines → smart-list suffix without leading dot. */
+function normalizeGeositeExpandLine(line: string): string {
+	const t = line.trim();
+	const lower = t.toLowerCase();
+	if (
+		lower.startsWith('domain_regex:') ||
+		lower.startsWith('regex:') ||
+		lower.startsWith('domain_keyword:') ||
+		lower.startsWith('keyword:') ||
+		lower.startsWith('domain:')
+	) {
+		return t;
+	}
+	let host = t;
+	if (host.startsWith('.')) host = host.slice(1);
+	else if (host.startsWith('*.')) host = host.slice(2);
+	return toAsciiHostname(host) ?? host;
+}
 
 export type GeoExpandFn = (kind: 'geosite' | 'geoip', tag: string) => Promise<string[]>;
 
@@ -33,7 +54,7 @@ export async function expandGeoLinesInInput(
 					warnings.push(`geosite:${tag}: тег пуст`);
 				} else {
 					warnings.push(`geosite:${tag} → ${items.length} строк`);
-					out.push(...items);
+					out.push(...items.map(normalizeGeositeExpandLine));
 				}
 			} catch (e) {
 				warnings.push(`geosite:${tag}: ${(e as Error).message}`);
@@ -51,7 +72,7 @@ export async function expandGeoLinesInInput(
 					warnings.push(`geoip:${tag}: тег пуст`);
 				} else {
 					warnings.push(`geoip:${tag} → ${items.length} строк`);
-					out.push(...items);
+					out.push(...items.map(formatIpCidrForList));
 				}
 			} catch (e) {
 				warnings.push(`geoip:${tag}: ${(e as Error).message}`);

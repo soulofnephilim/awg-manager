@@ -7,6 +7,7 @@
 	import { HrNeoGeoTagPicker } from '$lib/components/hrneo';
 	import {
 		analyzeInlineRuleListLossy,
+		isInlineRuleListEmpty,
 		parseInlineRuleList,
 		stringifyInlineRuleList,
 	} from '$lib/utils/singboxInlineRules';
@@ -28,12 +29,17 @@
 		{ value: '168h', label: '168h (неделя)' },
 	];
 
-	const RULES_LIST_PLACEHOLDER = `# Домены
-openai.com
+	const RULES_LIST_PLACEHOLDER = `# Домены и все поддомены
 chatgpt.com
-domain:claude.ai
-*.perplexity.ai
+*.openai.com 
 https://gemini.google.com/app
+
+# Только поддомены
+.perplexity.ai
+domain_suffix:deepseek.com
+
+# Только домен
+domain:claude.ai
 
 # IP/CIDR
 1.1.1.1
@@ -124,6 +130,11 @@ geosite:xai`;
 		rulesList = trimmed ? `${trimmed}\n${token}` : token;
 	}
 
+	function appendGeositeLine(token: string): void {
+		appendRulesLine(token);
+		geositePickerOpen = false;
+	}
+
 	// ── line numbers for rules-list textarea ─────────────────────
 	const rulesListLineNumbers = $derived.by(() => {
 		const count = Math.max(1, rulesList.split(/\r?\n/).length);
@@ -143,6 +154,8 @@ geosite:xai`;
 	let inlineMode: 'list' | 'json' = $state('list');
 
 	let rulesList = $state('');
+
+	const listInputEmpty = $derived(isInlineRuleListEmpty(rulesList));
 
 	let type: 'remote' | 'local' | 'inline' = $state('remote');
 	let format: 'binary' | 'source' = $state('binary');
@@ -232,7 +245,7 @@ geosite:xai`;
 	const DEFAULT_RULES_JSON = `[
   {
     "domain_suffix": [
-      ".example.com"
+      "example.com"
     ]
   }
 ]`;
@@ -362,6 +375,11 @@ geosite:xai`;
 						return;
 					}
 				} else {
+					if (isInlineRuleListEmpty(rulesList)) {
+						error = 'Список пуст';
+						busy = false;
+						return;
+					}
 					const { text: expanded, warnings: geoWarn } = await expandGeoLinesInInput(
 						rulesList,
 						async (kind, tag) => (await api.expandGeoTag(kind, tag)).lines,
@@ -465,7 +483,8 @@ geosite:xai`;
 					</button>
 					<button
 						class:active={inlineMode === 'json'}
-						disabled={inlineModeBusy}
+						disabled={inlineModeBusy || (inlineMode === 'list' && listInputEmpty)}
+						title={inlineMode === 'list' && listInputEmpty ? 'Добавьте хотя бы одну строку в список' : undefined}
 						onclick={() => void switchInlineMode('json')}
 						type="button"
 					>
@@ -487,7 +506,9 @@ geosite:xai`;
 			{#if inlineMode === 'list'}
 				<div class="field">
 					<div class="list-toolbar">
-						<div class="lbl">Список правил</div>
+						<div class="lbl" class:lbl-expanding={geoExpanding}>
+							{geoExpanding ? 'Разворачиваем geosite:/geoip: теги…' : 'Список правил'}
+						</div>
 						<div class="list-toolbar-actions">
 							<Button variant="ghost" size="sm" onclick={() => (geositePickerOpen = !geositePickerOpen)}>
 								+ geosite:TAG
@@ -501,7 +522,7 @@ geosite:xai`;
 						<HrNeoGeoTagPicker
 							kind="geosite"
 							files={geositeFiles}
-							onpick={(t) => appendRulesLine(t)}
+							onpick={appendGeositeLine}
 							onclose={() => (geositePickerOpen = false)}
 						/>
 					{/if}
@@ -512,9 +533,6 @@ geosite:xai`;
 							onpick={(t) => appendRulesLine(t)}
 							onclose={() => (geoipPickerOpen = false)}
 						/>
-					{/if}
-					{#if geoExpanding}
-						<div class="hint">Разворачиваем geosite:/geoip: теги…</div>
 					{/if}
 					<div class="rules-editor">
 						<pre class="line-numbers" aria-hidden="true" bind:this={rulesListLineNumberGutter}>{rulesListLineNumbers}</pre>
@@ -544,44 +562,86 @@ geosite:xai`;
 					<summary>Подсказка по формату списка</summary>
 
 					<div class="inline-help-body">
-						<div>
-							<span class="help-label">Поддерживается:</span>
-							голый домен (даёт и <code>domain</code>, и <code>domain_suffix</code>),
-							<code>domain:хост</code> — только точное совпадение хоста в <code>domain</code>,
-							URL, wildcard <code>*.example.com</code>, суффикс <code>.example.com</code>,
-							<code>domain_suffix:</code> / <code>suffix:</code>, IP/CIDR,
-							<code>geosite:TAG</code>, <code>geoip:TAG</code> (разворачиваются из гео-файлов),
-							<code>keyword:</code>, <code>regex:</code>.
-						</div>
-						<div>
-							<span class="help-label">JSON → список:</span>
-							если в JSON есть и <code>domain</code>, и парный <code>domain_suffix</code>
-							(<code>.</code> + тот же хост) — в текст попадёт голый домен; только
-							<code>domain</code> → <code>domain:хост</code>; только суффикс → строка
-							<code>.example.com</code>.
-						</div>
-						<div>
-							<span class="help-label">Расширенные matchers:</span>
-							<code>port:</code>, <code>process:</code>, <code>package:</code>,
-							<code>network:</code>.
-						</div>
-						<div>
-							<span class="help-label">Осторожно:</span>
-							<code>port:443</code> создаёт отдельное правило для любого HTTPS-трафика,
-							а <code>process:</code> на Keenetic/Entware относится к локальным процессам,
-							не к LAN-клиентам.
-						</div>
-						<div>
-							<span class="help-label">Пока не поддерживается:</span>
-							исключения <code>@@</code>, <code>port_range:</code>, логические правила
-							<code>and/or</code> и произвольные JSON-поля sing-box. Для них используйте
-							режим <code>JSON</code>.
-						</div>
+						<p class="inline-help-intro">
+							Одна строка — одно значение. Пустые строки игнорируются. <br>
+							В списке можно писать комментарии: <code>#</code>, <code>//</code>, <code>;</code> (целая строка или в конце — после пробела). <br>
+							При сохранении или переходе на вкладку JSON комментарии удаляются и в JSON не сохраняются. Порядок строк в списке не имеет значения и может меняться при сохранении.
+						</p>
+
+						<section class="inline-help-section">
+							<div class="help-label">Домены и поддомены</div>
+							<ul>
+								<li><code>domain.com</code> → хост и его поддомены (хранится в JSON как <code>domain_suffix</code> без точки)</li>
+								<li><code>*.domain.com</code> → то же самое</li>
+								<li><code>https://example.domain.com/…</code> — из URL берётся hostname и хранится так же</li>
+								<li><code>*.рф</code> — доменная зона (если текст содержит кириллицу, то будет конвертирован в punycode <code>.xn--p1ai</code>)</li>
+							</ul>
+						</section>
+
+						<section class="inline-help-section">
+							<div class="help-label">Только поддомены (без отдельного <code>domain</code>)</div>
+							<ul>
+								<li><code>.domain.com</code> — суффикс <em>с</em> точкой в JSON: <code>[".domain.com"]</code> (apex не матчится)</li>
+								<li><code>domain_suffix:domain.com</code> — тоже: в JSON будет <code>".domain.com"</code></li>
+							</ul>
+						</section>
+
+						<section class="inline-help-section">
+							<div class="help-label">Только точный хост</div>
+							<ul>
+								<li><code>domain:domain.com</code> — только <code>domain</code>, без поддоменов</li>
+							</ul>
+						</section>
+
+						<section class="inline-help-section">
+							<div class="help-label">IP и подсети (только IPv4)</div>
+							<ul>
+								<li><code>1.1.1.1</code> — в JSON как <code>1.1.1.1/32</code>; при обратном переводе снова голый IP</li>
+								<li><code>8.8.8.0/24</code> — CIDR как есть; маски кроме <code>/32</code> не сжимаются</li>
+								<li>префиксы <code>ip:</code>, <code>cidr:</code>, <code>src_ip:</code> — то же правило</li>
+								<li>IPv6 в режиме «Список» не поддерживается — адреса и префиксы IPv6 задавайте в JSON</li>
+							</ul>
+						</section>
+
+						<section class="inline-help-section">
+							<div class="help-label">Geo и прочие matchers</div>
+							<ul>
+								<li><code>geosite:TAG</code> — разворачивается в домены; суффиксы из .dat — <strong>без</strong> ведущей точки (как <code>domain.com</code>)</li>
+								<li><code>geoip:TAG</code> — разворачивается в CIDR; одиночные хосты из geo — в списке без <code>/32</code></li>
+								<li><code>keyword:TAG</code>, <code>regex:…</code> — отдельные поля в JSON</li>
+							</ul>
+						</section>
+
+						<section class="inline-help-section">
+							<div class="help-label">Расширенные matchers</div>
+							<ul>
+								<li><code>port:443</code>, <code>process:curl</code>, <code>package:…</code>, <code>network:tcp|udp</code></li>
+								<li>каждый тип — отдельная группа правил в JSON (не смешивается с доменами в одной записи)</li>
+							</ul>
+						</section>
+
+						<section class="inline-help-section">
+							<div class="help-label">Осторожно</div>
+							<ul>
+								<li><code>port:443</code> — отдельное правило на весь HTTPS-трафик</li>
+								<li><code>process:</code> / <code>process_path:</code> на Keenetic/Entware — только локальные процессы роутера, не LAN-клиенты</li>
+							</ul>
+						</section>
+
+						<section class="inline-help-section">
+							<div class="help-label">Пока не в режиме «Список»</div>
+							<ul>
+								<li>IPv6, исключения <code>@@</code>, <code>port_range:</code></li>
+								<li>логика <code>and</code> / <code>or</code> и любые лишние поля sing-box — только режим <code>JSON</code></li>
+							</ul>
+						</section>
 					</div>
 				</details>
 				</div>
 
-				{#if listParsePreview.errors.length > 0}
+				{#if listInputEmpty}
+					<div class="hint list-empty-hint">Список пуст — добавьте домены, IP или geosite:/geoip: тег.</div>
+				{:else if listParsePreview.errors.length > 0}
 					<div class="parse-messages parse-messages-error">
 						<div class="parse-messages-title">Ошибки разбора</div>
 						<ul>
@@ -652,6 +712,9 @@ geosite:xai`;
 		font-size: 0.75rem;
 		color: var(--muted-text);
 	}
+	.lbl-expanding {
+		color: var(--accent, #3b82f6);
+	}
 	.list-toolbar {
 		display: flex;
 		align-items: center;
@@ -691,7 +754,24 @@ geosite:xai`;
 	.inline-help-body {
 		margin-top: 0.45rem;
 		display: grid;
-		gap: 0.28rem;
+		gap: 0.55rem;
+	}
+
+	.inline-help-intro {
+		margin: 0;
+	}
+
+	.inline-help-section ul {
+		margin: 0.2rem 0 0;
+		padding-left: 1.15rem;
+	}
+
+	.inline-help-section li {
+		margin: 0.12rem 0;
+	}
+
+	.inline-help-section li::marker {
+		color: var(--muted-text);
 	}
 
 	.inline-help code {
@@ -731,6 +811,8 @@ geosite:xai`;
 		width: 100%;
 		box-sizing: border-box;
 		resize: vertical;
+		min-height: 8rem;
+		max-height: min(70vh, 36rem);
 		line-height: 1.45;
 	}
 	.segment {
@@ -827,9 +909,9 @@ geosite:xai`;
 		display: grid;
 		grid-template-columns: auto 1fr;
 		height: 16rem;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 4px;
+		min-height: 8rem;
+		max-height: min(70vh, 36rem);
+		resize: vertical;
 		overflow: hidden;
 		min-width: 0;
 		align-items: stretch;
@@ -856,6 +938,7 @@ geosite:xai`;
 		border-radius: 0;
 		background: transparent;
 		min-width: 0;
+		width: 100%;
 		height: 100%;
 		overflow: auto;
 		resize: none;

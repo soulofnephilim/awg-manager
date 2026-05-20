@@ -14,7 +14,7 @@ describe('expandGeoLinesInInput', () => {
 			expand,
 		);
 
-		expect(text).toBe('google.com\n.youtube.com\n5.8.0.0/21\nplain.com');
+		expect(text).toBe('google.com\nyoutube.com\n5.8.0.0/21\nplain.com');
 		expect(warnings.some((w) => w.includes('geosite:GOOGLE'))).toBe(true);
 		expect(warnings.some((w) => w.includes('geoip:RU'))).toBe(true);
 	});
