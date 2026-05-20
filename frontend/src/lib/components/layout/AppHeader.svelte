@@ -79,6 +79,7 @@
 		username = null,
 		theme = {
 			preset: 'legacy',
+			modePreference: 'dark',
 			mode: 'dark',
 			legacyMode: 'dark',
 			custom: {
@@ -141,6 +142,9 @@
 	const themeButtonLabel = $derived.by(() => {
 		const currentModeLabel = themeDisplayMode === 'light' ? 'светлая' : 'тёмная';
 		const nextModeLabel = themeDisplayMode === 'light' ? 'тёмную' : 'светлую';
+		if (theme.modePreference === 'system') {
+			return `Переключить ${theme.label} с системной на ${nextModeLabel} тему. Сейчас ${currentModeLabel} (по системе).`;
+		}
 		return `Переключить ${theme.label} на ${nextModeLabel} тему. Сейчас ${currentModeLabel}.`;
 	});
 </script>

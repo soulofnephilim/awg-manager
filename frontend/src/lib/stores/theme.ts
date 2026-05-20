@@ -3,6 +3,7 @@ import { writable } from 'svelte/store';
 
 export type ThemePreset = 'legacy' | 'neo' | 'mint' | 'custom';
 export type ThemeMode = 'dark' | 'light';
+export type ThemeModePreference = 'system' | ThemeMode;
 
 export interface ThemeCustomPalette {
 	accent: string;
@@ -12,11 +13,12 @@ export interface ThemeCustomPalette {
 
 export interface ThemeSelection {
 	preset: ThemePreset;
-	legacyMode: ThemeMode;
+	modePreference: ThemeModePreference;
 	custom: ThemeCustomPalette;
 }
 
 export interface ThemeState extends ThemeSelection {
+	legacyMode: ThemeMode;
 	mode: ThemeMode;
 	label: string;
 	summary: string;
@@ -27,6 +29,7 @@ type ThemeTokenMap = Record<string, string>;
 
 const storageKey = 'awg-manager-theme';
 const presetCycleOrder: ThemePreset[] = ['legacy', 'neo', 'mint', 'custom'];
+const SYSTEM_LIGHT_MEDIA_QUERY = '(prefers-color-scheme: light)';
 
 export const DEFAULT_CUSTOM_THEME: ThemeCustomPalette = {
 	accent: '#8b5cf6',
@@ -289,6 +292,10 @@ function isThemeMode(value: string | null | undefined): value is ThemeMode {
 	return value === 'dark' || value === 'light';
 }
 
+function isThemeModePreference(value: string | null | undefined): value is ThemeModePreference {
+	return value === 'system' || isThemeMode(value);
+}
+
 function isThemePreset(value: string | null | undefined): value is ThemePreset {
 	return value === 'legacy' || value === 'neo' || value === 'mint' || value === 'custom';
 }
@@ -363,7 +370,7 @@ function getContrastColor(background: string, dark = '#111827', light = '#ffffff
 function selectionFromState(state: ThemeState): ThemeSelection {
 	return {
 		preset: state.preset,
-		legacyMode: state.legacyMode,
+		modePreference: state.modePreference,
 		custom: state.custom,
 	};
 }
@@ -405,26 +412,46 @@ function buildCustomTokens(custom: ThemeCustomPalette): ThemeTokenMap {
 	};
 }
 
-function resolveThemeMode(selection: ThemeSelection): ThemeMode {
+function resolveLegacyMode(selection: ThemeSelection): ThemeMode {
 	if (selection.preset === 'custom') {
 		return inferModeFromBackground(selection.custom.background);
 	}
+	if (selection.modePreference === 'system') {
+		return getSystemPreferredMode();
+	}
+	return selection.modePreference;
+}
+
+function resolveThemeMode(selection: ThemeSelection): ThemeMode {
+	const legacyMode = resolveLegacyMode(selection);
+	if (selection.preset === 'custom') {
+		return legacyMode;
+	}
 	/* Neo «светлая» — палитра тёмного Gruvbox; для color-scheme и data-theme оставляем dark */
-	if (selection.preset === 'neo' && selection.legacyMode === 'light') {
+	if (selection.preset === 'neo' && legacyMode === 'light') {
 		return 'dark';
 	}
-	return selection.legacyMode;
+	return legacyMode;
+}
+
+function resolveToggledModePreference(selection: ThemeSelection): ThemeMode {
+	if (selection.modePreference === 'system') {
+		const legacyMode = resolveLegacyMode(selection);
+		return legacyMode === 'dark' ? 'light' : 'dark';
+	}
+	return selection.modePreference === 'dark' ? 'light' : 'dark';
 }
 
 export function resolveThemeTokens(selection: ThemeSelection): ThemeTokenMap {
+	const legacyMode = resolveLegacyMode(selection);
 	if (selection.preset === 'legacy') {
-		return selection.legacyMode === 'light' ? LEGACY_LIGHT_TOKENS : LEGACY_DARK_TOKENS;
+		return legacyMode === 'light' ? LEGACY_LIGHT_TOKENS : LEGACY_DARK_TOKENS;
 	}
 	if (selection.preset === 'neo') {
-		return selection.legacyMode === 'light' ? NEO_LIGHT_TOKENS : NEO_DARK_TOKENS;
+		return legacyMode === 'light' ? NEO_LIGHT_TOKENS : NEO_DARK_TOKENS;
 	}
 	if (selection.preset === 'mint') {
-		return selection.legacyMode === 'light' ? MINT_LIGHT_TOKENS : MINT_DARK_TOKENS;
+		return legacyMode === 'light' ? MINT_LIGHT_TOKENS : MINT_DARK_TOKENS;
 	}
 	return buildCustomTokens(selection.custom);
 }
@@ -438,12 +465,13 @@ export function getThemePreviewStyle(selection: ThemeSelection): string {
 function buildThemeState(selection: ThemeSelection): ThemeState {
 	const normalizedSelection: ThemeSelection = {
 		preset: selection.preset,
-		legacyMode: selection.legacyMode,
+		modePreference: selection.modePreference,
 		custom: normalizeCustomPalette(selection.custom),
 	};
 	const presetMeta = THEME_PRESETS[normalizedSelection.preset];
 	return {
 		...normalizedSelection,
+		legacyMode: resolveLegacyMode(normalizedSelection),
 		mode: resolveThemeMode(normalizedSelection),
 		label: presetMeta.label,
 		summary: presetMeta.summary,
@@ -453,6 +481,38 @@ function buildThemeState(selection: ThemeSelection): ThemeState {
 
 function persistSelection(selection: ThemeSelection): void {
 	localStorage.setItem(storageKey, JSON.stringify(selection));
+}
+
+function applyThemeChromeMetadata(tokens: ThemeTokenMap, mode: ThemeMode): void {
+	const themeColor =
+		tokens['--color-bg-secondary'] ??
+		tokens['--color-bg-primary'] ??
+		(mode === 'light' ? '#f0f0f3' : '#16161e');
+
+	const themeColorMetas = Array.from(
+		document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]'),
+	);
+
+	if (themeColorMetas.length === 0) {
+		const meta = document.createElement('meta');
+		meta.setAttribute('name', 'theme-color');
+		document.head.appendChild(meta);
+		themeColorMetas.push(meta);
+	}
+
+	for (const meta of themeColorMetas) {
+		meta.setAttribute('content', themeColor);
+	}
+
+	let appleStatusMeta = document.querySelector<HTMLMetaElement>(
+		'meta[name="apple-mobile-web-app-status-bar-style"]',
+	);
+	if (!appleStatusMeta) {
+		appleStatusMeta = document.createElement('meta');
+		appleStatusMeta.setAttribute('name', 'apple-mobile-web-app-status-bar-style');
+		document.head.appendChild(appleStatusMeta);
+	}
+	appleStatusMeta.setAttribute('content', mode === 'light' ? 'default' : 'black');
 }
 
 function applyThemeState(state: ThemeState): void {
@@ -470,17 +530,18 @@ function applyThemeState(state: ThemeState): void {
 	root.setAttribute('data-theme-preset', state.preset);
 	root.classList.toggle('light', state.mode === 'light');
 	root.style.colorScheme = state.mode;
+	applyThemeChromeMetadata(tokens, state.mode);
 }
 
 function getSystemPreferredMode(): ThemeMode {
 	if (!browser) return 'dark';
-	return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+	return window.matchMedia(SYSTEM_LIGHT_MEDIA_QUERY).matches ? 'light' : 'dark';
 }
 
 function getInitialSelection(): ThemeSelection {
 	const fallback: ThemeSelection = {
 		preset: 'legacy',
-		legacyMode: getSystemPreferredMode(),
+		modePreference: 'system',
 		custom: DEFAULT_CUSTOM_THEME,
 	};
 	if (!browser) return fallback;
@@ -489,14 +550,20 @@ function getInitialSelection(): ThemeSelection {
 	if (!stored) return fallback;
 
 	if (isThemeMode(stored)) {
-		return { ...fallback, preset: 'legacy', legacyMode: stored };
+		return { ...fallback, preset: 'legacy', modePreference: stored };
 	}
 
 	try {
-		const parsed = JSON.parse(stored) as Partial<ThemeSelection> | null;
+		const parsed = JSON.parse(stored) as
+			| (Partial<ThemeSelection> & { legacyMode?: string })
+			| null;
 		return {
 			preset: isThemePreset(parsed?.preset) ? parsed.preset : fallback.preset,
-			legacyMode: isThemeMode(parsed?.legacyMode) ? parsed.legacyMode : fallback.legacyMode,
+			modePreference: isThemeModePreference(parsed?.modePreference)
+				? parsed.modePreference
+				: isThemeMode(parsed?.legacyMode)
+					? parsed.legacyMode
+					: fallback.modePreference,
 			custom: normalizeCustomPalette(parsed?.custom),
 		};
 	} catch {
@@ -507,6 +574,7 @@ function getInitialSelection(): ThemeSelection {
 function createThemeStore() {
 	let currentState = buildThemeState(getInitialSelection());
 	const { subscribe, set } = writable<ThemeState>(currentState);
+	let mediaQueryList: MediaQueryList | null = null;
 
 	function commit(selection: ThemeSelection): ThemeState {
 		const nextState = buildThemeState(selection);
@@ -523,9 +591,27 @@ function createThemeStore() {
 		return commit(transform(selectionFromState(currentState)));
 	}
 
+	function refreshFromSystemPreference(): void {
+		if (!browser) return;
+		if (currentState.preset === 'custom' || currentState.modePreference !== 'system') return;
+		commit(selectionFromState(currentState));
+	}
+
+	function startSystemPreferenceSync(): void {
+		if (!browser || mediaQueryList) return;
+		mediaQueryList = window.matchMedia(SYSTEM_LIGHT_MEDIA_QUERY);
+		const listener = () => refreshFromSystemPreference();
+		if (typeof mediaQueryList.addEventListener === 'function') {
+			mediaQueryList.addEventListener('change', listener);
+			return;
+		}
+		mediaQueryList.addListener(listener);
+	}
+
 	return {
 		subscribe,
 		init: () => {
+			startSystemPreferenceSync();
 			commit(getInitialSelection());
 		},
 		cyclePreset: () => {
@@ -538,15 +624,15 @@ function createThemeStore() {
 		setPreset: (preset: ThemePreset) => {
 			mutate((current) => ({ ...current, preset }));
 		},
-		setMode: (mode: ThemeMode) => {
-			mutate((current) => ({ ...current, legacyMode: mode }));
+		setMode: (mode: ThemeModePreference) => {
+			mutate((current) => ({ ...current, modePreference: mode }));
 		},
 		toggleMode: () => {
 			mutate((current) => {
 				if (current.preset === 'custom') return current;
 				return {
 					...current,
-					legacyMode: current.legacyMode === 'dark' ? 'light' : 'dark',
+					modePreference: resolveToggledModePreference(current),
 				};
 			});
 		},

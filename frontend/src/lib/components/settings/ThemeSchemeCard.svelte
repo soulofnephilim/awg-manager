@@ -5,12 +5,13 @@
 		THEME_PRESETS,
 		getThemePreviewStyle,
 		type ThemeCustomPalette,
-		type ThemeMode,
+		type ThemeModePreference,
 		type ThemePreset,
 	} from '$lib/stores/theme';
 
 	const PRESET_ORDER: ThemePreset[] = ['legacy', 'neo', 'mint', 'custom'];
-	const LEGACY_MODE_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
+	const LEGACY_MODE_OPTIONS: Array<{ value: ThemeModePreference; label: string }> = [
+		{ value: 'system', label: 'Системная' },
 		{ value: 'dark', label: 'Тёмная' },
 		{ value: 'light', label: 'Светлая' },
 	];
@@ -24,6 +25,9 @@
 
 	const currentThemeLabel = $derived.by(() => {
 		if ($theme.preset !== 'custom') {
+			if ($theme.modePreference === 'system') {
+				return `${$theme.label} · Системная (${$theme.legacyMode === 'light' ? 'Светлая' : 'Тёмная'})`;
+			}
 			return `${$theme.label} · ${$theme.legacyMode === 'light' ? 'Светлая' : 'Тёмная'}`;
 		}
 		return `${$theme.label} · ${$theme.mode === 'light' ? 'Авто-светлая' : 'Авто-тёмная'}`;
@@ -32,7 +36,7 @@
 	function previewStyleFor(preset: ThemePreset): string {
 		return getThemePreviewStyle({
 			preset,
-			legacyMode: $theme.legacyMode,
+			modePreference: $theme.modePreference,
 			custom: $theme.custom,
 		});
 	}
@@ -138,9 +142,9 @@
 							<button
 								type="button"
 								role="radio"
-								aria-checked={$theme.legacyMode === option.value}
+								aria-checked={$theme.modePreference === option.value}
 								class="mode-pill"
-								class:active={$theme.legacyMode === option.value}
+								class:active={$theme.modePreference === option.value}
 								onclick={() => theme.setMode(option.value)}
 							>
 								{option.label}
