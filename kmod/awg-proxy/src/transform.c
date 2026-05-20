@@ -130,8 +130,9 @@ u8 *transform_outbound(u8 *buf, int dataoff, int n,
 		else
 			write32_le(data, hrange_pick(&cfg->h4, rand_val));
 		if (cfg->s4 > 0 && dataoff >= cfg->s4) {
+			get_random_bytes(data - cfg->s4, cfg->s4);
 			*out_len = cfg->s4 + n;
-			return buf + dataoff - cfg->s4;
+			return data - cfg->s4;
 		}
 		*out_len = n;
 		return data;
