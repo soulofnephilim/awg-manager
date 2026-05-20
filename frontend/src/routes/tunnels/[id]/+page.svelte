@@ -13,6 +13,7 @@
 	import { editTunnelSchema } from '$lib/schemas/tunnel';
 	import { AWGAdvancedParams, ReplaceTunnelConfigModal } from '$lib/components/tunnels';
 	import TunnelEditHeader from '$lib/components/tunnels/TunnelEditHeader.svelte';
+	import AwgConfigAnalyzer from '$lib/components/diagnostics/AwgConfigAnalyzer.svelte';
 
 	let { data } = $props();
 
@@ -44,12 +45,13 @@
 
 	type ActionStatus = 'loading' | 'success' | 'error';
 
-	type TunnelDetailTab = 'basic' | 'obfuscation' | 'routing';
+	type TunnelDetailTab = 'basic' | 'obfuscation' | 'routing' | 'awgConfig';
 	let activeTab = $state<TunnelDetailTab>('basic');
 	const detailTabs = [
 		{ id: 'basic', label: 'Основное' },
 		{ id: 'obfuscation', label: 'Обфускация' },
 		{ id: 'routing', label: 'Маршрутизация' },
+		{ id: 'awgConfig', label: 'Анализ конфига' },
 	];
 	let replaceModalOpen = $state(false);
 
@@ -338,6 +340,8 @@
 			tabs={detailTabs}
 			active={activeTab}
 			onchange={(id) => (activeTab = id as TunnelDetailTab)}
+			urlParam="tab"
+			defaultTab="basic"
 		/>
 
 		<div class="tab-content">
@@ -462,6 +466,18 @@
 							/>
 						</div>
 					</section>
+				</div>
+			{:else if activeTab === 'awgConfig'}
+				<div class="tab-form">
+					<AwgConfigAnalyzer
+						initialTunnelId={tunnelId}
+						embedded
+						autoAnalyze
+						lockTunnelSelection
+						onTunnelSaved={() => {
+							loadTunnel();
+						}}
+					/>
 				</div>
 			{/if}
 		</div>
