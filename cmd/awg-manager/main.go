@@ -1019,6 +1019,7 @@ func main() {
 
 	routerSvc := router.NewService(router.Deps{
 		Log:                    log,
+		AppLog:                 loggingService,
 		Settings:               settingsStore,
 		Singbox:                singboxOp,
 		Policies:               &routerAccessPolicyAdapter{svc: accessPolicySvc, wan: wanModel},

@@ -655,7 +655,7 @@ func TestAddRuleSet_InlineWritesLocalBinaryToPendingAndListsInline(t *testing.T)
 		t.Fatalf("rule_set len = %d", len(cfg.Route.RuleSet))
 	}
 	stored := cfg.Route.RuleSet[0]
-	if stored.Tag != "custom-inline" || stored.Type != "local" || stored.Format != "binary" {
+	if stored.Tag != "custom-inline-srs" || stored.Type != "local" || stored.Format != "binary" {
 		t.Fatalf("stored rule_set not materialized local binary: %+v", stored)
 	}
 	if _, err := os.Stat(stored.Path); err != nil {
@@ -669,9 +669,47 @@ func TestAddRuleSet_InlineWritesLocalBinaryToPendingAndListsInline(t *testing.T)
 	if len(listed) != 1 || listed[0].Type != "inline" || len(listed[0].Rules) != 1 {
 		t.Fatalf("expected inline projection, got %+v", listed)
 	}
+	if !listed[0].MaterializedSRS {
+		t.Fatal("expected materialized_srs in list projection")
+	}
 }
 
-func TestUpdateRuleSet_InlineUsesNewContentAddressedFileWithoutChangingOld(t *testing.T) {
+func TestListRules_RewritesSRSCompanionRefToInlineTag(t *testing.T) {
+	svc, _ := newOrchedTestService(t)
+	svc.deps.Singbox.(*fakeSingbox).binary = "/opt/bin/sing-box"
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+
+	if err := svc.AddRuleSet(context.Background(), RuleSet{
+		Tag:   "geosite-samsung",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{".samsung.com"}}},
+	}); err != nil {
+		t.Fatalf("AddRuleSet: %v", err)
+	}
+	if err := svc.AddRule(context.Background(), Rule{
+		RuleSet:  []string{"geosite-samsung"},
+		Action:   "route",
+		Outbound: "direct",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	rules, err := svc.ListRules(context.Background())
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("rules len = %d", len(rules))
+	}
+	if len(rules[0].RuleSet) != 1 || rules[0].RuleSet[0] != "geosite-samsung" {
+		t.Fatalf("ListRules rule_set = %v, want [geosite-samsung]", rules[0].RuleSet)
+	}
+}
+
+func TestUpdateRuleSet_InlineOverwritesSameSRSFile(t *testing.T) {
 	svc, dir := newOrchedTestService(t)
 	svc.deps.Singbox.(*fakeSingbox).binary = "/opt/bin/sing-box"
 	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
@@ -715,13 +753,47 @@ func TestUpdateRuleSet_InlineUsesNewContentAddressedFileWithoutChangingOld(t *te
 		t.Fatal(err)
 	}
 	secondPath := secondCfg.Route.RuleSet[0].Path
-	if firstPath == secondPath {
-		t.Fatalf("updated inline content reused old path: %q", firstPath)
-	}
-	if _, err := os.Stat(firstPath); err != nil {
-		t.Fatalf("old .srs should remain for live safety: %v", err)
+	if firstPath != secondPath {
+		t.Fatalf("expected stable srs path, got %q -> %q", firstPath, secondPath)
 	}
 	if _, err := os.Stat(secondPath); err != nil {
-		t.Fatalf("new .srs missing: %v", err)
+		t.Fatalf("updated .srs missing: %v", err)
+	}
+}
+
+func TestDeleteRuleSet_InlineRemovesSRSCompanionAndFiles(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+	svc.deps.Singbox.(*fakeSingbox).binary = "/opt/bin/sing-box"
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+
+	if err := svc.AddRuleSet(context.Background(), RuleSet{
+		Tag:   "to-delete",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{".gone.example"}}},
+	}); err != nil {
+		t.Fatalf("AddRuleSet: %v", err)
+	}
+	if err := svc.DeleteRuleSet(context.Background(), "to-delete", false); err != nil {
+		t.Fatalf("DeleteRuleSet: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "pending", "20-router.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg RouterConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Route.RuleSet) != 0 {
+		t.Fatalf("expected no rule sets after delete, got %+v", cfg.Route.RuleSet)
+	}
+	for _, ext := range []string{".json", ".srs"} {
+		p := filepath.Join(dir, "rule-sets", "inline", "to-delete"+ext)
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed, stat err=%v", p, err)
+		}
 	}
 }

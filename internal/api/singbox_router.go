@@ -103,6 +103,7 @@ type SingboxRouterRuleSetDTO struct {
 	DownloadDetour string           `json:"download_detour,omitempty" example:"direct"`
 	Path           string           `json:"path,omitempty" example:"/opt/etc/singbox/rulesets/geosite-cn.srs"`
 	Rules          []map[string]any `json:"rules,omitempty"`
+	MaterializedSRS bool            `json:"materialized_srs,omitempty" example:"true"`
 }
 
 // SingboxRouterRuleSetUpdateRequest is the body for POST /singbox/router/rulesets/update.

@@ -5,6 +5,7 @@ import {
 	parseInlineRuleList,
 	stringifyInlineRuleList,
 	toAsciiHostname,
+	validateRuleSetTag,
 } from '$lib/utils/singboxInlineRules';
 
 describe('toAsciiHostname', () => {
@@ -378,5 +379,19 @@ describe('analyzeInlineRuleListLossy', () => {
 		const r = analyzeInlineRuleListLossy([{ domain: ['z.com'], inverted: [true] } as Record<string, unknown>]);
 		expect(r.lossy).toBe(true);
 		expect(r.issues.some((i) => i.includes('inverted'))).toBe(true);
+	});
+});
+
+describe('validateRuleSetTag', () => {
+	it('rejects empty tag', () => {
+		expect(validateRuleSetTag('')).toMatch(/обязателен/i);
+	});
+
+	it('rejects reserved -srs suffix', () => {
+		expect(validateRuleSetTag('geosite-samsung-srs')).toMatch(/-srs/);
+	});
+
+	it('allows base tag', () => {
+		expect(validateRuleSetTag('geosite-samsung')).toBeNull();
 	});
 });

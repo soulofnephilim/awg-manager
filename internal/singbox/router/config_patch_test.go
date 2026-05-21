@@ -82,6 +82,16 @@ func TestRuleSetRemoteURLValidation(t *testing.T) {
 	}
 }
 
+func TestRuleSetTagReservedSRSSuffix(t *testing.T) {
+	cfg := NewEmptyConfig()
+	err := cfg.AddRuleSet(RuleSet{Tag: "geosite-samsung-srs", Type: "inline", Rules: []map[string]any{
+		{"domain_suffix": []any{".samsung.com"}},
+	}})
+	if err == nil || !contains(err.Error(), "-srs") {
+		t.Fatalf("expected reserved -srs suffix error, got %v", err)
+	}
+}
+
 func TestRuleSetInlineValidation(t *testing.T) {
 	cfg := NewEmptyConfig()
 

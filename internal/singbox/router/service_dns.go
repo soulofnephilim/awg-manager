@@ -27,7 +27,7 @@ func (s *ServiceImpl) ListDNSRules(ctx context.Context) ([]DNSRule, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cfg.DNS.Rules, nil
+	return s.ruleSetMaterializer().restoreConfig(cfg).DNS.Rules, nil
 }
 
 func (s *ServiceImpl) AddDNSRule(ctx context.Context, r DNSRule) error {

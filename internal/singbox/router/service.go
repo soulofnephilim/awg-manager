@@ -14,6 +14,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logger"
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -177,6 +178,7 @@ type StagingEventBus interface {
 
 type Deps struct {
 	Log            *logger.Logger
+	AppLog         logging.AppLogger
 	Settings       *storage.SettingsStore
 	Singbox        SingboxController
 	Policies       AccessPolicyProvider
@@ -294,7 +296,11 @@ func (s *ServiceImpl) ruleSetMaterializer() ruleSetMaterializer {
 	if s.deps.Singbox != nil {
 		binary = s.deps.Singbox.Binary()
 	}
-	return ruleSetMaterializer{configDir: configDir, binary: binary}
+	return ruleSetMaterializer{
+		configDir: configDir,
+		binary:    binary,
+		log:       logging.NewScopedLogger(s.deps.AppLog, logging.GroupRouting, logging.SubSingboxRouter),
+	}
 }
 
 // loadRouterConfig returns the router config the user is currently editing.
@@ -976,6 +982,7 @@ func (s *ServiceImpl) withConfig(ctx context.Context, event string, fn func(*Rou
 	if err != nil {
 		return err
 	}
+	cfg = s.ruleSetMaterializer().restoreConfig(cfg)
 	if err := fn(cfg); err != nil {
 		return err
 	}
@@ -1016,7 +1023,7 @@ func (s *ServiceImpl) ListRules(ctx context.Context) ([]Rule, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cfg.Route.Rules, nil
+	return s.ruleSetMaterializer().restoreConfig(cfg).Route.Rules, nil
 }
 
 func (s *ServiceImpl) AddRule(ctx context.Context, r Rule) error {
@@ -1115,7 +1122,17 @@ func (s *ServiceImpl) UpdateRuleSet(ctx context.Context, tag string, rs RuleSet)
 }
 
 func (s *ServiceImpl) DeleteRuleSet(ctx context.Context, tag string, force bool) error {
-	return s.withConfig(ctx, "rulesets", func(c *RouterConfig) error { return c.DeleteRuleSet(tag, force) })
+	inlineTag := tag
+	if base, ok := inlineTagFromSRSTag(tag); ok {
+		inlineTag = base
+	}
+	return s.withConfig(ctx, "rulesets", func(c *RouterConfig) error {
+		if err := c.DeleteRuleSet(inlineTag, force); err != nil {
+			return err
+		}
+		s.ruleSetMaterializer().removeInlineArtifacts(inlineTag)
+		return nil
+	})
 }
 
 func (s *ServiceImpl) ListCompositeOutbounds(ctx context.Context) ([]CompositeOutboundView, error) {

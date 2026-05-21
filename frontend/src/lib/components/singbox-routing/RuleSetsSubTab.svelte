@@ -37,16 +37,22 @@
 	const localCount = $derived(ruleSets.filter((r) => r.type === 'local').length);
 	const inlineCount = $derived(ruleSets.filter((r) => r.type === 'inline').length);
 
+	/** Backend hides compiled -srs companions; filter defensively for older configs. */
+	function isVisibleRuleSet(rs: SingboxRouterRuleSet): boolean {
+		return !rs.tag.endsWith('-srs');
+	}
+
 	const visibleRuleSets = $derived(
-		sourceFilter === 'all'
+		(sourceFilter === 'all'
 			? ruleSets
-			: ruleSets.filter((r) => r.type === sourceFilter),
+			: ruleSets.filter((r) => r.type === sourceFilter)
+		).filter(isVisibleRuleSet),
 	);
 
 	const statTiles = $derived<StatTile[]>([
-		{ label: 'Наборов', value: ruleSets.length },
-		{ label: 'Удалённых', value: remoteCount },
-		{ label: 'Локальных', value: localCount },
+		{ label: 'Всего наборов', value: ruleSets.length },
+		{ label: 'Remote', value: remoteCount },
+		{ label: 'Local', value: localCount },
 		{ label: 'Inline', value: inlineCount },
 	]);
 
@@ -210,14 +216,19 @@
 			<div class="card">
 				<div class="card-head">
 					<div class="tag mono" title={rs.tag}>{rs.tag}</div>
-					<Badge
-						variant={rs.type === 'remote' ? 'accent' : 'info'}
-						size="sm"
-						uppercase
-						mono
-					>
-						{rs.type}
-					</Badge>
+					<div class="badges">
+						<Badge
+							variant={rs.type === 'remote' ? 'accent' : 'info'}
+							size="sm"
+							uppercase
+							mono
+						>
+							{rs.type}
+						</Badge>
+						{#if rs.type === 'inline' && rs.materialized_srs}
+							<Badge variant="muted" size="sm" uppercase mono>srs</Badge>
+						{/if}
+					</div>
 				</div>
 
 				{#if rs.type !== 'inline' && rs.format}
@@ -448,6 +459,12 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
+	}
+	.badges {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		flex-shrink: 0;
 	}
 	.tag {
 		font-size: 0.875rem;

@@ -104,31 +104,61 @@ func (c *RouterConfig) UpdateRuleSet(tag string, next RuleSet) error {
 }
 
 func (c *RouterConfig) DeleteRuleSet(tag string, force bool) error {
-	refs := c.rulesReferencingRuleSet(tag)
-	if len(refs) > 0 && !force {
-		return fmt.Errorf("%w: %q referenced by rules %v", ErrRuleSetReferenced, tag, refs)
+	tags := ruleSetTagsWithCompanion(tag)
+	refs := c.rulesReferencingRuleSets(tags)
+	if len(refs.route) > 0 && !force {
+		return fmt.Errorf("%w: %q referenced by route rules %v", ErrRuleSetReferenced, tag, refs.route)
+	}
+	if len(refs.dns) > 0 && !force {
+		return fmt.Errorf("%w: %q referenced by dns rules %v", ErrRuleSetReferenced, tag, refs.dns)
+	}
+	remove := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		remove[t] = struct{}{}
 	}
 	filtered := make([]RuleSet, 0, len(c.Route.RuleSet))
 	for _, rs := range c.Route.RuleSet {
-		if rs.Tag != tag {
-			filtered = append(filtered, rs)
+		if _, drop := remove[rs.Tag]; drop {
+			continue
 		}
+		filtered = append(filtered, rs)
 	}
 	c.Route.RuleSet = filtered
 	return nil
 }
 
-func (c *RouterConfig) rulesReferencingRuleSet(tag string) []int {
-	var refs []int
+type ruleSetRefIndices struct {
+	route []int
+	dns   []int
+}
+
+func (c *RouterConfig) rulesReferencingRuleSets(tags []string) ruleSetRefIndices {
+	want := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		want[t] = struct{}{}
+	}
+	var out ruleSetRefIndices
 	for i, r := range c.Route.Rules {
 		for _, rsTag := range r.RuleSet {
-			if rsTag == tag {
-				refs = append(refs, i)
+			if _, ok := want[rsTag]; ok {
+				out.route = append(out.route, i)
 				break
 			}
 		}
 	}
-	return refs
+	for i, r := range c.DNS.Rules {
+		for _, rsTag := range r.RuleSet {
+			if _, ok := want[rsTag]; ok {
+				out.dns = append(out.dns, i)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (c *RouterConfig) rulesReferencingRuleSet(tag string) []int {
+	return c.rulesReferencingRuleSets(ruleSetTagsWithCompanion(tag)).route
 }
 
 func (c *RouterConfig) AddRule(r Rule) error {
@@ -447,6 +477,9 @@ func validateRule(r Rule) error {
 func validateRuleSet(rs RuleSet) error {
 	if rs.Tag == "" {
 		return fmt.Errorf("rule_set tag is required")
+	}
+	if strings.HasSuffix(rs.Tag, inlineSRSSuffix) {
+		return fmt.Errorf("rule_set %q: tag suffix %q is reserved for compiled inline rulesets", rs.Tag, inlineSRSSuffix)
 	}
 	switch rs.Type {
 	case "inline":

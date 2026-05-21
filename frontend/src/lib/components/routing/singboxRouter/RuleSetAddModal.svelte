@@ -12,6 +12,7 @@
 		isInlineRuleListEmpty,
 		parseInlineRuleList,
 		stringifyInlineRuleList,
+		validateRuleSetTag,
 	} from '$lib/utils/singboxInlineRules';
 	import { expandGeoLinesInInput } from '$lib/utils/singboxInlineGeoExpand';
 
@@ -361,8 +362,9 @@ geosite:xai`;
 		error = '';
 		try {
 			const cleanTag = isEditing ? (ruleSet?.tag ?? '') : tag.trim();
-			if (!cleanTag) {
-				error = 'Tag обязателен';
+			const tagErr = validateRuleSetTag(cleanTag);
+			if (tagErr) {
+				error = tagErr;
 				busy = false;
 				return;
 			}
@@ -456,7 +458,11 @@ geosite:xai`;
 		<label class="field">
 			<div class="lbl">Tag (имя)</div>
 			<input bind:value={tag} placeholder="geosite-example" disabled={isEditing} />
-			{#if isEditing}<div class="hint">Tag нельзя менять у существующего набора.</div>{/if}
+			{#if isEditing}
+				<div class="hint">Tag нельзя менять у существующего набора.</div>
+			{:else}
+				<div class="hint">Не используйте суффикс -srs — он добавляется автоматически для скомпилированного набора.</div>
+			{/if}
 		</label>
 
 		{#if type !== 'inline'}
@@ -490,7 +496,7 @@ geosite:xai`;
 		{:else if type === 'local'}
 			<label class="field">
 				<div class="lbl">Путь к файлу</div>
-				<input bind:value={path} placeholder="/opt/etc/awg-manager/singbox/rulesets/my-custom.srs" />
+				<input bind:value={path} placeholder="/opt/etc/awg-manager/singbox/config.d/rule-sets/my.srs" />
 				<div class="hint">Абсолютный путь. Файл должен существовать на роутере.</div>
 			</label>
 		{:else}

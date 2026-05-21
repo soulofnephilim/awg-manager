@@ -105,6 +105,9 @@ type RuleSet struct {
 	DownloadDetour string           `json:"download_detour,omitempty"`
 	Path           string           `json:"path,omitempty"`
 	Rules          []map[string]any `json:"rules,omitempty"`
+	// MaterializedSRS is set by ListRuleSets when a compiled .srs sibling
+	// exists for an inline ruleset. Not persisted in router JSON.
+	MaterializedSRS bool `json:"materialized_srs,omitempty"`
 }
 
 type Outbound struct {

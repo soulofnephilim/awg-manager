@@ -1345,6 +1345,8 @@ export interface SingboxRouterRuleSet {
 	download_detour?: string;
 	path?: string;
 	rules?: Record<string, unknown>[];
+	/** True when a compiled .srs sibling exists (inline only). */
+	materialized_srs?: boolean;
 }
 
 export interface SingboxRouterOutbound {

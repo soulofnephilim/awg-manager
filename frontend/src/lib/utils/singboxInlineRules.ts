@@ -548,3 +548,16 @@ function isValidSimpleIpv6(addr: string): boolean {
 	if (hextets.length < 3 || hextets.length > 8) return false;
 	return hextets.every((h) => h === '' || /^[0-9a-f]{0,4}$/i.test(h));
 }
+
+/** Reserved for AWG-compiled inline → local .srs companion (see ruleset_materializer). */
+export const INLINE_RULE_SET_SRS_SUFFIX = '-srs';
+
+/** Returns a user-facing error, or null when the tag is allowed. */
+export function validateRuleSetTag(tag: string): string | null {
+	const t = tag.trim();
+	if (!t) return 'Tag обязателен';
+	if (t.endsWith(INLINE_RULE_SET_SRS_SUFFIX)) {
+		return `Суффикс «${INLINE_RULE_SET_SRS_SUFFIX}» зарезервирован для скомпилированного набора — укажите имя без него (например geosite-samsung, не geosite-samsung-srs)`;
+	}
+	return null;
+}
