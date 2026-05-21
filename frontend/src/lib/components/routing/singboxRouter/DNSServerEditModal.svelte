@@ -36,7 +36,9 @@
 	const detourOptions = $derived<DropdownOption[]>([
 		{ value: '', label: '— через route (по умолчанию) —' },
 		...outboundOptions.flatMap((g) =>
-			g.items.map((i) => ({ value: i.value, label: i.label, group: g.group })),
+			g.items
+				.filter((i) => server != null || i.value !== 'direct')
+				.map((i) => ({ value: i.value, label: i.label, group: g.group })),
 		),
 	]);
 
@@ -160,28 +162,35 @@
 	}
 </script>
 
-<Modal open onclose={onClose} title={server ? 'Редактировать DNS сервер' : 'Новый DNS сервер'} hasUnsavedChanges={() => isDirty}>
+<Modal
+	open
+	onclose={onClose}
+	title={server ? 'Редактировать DNS сервер' : 'Новый DNS сервер'}
+	size="lg"
+	hasUnsavedChanges={() => isDirty}
+>
 	<div class="form">
-		<label class="field">
-			<div class="lbl">Tag <span class="req">*</span></div>
-			<input bind:value={tag} placeholder="bootstrap, cloudflare, vpn-dns" />
-		</label>
-
-		<label class="field">
-			<div class="lbl">Type <span class="req">*</span></div>
-			<Dropdown bind:value={type} options={TYPE_OPTIONS} fullWidth />
-		</label>
-
-		<label class="field">
-			<div class="lbl">Server <span class="req">*</span></div>
-			<input bind:value={serverAddr} placeholder={type === 'udp' ? '1.1.1.1' : 'cloudflare-dns.com'} />
-		</label>
-
-		<div class="row-2">
+		<div class="fields-grid">
 			<label class="field">
+				<div class="lbl">Tag <span class="req">*</span></div>
+				<input bind:value={tag} placeholder="bootstrap, cloudflare, vpn-dns" />
+			</label>
+
+			<label class="field">
+				<div class="lbl">Type <span class="req">*</span></div>
+				<Dropdown bind:value={type} options={TYPE_OPTIONS} fullWidth />
+			</label>
+
+			<label class="field span-full">
+				<div class="lbl">Server <span class="req">*</span></div>
+				<input bind:value={serverAddr} placeholder={type === 'udp' ? '1.1.1.1' : 'cloudflare-dns.com'} />
+			</label>
+
+			<label class="field" class:span-full={type !== 'https'}>
 				<div class="lbl">Server port</div>
 				<input type="number" bind:value={serverPort} placeholder={type === 'udp' ? '53' : type === 'https' ? '443' : '853'} />
 			</label>
+
 			{#if type === 'https'}
 				<label class="field">
 					<div class="lbl">Path</div>
@@ -190,45 +199,57 @@
 			{/if}
 		</div>
 
-		<div class="section-label">Маршрутизация</div>
+		<section class="form-section">
+			<div class="section-label">Маршрутизация</div>
 
-		<label class="field">
-			<div class="lbl">Detour (outbound)</div>
-			<Dropdown bind:value={detour} options={detourOptions} fullWidth />
-			<div class="hint">
-				Через какой outbound сам сервер отправляет запросы. <code>direct</code> — через провайдера,
-				выбранный туннель — через VPN (шифрованный DNS без утечек).
-			</div>
-		</label>
+			<label class="field">
+				<div class="lbl">Detour (outbound)</div>
+				<Dropdown bind:value={detour} options={detourOptions} fullWidth />
+				<div class="hint">
+					{#if server}
+						Через какой outbound сам сервер отправляет запросы. <code>direct</code> — через провайдера,
+						выбранный туннель — через VPN (шифрованный DNS без утечек).
+					{:else}
+						Через какой outbound сам сервер отправляет запросы.
+						Выбранный туннель — через VPN (шифрованный DNS без утечек).
+					{/if}
+				</div>
+			</label>
 
-		<label class="field">
-			<div class="lbl">Стратегия (IPv4/IPv6)</div>
-			<Dropdown bind:value={strategy} options={STRATEGY_OPTIONS} fullWidth />
-		</label>
+			<label class="field">
+				<div class="lbl">Стратегия (IPv4/IPv6)</div>
+				<Dropdown bind:value={strategy} options={STRATEGY_OPTIONS} fullWidth />
+			</label>
+		</section>
 
 		{#if type !== 'udp'}
-			<div class="section-label">Bootstrap resolver (для домена сервера)</div>
-			<label class="toggle">
-				<input type="checkbox" bind:checked={resolverEnabled} />
-				Использовать другой DNS для резолва домена этого сервера
-			</label>
-			{#if needsResolver && !resolverEnabled}
-				<div class="warn">
-					У <code>{type}</code> сервера адрес — доменное имя. Без bootstrap resolver sing-box не сможет его резолвить.
-				</div>
-			{/if}
-			{#if resolverEnabled}
-				<div class="row-2">
-					<label class="field">
-						<div class="lbl">Resolver server (tag)</div>
-						<Dropdown bind:value={resolverServer} options={resolverServerOptions} fullWidth />
-					</label>
-					<label class="field">
-						<div class="lbl">Resolver strategy</div>
-						<Dropdown bind:value={resolverStrategy} options={STRATEGY_OPTIONS} fullWidth />
-					</label>
-				</div>
-			{/if}
+			<section class="form-section">
+				<div class="section-label">Bootstrap resolver (для домена сервера)</div>
+
+				<label class="toggle">
+					<input type="checkbox" bind:checked={resolverEnabled} />
+					<span>Использовать другой DNS для резолва домена этого сервера</span>
+				</label>
+
+				{#if needsResolver && !resolverEnabled}
+					<div class="warn">
+						У <code>{type}</code> сервера адрес — доменное имя. Без bootstrap resolver sing-box не сможет его резолвить.
+					</div>
+				{/if}
+
+				{#if resolverEnabled}
+					<div class="resolver-fields">
+						<label class="field">
+							<div class="lbl">Resolver server (tag)</div>
+							<Dropdown bind:value={resolverServer} options={resolverServerOptions} fullWidth />
+						</label>
+						<label class="field">
+							<div class="lbl">Resolver strategy</div>
+							<Dropdown bind:value={resolverStrategy} options={STRATEGY_OPTIONS} fullWidth />
+						</label>
+					</div>
+				{/if}
+			</section>
 		{/if}
 
 		{#if error}<div class="error">{error}</div>{/if}
@@ -242,8 +263,25 @@
 
 <style>
 	.form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		min-width: 0;
+	}
+	.fields-grid {
 		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.5rem 0.6rem;
+	}
+	.span-full {
+		grid-column: 1 / -1;
+	}
+	.form-section {
+		display: flex;
+		flex-direction: column;
 		gap: 0.6rem;
+		padding-top: 0.5rem;
+		border-top: 1px solid var(--border);
 		min-width: 0;
 	}
 	.section-label {
@@ -251,9 +289,21 @@
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
 		color: var(--muted-text);
-		margin: 0.5rem 0 0.1rem;
-		padding-top: 0.5rem;
-		border-top: 1px solid var(--border);
+		margin: 0;
+	}
+	.resolver-fields {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.5rem;
+	}
+	@media (max-width: 520px) {
+		.fields-grid,
+		.resolver-fields {
+			grid-template-columns: 1fr;
+		}
+		.span-full {
+			grid-column: auto;
+		}
 	}
 	.field {
 		display: grid;
@@ -288,18 +338,18 @@
 		border-radius: 2px;
 		font-family: ui-monospace, monospace;
 	}
-	.row-2 {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 0.5rem;
-	}
 	.toggle {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 0.5rem;
 		font-size: 0.85rem;
 		color: var(--text);
 		cursor: pointer;
+		line-height: 1.4;
+	}
+	.toggle input {
+		margin-top: 0.15rem;
+		flex-shrink: 0;
 	}
 	.warn {
 		padding: 0.5rem 0.7rem;
