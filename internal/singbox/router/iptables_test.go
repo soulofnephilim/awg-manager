@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -954,5 +955,66 @@ func TestHasAnyInstalled_None_ReturnsFalse(t *testing.T) {
 	it := newFakeIPTables(fe)
 	if it.HasAnyInstalled(context.Background()) {
 		t.Error("expected false when no chains exist")
+	}
+}
+
+func TestBuildRestoreInput_BypassUDPPorts_AddsReturnRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		BypassUDPPorts: []int{500, 4500, 1701},
+	}
+	out := buildRestoreInput(spec)
+
+	for _, port := range []int{500, 4500, 1701} {
+		rule := fmt.Sprintf("-A %s -p udp --dport %d -j RETURN", ChainName, port)
+		if !strings.Contains(out, rule) {
+			t.Errorf("mangle chain missing UDP bypass rule for port %d\ngot:\n%s", port, out)
+		}
+	}
+}
+
+func TestBuildRestoreInput_BypassTCPPorts_AddsReturnRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		BypassTCPPorts: []int{139, 445},
+	}
+	out := buildRestoreInput(spec)
+
+	for _, port := range []int{139, 445} {
+		rule := fmt.Sprintf("-A %s -p tcp --dport %d -j RETURN", RedirectChain, port)
+		if !strings.Contains(out, rule) {
+			t.Errorf("nat chain missing TCP bypass rule for port %d\ngot:\n%s", port, out)
+		}
+	}
+}
+
+func TestBuildRestoreInput_EmptyBypassPorts_NoExtraReturnRules(t *testing.T) {
+	spec := RestoreInputSpec{PolicyMark: "0xffffaaa"}
+	out := buildRestoreInput(spec)
+
+	// port 500 should NOT appear as a bypass rule when no BypassUDPPorts set
+	if strings.Contains(out, "--dport 500 -j RETURN") {
+		t.Errorf("unexpected bypass rule for port 500 when BypassUDPPorts is empty\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_BypassPortsBeforeCatchAll(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		BypassUDPPorts: []int{500},
+	}
+	out := buildRestoreInput(spec)
+
+	// RETURN for port 500 must appear before the catch-all TPROXY rule
+	bypassIdx := strings.Index(out, "--dport 500 -j RETURN")
+	catchAllIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp -j TPROXY", ChainName))
+	if bypassIdx == -1 {
+		t.Fatal("bypass rule not found")
+	}
+	if catchAllIdx == -1 {
+		t.Fatal("catch-all TPROXY rule not found")
+	}
+	if bypassIdx > catchAllIdx {
+		t.Errorf("bypass rule appears AFTER catch-all TPROXY — must be before it")
 	}
 }
