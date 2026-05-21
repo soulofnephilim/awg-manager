@@ -142,7 +142,6 @@ func (g *restoreLiveGetter) Post(ctx context.Context, payload any) (json.RawMess
 	raw, _ := json.Marshal(resp)
 	return raw, nil
 }
-
 func mustDerivePublicKey(t *testing.T, privateKey string) string {
 	t.Helper()
 	pub, err := derivePublicKeyFromPrivate(privateKey)
