@@ -80,8 +80,8 @@ struct awg_proxy {
 	u8 last_mac1_old[16];
 	u8 last_mac1_new[16];
 	bool have_last_mac1;
+	bool has_cookie_key;    /* server_pub was set → cookie translation enabled */
 	spinlock_t mac1_lock;
-	struct crypto_aead *cookie_aead;
 
 	/*
 	 * Stashed decrypted cookie from the most recent cookie_reply, used to

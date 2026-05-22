@@ -57,7 +57,7 @@ define KernelPackage/awg-proxy
   CATEGORY:=Kernel modules
   SUBMENU:=Network Support
   TITLE:=AWG Proxy netfilter module
-  DEPENDS:=+kmod-crypto-aead +kmod-crypto-chacha20poly1305
+  DEPENDS:=
   FILES:=$(PKG_BUILD_DIR)/src/awg_proxy.ko
 endef
 

@@ -365,7 +365,7 @@ static int c2s_thread_fn(void *data)
 			spin_unlock(&proxy->client_lock);
 		}
 
-		if (proxy->cookie_aead) {
+		if (proxy->has_cookie_key) {
 			if (payload[0] == WG_HANDSHAKE_INIT &&
 			    n == WG_INIT_SIZE) {
 				memcpy(captured_mac1_old, payload + 116, 16);
@@ -385,7 +385,7 @@ static int c2s_thread_fn(void *data)
 					 &proxy->cfg, rand_val,
 					 &out_len, &sendJunk, &msgType);
 
-		if (mac1_capture_pending && proxy->cookie_aead) {
+		if (mac1_capture_pending && proxy->has_cookie_key) {
 			int s_prefix = -1;
 			int mac1_off = -1;
 
@@ -560,7 +560,7 @@ static int s2c_thread_fn(void *data)
 		out = transform_inbound(buf, n, &proxy->cfg, &out_len);
 		if (out && out_len == WG_COOKIE_SIZE &&
 		    out[0] == WG_COOKIE_REPLY &&
-		    proxy->cookie_aead &&
+		    proxy->has_cookie_key &&
 		    READ_ONCE(proxy->have_last_mac1)) {
 			u8 mac1_old[16], mac1_new[16];
 			u8 cookie_buf[32];
@@ -573,7 +573,6 @@ static int s2c_thread_fn(void *data)
 
 			memcpy(cookie_buf, out + 32, 32);
 			ret = awg_xchacha20p1305_decrypt(
-				proxy->cookie_aead,
 				proxy->cookie_aead_key,
 				out + 8, mac1_new, 16, cookie_buf, 32);
 			if (!ret) {
@@ -600,7 +599,6 @@ static int s2c_thread_fn(void *data)
 				 * same trust domain as the local client.
 				 */
 				ret = awg_xchacha20p1305_encrypt(
-					proxy->cookie_aead,
 					proxy->cookie_aead_key,
 					out + 8, mac1_old, 16, cookie_buf, 16);
 				if (!ret)
@@ -701,18 +699,12 @@ int awg_proxy_add(const char *config_line)
 	p->cps_counter = 0;
 	p->have_last_mac1 = false;
 	p->latest_cookie_valid = false;
-	p->cookie_aead = NULL;
+	p->has_cookie_key = false;
 	p->headroom = compute_headroom(&p->cfg);
 
 	if (p->cfg.has_server_pub) {
 		compute_cookie_key(p->cfg.server_pub, p->cookie_aead_key);
-		ret = awg_cookie_aead_create(&p->cookie_aead);
-		if (ret) {
-			pr_warn("awg_proxy: cookie AEAD setup failed: %d\n",
-				ret);
-			p->cookie_aead = NULL;
-			ret = 0;
-		}
+		p->has_cookie_key = true;
 	}
 	atomic64_set(&p->rx_bytes, 0);
 	atomic64_set(&p->tx_bytes, 0);
@@ -800,14 +792,11 @@ out_cleanup:
 		sock_release(p->remote_sock);
 		p->remote_sock = NULL;
 	}
-	if (p->cookie_aead) {
-		awg_cookie_aead_destroy(p->cookie_aead);
-		p->cookie_aead = NULL;
-	}
 	memzero_explicit(p->cookie_aead_key,
 			 sizeof(p->cookie_aead_key));
 	memzero_explicit(p->latest_cookie, sizeof(p->latest_cookie));
 	p->latest_cookie_valid = false;
+	p->has_cookie_key = false;
 	p->active = false;
 	awg_config_free(&p->cfg);
 out_free:
@@ -848,14 +837,11 @@ static void proxy_stop(struct awg_proxy *p)
 		sock_release(p->remote_sock);
 		p->remote_sock = NULL;
 	}
-	if (p->cookie_aead) {
-		awg_cookie_aead_destroy(p->cookie_aead);
-		p->cookie_aead = NULL;
-	}
 	memzero_explicit(p->cookie_aead_key,
 			 sizeof(p->cookie_aead_key));
 	memzero_explicit(p->latest_cookie, sizeof(p->latest_cookie));
 	p->latest_cookie_valid = false;
+	p->has_cookie_key = false;
 
 	awg_config_free(&p->cfg);
 }
