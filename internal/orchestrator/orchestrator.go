@@ -146,8 +146,6 @@ func (o *Orchestrator) RefreshTunnelState(tunnelID string) {
 	if cur, ok := o.state.tunnels[tunnelID]; ok {
 		fresh.Running = cur.Running
 		fresh.Monitoring = cur.Monitoring
-		fresh.ExternalRestartCount = cur.ExternalRestartCount
-		fresh.LastExternalRestart = cur.LastExternalRestart
 	}
 	o.state.tunnels[tunnelID] = fresh
 }
@@ -319,8 +317,6 @@ func (o *Orchestrator) updateState(action Action) {
 		t.Monitoring = false
 	case ActionDeleteKernel, ActionDeleteNativeWG:
 		delete(o.state.tunnels, action.Tunnel)
-	case ActionExternalRestart:
-		// State already updated inside executeExternalRestart directly.
 	}
 
 	// Publish SSE event
