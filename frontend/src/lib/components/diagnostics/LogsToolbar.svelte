@@ -598,6 +598,15 @@
     gap: 0.35rem;
   }
 
+  /* Keep readable contrast for the "Дата" chip in both states. */
+  .chip-timestamp:hover:not(.chip-active) {
+    color: var(--color-text-primary);
+  }
+  .chip-timestamp.chip-active,
+  .chip-timestamp.chip-active:hover {
+    color: var(--color-accent-contrast, #111);
+  }
+
   .chip-icon {
     width: 14px;
     height: 14px;
