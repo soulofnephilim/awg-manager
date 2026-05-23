@@ -88,6 +88,19 @@ func (b *Batcher) Submit(ctx context.Context, path string) ([]byte, error) {
 		return res.body, res.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-b.done:
+		// b.done closes ПОСЛЕ того как flusher завершил drain+flush.
+		// Если flush успел доставить reply (final drain flush) — выбираем
+		// его. Иначе flusher exit'нул без обработки нашего req (например
+		// Submit прошёл send в submit channel параллельно с Close, но
+		// drain уже закончился) — отдаём ErrBatcherClosed чтобы caller
+		// не висел навсегда.
+		select {
+		case res := <-req.reply:
+			return res.body, res.err
+		default:
+			return nil, ErrBatcherClosed
+		}
 	}
 }
 
@@ -193,8 +206,9 @@ func (b *Batcher) flush(ctx context.Context, pending []readReq) {
 
 	batch := make([]any, 0, len(uniqueOrder))
 	validPaths := make([]string, 0, len(uniqueOrder))
+	unwrapByPath := make(map[string][]string, len(uniqueOrder))
 	for _, path := range uniqueOrder {
-		cmd, err := pathToCommand(path)
+		cmd, unwrap, err := pathToCommand(path)
 		if err != nil {
 			for _, r := range byPath[path] {
 				r.reply <- readResult{nil, err}
@@ -205,6 +219,7 @@ func (b *Batcher) flush(ctx context.Context, pending []readReq) {
 		}
 		batch = append(batch, cmd)
 		validPaths = append(validPaths, path)
+		unwrapByPath[path] = unwrap
 	}
 
 	if len(batch) == 0 {
@@ -231,16 +246,66 @@ func (b *Batcher) flush(ctx context.Context, pending []readReq) {
 	}
 
 	for i, path := range validPaths {
-		body := []byte(responses[i])
+		rawItem := []byte(responses[i])
 		var itemErr error
-		if msg := ExtractError(body); msg != "" {
-			itemErr = &NDMSAppError{Method: "POST-BATCH", Path: path, Message: msg, Body: body}
+		if msg := ExtractError(rawItem); msg != "" {
+			itemErr = &NDMSAppError{Method: "POST-BATCH", Path: path, Message: msg, Body: rawItem}
+		}
+		// NDMS оборачивает batch response item в path-tree:
+		//   {"show":{"version":{...actual content...}}}
+		// А direct GET возвращал content напрямую. Распаковываем по
+		// unwrapByPath[path], чтобы callers получили тот же shape.
+		body := rawItem
+		if itemErr == nil {
+			if unwrapped, uerr := unwrapBatchItem(rawItem, unwrapByPath[path]); uerr == nil {
+				body = unwrapped
+			}
+			// На ошибке unwrap'а оставляем raw — caller возможно умеет
+			// парсить wrapped (или error будет видна при Unmarshal).
 		}
 		for _, r := range byPath[path] {
 			r.reply <- readResult{body, itemErr}
 			close(r.reply)
 		}
 	}
+}
+
+// unwrapBatchItem walks NDMS batch response item по пути ключей,
+// возвращая JSON innermost value. Используется для приведения shape
+// batch response к тому что direct GET возвращал на тот же path.
+//
+// Пример:
+//
+//	rawItem  = {"show":{"version":{"release":"5.0","title":"x"}}}
+//	keys     = ["show","version"]
+//	result   = {"release":"5.0","title":"x"}
+//
+// Если по пути нет ключа или значение не map — возвращает error;
+// caller (см. flush) делает fallback на rawItem.
+func unwrapBatchItem(rawItem []byte, keys []string) ([]byte, error) {
+	if len(keys) == 0 {
+		return rawItem, nil
+	}
+	var node any
+	if err := json.Unmarshal(rawItem, &node); err != nil {
+		return nil, fmt.Errorf("unwrap: parse: %w", err)
+	}
+	for _, k := range keys {
+		m, ok := node.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unwrap: not a map at key %q (have %T)", k, node)
+		}
+		next, ok := m[k]
+		if !ok {
+			return nil, fmt.Errorf("unwrap: missing key %q", k)
+		}
+		node = next
+	}
+	out, err := json.Marshal(node)
+	if err != nil {
+		return nil, fmt.Errorf("unwrap: marshal: %w", err)
+	}
+	return out, nil
 }
 
 // distributeAll отдаёт одинаковый result/error всем receivers в batch'е.

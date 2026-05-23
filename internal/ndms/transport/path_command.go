@@ -7,22 +7,31 @@ import (
 
 // pathToCommand парсит RCI-путь в JSON-дерево для batch-POST'а.
 //
+// Возвращает:
+//   - cmd — JSON-дерево для упаковки в batch request
+//   - unwrapKeys — список ключей для walk'а внутрь response item'а,
+//     чтобы достать данные эквивалентные direct GET. NDMS оборачивает
+//     batch response item в путь-tree (`{"show":{"version":{...content...}}}`),
+//     callers ожидают direct content (как от direct GET).
+//
 // Поддерживает формы:
 //
-//	"/show/interface/"                            → {"show": {"interface": nil}}
-//	"/show/interface/Wireguard0"                  → {"show": {"interface": {"name": "Wireguard0"}}}
-//	"/show/interface/system-name?name=Wireguard0" → {"show": {"interface": {"system-name": {"name": "Wireguard0"}}}}
-//	"/show/sc/dns-proxy/route"                    → {"show": {"sc": {"dns-proxy": {"route": nil}}}}
+//	"/show/interface/"                            → cmd {"show":{"interface":{}}}, unwrap ["show","interface"]
+//	"/show/interface/Wireguard0"                  → cmd {"show":{"interface":{"name":"Wireguard0"}}}, unwrap ["show","interface"]
+//	"/show/interface/system-name?name=Wireguard0" → cmd {"show":{"interface":{"system-name":{"name":"Wireguard0"}}}}, unwrap ["show","interface","system-name"]
+//	"/show/sc/dns-proxy/route"                    → cmd {"show":{"sc":{"dns-proxy":{"route":{}}}}}, unwrap ["show","sc","dns-proxy","route"]
+//	"/show/running-config"                        → cmd {"show":{"running-config":{}}}, unwrap ["show","running-config"]
 //
 // Эвристика: последний "содержательный" сегмент это leaf. Если последний
-// сегмент — name-like (без `/` после, без `?`) после path/segments — он
+// сегмент — name-like (без `?`) после трёх и более сегментов — он
 // становится {name: <value>} параметром предыдущего узла. Если последний
-// сегмент содержит `?k=v` — параметры применяются к leaf'у. Trailing slash
-// означает leaf без параметров (nil value).
-func pathToCommand(path string) (any, error) {
+// сегмент содержит `?k=v` — параметры применяются к leaf'у. Leaf без
+// параметров получает значение `{}` (empty object) — NDMS требует
+// non-null для batch query, иначе вернёт пустой response.
+func pathToCommand(path string) (any, []string, error) {
 	path = strings.TrimPrefix(path, "/")
 	if path == "" {
-		return nil, fmt.Errorf("pathToCommand: empty path")
+		return nil, nil, fmt.Errorf("pathToCommand: empty path")
 	}
 
 	hasTrailingSlash := strings.HasSuffix(path, "/")
@@ -30,7 +39,7 @@ func pathToCommand(path string) (any, error) {
 
 	segments := strings.Split(path, "/")
 	if len(segments) == 0 {
-		return nil, fmt.Errorf("pathToCommand: no segments")
+		return nil, nil, fmt.Errorf("pathToCommand: no segments")
 	}
 
 	last := segments[len(segments)-1]
@@ -40,7 +49,7 @@ func pathToCommand(path string) (any, error) {
 		paramStr := last[idx+1:]
 		last = last[:idx]
 		if last == "" || paramStr == "" {
-			return nil, fmt.Errorf("pathToCommand: malformed query in %q", path)
+			return nil, nil, fmt.Errorf("pathToCommand: malformed query in %q", path)
 		}
 		segments[len(segments)-1] = last
 
@@ -48,7 +57,7 @@ func pathToCommand(path string) (any, error) {
 		for _, kv := range strings.Split(paramStr, "&") {
 			eq := strings.Index(kv, "=")
 			if eq <= 0 || eq == len(kv)-1 {
-				return nil, fmt.Errorf("pathToCommand: malformed param %q in %q", kv, path)
+				return nil, nil, fmt.Errorf("pathToCommand: malformed param %q in %q", kv, path)
 			}
 			leafParams[kv[:eq]] = kv[eq+1:]
 		}
@@ -64,9 +73,9 @@ func pathToCommand(path string) (any, error) {
 		leafValue = leafParams
 		segments = segments[:len(segments)-1]
 	} else if hasTrailingSlash {
-		// "/show/interface/" → leaf is "interface", value nil
+		// "/show/interface/" → leaf is "interface", empty params {}
 		leafKey = last
-		leafValue = nil
+		leafValue = map[string]any{}
 		segments = segments[:len(segments)-1]
 	} else if len(segments) == 3 {
 		// "/show/interface/Wireguard0" → last "Wireguard0" is name-value of "interface"
@@ -76,13 +85,20 @@ func pathToCommand(path string) (any, error) {
 	} else {
 		// len == 2 (например "/show/running-config")
 		leafKey = last
-		leafValue = nil
+		leafValue = map[string]any{}
 		segments = segments[:len(segments)-1]
 	}
+
+	// unwrapKeys = segments + leafKey (по этим ключам walk'аем response
+	// чтобы достать content — параметр-значения вроде "Wireguard0" в
+	// unwrap path НЕ входят, т.к. NDMS не оборачивает по name).
+	unwrapKeys := make([]string, 0, len(segments)+1)
+	unwrapKeys = append(unwrapKeys, segments...)
+	unwrapKeys = append(unwrapKeys, leafKey)
 
 	tree := map[string]any{leafKey: leafValue}
 	for i := len(segments) - 1; i >= 0; i-- {
 		tree = map[string]any{segments[i]: tree}
 	}
-	return tree, nil
+	return tree, unwrapKeys, nil
 }

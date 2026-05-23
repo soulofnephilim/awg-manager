@@ -119,17 +119,17 @@ func (c *Client) SetAppLogger(appLogger logging.AppLogger) {
 }
 
 // New constructs a production Client pointing at localhost:79/rci with
-// the default 10s timeout. Batcher is OPT-IN: set AWG_NDMS_BATCH=1 to
-// enable. По default отключён — после обнаружения регрессии на Keenetic
-// 4.x (awg_proxy detection broken, tunnel ops broken). См. perf-сессию
-// 2026-05-23 14:01 + диагностика в commit'е после.
+// the default 10s timeout. Batcher is enabled by default; set
+// AWG_NDMS_BATCH=0 to disable. После fix формата pathToCommand
+// (null→{} в leaf) и unwrap'инга NDMS batch response (path tree
+// wrapping) — verified на Keenetic 5.x curl'ом 2026-05-23 14:30.
 func New(sem *Semaphore) *Client {
 	c := &Client{
 		http:    &http.Client{Timeout: defaultTimeout, Transport: sharedTransport},
 		baseURL: defaultBaseURL,
 		sem:     sem,
 	}
-	if env.IntDefault("AWG_NDMS_BATCH", 0) != 0 {
+	if env.IntDefault("AWG_NDMS_BATCH", 1) != 0 {
 		windowMs := env.IntDefault("AWG_NDMS_BATCH_WINDOW_MS", defaultBatchWindowMs)
 		maxSize := env.IntDefault("AWG_NDMS_BATCH_MAX_SIZE", defaultBatchMaxSize)
 		submitBuf := env.IntDefault("AWG_NDMS_BATCH_SUBMIT_BUF", defaultBatchSubmit)
