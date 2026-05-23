@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
@@ -30,6 +31,61 @@ type Client struct {
 	baseURL string
 	sem     *Semaphore
 	appLog  *logging.ScopedLogger
+
+	// Perftrace counters (атомарные, безлокные). Дамп раз в минуту через
+	// StartPerfDumper. ВРЕМЕННЫЕ — удалить после perf-анализа сессии 2026-05-23.
+	totalReq     atomic.Uint64
+	totalDurMs   atomic.Uint64
+	slowReqCount atomic.Uint64 // requests > 500ms
+}
+
+// recordPerf инкрементит counters после одного RCI запроса.
+// ВРЕМЕННЫЙ — удалить после perf-анализа.
+func (c *Client) recordPerf(start time.Time, method, path string) {
+	durMs := time.Since(start).Milliseconds()
+	c.totalReq.Add(1)
+	c.totalDurMs.Add(uint64(durMs))
+	if durMs > 500 {
+		c.slowReqCount.Add(1)
+		if c.appLog != nil {
+			c.appLog.Warn(method, path, fmt.Sprintf("perf: slow rci %dms", durMs))
+		}
+	}
+}
+
+// PerfSnapshot возвращает текущие counters и обнуляет их (для periodic dump).
+// ВРЕМЕННЫЙ — удалить после perf-анализа.
+func (c *Client) PerfSnapshot() (totalReq, totalDurMs, slowReqCount uint64) {
+	return c.totalReq.Swap(0), c.totalDurMs.Swap(0), c.slowReqCount.Swap(0)
+}
+
+// StartPerfDumper запускает горутину, которая раз в minute печатает
+// summary RCI counters в app-log. Останавливается при cancel.
+// ВРЕМЕННАЯ — удалить после perf-анализа.
+func (c *Client) StartPerfDumper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				total, durMs, slow := c.PerfSnapshot()
+				if total == 0 {
+					continue
+				}
+				avg := durMs / total
+				if c.appLog != nil {
+					c.appLog.Info("perf-summary", "rci",
+						fmt.Sprintf("last %s: %d req, avg %dms, slow(>500ms) %d", interval, total, avg, slow))
+				}
+			}
+		}
+	}()
 }
 
 // SetAppLogger wires the UI-visible logger into the client. Optional;
@@ -109,6 +165,8 @@ func (c *Client) PostBatch(ctx context.Context, commands []any) ([]json.RawMessa
 }
 
 func (c *Client) postJSON(ctx context.Context, payload any) (json.RawMessage, error) {
+	start := time.Now()
+	defer c.recordPerf(start, "POST", "/")
 	if err := c.sem.Acquire(ctx); err != nil {
 		c.appLog.Error("POST", "/", fmt.Sprintf("semaphore: %v", err))
 		return nil, fmt.Errorf("rci POST: %w", err)
@@ -159,6 +217,8 @@ func (c *Client) postJSON(ctx context.Context, payload any) (json.RawMessage, er
 // GetRaw performs GET {baseURL}{path} and returns the raw body bytes.
 // On success no log entry is emitted; every failure path is logged at Error.
 func (c *Client) GetRaw(ctx context.Context, path string) ([]byte, error) {
+	start := time.Now()
+	defer c.recordPerf(start, "GET", path)
 	if err := c.sem.Acquire(ctx); err != nil {
 		c.appLog.Error("GET", path, fmt.Sprintf("semaphore: %v", err))
 		return nil, fmt.Errorf("rci GET %s: %w", path, err)

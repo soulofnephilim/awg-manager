@@ -3,12 +3,21 @@ package singbox
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms/command"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 )
+
+// markProxyMgrDur — ВРЕМЕННЫЙ helper для perf-diagnostics. Логирует через
+// slog.Default — в этом пакете нет ScopedLogger в ProxyManager. Удалить
+// после perf-сессии 2026-05-23.
+func markProxyMgrDur(label string, start time.Time) {
+	slog.Info("perf-proxy", "label", label, "ms", time.Since(start).Milliseconds())
+}
 
 // maxProxySlots caps how many ProxyN slots we will scan when looking for
 // a free index. Keenetic does not publish an official ceiling; 128 is
@@ -40,6 +49,7 @@ func NewProxyManager(q *query.Queries, c *command.Commands) *ProxyManager {
 // ErrProxyComponentMissing before talking to NDMS when the required
 // component is absent.
 func (pm *ProxyManager) EnsureProxy(ctx context.Context, index, port int, description string) error {
+	defer markProxyMgrDur(fmt.Sprintf("EnsureProxy(%d)", index), time.Now())
 	if !ndmsinfo.HasProxyComponent() {
 		return ErrProxyComponentMissing
 	}
@@ -55,6 +65,7 @@ func (pm *ProxyManager) EnsureProxy(ctx context.Context, index, port int, descri
 // indices it has already handed out earlier in the same batch, before
 // those ProxyN interfaces have been committed to NDMS.
 func (pm *ProxyManager) NextFreeIndex(ctx context.Context, reserved map[int]bool) (int, error) {
+	defer markProxyMgrDur("NextFreeIndex", time.Now())
 	ifaces, err := pm.queries.Interfaces.List(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list interfaces: %w", err)
@@ -83,6 +94,7 @@ func (pm *ProxyManager) NextFreeIndex(ctx context.Context, reserved map[int]bool
 
 // RemoveProxy tears down ProxyN.
 func (pm *ProxyManager) RemoveProxy(ctx context.Context, index int) error {
+	defer markProxyMgrDur(fmt.Sprintf("RemoveProxy(%d)", index), time.Now())
 	name := fmt.Sprintf("%s%d", proxyIfacePrefix, index)
 	_ = pm.commands.Proxies.ProxyDown(ctx, name) // ignore error — may be already down
 	return pm.commands.Proxies.DeleteProxy(ctx, name)

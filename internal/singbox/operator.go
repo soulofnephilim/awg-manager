@@ -23,6 +23,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/vlink"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
+	"github.com/hoaxisr/awg-manager/internal/sys/perftrace"
 )
 
 const (
@@ -1153,6 +1154,7 @@ func (o *Operator) isNDMSProxyEnabled() bool {
 
 // GetStatus returns install + run status.
 func (o *Operator) GetStatus(ctx context.Context) Status {
+	defer perftrace.LogDuration(o.runtimeLogger, "perf", "GetStatus", "total", time.Now())
 	s := Status{}
 	if isExecutable(o.binary) {
 		s.Installed = true
@@ -1285,6 +1287,7 @@ func (o *Operator) IsPresent() bool {
 // ListTunnels returns the current tunnels from config.json enriched with
 // per-tunnel runtime state (Running = process-alive && TUN exists).
 func (o *Operator) ListTunnels(ctx context.Context) ([]TunnelInfo, error) {
+	defer perftrace.LogDuration(o.runtimeLogger, "perf", "ListTunnels", "total", time.Now())
 	cfg, err := o.loadConfig()
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1450,6 +1453,7 @@ func nextFreeListenPortSlot(cfg *Config, reserved map[int]bool) int {
 // AddTunnels parses one or more links and atomically adds them.
 // Returns successfully-added tunnels and parse errors.
 func (o *Operator) AddTunnels(ctx context.Context, linksText string) ([]TunnelInfo, []BatchError, error) {
+	defer perftrace.LogDuration(o.runtimeLogger, "perf", "AddTunnels", "total", time.Now())
 	o.migrationMu.Lock()
 	defer o.migrationMu.Unlock()
 
@@ -1587,6 +1591,7 @@ func (o *Operator) AddTunnels(ctx context.Context, linksText string) ([]TunnelIn
 
 // RemoveTunnel removes outbound+inbound+route+Proxy for a tag.
 func (o *Operator) RemoveTunnel(ctx context.Context, tag string) error {
+	defer perftrace.LogDuration(o.runtimeLogger, "perf", "RemoveTunnel", "total", time.Now())
 	o.migrationMu.Lock()
 	defer o.migrationMu.Unlock()
 	if o.runtimeLogger != nil {
@@ -1715,6 +1720,7 @@ func (o *Operator) removeOrphanSingboxProxies(ctx context.Context) error {
 // В режиме NDMS Proxy disabled пропускает SyncProxies и, при наличии
 // сигнала, делает one-shot orphan cleanup.
 func (o *Operator) Reconcile(ctx context.Context) error {
+	defer perftrace.LogDuration(o.runtimeLogger, "perf", "Reconcile", "total", time.Now())
 	if o.manuallyStopped.Load() {
 		if o.runtimeLogger != nil {
 			o.runtimeLogger.Debug("reconcile", "", "skipped: manually stopped")
@@ -2105,6 +2111,8 @@ func (o *Operator) Cleanup(ctx context.Context) error {
 }
 
 func (o *Operator) applyConfig(ctx context.Context, cfg *Config) error {
+	defer perftrace.LogDuration(o.runtimeLogger, "perf", "applyConfig", "total", time.Now())
+	stage := time.Now()
 	if o.runtimeLogger != nil {
 		o.runtimeLogger.Debug("apply-config", "", fmt.Sprintf("start tunnels=%d", len(cfg.Tunnels())))
 	}
@@ -2132,6 +2140,7 @@ func (o *Operator) applyConfig(ctx context.Context, cfg *Config) error {
 		}
 		return err
 	}
+	stage = perftrace.Mark(o.runtimeLogger, "perf", "applyConfig", "cfg.Save", stage)
 	if err := o.preflightConfigDir(); err != nil {
 		restore()
 		if o.runtimeLogger != nil {
@@ -2139,11 +2148,15 @@ func (o *Operator) applyConfig(ctx context.Context, cfg *Config) error {
 		}
 		return fmt.Errorf("validate: %w", err)
 	}
+	stage = perftrace.Mark(o.runtimeLogger, "perf", "applyConfig", "preflight (sing-box check)", stage)
 	var runErr error
-	if running, _ := o.proc.IsRunning(); !running {
+	running, _ := o.proc.IsRunning()
+	if !running {
 		runErr = o.startAndWait(ctx)
+		_ = perftrace.Mark(o.runtimeLogger, "perf", "applyConfig", "startAndWait (cold start)", stage)
 	} else {
 		runErr = o.proc.Reload()
+		_ = perftrace.Mark(o.runtimeLogger, "perf", "applyConfig", "Reload (SIGHUP)", stage)
 	}
 	if hadExisting == nil {
 		_ = os.Remove(backupPath)
