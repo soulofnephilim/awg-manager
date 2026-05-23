@@ -266,31 +266,34 @@ func stderrLineIndicatesSingBoxFatal(line string) bool {
 // surfaced at /diagnostics?tab=logs). FATAL/ERROR lines are also stored
 // as lastError so the UI shows them when sing-box subsequently dies.
 func (o *Operator) handleStderrLine(line string) {
+	safeLine := sanitizeSingboxLogText(line)
 	upper := strings.ToUpper(line)
 	switch {
 	case stderrLineIndicatesSingBoxFatal(line):
-		o.log.Error("singbox stderr", "line", line)
-		o.setLastError(line)
+		o.log.Error("singbox stderr", "line", safeLine)
+		o.setLastError(safeLine)
 	case strings.Contains(upper, "ERROR"):
-		o.log.Warn("singbox stderr", "line", line)
+		o.log.Warn("singbox stderr", "line", safeLine)
 	default:
-		o.log.Info("singbox stderr", "line", line)
+		o.log.Info("singbox stderr", "line", safeLine)
 	}
 }
 
 // handleStdoutLine forwards each sing-box stdout line into the app log
 // under singbox/process. Level chosen by classifyProcessLine.
 func (o *Operator) handleStdoutLine(line string) {
+	level := classifyProcessLine(line)
+	safeLine := sanitizeSingboxLogText(line)
 	if o.processLogger == nil {
 		return
 	}
-	switch classifyProcessLine(line) {
+	switch level {
 	case logging.LevelError:
-		o.processLogger.Error("stdout", "", line)
+		o.processLogger.Error("stdout", "", safeLine)
 	case logging.LevelWarn:
-		o.processLogger.Warn("stdout", "", line)
+		o.processLogger.Warn("stdout", "", safeLine)
 	default:
-		o.processLogger.Info("stdout", "", line)
+		o.processLogger.Info("stdout", "", safeLine)
 	}
 }
 
@@ -320,15 +323,21 @@ func classifyProcessLine(line string) logging.Level {
 // also nudged so subscribers refetch immediately instead of waiting
 // for the next 30s poll tick.
 func (o *Operator) handleExit(err error, stderrTail string) {
-	msg := stderrTail
-	if msg == "" && err != nil {
-		msg = err.Error()
+	rawMsg := stderrTail
+	if rawMsg == "" && err != nil {
+		rawMsg = err.Error()
 	}
-	if msg == "" {
-		msg = "sing-box exited (no diagnostic output)"
+	if rawMsg == "" {
+		rawMsg = "sing-box exited (no diagnostic output)"
 	}
-	o.log.Error("singbox exited", "err", err, "stderrTail", stderrTail)
-	o.setLastError(msg)
+	safeMsg := sanitizeSingboxLogText(rawMsg)
+	safeTail := sanitizeSingboxLogText(stderrTail)
+	safeErr := ""
+	if err != nil {
+		safeErr = sanitizeSingboxLogText(err.Error())
+	}
+	o.log.Error("singbox exited", "err", safeErr, "stderrTail", safeTail)
+	o.setLastError(safeMsg)
 	if o.bus != nil {
 		o.bus.Publish("resource:invalidated", map[string]any{
 			"resource": "singbox.status",
@@ -1911,9 +1920,10 @@ func (o *Operator) startAndWait(ctx context.Context) error {
 		o.runtimeLogger.Info("start-and-wait", "", "starting sing-box process")
 	}
 	if err := o.proc.Start(); err != nil {
-		o.setLastError(err.Error())
+		safeErr := sanitizeSingboxLogText(err.Error())
+		o.setLastError(safeErr)
 		if o.runtimeLogger != nil {
-			o.runtimeLogger.Error("start-and-wait", "", "process start failed: "+err.Error())
+			o.runtimeLogger.Error("start-and-wait", "", "process start failed: "+safeErr)
 		}
 		return err
 	}
@@ -1925,10 +1935,10 @@ func (o *Operator) startAndWait(ctx context.Context) error {
 		// tail captured by handleExit if it fired, otherwise note the
 		// clash timeout.
 		if o.LastError() == "" {
-			o.setLastError("sing-box запущен, но Clash API не отвечает: " + err.Error())
+			o.setLastError("sing-box запущен, но Clash API не отвечает: " + sanitizeSingboxLogText(err.Error()))
 		}
 		if o.runtimeLogger != nil {
-			o.runtimeLogger.Error("start-and-wait", "", "clash API readiness timeout: "+err.Error())
+			o.runtimeLogger.Error("start-and-wait", "", "clash API readiness timeout: "+sanitizeSingboxLogText(err.Error()))
 		}
 		return err
 	}

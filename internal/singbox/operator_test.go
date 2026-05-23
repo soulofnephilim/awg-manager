@@ -415,6 +415,64 @@ func TestEnsureBaseConfig_MaterialisesMissingRouteBlock(t *testing.T) {
 	}
 }
 
+func TestOperator_HandleStdoutLine_RedactsSensitiveHosts(t *testing.T) {
+	cap := &captureLogger{}
+	op := &Operator{
+		processLogger: logging.NewScopedLogger(cap, logging.GroupSingbox, logging.SubSBProcess),
+	}
+
+	op.handleStdoutLine("lookup domain node.example.org and dial 203.0.113.77")
+
+	got := cap.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected one log, got %d", len(got))
+	}
+	msg := got[0].Message
+	if strings.Contains(msg, "node.example.org") || strings.Contains(msg, "203.0.113.77") {
+		t.Fatalf("raw sensitive value leaked: %q", msg)
+	}
+	if !strings.Contains(msg, "no************rg") || !strings.Contains(msg, "20********77") {
+		t.Fatalf("redacted values missing: %q", msg)
+	}
+	if got[0].Sub != logging.SubSBProcess {
+		t.Fatalf("subgroup = %q, want %q", got[0].Sub, logging.SubSBProcess)
+	}
+}
+
+func TestOperator_HandleStderrLine_RedactsAndSetsLastError(t *testing.T) {
+	op := &Operator{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	op.handleStderrLine("FATAL[0000] lookup failed for node.example.org: 203.0.113.77")
+	last := op.LastError()
+	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
+		t.Fatalf("raw sensitive value leaked into LastError: %q", last)
+	}
+	if !strings.Contains(last, "no************rg") || !strings.Contains(last, "20********77") {
+		t.Fatalf("redacted values missing in LastError: %q", last)
+	}
+}
+
+func TestOperator_HandleExit_RedactsLastError(t *testing.T) {
+	op := &Operator{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	op.handleExit(errors.New("exit for node.example.org: 203.0.113.77"), "")
+	last := op.LastError()
+	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
+		t.Fatalf("raw sensitive value leaked from err: %q", last)
+	}
+	if !strings.Contains(last, "no************rg") || !strings.Contains(last, "20********77") {
+		t.Fatalf("redacted values missing from err: %q", last)
+	}
+
+	op.handleExit(errors.New("exit"), "stderr for node.example.org: 203.0.113.77")
+	last = op.LastError()
+	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
+		t.Fatalf("raw sensitive value leaked from stderrTail: %q", last)
+	}
+	if !strings.Contains(last, "no************rg") || !strings.Contains(last, "20********77") {
+		t.Fatalf("redacted values missing from stderrTail: %q", last)
+	}
+}
+
 func TestClassifyProcessLine(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -1185,10 +1243,10 @@ func TestListTunnels_Running_NDMSDisabled_UsesClash(t *testing.T) {
 	}`
 
 	cases := []struct {
-		name          string
-		clashHandler  func(http.ResponseWriter, *http.Request)
-		clashAddr     string // overrides if non-empty
-		wantRunning   bool
+		name         string
+		clashHandler func(http.ResponseWriter, *http.Request)
+		clashAddr    string // overrides if non-empty
+		wantRunning  bool
 	}{
 		{
 			name: "clash reports outbound present → Running true",

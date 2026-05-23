@@ -177,17 +177,19 @@ func (p *Process) startLocked() error {
 				msg = "no output on stderr"
 			}
 		}
-		p.setLastStderr(msg)
-		return fmt.Errorf("sing-box exited during startup: %s", msg)
+		safeMsg := sanitizeSingboxLogText(msg)
+		p.setLastStderr(safeMsg)
+		return fmt.Errorf("sing-box exited during startup: %s", safeMsg)
 	case <-time.After(startupGracePeriod):
 		myPid := cmd.Process.Pid
 		go func() {
 			waitErr := <-errCh
 			p.cleanupPidIfOurs(myPid)
 			tail := strings.TrimSpace(stderr.String())
-			p.setLastStderr(tail)
+			safeTail := sanitizeSingboxLogText(tail)
+			p.setLastStderr(safeTail)
 			if p.OnExit != nil {
-				p.OnExit(waitErr, tail)
+				p.OnExit(waitErr, safeTail)
 			}
 		}()
 		return nil

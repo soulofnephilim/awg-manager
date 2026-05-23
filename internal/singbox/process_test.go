@@ -114,7 +114,7 @@ func TestProcessStartReportsImmediateExit(t *testing.T) {
 		binary:  "sing-box",
 		pidPath: filepath.Join(dir, "pid"),
 		startCmd: func(bin string, args ...string) (*exec.Cmd, error) {
-			c := exec.Command("/bin/sh", "-c", "echo 'FATAL boom' >&2; exit 1")
+			c := exec.Command("/bin/sh", "-c", "echo 'FATAL boom node.example.org 203.0.113.77' >&2; exit 1")
 			return c, nil
 		},
 		signalFn: func(pid int, sig syscall.Signal) error { return nil },
@@ -125,6 +125,16 @@ func TestProcessStartReportsImmediateExit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "FATAL boom") {
 		t.Errorf("expected stderr in error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "node.example.org") || strings.Contains(err.Error(), "203.0.113.77") {
+		t.Fatalf("raw sensitive value leaked in startup error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no************rg") || !strings.Contains(err.Error(), "20********77") {
+		t.Fatalf("redacted values missing in startup error: %v", err)
+	}
+	last := p.LastStderr()
+	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
+		t.Fatalf("raw sensitive value leaked in LastStderr: %q", last)
 	}
 }
 
