@@ -666,22 +666,23 @@ func (o *OperatorNativeWG) ResolveActiveWAN(ctx context.Context, stored *storage
 	return sysName
 }
 
-// nextFreeIndex finds the next available Wireguard index via RCI.
+// nextFreeIndex finds the next available Wireguard index via cached InterfaceStore.
+// Раньше делал direct GetRaw + parseRCIInterfaceList; теперь идёт через
+// query.InterfaceStore.List() который кэширует bootstrap. Cold path (only
+// at tunnel creation) — миграция нужна для чистой архитектуры, не perf.
 func (o *OperatorNativeWG) nextFreeIndex(ctx context.Context) (int, error) {
-	body, err := o.transport.GetRaw(ctx, "/show/interface/")
+	ifaces, err := o.queries.Interfaces.List(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list wireguard interfaces: %w", err)
 	}
 
-	existing, err := parseRCIInterfaceList(body)
-	if err != nil {
-		return 0, fmt.Errorf("parse interface list: %w", err)
-	}
-
 	used := make(map[int]bool)
-	for _, name := range existing {
+	for _, iface := range ifaces {
+		if !strings.EqualFold(iface.Type, "Wireguard") {
+			continue
+		}
 		// Extract index from "WireguardN"
-		if idx, _, err := ParseNDMSCreatedName(`"` + name + `" interface created`); err == nil {
+		if idx, _, err := ParseNDMSCreatedName(`"` + iface.ID + `" interface created`); err == nil {
 			used[idx] = true
 		}
 	}

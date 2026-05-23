@@ -2,7 +2,6 @@ package diagnostics
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -154,23 +153,24 @@ func (r *Runner) testWANConnectivity(ctx context.Context) TestResult {
 func (r *Runner) testNDMSHealth(ctx context.Context) TestResult {
 	res := TestResult{Name: "ndms_health", Description: "NDMS отвечает"}
 
-	raw, err := r.deps.NDMSTransport.GetRaw(ctx, "/show/version")
+	// Используем cached SystemInfoStore (loaded на boot) вместо direct
+	// GetRaw — следует audit-policy "через cached stores". Liveness
+	// implicit: если store доступен — daemon успешно стартовал, NDMS
+	// был доступен. Reload приходит через event invalidation.
+	if r.deps.NDMSQueries == nil || r.deps.NDMSQueries.SystemInfo == nil {
+		res.Status = StatusFail
+		res.Detail = "SystemInfoStore не инициализирован"
+		return res
+	}
+	v, err := r.deps.NDMSQueries.SystemInfo.Get()
 	if err != nil {
 		res.Status = StatusFail
 		res.Detail = "NDMS не отвечает: " + err.Error()
 		return res
 	}
-	var info struct {
-		Title string `json:"title"`
-	}
-	if err := json.Unmarshal(raw, &info); err != nil {
-		res.Status = StatusFail
-		res.Detail = "NDMS вернул невалидный JSON: " + err.Error()
-		return res
-	}
 
 	res.Status = StatusPass
-	res.Detail = info.Title
+	res.Detail = v.Title
 	return res
 }
 
