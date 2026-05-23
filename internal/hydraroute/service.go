@@ -55,7 +55,7 @@ func (s *Service) HealInvalidRuntimeConfig() {
 		return
 	}
 	s.appLog.Warn("config-heal", "IpsetMaxElem", fmt.Sprintf("invalid or duplicate IpsetMaxElem healed to %d", chosen))
-	if !s.status.Running {
+	if s.status.Installed && !s.status.Running {
 		s.scheduleRestart("config-heal")
 	}
 }
@@ -106,7 +106,18 @@ func (s *Service) Control(action string) error {
 }
 
 // scheduleRestart debounces neo restart: resets timer on each call.
+//
+// Central guard: при !Installed silently skip — это покрывает все
+// callsite'ы (rules-write/config-heal/config-write/policy-order/geo-sync)
+// одной защитой. Без guard'а AfterFunc через 2s делал fork/exec
+// /opt/bin/neo restart, что на чистой системе без HR Neo приводило к
+// шуму "neo restart failed: no such file or directory". Решение:
+// systematic-debugging session 2026-05-23.
 func (s *Service) scheduleRestart(reason string) {
+	if !s.status.Installed {
+		s.appLog.Debug("restart-schedule", "", "skipped: HR Neo не установлен (reason: "+reason+")")
+		return
+	}
 	if s.restartTimer != nil {
 		s.restartTimer.Stop()
 	}
@@ -255,7 +266,13 @@ func (s *Service) SetPolicyOrder(order []string) error {
 }
 
 // SyncGeoFilesToConfig updates only GeoIPFile/GeoSiteFile in hrneo.conf.
+// При !Installed — no-op: если HR Neo удалили, мы не обновляем его
+// конфиг "на будущее" (решено session 2026-05-23).
 func (s *Service) SyncGeoFilesToConfig() error {
+	if !s.status.Installed {
+		s.appLog.Debug("sync-geo", "", "skipped: HR Neo не установлен")
+		return nil
+	}
 	geoIP, geoSite := 0, 0
 	var ips []string
 	var sites []string
