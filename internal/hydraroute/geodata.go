@@ -101,9 +101,15 @@ func NewGeoDataStore(dataDir string) *GeoDataStore {
 }
 
 // List returns a copy of all tracked geo file entries.
+// Reconciles first so manual deletes on disk and stale JSON are reflected
+// without requiring a service restart (UI refresh calls this path).
 func (s *GeoDataStore) List() []GeoFileEntry {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.reconcileUnlocked() {
+		_ = s.saveUnlocked()
+	}
 
 	result := make([]GeoFileEntry, len(s.entries))
 	copy(result, s.entries)

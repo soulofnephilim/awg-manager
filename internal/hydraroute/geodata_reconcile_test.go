@@ -46,7 +46,7 @@ func TestReconcile_PruneMissingFiles(t *testing.T) {
 	}
 }
 
-func TestReconcile_DedupePrefersAWGMOverHR(t *testing.T) {
+func TestReconcile_KeepsBothAWGMAndHRWhenBothExist(t *testing.T) {
 	tmp := t.TempDir()
 	origHR := hrDir
 	hrDir = filepath.Join(tmp, "HydraRoute")
@@ -69,22 +69,26 @@ func TestReconcile_DedupePrefersAWGMOverHR(t *testing.T) {
 
 	store.mu.Lock()
 	store.entries = []GeoFileEntry{
-		{Type: "geoip", Path: hrPath, External: true},
+		{Type: "geoip", Path: hrPath, External: false},
 		{Type: "geoip", Path: awgmPath, External: true},
 	}
 	changed := store.reconcileUnlocked()
 	store.mu.Unlock()
 	if !changed {
-		t.Fatal("expected reconcile to dedupe")
+		t.Fatal("expected reconcile to fix external flags")
 	}
-	if len(store.entries) != 1 {
-		t.Fatalf("entries = %d, want 1", len(store.entries))
+	if len(store.entries) != 2 {
+		t.Fatalf("entries = %d, want 2 (AWGM + HR)", len(store.entries))
 	}
-	if store.entries[0].Path != awgmPath {
-		t.Fatalf("kept %q, want AWGM %q", store.entries[0].Path, awgmPath)
+	byPath := map[string]GeoFileEntry{}
+	for _, e := range store.entries {
+		byPath[e.Path] = e
 	}
-	if store.entries[0].External {
-		t.Fatal("kept AWGM entry should be non-external")
+	if byPath[awgmPath].External {
+		t.Fatal("AWGM entry should not be external")
+	}
+	if !byPath[hrPath].External {
+		t.Fatal("HR entry should be external")
 	}
 }
 
@@ -125,6 +129,28 @@ func TestLoad_ReconcilesPersistedJSON(t *testing.T) {
 	}
 }
 
+func TestList_ReconcilesMissingFileOnDisk(t *testing.T) {
+	store := newTestGeoStore(t)
+	path := filepath.Join(store.geoDir, "vanished.dat")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	store.entries = []GeoFileEntry{{Type: "geoip", Path: path}}
+	store.mu.Unlock()
+
+	if len(store.List()) != 1 {
+		t.Fatal("expected one entry before manual delete")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if entries := store.List(); len(entries) != 0 {
+		t.Fatalf("List after manual delete: %+v, want empty", entries)
+	}
+}
+
 func TestDedupeGeoPaths(t *testing.T) {
 	in := []string{"/a/x.dat", "/b/x.dat", "/a/x.dat"}
 	out := dedupeGeoPaths(in)
@@ -133,11 +159,10 @@ func TestDedupeGeoPaths(t *testing.T) {
 	}
 }
 
-// TestRescanAndSync_RemovesDuplicateGeoPathsFromHrneoConf reproduces the user
-// report: hrneo.conf lists both AWGM and HR paths, stale JSON marks everything
-// external, missing HR files on disk. After rescan + sync only AWGM paths remain
-// in hrneo.conf and the catalog.
-func TestRescanAndSync_RemovesDuplicateGeoPathsFromHrneoConf(t *testing.T) {
+// TestRescanAndSync_PrunesMissingHRPathsFromCatalog reproduces the user report:
+// hrneo.conf lists AWGM + HR paths, stale JSON marks everything external, but HR
+// files are missing on disk. Reconcile drops HR ghosts; sync writes only AWGM paths.
+func TestRescanAndSync_PrunesMissingHRPathsFromCatalog(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "awg-manager")
 	awgmGeo := filepath.Join(dataDir, "geo")
@@ -248,5 +273,72 @@ GeoSiteFile=` + hrGeoSite + `
 	entries := store.List()
 	if len(entries) != 2 {
 		t.Fatalf("catalog after sync: %+v", entries)
+	}
+}
+
+// TestSync_WritesBothAWGMAndHRPathsWhenBothExistOnDisk ensures coexistence:
+// two different paths with the same basename both stay in the catalog and hrneo.conf.
+func TestSync_WritesBothAWGMAndHRPathsWhenBothExistOnDisk(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "awg-manager")
+	awgmGeo := filepath.Join(dataDir, "geo")
+	if err := os.MkdirAll(awgmGeo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origHR := hrDir
+	origConf := hrConfPath
+	hrDir = filepath.Join(root, "HydraRoute")
+	hrConfPath = filepath.Join(hrDir, "hrneo.conf")
+	t.Cleanup(func() {
+		hrDir = origHR
+		hrConfPath = origConf
+	})
+
+	awgmGeoIP := filepath.Join(awgmGeo, "geoip_GA.dat")
+	hrGeoIP := filepath.Join(hrDir, "geofile", "geoip_GA.dat")
+	if err := os.MkdirAll(filepath.Dir(hrGeoIP), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{awgmGeoIP, hrGeoIP} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := NewGeoDataStore(dataDir)
+	store.mu.Lock()
+	store.entries = []GeoFileEntry{
+		{Type: "geoip", Path: awgmGeoIP, URL: GroundZerroGeoIPURL},
+		{Type: "geoip", Path: hrGeoIP, External: true, URL: GroundZerroGeoIPURL},
+	}
+	store.mu.Unlock()
+
+	svc := &Service{}
+	svc.SetStatusForTest(true)
+	svc.SetGeoDataStore(store)
+
+	if err := svc.SyncGeoFilesToConfig(); err != nil {
+		t.Fatalf("SyncGeoFilesToConfig: %v", err)
+	}
+	if svc.restartTimer != nil {
+		svc.restartTimer.Stop()
+	}
+
+	cfg, err := ReadConfig()
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if len(cfg.GeoIPFiles) != 2 {
+		t.Fatalf("GeoIPFiles = %v, want both AWGM and HR", cfg.GeoIPFiles)
+	}
+	got := map[string]bool{cfg.GeoIPFiles[0]: true, cfg.GeoIPFiles[1]: true}
+	if !got[awgmGeoIP] || !got[hrGeoIP] {
+		t.Fatalf("conf paths = %v, want %q and %q", cfg.GeoIPFiles, awgmGeoIP, hrGeoIP)
+	}
+
+	entries := store.List()
+	if len(entries) != 2 {
+		t.Fatalf("catalog: %+v", entries)
 	}
 }

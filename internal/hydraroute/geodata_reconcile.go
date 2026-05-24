@@ -5,23 +5,12 @@ import (
 	"path/filepath"
 )
 
-// geoEntryPriority scores catalog entries when the same type+basename appears
-// twice (e.g. awg-manager/geo and HydraRoute/geofile). Higher wins.
-func geoEntryPriority(e GeoFileEntry, geoDir string) int {
-	score := 0
-	if geoDir != "" && hasPathPrefix(filepath.Clean(e.Path), geoDir) {
-		score += 100
-	}
-	if !e.External {
-		score += 50
-	}
-	return score
-}
-
 // reconcileUnlocked normalizes the in-memory catalog:
 //   - External matches the path (AWGM geo dir → false, HR tree → true)
 //   - drops entries whose files are missing on disk
-//   - when type and basename collide, keeps the higher-priority path
+//
+// AWGM and HR may each hold their own copy of the same basename; we do not
+// collapse those into one catalog entry.
 //
 // Caller must hold s.mu (write lock). Returns whether entries changed.
 func (s *GeoDataStore) reconcileUnlocked() bool {
@@ -45,54 +34,6 @@ func (s *GeoDataStore) reconcileUnlocked() bool {
 		alive = append(alive, e)
 	}
 	s.entries = alive
-
-	if len(s.entries) < 2 {
-		return changed
-	}
-
-	keep := make([]bool, len(s.entries))
-	for i := range keep {
-		keep[i] = true
-	}
-
-	for i := 0; i < len(s.entries); i++ {
-		if !keep[i] {
-			continue
-		}
-		for j := i + 1; j < len(s.entries); j++ {
-			if !keep[j] {
-				continue
-			}
-			ei, ej := s.entries[i], s.entries[j]
-			if ei.Type != ej.Type || filepath.Base(ei.Path) != filepath.Base(ej.Path) {
-				continue
-			}
-			pi, pj := geoEntryPriority(ei, s.geoDir), geoEntryPriority(ej, s.geoDir)
-			if pi == pj {
-				// Stable tie-break: keep the earlier catalog entry.
-				continue
-			}
-			if pi > pj {
-				keep[j] = false
-				delete(s.tagCache, ej.Path)
-			} else {
-				keep[i] = false
-				delete(s.tagCache, ei.Path)
-				break
-			}
-			changed = true
-		}
-	}
-
-	deduped := s.entries[:0]
-	for i, e := range s.entries {
-		if keep[i] {
-			deduped = append(deduped, e)
-		} else {
-			changed = true
-		}
-	}
-	s.entries = deduped
 	return changed
 }
 
