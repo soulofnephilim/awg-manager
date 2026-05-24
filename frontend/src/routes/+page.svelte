@@ -893,7 +893,7 @@
 			case 'running':
 				return tunnel.pingCheck.status === 'recovering' ? 'Восстанавливается' : 'Активен';
 			case 'broken':
-				return 'Ошибка';
+				return 'Сломан';
 			case 'starting':
 				return 'Запускается';
 			case 'needs_stop':
