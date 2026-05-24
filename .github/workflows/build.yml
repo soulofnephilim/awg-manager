@@ -13,8 +13,8 @@ permissions:
   contents: write
 
 env:
-  SINGBOX_VERSION: 1.14.0-alpha.21
-  SINGBOX_REF: v1.14.0-alpha.21
+  SINGBOX_VERSION: 1.14.0-alpha.25
+  SINGBOX_REF: v1.14.0-alpha.25
 
 jobs:
   frontend:
