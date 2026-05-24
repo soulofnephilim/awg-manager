@@ -254,6 +254,7 @@
 
 	let pendingDelete = $state<GeoFileEntry | null>(null);
 	let pendingTakeControl = $state<GeoFileEntry | null>(null);
+	let expandedPaths = $state<Set<string>>(new Set());
 
 	function requestRemove(f: GeoFileEntry) {
 		pendingDelete = f;
@@ -359,6 +360,22 @@
 	function fileName(p: string): string {
 		return p.split('/').pop() ?? p;
 	}
+
+	function fileDir(p: string): string {
+		const base = fileName(p);
+		if (!base || p === base) return '';
+		return p.slice(0, p.length - base.length);
+	}
+
+	function togglePathExpanded(path: string) {
+		const next = new Set(expandedPaths);
+		if (next.has(path)) {
+			next.delete(path);
+		} else {
+			next.add(path);
+		}
+		expandedPaths = next;
+	}
 </script>
 
 <div class="geo-pane">
@@ -388,7 +405,20 @@
 				<div class="file-row">
 					<div class="file-info">
 						<span class="file-type type-{f.type}">{f.type}</span>
-						<span class="file-name" title={f.path}>{fileName(f.path)}</span>
+						<button
+							type="button"
+							class="file-name"
+							title={expandedPaths.has(f.path) ? 'Скрыть путь' : f.path}
+							onclick={() => togglePathExpanded(f.path)}
+						>
+							{#if expandedPaths.has(f.path)}
+								<span class="file-path">{fileDir(f.path)}</span><span
+									class="file-basename">{fileName(f.path)}</span
+								>
+							{:else}
+								{fileName(f.path)}
+							{/if}
+						</button>
 						{#if f.external}
 							<span
 								class="file-external"
@@ -690,7 +720,27 @@
 		font-family: ui-monospace, monospace;
 		color: var(--text-primary);
 		font-size: 0.875rem;
-		cursor: help;
+		cursor: pointer;
+		padding: 0;
+		border: none;
+		background: none;
+		text-align: left;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.file-name:hover .file-basename {
+		text-decoration: underline;
+	}
+
+	.file-path {
+		color: var(--text-muted);
+	}
+
+	.file-basename {
+		color: var(--text-primary);
 	}
 
 	.file-meta {
