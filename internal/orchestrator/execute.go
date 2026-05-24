@@ -396,14 +396,25 @@ func (o *Orchestrator) executeRestoreKmod(ctx context.Context, action Action) er
 		return err
 	}
 
-	// Refresh ActiveWAN — at boot, the tunnel survived a router restart and
-	// NDMS may have picked a different WAN than what was previously stored.
+	// Refresh persisted runtime state in a single save:
+	//  - ActiveWAN: at boot NDMS may have picked a different WAN than stored.
+	//  - ResolvedEndpointIP: RestoreKmodTunnel resolved the endpoint (or used cache);
+	//    persist a freshly-resolved IP so the next boot has a current fallback.
+	dirty := false
 	if activeWAN := o.nwgOp.ResolveActiveWAN(ctx, stored); activeWAN != "" && stored.ActiveWAN != activeWAN {
 		stored.ActiveWAN = activeWAN
-		if err := o.store.Save(stored); err != nil {
-			o.appLog.Warn("persist-state", action.Tunnel, "refreshed ActiveWAN: "+err.Error())
-		}
+		dirty = true
 		o.appLog.Info("restore-kmod", action.Tunnel, fmt.Sprintf("active WAN refreshed to %s", activeWAN))
+	}
+	if trackedIP := o.nwgOp.GetTrackedEndpointIP(action.Tunnel); trackedIP != "" && trackedIP != stored.ResolvedEndpointIP {
+		stored.ResolvedEndpointIP = trackedIP
+		dirty = true
+		o.appLog.Info("restore-kmod", action.Tunnel, "resolved endpoint IP refreshed to "+trackedIP)
+	}
+	if dirty {
+		if err := o.store.Save(stored); err != nil {
+			o.appLog.Warn("persist-state", action.Tunnel, "refresh runtime state: "+err.Error())
+		}
 	}
 
 	return nil
@@ -547,7 +558,15 @@ func (o *Orchestrator) executePersistRunning(action Action) error {
 	if stored.StartedAt == "" {
 		stored.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	if trackedIP := o.kernelOp.GetTrackedEndpointIP(action.Tunnel); trackedIP != "" {
+	var trackedIP string
+	if stored.Backend == "nativewg" {
+		if o.nwgOp != nil {
+			trackedIP = o.nwgOp.GetTrackedEndpointIP(action.Tunnel)
+		}
+	} else if o.kernelOp != nil {
+		trackedIP = o.kernelOp.GetTrackedEndpointIP(action.Tunnel)
+	}
+	if trackedIP != "" {
 		stored.ResolvedEndpointIP = trackedIP
 	}
 
