@@ -31,6 +31,12 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/netutil"
 )
 
+const (
+	resolveAttempts       = 3
+	resolveAttemptTimeout = 1500 * time.Millisecond
+	resolveRetryGap       = 300 * time.Millisecond
+)
+
 // OperatorNativeWG manages tunnels via Keenetic native WireGuard + awg_proxy.ko.
 type OperatorNativeWG struct {
 	queries      *query.Queries
@@ -748,6 +754,49 @@ func (o *OperatorNativeWG) fallbackResolve(stored *storage.AWGTunnel, resolveErr
 	port, _ := strconv.Atoi(portStr)
 	o.appLog.Warn("resolve-endpoint", stored.Peer.Endpoint, "DNS failed, using cached IP "+stored.ResolvedEndpointIP)
 	return stored.ResolvedEndpointIP, port, nil
+}
+
+// resolveEndpointWithFallback resolves the tunnel's endpoint with a short retry
+// budget, then falls back to the cached ResolvedEndpointIP. On a fresh DNS
+// success it records the IP via trackEndpointIP (cache fallbacks are NOT tracked).
+func (o *OperatorNativeWG) resolveEndpointWithFallback(stored *storage.AWGTunnel) (string, int, error) {
+	var lastErr error
+	for attempt := 1; attempt <= resolveAttempts; attempt++ {
+		ip, port, err := o.resolveOnce(stored.Peer.Endpoint, resolveAttemptTimeout)
+		if err == nil {
+			o.trackEndpointIP(stored.ID, ip)
+			return ip, port, nil
+		}
+		lastErr = err
+		o.appLog.Debug("resolve-endpoint", stored.Peer.Endpoint,
+			fmt.Sprintf("attempt %d/%d failed: %v", attempt, resolveAttempts, err))
+		if attempt < resolveAttempts {
+			time.Sleep(resolveRetryGap)
+		}
+	}
+	return o.fallbackResolve(stored, lastErr)
+}
+
+// resolveOnce runs the injected resolver under a per-attempt timeout. A resolver
+// that outlives the timeout is abandoned (its goroutine finishes and the result
+// is discarded) and the attempt is reported as a timeout failure.
+func (o *OperatorNativeWG) resolveOnce(endpoint string, timeout time.Duration) (string, int, error) {
+	type result struct {
+		ip   string
+		port int
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		ip, port, err := o.resolveFn(endpoint)
+		ch <- result{ip, port, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.ip, r.port, r.err
+	case <-time.After(timeout):
+		return "", 0, fmt.Errorf("resolve %s: timeout after %s", endpoint, timeout)
+	}
 }
 
 // trackEndpointIP records a freshly-resolved endpoint IP for a tunnel.
