@@ -776,6 +776,7 @@ func main() {
 	// Wire managed-binary installer into Operator. The installer is keyed
 	// by the build-time arch string (e.g. "mipsel-3.4") so it can resolve
 	// the correct download URL and SHA256 from EmbeddedBinaries.
+	var singboxInstaller *installer.Installer
 	arch := detectArch()
 	if arch == "" {
 		bootLog.Warn("managed-singbox", runtime.GOARCH, "could not derive arch — install/update disabled")
@@ -784,7 +785,7 @@ func main() {
 		if !ok {
 			bootLog.Warn("managed-singbox", arch, "no embedded BinarySpec — install/update disabled")
 		} else {
-			singboxInstaller := installer.New(installer.DefaultBinaryPath, arch, spec, loggingService)
+			singboxInstaller = installer.New(installer.DefaultBinaryPath, arch, spec, loggingService)
 			singboxOp.SetInstaller(singboxInstaller)
 
 			// Stream sing-box install/update lifecycle over SSE so the UI
@@ -799,23 +800,6 @@ func main() {
 				})
 			})
 
-			// Auto-migration goroutine: when legacy sing-box-naive opkg
-			// package is present but managed binary is missing, run the
-			// jump from opkg → managed in the background. Failures keep
-			// awg-manager on the legacy install — retry happens on next boot.
-			go func() {
-				ctx := context.Background()
-				if singboxInstaller.CurrentVersion(ctx) != "" {
-					return // managed binary already in place
-				}
-				if !singboxInstaller.IsLegacyOpkgInstalled(ctx) {
-					return // nothing to migrate
-				}
-				lc := &operatorLifecycle{op: singboxOp}
-				if err := singboxInstaller.Migrate(ctx, lc); err != nil {
-					bootLog.Warn("singbox-auto-migration", "", "deferred: "+err.Error())
-				}
-			}()
 		}
 	}
 
@@ -1024,12 +1008,33 @@ func main() {
 	if err := deviceProxySvc.Reconcile(context.Background()); err != nil {
 		bootLog.Warn("deviceproxy-reconcile", "", err.Error())
 	}
-	updaterService.SetDownloader(downloader.NewSettingsBackedService(
+	sharedDownloadSvc := downloader.NewSettingsBackedService(
 		deviceProxySvc,
 		singboxOp,
 		sbOrch,
 		settingsStore,
-	))
+	)
+	updaterService.SetDownloader(sharedDownloadSvc)
+	if singboxInstaller != nil {
+		singboxInstaller.SetDownloader(&installerDownloaderAdapter{svc: sharedDownloadSvc})
+		// Auto-migration goroutine: when legacy sing-box-naive opkg
+		// package is present but managed binary is missing, run the
+		// jump from opkg → managed in the background. Failures keep
+		// awg-manager on the legacy install — retry happens on next boot.
+		go func() {
+			ctx := context.Background()
+			if singboxInstaller.CurrentVersion(ctx) != "" {
+				return // managed binary already in place
+			}
+			if !singboxInstaller.IsLegacyOpkgInstalled(ctx) {
+				return // nothing to migrate
+			}
+			lc := &operatorLifecycle{op: singboxOp}
+			if err := singboxInstaller.Migrate(ctx, lc); err != nil {
+				bootLog.Warn("singbox-auto-migration", "", "deferred: "+err.Error())
+			}
+		}()
+	}
 
 	srv.SetDeviceProxyService(deviceProxySvc)
 	// Note: legacy awg-* outbound cleanup happens lazily on first
@@ -1884,6 +1889,42 @@ func (l *operatorLifecycle) Stop(ctx context.Context) error {
 
 func (l *operatorLifecycle) Start(ctx context.Context) error {
 	return l.op.Control(ctx, "start")
+}
+
+type installerDownloaderAdapter struct {
+	svc *downloader.Service
+}
+
+func (a *installerDownloaderAdapter) DownloadFile(ctx context.Context, req installer.DownloadFileRequest) (installer.DownloadFileResult, error) {
+	if a == nil || a.svc == nil {
+		return installer.DownloadFileResult{}, fmt.Errorf("downloader service is not configured")
+	}
+
+	res, err := a.svc.DownloadFile(ctx, downloader.FileRequest{
+		Request: downloader.Request{
+			Purpose: "singbox-binary",
+			URL:     req.URL,
+			Timeout: req.Timeout,
+		},
+		// Intentional: req.DestPath is already "<binary>.tmp" from installer.
+		// We keep temp == dest here, and activation of live binary is done
+		// separately in Installer.Activate().
+		DestPath:     req.DestPath,
+		TempPath:     req.DestPath,
+		MaxFileBytes: req.MaxFileBytes,
+		Mode:         req.Mode,
+		// Intentional: do not atomically move to final binary here.
+		// Installer.Activate() performs chmod + final atomic rename.
+		Atomic:       false,
+		Progress:     req.Progress,
+	})
+	if err != nil {
+		return installer.DownloadFileResult{}, err
+	}
+	return installer.DownloadFileResult{
+		Path: res.Path,
+		Size: res.Size,
+	}, nil
 }
 
 // singboxAndSubLister satisfies singbox.tunnelLister by combining the regular

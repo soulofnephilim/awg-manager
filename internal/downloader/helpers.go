@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/hoaxisr/awg-manager/internal/sys/httpdownload"
 )
 
 type Request struct {
@@ -38,6 +40,7 @@ type FileRequest struct {
 	MaxFileBytes int64
 	Mode         os.FileMode
 	Atomic       bool
+	Progress     func(downloaded, total int64)
 }
 
 type FileResult struct {
@@ -213,7 +216,11 @@ func (s *Service) DownloadFile(ctx context.Context, req FileRequest) (FileResult
 		}
 	}()
 
-	written, err := io.Copy(out, io.LimitReader(resp.Body, req.MaxFileBytes+1))
+	src := io.Reader(resp.Body)
+	if req.Progress != nil {
+		src = httpdownload.NewReader(resp.Body, resp.ContentLength, req.Progress)
+	}
+	written, err := io.Copy(out, io.LimitReader(src, req.MaxFileBytes+1))
 	if err != nil {
 		return FileResult{}, fmt.Errorf("download via %s: write file: %w", lease.Route.DisplayName(), err)
 	}

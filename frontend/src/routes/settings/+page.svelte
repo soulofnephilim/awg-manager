@@ -641,7 +641,7 @@ onMount(() => {
 					<div class="section-label section-label-with-route">
 						<span>Обновление AWGM</span>
 						<span class="section-label-route" title={currentDownloadRouteLabel()}>
-							(через {currentDownloadRouteLabel()})
+							через {currentDownloadRouteLabel()}
 						</span>
 					</div>
 					<UpdateSection bind:updateInfo downloadRouteLabel={currentDownloadRouteLabel()} />
@@ -661,6 +661,7 @@ onMount(() => {
 					onupdateSingbox={updateSingbox}
 					showSingbox={showSingboxIntegration}
 					showHydra={showHydraIntegration}
+					downloadRouteLabel={currentDownloadRouteLabel()}
 				/>
 			</aside>
 

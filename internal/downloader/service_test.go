@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -680,5 +681,46 @@ func TestDownloadFile_OverLimitCleansTemp(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Fatalf("dest file should not exist, stat err=%v", statErr)
+	}
+}
+
+func TestDownloadFile_ReportsProgress(t *testing.T) {
+	svc := NewService(Deps{})
+	body := []byte("progress-body")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "progress.bin")
+	var lastDownloaded int64
+	var lastTotal int64
+
+	res, err := svc.DownloadFile(context.Background(), FileRequest{
+		Request: Request{
+			Purpose: "test-progress",
+			URL:     ts.URL,
+		},
+		DestPath:     dest,
+		MaxFileBytes: 128,
+		Atomic:       true,
+		Progress: func(downloaded, total int64) {
+			lastDownloaded = downloaded
+			lastTotal = total
+		},
+	})
+	if err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	if res.Size != int64(len(body)) {
+		t.Fatalf("size = %d, want %d", res.Size, len(body))
+	}
+	if lastDownloaded != int64(len(body)) {
+		t.Fatalf("last downloaded = %d, want %d", lastDownloaded, len(body))
+	}
+	if lastTotal != int64(len(body)) {
+		t.Fatalf("last total = %d, want %d", lastTotal, len(body))
 	}
 }

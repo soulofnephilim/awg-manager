@@ -454,7 +454,7 @@
 			</div>
 		{:else}
 			<div class="route-status route-status-live">
-				Маршрут загрузки: <strong>{outboundLabel(currentRouteTag())}</strong>.
+				Через: <strong>{outboundLabel(currentRouteTag())}</strong>.
 				Изменяется в <a href="/settings#downloads" data-sveltekit-reload>Настройки → Загрузки</a>.
 			</div>
 		{/if}
