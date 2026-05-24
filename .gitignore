@@ -13,6 +13,7 @@ kmod/awg-proxy/tests/mac1_aad_cookie.py
 kmod/awg-proxy/tests/manual_tunnel.sh
 kmod/awg-proxy/tests/manual_tunnel_kernel.sh
 .cache/
+down_ref_plan.md
 
 # IDE
 .idea/
