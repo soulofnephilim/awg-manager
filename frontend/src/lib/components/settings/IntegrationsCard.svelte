@@ -229,7 +229,7 @@
 					<Button variant="secondary" size="sm" disabled>Ожидание…</Button>
 				{:else}
 					<Button
-						variant="primary"
+						variant="outline-primary"
 						size="sm"
 						href="https://github.com/Ground-Zerro/HydraRoute"
 						target="_blank"
