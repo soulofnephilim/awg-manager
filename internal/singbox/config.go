@@ -421,6 +421,8 @@ func detectTransport(ob map[string]any) string {
 		return "quic"
 	case "naive":
 		return "https"
+	case "mieru":
+		return strings.ToLower(strOr(ob["transport"], "tcp"))
 	}
 	if tr, ok := ob["transport"].(map[string]any); ok {
 		return strOr(tr["type"], "tcp")
@@ -455,7 +457,7 @@ func detectFingerprint(ob map[string]any) string {
 // awgoutbounds package. Spec only references their tags.
 type DeviceProxySpec struct {
 	Enabled     bool
-	ListenAddr  string   // already resolved to an IP literal
+	ListenAddr  string // already resolved to an IP literal
 	Port        int
 	Auth        DeviceProxyAuth
 	SelectedTag string   // member tag that becomes selector.default

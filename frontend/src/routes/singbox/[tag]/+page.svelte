@@ -60,6 +60,18 @@
 		}
 		return obj;
 	}
+
+	function serverPortsText(value: unknown): string {
+		return Array.isArray(value) ? value.map(String).join('\n') : '';
+	}
+
+	function parseServerPorts(value: string): string[] | undefined {
+		const parts = value
+			.split(/[\n,]+/)
+			.map((v) => v.trim())
+			.filter(Boolean);
+		return parts.length > 0 ? parts : undefined;
+	}
 </script>
 
 <svelte:head>
@@ -304,6 +316,77 @@
 							value={outbound.password ?? ''}
 							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
 						/>
+					</div>
+				</div>
+			{:else if protocol === 'mieru'}
+				<div class="section">
+					<h2 class="section-title">Mieru</h2>
+
+					<div class="form-group">
+						<label class="label" for="mieru_username">Пользователь</label>
+						<input
+							id="mieru_username"
+							class="input"
+							value={outbound.username ?? ''}
+							oninput={(e) => setField(['username'], (e.target as HTMLInputElement).value)}
+						/>
+					</div>
+
+					<div class="form-group">
+						<label class="label" for="mieru_password">Пароль</label>
+						<input
+							id="mieru_password"
+							class="input"
+							type="password"
+							value={outbound.password ?? ''}
+							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
+						/>
+					</div>
+
+					<div class="form-group">
+						<Dropdown
+							id="mieru_transport"
+							label="Transport"
+							value={outbound.transport ?? 'TCP'}
+							options={[
+								{ value: 'TCP', label: 'TCP' },
+								{ value: 'UDP', label: 'UDP' },
+							]}
+							onchange={(v) => setField(['transport'], v)}
+							fullWidth
+						/>
+					</div>
+
+					<div class="form-group">
+						<label class="label" for="mieru_server_ports">Дополнительные порты / диапазоны</label>
+						<textarea
+							id="mieru_server_ports"
+							class="input textarea"
+							rows="3"
+							value={serverPortsText(outbound.server_ports)}
+							oninput={(e) => setField(['server_ports'], parseServerPorts((e.target as HTMLTextAreaElement).value))}
+						></textarea>
+					</div>
+
+					<div class="form-group">
+						<label class="label" for="mieru_multiplexing">Multiplexing</label>
+						<input
+							id="mieru_multiplexing"
+							class="input"
+							value={outbound.multiplexing ?? ''}
+							oninput={(e) => setField(['multiplexing'], (e.target as HTMLInputElement).value)}
+						/>
+					</div>
+
+					<div class="form-group">
+						<label class="label" for="mieru_traffic_pattern">Traffic pattern</label>
+						<textarea
+							id="mieru_traffic_pattern"
+							class="input textarea"
+							rows="3"
+							value={outbound.traffic_pattern ?? ''}
+							oninput={(e) => setField(['traffic_pattern'], (e.target as HTMLTextAreaElement).value)}
+						></textarea>
 					</div>
 				</div>
 			{/if}

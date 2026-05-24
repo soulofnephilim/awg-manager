@@ -1087,7 +1087,7 @@ export type {
 
 export interface SingboxTunnel {
 	tag: string;
-	protocol: 'vless' | 'hysteria2' | 'naive' | 'trojan' | 'shadowsocks';
+	protocol: 'vless' | 'hysteria2' | 'naive' | 'trojan' | 'shadowsocks' | 'mieru';
 	server: string;
 	port: number;
 	security: 'reality' | 'tls' | 'none';

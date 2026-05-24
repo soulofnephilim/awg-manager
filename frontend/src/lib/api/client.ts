@@ -1492,6 +1492,10 @@ class ApiClient {
 			}
 			outbound.transport = { type: t.transport || 'tcp' };
 			if (Object.keys(tls).length > 0) outbound.tls = tls;
+		} else if (t.protocol === 'mieru') {
+			outbound.transport = (t.transport || 'TCP').toUpperCase();
+			outbound.username = t.username || '';
+			outbound.password = '';
 		}
 
 		return outbound;
