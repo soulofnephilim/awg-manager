@@ -1,0 +1,60 @@
+package main
+
+import "testing"
+
+func TestGenerate_GroupsAndOrder(t *testing.T) {
+	subjects := []string{
+		"feat(frontend): селектор канала",
+		"fix(updater): выбор версии",
+		"refactor(x): cleanup",
+		"perf(y): faster loop",
+	}
+	got := Generate(subjects, "2.11.2+r95", "2026-05-25")
+	want := "## [2.11.2+r95] - 2026-05-25\n\n" +
+		"### Добавлено\n- feat(frontend): селектор канала\n\n" +
+		"### Исправлено\n- fix(updater): выбор версии\n\n" +
+		"### Рефакторинг\n- refactor(x): cleanup\n\n" +
+		"### Производительность\n- perf(y): faster loop\n\n"
+	if got != want {
+		t.Errorf("Generate mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestGenerate_FiltersNoise(t *testing.T) {
+	subjects := []string{
+		"chore: bump deps",
+		"ci: tweak workflow",
+		"docs: readme",
+		"test(x): add test",
+		"style: format",
+		"Merge branch 'develop' into x",
+		"Update .gitignore",
+		"upd(singbox): bump",
+		"fix(scope) - dash separator not colon",
+	}
+	if got := Generate(subjects, "1.0.0", "2026-01-01"); got != "" {
+		t.Errorf("expected empty output for all-noise input, got:\n%s", got)
+	}
+}
+
+func TestGenerate_PrefixVariants(t *testing.T) {
+	subjects := []string{
+		"fix: no scope",
+		"feat(a,b): comma scope",
+		"feat!: breaking no scope",
+		"fix(x)!: breaking with scope",
+	}
+	got := Generate(subjects, "1.0.0", "2026-01-01")
+	want := "## [1.0.0] - 2026-01-01\n\n" +
+		"### Добавлено\n- feat(a,b): comma scope\n- feat!: breaking no scope\n\n" +
+		"### Исправлено\n- fix: no scope\n- fix(x)!: breaking with scope\n\n"
+	if got != want {
+		t.Errorf("prefix variants mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestGenerate_EmptyInput(t *testing.T) {
+	if got := Generate(nil, "1.0.0", "2026-01-01"); got != "" {
+		t.Errorf("expected empty for nil input, got %q", got)
+	}
+}
