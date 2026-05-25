@@ -2,14 +2,24 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
+
+type testDownloadOutboundsProvider struct {
+	items []downloader.Outbound
+}
+
+func (p testDownloadOutboundsProvider) ListDownloadOutbounds(_ context.Context) []downloader.Outbound {
+	return p.items
+}
 
 // newSettingsHandlerForTest returns a SettingsHandler backed by an
 // isolated SettingsStore in a temp directory. The store is preloaded so
@@ -379,5 +389,47 @@ func TestUpdate_ApiKeyExplicitEmpty_Preserved(t *testing.T) {
 	got, _ := store.Get()
 	if got.ApiKey != "preexisting-key" {
 		t.Errorf("ApiKey = %q after explicit empty patch, want preexisting-key", got.ApiKey)
+	}
+}
+
+func TestUpdate_DownloadRoute_RejectsUnknownTag(t *testing.T) {
+	h, _ := newSettingsHandlerForTest(t)
+	dl := downloader.NewService(downloader.Deps{
+		Outbounds: testDownloadOutboundsProvider{
+			items: []downloader.Outbound{
+				{Tag: "direct", Kind: "direct", Label: "Direct (WAN)", Available: true},
+				{Tag: "awg-1", Kind: "awg", Label: "AWG 1", Available: false},
+			},
+		},
+	})
+	h.SetDownloadService(dl)
+
+	body := []byte(`{"download":{"routeTag":"unknown-route"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/settings/update", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.Update(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "INVALID_DOWNLOAD_ROUTE") {
+		t.Fatalf("missing INVALID_DOWNLOAD_ROUTE, body=%s", rec.Body.String())
+	}
+}
+
+func TestUpdate_DownloadRoute_NormalizesEmptyToDirect(t *testing.T) {
+	h, store := newSettingsHandlerForTest(t)
+	body := []byte(`{"download":{"routeTag":"   ","routeKind":"awg"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/settings/update", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.Update(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := store.Get()
+	if got.Download.RouteTag != "direct" {
+		t.Fatalf("routeTag = %q, want direct", got.Download.RouteTag)
+	}
+	if got.Download.RouteKind != "direct" {
+		t.Fatalf("routeKind = %q, want direct", got.Download.RouteKind)
 	}
 }

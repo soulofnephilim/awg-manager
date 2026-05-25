@@ -1023,7 +1023,6 @@ func main() {
 		settingsStore,
 	)
 	dnsRouteService.SetDownloader(&dnsRouteDownloaderAdapter{svc: sharedDownloadSvc})
-	subSvc.SetDownloader(&singboxSubscriptionDownloaderAdapter{svc: sharedDownloadSvc})
 	dnsRefreshScheduler.Start()
 	updaterService.SetDownloader(sharedDownloadSvc)
 	if singboxInstaller != nil {
@@ -1048,6 +1047,7 @@ func main() {
 	}
 
 	srv.SetDeviceProxyService(deviceProxySvc)
+	srv.SetDownloadService(sharedDownloadSvc)
 	// Note: legacy awg-* outbound cleanup happens lazily on first
 	// deviceproxy CRUD via pruneAWGOutbounds(nil) inside EnsureDeviceProxy.
 	// We deliberately do NOT call ForceApply on boot because it triggers
@@ -1943,34 +1943,6 @@ func (l *operatorLifecycle) Start(ctx context.Context) error {
 
 type installerDownloaderAdapter struct {
 	svc *downloader.Service
-}
-
-type singboxSubscriptionDownloaderAdapter struct {
-	svc *downloader.Service
-}
-
-func (a *singboxSubscriptionDownloaderAdapter) ReadAll(
-	ctx context.Context,
-	req subscription.BodyDownloadRequest,
-) ([]byte, subscription.BodyDownloadMeta, error) {
-	if a == nil || a.svc == nil {
-		return nil, subscription.BodyDownloadMeta{}, fmt.Errorf("downloader service is not configured")
-	}
-	body, meta, err := a.svc.ReadAll(ctx, downloader.Request{
-		Purpose:       "singbox-subscription",
-		URL:           req.URL,
-		Method:        req.Method,
-		Headers:       req.Headers,
-		Timeout:       req.Timeout,
-		MaxBodyBytes:  req.MaxBodyBytes,
-		UserAgent:     req.UserAgent,
-		CheckRedirect: req.CheckRedirect,
-		AllowedStatus: req.AllowedStatus,
-	})
-	if err != nil {
-		return nil, subscription.BodyDownloadMeta{}, err
-	}
-	return body, subscription.BodyDownloadMeta{ContentType: meta.ContentType}, nil
 }
 
 type dnsRouteDownloaderAdapter struct {

@@ -12,12 +12,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/sys/httpdownload"
 )
 
 // geoDataFile is the JSON storage filename for geo data entries.
@@ -64,9 +66,18 @@ type GeoDataStore struct {
 	mu          sync.RWMutex
 	entries     []GeoFileEntry
 	tagCache    map[string][]GeoTag // path → cached tags
+	busyPaths   map[string]struct{}
+	reserved    map[string]string // path -> fileType
 	progress    func(rawURL, fileType, phase string, downloaded, total int64, errMsg string)
 	appLog      *logging.ScopedLogger
 }
+
+var (
+	updateArtifactRe = regexp.MustCompile(`^(.+)\.update\.(\d+)\.(\d+)$`) //nolint:gochecknoglobals
+	backupArtifactRe = regexp.MustCompile(`^(.+)\.backup\.(\d+)\.(\d+)$`) //nolint:gochecknoglobals
+	// test hook only: allows deterministic synchronization around update swap window
+	geoUpdateSwapHook = func(string) {} //nolint:gochecknoglobals
+)
 
 // SetAppLogger wires the UI-visible logger into the store. Optional;
 // nil-safe. The store keeps the lazy-construction guarantee for tests
@@ -93,8 +104,11 @@ func NewGeoDataStore(dataDir string) *GeoDataStore {
 		storagePath: filepath.Join(dataDir, geoDataFile),
 		geoDir:      geoDir,
 		tagCache:    make(map[string][]GeoTag),
+		busyPaths:   make(map[string]struct{}),
+		reserved:    make(map[string]string),
 	}
 	_ = os.MkdirAll(geoDir, storage.DirPermission)
+	s.recoverUpdateArtifacts()
 	// Best-effort load; errors are silently ignored (empty store is valid).
 	_ = s.load()
 	return s
@@ -144,12 +158,12 @@ func validateDownloadURL(rawURL string) error {
 
 // Download fetches a .dat file from rawURL, validates it, and tracks it.
 func (s *GeoDataStore) Download(fileType, rawURL string) (*GeoFileEntry, error) {
-	return s.DownloadWithClient(fileType, rawURL, nil)
+	return s.DownloadWithClient(context.Background(), fileType, rawURL, nil)
 }
 
 // DownloadWithClient fetches a .dat file from rawURL using the provided
 // client (or direct client when nil), validates it, and tracks it.
-func (s *GeoDataStore) DownloadWithClient(fileType, rawURL string, client *http.Client) (*GeoFileEntry, error) {
+func (s *GeoDataStore) DownloadWithClient(ctx context.Context, fileType, rawURL string, client *http.Client) (*GeoFileEntry, error) {
 	if fileType != "geosite" && fileType != "geoip" {
 		return nil, fmt.Errorf("invalid file type %q: must be geosite or geoip", fileType)
 	}
@@ -159,16 +173,21 @@ func (s *GeoDataStore) DownloadWithClient(fileType, rawURL string, client *http.
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	// Count existing entries of this type.
+	// Count existing + in-flight reserved entries of this type.
 	count := 0
 	for _, e := range s.entries {
 		if e.Type == fileType {
 			count++
 		}
 	}
+	for _, t := range s.reserved {
+		if t == fileType {
+			count++
+		}
+	}
 	if count >= maxGeoFiles {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("limit reached: maximum %d %s files allowed", maxGeoFiles, fileType)
 	}
 
@@ -178,9 +197,11 @@ func (s *GeoDataStore) DownloadWithClient(fileType, rawURL string, client *http.
 		base = fileType + ".dat"
 	}
 	dest := filepath.Join(s.geoDir, base)
-	dest = s.resolveConflict(dest)
+	dest = s.resolveConflictLocked(dest)
 
 	progress := s.progress
+	s.reserved[dest] = fileType
+	s.mu.Unlock()
 	report := func(phase string, downloaded, total int64, errMsg string) {
 		if progress != nil {
 			progress(rawURL, fileType, phase, downloaded, total, errMsg)
@@ -191,9 +212,16 @@ func (s *GeoDataStore) DownloadWithClient(fileType, rawURL string, client *http.
 	bytesProgress := func(downloaded, total int64) {
 		report("download", downloaded, total, "")
 	}
-	if _, err := downloadFileWithClient(client, rawURL, dest, bytesProgress); err != nil {
+	unreserve := func() {
+		s.mu.Lock()
+		delete(s.reserved, dest)
+		s.mu.Unlock()
+	}
+	if _, err := downloadFileWithClient(ctx, client, rawURL, dest, bytesProgress); err != nil {
+		_ = os.Remove(dest)
+		unreserve()
 		report("error", 0, 0, err.Error())
-		s.appLog.Warn("download", rawURL, fmt.Sprintf("%s: %v", fileType, err))
+		s.logWarn("download", rawURL, fmt.Sprintf("%s: %v", fileType, err))
 		return nil, fmt.Errorf("download %s: %w", rawURL, err)
 	}
 
@@ -203,21 +231,20 @@ func (s *GeoDataStore) DownloadWithClient(fileType, rawURL string, client *http.
 	// that the user picked the wrong type for this URL).
 	size, tagCount, err := ReadFileInfo(dest, fileType)
 	if err != nil {
-		os.Remove(dest)
+		_ = os.Remove(dest)
+		unreserve()
 		report("error", 0, 0, err.Error())
-		s.appLog.Warn("validate", rawURL, fmt.Sprintf("%s: %v", fileType, err))
+		s.logWarn("validate", rawURL, fmt.Sprintf("%s: %v", fileType, err))
 		return nil, fmt.Errorf("validate %s: %w", dest, err)
 	}
 	if tagCount == 0 {
-		os.Remove(dest)
+		_ = os.Remove(dest)
+		unreserve()
 		emsg := fmt.Sprintf("file has 0 %s entries — wrong type or corrupt download?", fileType)
 		report("error", size, size, emsg)
-		s.appLog.Warn("validate", rawURL, emsg)
+		s.logWarn("validate", rawURL, emsg)
 		return nil, fmt.Errorf("%s", emsg)
 	}
-	report("done", size, size, "")
-	s.appLog.Info("download", rawURL, fmt.Sprintf("%s downloaded: %d bytes, %d tags", fileType, size, tagCount))
-
 	entry := GeoFileEntry{
 		Type:     fileType,
 		Path:     dest,
@@ -227,13 +254,33 @@ func (s *GeoDataStore) DownloadWithClient(fileType, rawURL string, client *http.
 		Updated:  time.Now().UTC().Format(time.RFC3339),
 	}
 
+	s.mu.Lock()
+	if _, ok := s.reserved[dest]; !ok {
+		s.mu.Unlock()
+		_ = os.Remove(dest)
+		emsg := fmt.Sprintf("download reservation lost for %s", dest)
+		report("error", 0, 0, emsg)
+		s.logWarn("save", rawURL, emsg)
+		return nil, fmt.Errorf("download reservation lost for %s", dest)
+	}
+	delete(s.reserved, dest)
 	s.entries = append(s.entries, entry)
 	delete(s.tagCache, dest)
 
 	if err := s.saveUnlocked(); err != nil {
+		s.entries = s.entries[:len(s.entries)-1]
+		delete(s.tagCache, dest)
+		s.mu.Unlock()
+		_ = os.Remove(dest)
+		emsg := fmt.Sprintf("save metadata: %v", err)
+		report("error", 0, 0, emsg)
+		s.logWarn("save", rawURL, emsg)
 		return nil, fmt.Errorf("save metadata: %w", err)
 	}
+	s.mu.Unlock()
 
+	report("done", size, size, "")
+	s.logInfo("download", rawURL, fmt.Sprintf("%s downloaded: %d bytes, %d tags", fileType, size, tagCount))
 	return &entry, nil
 }
 
@@ -251,6 +298,9 @@ func (s *GeoDataStore) TakeControl(path string) (*GeoFileEntry, error) {
 	idx := s.findUnlocked(path)
 	if idx < 0 {
 		return nil, fmt.Errorf("geo file not found: %s", path)
+	}
+	if _, busy := s.busyPaths[path]; busy {
+		return nil, fmt.Errorf("geo file is already being updated")
 	}
 	entry := s.entries[idx]
 	if !entry.External {
@@ -297,6 +347,9 @@ func (s *GeoDataStore) Delete(path string) error {
 	if idx < 0 {
 		return fmt.Errorf("geo file not found: %s", path)
 	}
+	if _, busy := s.busyPaths[path]; busy {
+		return fmt.Errorf("geo file is already being updated")
+	}
 
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove file: %w", err)
@@ -310,27 +363,32 @@ func (s *GeoDataStore) Delete(path string) error {
 
 // Update re-downloads and revalidates a tracked file from its stored URL.
 func (s *GeoDataStore) Update(path string) (*GeoFileEntry, error) {
-	return s.UpdateWithClient(path, nil)
+	return s.UpdateWithClient(context.Background(), path, nil)
 }
 
 // UpdateWithClient re-downloads a tracked geo file via the provided client
 // (or direct client when nil).
-func (s *GeoDataStore) UpdateWithClient(path string, client *http.Client) (*GeoFileEntry, error) {
+func (s *GeoDataStore) UpdateWithClient(ctx context.Context, path string, client *http.Client) (*GeoFileEntry, error) {
 	path = filepath.Clean(path)
 	if !s.isManagedPath(path) {
 		return nil, fmt.Errorf("path outside managed geo directories")
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	idx := s.findUnlocked(path)
 	if idx < 0 {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("geo file not found: %s", path)
+	}
+	if _, busy := s.busyPaths[path]; busy {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("geo file is already being updated")
 	}
 
 	entry := s.entries[idx]
 	if entry.External {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("cannot update external file managed by HydraRoute Neo — use «Взять под управление or update in HR Neo")
 	}
 	sourceURL := entry.URL
@@ -338,51 +396,177 @@ func (s *GeoDataStore) UpdateWithClient(path string, client *http.Client) (*GeoF
 		sourceURL = defaultURLForType(entry.Type)
 	}
 	if sourceURL == "" {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("no source URL for %s file", entry.Type)
 	}
-
 	progress := s.progress
+	s.busyPaths[path] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.busyPaths, path)
+		s.mu.Unlock()
+	}()
 	bytesProgress := func(downloaded, total int64) {
 		if progress != nil {
 			progress(sourceURL, entry.Type, "download", downloaded, total, "")
 		}
 	}
-	if _, err := downloadFileWithClient(client, sourceURL, path, bytesProgress); err != nil {
+	candidate := fmt.Sprintf("%s.update.%d.%d", path, os.Getpid(), time.Now().UnixNano())
+	if _, err := downloadFileWithClient(ctx, client, sourceURL, candidate, bytesProgress); err != nil {
+		_ = os.Remove(candidate)
 		if progress != nil {
 			progress(sourceURL, entry.Type, "error", 0, 0, err.Error())
 		}
 		return nil, fmt.Errorf("re-download %s: %w", sourceURL, err)
 	}
 	if progress != nil {
-		progress(sourceURL, entry.Type, "done", 0, 0, "")
+		progress(sourceURL, entry.Type, "validate", 0, 0, "")
 	}
 
-	size, tagCount, err := ReadFileInfo(path, entry.Type)
+	size, tagCount, err := ReadFileInfo(candidate, entry.Type)
 	if err != nil {
+		_ = os.Remove(candidate)
+		if progress != nil {
+			progress(sourceURL, entry.Type, "error", 0, 0, err.Error())
+		}
 		return nil, fmt.Errorf("validate after update: %w", err)
 	}
+	if tagCount == 0 {
+		_ = os.Remove(candidate)
+		emsg := fmt.Sprintf("file has 0 %s entries — wrong type or corrupt download?", entry.Type)
+		if progress != nil {
+			progress(sourceURL, entry.Type, "error", size, size, emsg)
+		}
+		return nil, fmt.Errorf("%s", emsg)
+	}
 
+	s.mu.Lock()
+	idx = s.findUnlocked(path)
+	if idx < 0 {
+		s.mu.Unlock()
+		_ = os.Remove(candidate)
+		emsg := fmt.Sprintf("geo file not found after update: %s", path)
+		if progress != nil {
+			progress(sourceURL, entry.Type, "error", 0, 0, emsg)
+		}
+		return nil, fmt.Errorf("geo file not found after update: %s", path)
+	}
+	geoUpdateSwapHook("before_swap_locked")
+	backup := fmt.Sprintf("%s.backup.%d.%d", path, os.Getpid(), time.Now().UnixNano())
+	if err := os.Rename(path, backup); err != nil {
+		s.mu.Unlock()
+		_ = os.Remove(candidate)
+		if progress != nil {
+			progress(sourceURL, entry.Type, "error", 0, 0, err.Error())
+		}
+		return nil, fmt.Errorf("backup current geo file: %w", err)
+	}
+	geoUpdateSwapHook("after_backup_rename")
+	if err := os.Rename(candidate, path); err != nil {
+		restoreErr := os.Rename(backup, path)
+		s.mu.Unlock()
+		_ = os.Remove(candidate)
+		emsg := err.Error()
+		if restoreErr != nil {
+			emsg = fmt.Sprintf("%s; rollback file restore failed: %v", emsg, restoreErr)
+			s.logWarn("rollback", sourceURL, emsg)
+		}
+		if progress != nil {
+			progress(sourceURL, entry.Type, "error", 0, 0, emsg)
+		}
+		return nil, fmt.Errorf("replace geo file: %w", err)
+	}
+
+	oldEntry := s.entries[idx]
+	oldTags, hadTags := s.tagCache[path]
 	s.entries[idx].Size = size
 	s.entries[idx].TagCount = tagCount
 	s.entries[idx].Updated = time.Now().UTC().Format(time.RFC3339)
 	delete(s.tagCache, path)
 
 	if err := s.saveUnlocked(); err != nil {
+		s.entries[idx] = oldEntry
+		if hadTags {
+			s.tagCache[path] = oldTags
+		} else {
+			delete(s.tagCache, path)
+		}
+		rollbackWarn := ""
+		_ = os.Remove(path)
+		restoreErr := os.Rename(backup, path)
+		emsg := fmt.Sprintf("save metadata: %v", err)
+		if restoreErr != nil {
+			emsg = fmt.Sprintf("%s; rollback file restore failed: %v", emsg, restoreErr)
+			rollbackWarn = emsg
+		}
+		s.mu.Unlock()
+		if progress != nil {
+			progress(sourceURL, entry.Type, "error", 0, 0, emsg)
+		}
+		if rollbackWarn != "" {
+			s.logWarn("rollback", sourceURL, rollbackWarn)
+		}
 		return nil, fmt.Errorf("save metadata: %w", err)
 	}
 
 	updated := s.entries[idx]
+	s.mu.Unlock()
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		s.logWarn("cleanup", sourceURL, fmt.Sprintf("remove backup file: %v", err))
+	}
+	if progress != nil {
+		progress(sourceURL, entry.Type, "done", size, size, "")
+	}
 	return &updated, nil
+}
+
+func (s *GeoDataStore) recoverUpdateArtifacts() {
+	entries, err := os.ReadDir(s.geoDir)
+	if err != nil {
+		return
+	}
+	for _, de := range entries {
+		if de.IsDir() {
+			continue
+		}
+		full := filepath.Join(s.geoDir, de.Name())
+		original, kind, ok := originalPathFromUpdateArtifact(full)
+		if !ok {
+			continue
+		}
+		switch kind {
+		case "update":
+			_ = os.Remove(full)
+		case "backup":
+			if _, statErr := os.Stat(original); os.IsNotExist(statErr) {
+				_ = os.Rename(full, original)
+			} else {
+				_ = os.Remove(full)
+			}
+		}
+	}
+}
+
+func originalPathFromUpdateArtifact(path string) (original string, kind string, ok bool) {
+	base := filepath.Base(path)
+	if m := updateArtifactRe.FindStringSubmatch(base); len(m) == 4 {
+		return filepath.Join(filepath.Dir(path), m[1]), "update", true
+	}
+	if m := backupArtifactRe.FindStringSubmatch(base); len(m) == 4 {
+		return filepath.Join(filepath.Dir(path), m[1]), "backup", true
+	}
+	return "", "", false
 }
 
 // UpdateAll updates all non-external tracked files sequentially.
 func (s *GeoDataStore) UpdateAll() (int, error) {
-	return s.UpdateAllWithClient(nil)
+	return s.UpdateAllWithClient(context.Background(), nil)
 }
 
 // UpdateAllWithClient refreshes all tracked geo files via the provided client
 // (or direct client when nil).
-func (s *GeoDataStore) UpdateAllWithClient(client *http.Client) (int, error) {
+func (s *GeoDataStore) UpdateAllWithClient(ctx context.Context, client *http.Client) (int, error) {
 	// Collect paths outside the lock so Update can re-acquire it.
 	s.mu.RLock()
 	var paths []string
@@ -397,7 +581,7 @@ func (s *GeoDataStore) UpdateAllWithClient(client *http.Client) (int, error) {
 	updated := 0
 	var errs []string
 	for _, path := range paths {
-		if _, err := s.UpdateWithClient(path, client); err != nil {
+		if _, err := s.UpdateWithClient(ctx, path, client); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
@@ -632,7 +816,7 @@ func (s *GeoDataStore) findUnlocked(path string) int {
 
 // resolveConflict returns a non-conflicting path by appending a numeric suffix.
 // Caller must hold s.mu (write lock).
-func (s *GeoDataStore) resolveConflict(path string) string {
+func (s *GeoDataStore) resolveConflictLocked(path string) string {
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(path, ext)
 
@@ -645,6 +829,9 @@ func (s *GeoDataStore) resolveConflict(path string) string {
 				break
 			}
 		}
+		if _, reserved := s.reserved[candidate]; reserved {
+			conflict = true
+		}
 		if !conflict {
 			// Also check if file physically exists.
 			if _, err := os.Stat(candidate); os.IsNotExist(err) {
@@ -655,38 +842,34 @@ func (s *GeoDataStore) resolveConflict(path string) string {
 	}
 }
 
+// resolveConflict returns a non-conflicting path.
+// Caller must hold s.mu (write lock).
+func (s *GeoDataStore) resolveConflict(path string) string {
+	return s.resolveConflictLocked(path)
+}
+
+func (s *GeoDataStore) logWarn(action, key, msg string) {
+	s.mu.RLock()
+	l := s.appLog
+	s.mu.RUnlock()
+	if l != nil {
+		l.Warn(action, key, msg)
+	}
+}
+
+func (s *GeoDataStore) logInfo(action, key, msg string) {
+	s.mu.RLock()
+	l := s.appLog
+	s.mu.RUnlock()
+	if l != nil {
+		l.Info(action, key, msg)
+	}
+}
+
 // maxGeoFileSize caps single .dat downloads. Realistic geosite/geoip files
 // are 5-30 MB; anything past 200 MB is almost certainly a misclick on a
 // random URL, and on a router with limited disk it can fill /opt.
 const maxGeoFileSize = 200 << 20 // 200 MB
-
-// progressReader wraps an io.Reader and calls onProgress periodically with
-// the cumulative bytes read so far. Throttled — emits at most every ~64 KB
-// or 200 ms (whichever comes first) to keep SSE traffic sane.
-type progressReader struct {
-	r          io.Reader
-	total      int64
-	read       int64
-	lastEmit   int64
-	lastTime   time.Time
-	onProgress ProgressFn
-}
-
-func (p *progressReader) Read(buf []byte) (int, error) {
-	n, err := p.r.Read(buf)
-	if n > 0 {
-		p.read += int64(n)
-		shouldEmit := p.read-p.lastEmit >= 64*1024 ||
-			time.Since(p.lastTime) >= 200*time.Millisecond ||
-			err == io.EOF
-		if shouldEmit && p.onProgress != nil {
-			p.onProgress(p.read, p.total)
-			p.lastEmit = p.read
-			p.lastTime = time.Now()
-		}
-	}
-	return n, err
-}
 
 // downloadTimeout caps a single .dat fetch. 200 MB at 0.5 MB/s ≈ 7 min in
 // the worst case; 15 min leaves plenty of margin for slow router uplinks
@@ -697,10 +880,10 @@ const downloadTimeout = 15 * time.Minute
 // hard size cap. Uses atomic write: downloads to a temp file, then renames.
 // onProgress (optional) receives streaming byte counters during the copy.
 func downloadFile(rawURL, dest string, onProgress ProgressFn) (size int64, err error) {
-	return downloadFileWithClient(nil, rawURL, dest, onProgress)
+	return downloadFileWithClient(context.Background(), nil, rawURL, dest, onProgress)
 }
 
-func downloadFileWithClient(client *http.Client, rawURL, dest string, onProgress ProgressFn) (size int64, err error) {
+func downloadFileWithClient(ctx context.Context, client *http.Client, rawURL, dest string, onProgress ProgressFn) (size int64, err error) {
 	// Defense-in-depth: re-validate scheme before making the request.
 	if u, parseErr := url.Parse(rawURL); parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return 0, fmt.Errorf("only http/https URLs are allowed")
@@ -709,7 +892,10 @@ func downloadFileWithClient(client *http.Client, rawURL, dest string, onProgress
 	// Per-request context so the timeout covers headers + body. The
 	// http.Client.Timeout field has the same effect, but a context lets us
 	// surface a clearer error string ("download timed out after …").
-	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -752,18 +938,13 @@ func downloadFileWithClient(client *http.Client, rawURL, dest string, onProgress
 	// Cap the read at maxGeoFileSize+1 so we can detect oversize content
 	// even when the server didn't send Content-Length.
 	src := io.LimitReader(resp.Body, maxGeoFileSize+1)
-	pr := &progressReader{
-		r:          src,
-		total:      resp.ContentLength,
-		lastTime:   time.Now(),
-		onProgress: onProgress,
-	}
+	pr := httpdownload.NewReader(src, resp.ContentLength, httpdownload.ProgressFn(onProgress))
 	written, err := io.Copy(f, pr)
 	if err != nil {
 		f.Close()
 		os.Remove(tmp)
 		if errors.Is(err, context.DeadlineExceeded) {
-			return 0, fmt.Errorf("download timed out at %d/%d bytes after %s", pr.read, pr.total, downloadTimeout)
+			return 0, fmt.Errorf("download timed out at %d/%d bytes after %s", pr.BytesRead(), resp.ContentLength, downloadTimeout)
 		}
 		return 0, fmt.Errorf("write temp file: %w", err)
 	}

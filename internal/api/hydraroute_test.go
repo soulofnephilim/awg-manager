@@ -2,9 +2,6 @@ package api
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/downloader"
@@ -24,32 +21,13 @@ func TestToDownloaderRoute(t *testing.T) {
 	}
 }
 
-func TestListDownloadOutbounds_NoDeviceProxy(t *testing.T) {
-	h := NewHydraRouteHandler(nil)
-	req := httptest.NewRequest(http.MethodGet, "/download/outbounds", nil)
-	rr := httptest.NewRecorder()
-
-	h.ListDownloadOutbounds(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status: got %d", rr.Code)
-	}
-	body := rr.Body.String()
-	if !strings.Contains(body, `"tag":"direct"`) {
-		t.Fatalf("expected direct tag in response: %s", body)
-	}
-	if !strings.Contains(body, `"available":true`) {
-		t.Fatalf("expected direct available=true in response: %s", body)
-	}
-}
-
 func TestDownloadDeviceProxyAdapter(t *testing.T) {
 	adapter := downloader.NewDeviceProxyOutboundsProvider(nil)
 	if adapter != nil {
 		t.Fatalf("nil service should produce nil provider")
 	}
-	h := NewHydraRouteHandler(nil)
-	h.SetDeviceProxyService(nil)
-	list := h.downloadSvc.ListOutbounds(context.Background())
+	dl := downloader.NewService(downloader.Deps{})
+	list := dl.ListOutbounds(context.Background())
 	if len(list) == 0 {
 		t.Fatal("expected at least direct outbound")
 	}

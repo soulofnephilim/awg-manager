@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -112,6 +113,35 @@ func (s *Service) DescribeRoute(ctx context.Context, route *Route) RouteInfo {
 	return describeRouteWithProvider(ctx, outbounds, route)
 }
 
+func (s *Service) ValidateRoute(ctx context.Context, route *Route) (RouteInfo, error) {
+	// ValidateRoute validates route identity only. It intentionally does not
+	// reject Available=false outbounds: a saved service-download route may be
+	// temporarily unavailable when sing-box is stopped or runtime dependencies
+	// are down.
+	outbounds, _, _, _ := s.snapshotDeps()
+	tag := "direct"
+	if route != nil && strings.TrimSpace(route.Tag) != "" {
+		tag = strings.TrimSpace(route.Tag)
+	}
+	if tag == "direct" {
+		return RouteInfo{Tag: "direct", Kind: "direct", Label: "Direct (WAN)", Detail: "без туннеля"}, nil
+	}
+	if outbounds == nil {
+		return RouteInfo{}, errors.New(unavailableRouteMessage(tag, routeKind(route)))
+	}
+	items := outbounds.ListDownloadOutbounds(ctx)
+	if isRuntimeTagAmbiguous(items, tag) {
+		return RouteInfo{}, fmt.Errorf("selected outbound tag %q is ambiguous for download transport: multiple outbounds share the same runtime tag", tag)
+	}
+	for _, ob := range items {
+		if !routeMatches(ob, route, tag) {
+			continue
+		}
+		return RouteInfo{Tag: ob.Tag, Kind: ob.Kind, Label: ob.Label, Detail: ob.Detail}, nil
+	}
+	return RouteInfo{}, errors.New(unavailableRouteMessage(tag, routeKind(route)))
+}
+
 func describeRouteWithProvider(ctx context.Context, outbounds OutboundsProvider, route *Route) RouteInfo {
 	tag := "direct"
 	if route != nil && strings.TrimSpace(route.Tag) != "" {
@@ -122,15 +152,12 @@ func describeRouteWithProvider(ctx context.Context, outbounds OutboundsProvider,
 	}
 	if outbounds != nil {
 		for _, ob := range outbounds.ListDownloadOutbounds(ctx) {
-			if ob.Tag == tag {
+			if routeMatches(ob, route, tag) {
 				return RouteInfo{Tag: ob.Tag, Kind: ob.Kind, Label: ob.Label, Detail: ob.Detail}
 			}
 		}
 	}
-	kind := ""
-	if route != nil {
-		kind = strings.TrimSpace(route.Kind)
-	}
+	kind := routeKind(route)
 	return RouteInfo{Tag: tag, Kind: kind}
 }
 
@@ -168,21 +195,25 @@ func (s *Service) ResolveClient(ctx context.Context, route *Route) (*Lease, erro
 	members := []string{"direct"}
 	found := false
 	if outbounds != nil {
-		for _, ob := range outbounds.ListDownloadOutbounds(ctx) {
+		items := outbounds.ListDownloadOutbounds(ctx)
+		if isRuntimeTagAmbiguous(items, tag) {
+			return nil, fmt.Errorf("selected outbound tag %q is ambiguous for download transport: multiple outbounds share the same runtime tag", tag)
+		}
+		for _, ob := range items {
 			if ob.Tag == "" {
 				continue
 			}
 			if ob.Tag != "direct" {
 				members = append(members, ob.Tag)
 			}
-			if ob.Tag == tag {
+			if routeMatches(ob, effectiveRoute, tag) {
 				found = true
 				info = RouteInfo{Tag: ob.Tag, Kind: ob.Kind, Label: ob.Label, Detail: ob.Detail}
 			}
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("selected outbound %q is unavailable for download transport", tag)
+		return nil, errors.New(unavailableRouteMessage(tag, routeKind(effectiveRoute)))
 	}
 
 	s.mu.Lock()
@@ -238,6 +269,48 @@ func (s *Service) ResolveClient(ctx context.Context, route *Route) (*Lease, erro
 		return nil, fmt.Errorf("download selector mismatch: requested %s, active %s", selectedTag, active)
 	}
 	return lease, nil
+}
+
+func routeKind(route *Route) string {
+	if route == nil {
+		return ""
+	}
+	return strings.TrimSpace(route.Kind)
+}
+
+func routeMatches(ob Outbound, route *Route, tag string) bool {
+	if ob.Tag != tag {
+		return false
+	}
+	kind := routeKind(route)
+	if kind == "" {
+		return true
+	}
+	return strings.TrimSpace(ob.Kind) == kind
+}
+
+func unavailableRouteMessage(tag, kind string) string {
+	if strings.TrimSpace(kind) == "" {
+		return fmt.Sprintf("selected outbound %q is unavailable for download transport", tag)
+	}
+	return fmt.Sprintf("selected outbound %q kind %q is unavailable for download transport", tag, strings.TrimSpace(kind))
+}
+
+func isRuntimeTagAmbiguous(items []Outbound, tag string) bool {
+	if strings.TrimSpace(tag) == "" || strings.TrimSpace(tag) == "direct" {
+		return false
+	}
+	count := 0
+	for _, ob := range items {
+		if strings.TrimSpace(ob.Tag) != tag {
+			continue
+		}
+		count++
+		if count > 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func selectedTagForSlot(tag string) string {

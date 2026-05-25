@@ -226,12 +226,14 @@
 		);
 	}
 
-	async function selectDownloadRoute(routeTag: string) {
+	async function selectDownloadRoute(routeTag: string, routeKind?: 'direct' | 'awg' | 'singbox' | 'subscription') {
 		if (!settings) return;
 		saving = true;
 		try {
+			const normalizedTag = routeTag.trim() || 'direct';
+			const normalizedKind = normalizedTag === 'direct' ? 'direct' : routeKind;
 			settings = await api.updateSettings({
-				download: { routeTag },
+				download: { routeTag: normalizedTag, routeKind: normalizedKind },
 			});
 			setGlobalSettings(settings);
 			notifications.success('Маршрут загрузок сохранён');

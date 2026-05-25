@@ -5,14 +5,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/hoaxisr/awg-manager/internal/deviceproxy"
 	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/response"
-	"github.com/hoaxisr/awg-manager/internal/singbox"
-	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
-	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 // ── Response DTOs ────────────────────────────────────────────────
@@ -50,24 +46,6 @@ type GeoFileEntryDTO struct {
 	TagCount int    `json:"tagCount" example:"420"`
 	Updated  string `json:"updated" example:"2024-01-15T02:00:00Z"`
 	External bool   `json:"external,omitempty" example:"true"`
-}
-
-type DownloadRouteDTO struct {
-	Tag  string `json:"tag" example:"direct"`
-	Kind string `json:"kind,omitempty" example:"direct"`
-}
-
-type DownloadOutboundDTO struct {
-	Tag       string `json:"tag" example:"direct"`
-	Kind      string `json:"kind" example:"direct"`
-	Label     string `json:"label" example:"Direct (WAN)"`
-	Detail    string `json:"detail,omitempty" example:"без туннеля"`
-	Available bool   `json:"available" example:"true"`
-}
-
-type DownloadOutboundsResponse struct {
-	Success bool                  `json:"success" example:"true"`
-	Data    []DownloadOutboundDTO `json:"data"`
 }
 
 // GeoFilesResponse is the envelope for GET /hydraroute/geo-files.
@@ -207,39 +185,14 @@ type HydraRouteHandler struct {
 }
 
 // NewHydraRouteHandler creates a new HydraRoute settings handler.
-func NewHydraRouteHandler(svc *hydraroute.Service) *HydraRouteHandler {
+func NewHydraRouteHandler(svc *hydraroute.Service, downloadSvc *downloader.Service) *HydraRouteHandler {
+	if downloadSvc == nil {
+		downloadSvc = downloader.NewService(downloader.Deps{})
+	}
 	return &HydraRouteHandler{
 		svc:         svc,
-		downloadSvc: downloader.NewService(downloader.Deps{}),
+		downloadSvc: downloadSvc,
 	}
-}
-
-func (h *HydraRouteHandler) SetDeviceProxyService(svc *deviceproxy.Service) {
-	if h.downloadSvc == nil {
-		h.downloadSvc = downloader.NewService(downloader.Deps{})
-	}
-	h.downloadSvc.SetOutboundsProvider(downloader.NewDeviceProxyOutboundsProvider(svc))
-}
-
-func (h *HydraRouteHandler) SetSingboxOperator(op *singbox.Operator) {
-	if h.downloadSvc == nil {
-		h.downloadSvc = downloader.NewService(downloader.Deps{})
-	}
-	h.downloadSvc.SetSingboxOperator(downloader.NewSingboxOperatorAdapter(op))
-}
-
-func (h *HydraRouteHandler) SetSingboxOrchestrator(orch *singboxorch.Orchestrator) {
-	if h.downloadSvc == nil {
-		h.downloadSvc = downloader.NewService(downloader.Deps{})
-	}
-	h.downloadSvc.SetSlotController(orch)
-}
-
-func (h *HydraRouteHandler) SetSettingsStore(store *storage.SettingsStore) {
-	if h.downloadSvc == nil {
-		h.downloadSvc = downloader.NewService(downloader.Deps{})
-	}
-	h.downloadSvc.SetRouteProvider(downloader.NewSettingsRouteProvider(store))
 }
 
 func toDownloaderRoute(route *DownloadRouteDTO) *downloader.Route {
@@ -380,7 +333,7 @@ func (h *HydraRouteHandler) AddGeoFile(w http.ResponseWriter, r *http.Request) {
 
 	routeLabel := lease.Route.DisplayName()
 
-	entry, err := gds.DownloadWithClient(req.Type, req.URL, lease.Client)
+	entry, err := gds.DownloadWithClient(r.Context(), req.Type, req.URL, lease.Client)
 	if err != nil {
 		response.Error(w, fmt.Sprintf("download via %s: %v", routeLabel, err), "GEO_DOWNLOAD_ERROR")
 		return
@@ -550,7 +503,7 @@ func (h *HydraRouteHandler) UpdateGeoFile(w http.ResponseWriter, r *http.Request
 
 	out := GeoFileUpdatedData{}
 	if req.Path == "" {
-		count, err := gds.UpdateAllWithClient(lease.Client)
+		count, err := gds.UpdateAllWithClient(r.Context(), lease.Client)
 		out.Updated = count
 		if err != nil {
 			out.Partial = count > 0
@@ -561,7 +514,7 @@ func (h *HydraRouteHandler) UpdateGeoFile(w http.ResponseWriter, r *http.Request
 			}
 		}
 	} else {
-		if _, err := gds.UpdateWithClient(req.Path, lease.Client); err != nil {
+		if _, err := gds.UpdateWithClient(r.Context(), req.Path, lease.Client); err != nil {
 			response.Error(w, fmt.Sprintf("update via %s: %v", routeLabel, err), "GEO_UPDATE_ERROR")
 			return
 		}
@@ -583,35 +536,6 @@ func (h *HydraRouteHandler) UpdateGeoFile(w http.ResponseWriter, r *http.Request
 	}
 
 	response.Success(w, out)
-}
-
-// ListDownloadOutbounds returns existing route options for geo downloads.
-//
-//	@Summary		List geo download outbounds
-//	@Tags			hydraroute
-//	@Produce		json
-//	@Security		CookieAuth
-//	@Success		200	{object}	DownloadOutboundsResponse
-//	@Failure		500	{object}	APIErrorEnvelope
-//	@Router			/download/outbounds [get]
-func (h *HydraRouteHandler) ListDownloadOutbounds(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		response.MethodNotAllowed(w)
-		return
-	}
-
-	out := h.downloadSvc.ListOutbounds(r.Context())
-	resp := make([]DownloadOutboundDTO, 0, len(out))
-	for _, ob := range out {
-		resp = append(resp, DownloadOutboundDTO{
-			Tag:       ob.Tag,
-			Kind:      ob.Kind,
-			Label:     ob.Label,
-			Detail:    ob.Detail,
-			Available: ob.Available,
-		})
-	}
-	response.Success(w, resp)
 }
 
 // GetGeoTags returns the tag list for a specific geo data file.

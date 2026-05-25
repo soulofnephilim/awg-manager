@@ -681,6 +681,7 @@ export interface UpdateSettings {
 
 export interface DownloadSettings {
 	routeTag: string;
+	routeKind?: 'direct' | 'awg' | 'singbox' | 'subscription';
 }
 
 export interface DNSRouteSettings {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
@@ -55,7 +56,8 @@ type UpdateSettingsDTO struct {
 }
 
 type DownloadSettingsDTO struct {
-	RouteTag string `json:"routeTag" example:"direct"`
+	RouteTag  string `json:"routeTag" example:"direct"`
+	RouteKind string `json:"routeKind,omitempty" example:"direct"`
 }
 
 // DNSRouteSettingsDTO mirrors frontend DNSRouteSettings.
@@ -115,6 +117,7 @@ type SettingsHandler struct {
 	logsSnapshot            func()
 	applyLogSettings        func()
 	applySingboxLogSettings func() error
+	downloadSvc             *downloader.Service
 	log                     *logging.ScopedLogger
 	bus                     *events.Bus
 }
@@ -161,6 +164,10 @@ func (h *SettingsHandler) SetApplyLoggingSettings(fn func()) { h.applyLogSetting
 // log-level into 00-base.json and triggers orchestrator-driven reload.
 func (h *SettingsHandler) SetApplySingboxLogSettings(fn func() error) {
 	h.applySingboxLogSettings = fn
+}
+
+func (h *SettingsHandler) SetDownloadService(svc *downloader.Service) {
+	h.downloadSvc = svc
 }
 
 // SetEventBus wires the SSE bus so settings mutations broadcast a
@@ -233,6 +240,28 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	merged := *oldSettings
 	storage.ApplyPatch(&merged, &patch)
+	merged.Download.RouteTag = strings.TrimSpace(merged.Download.RouteTag)
+	if merged.Download.RouteTag == "" {
+		merged.Download.RouteTag = "direct"
+	}
+	if merged.Download.RouteTag == "direct" {
+		merged.Download.RouteKind = "direct"
+	}
+	if patch.Download != nil && merged.Download.RouteTag != "direct" {
+		if h.downloadSvc == nil {
+			response.ErrorWithStatus(w, http.StatusBadRequest, "download service is not configured", "INVALID_DOWNLOAD_ROUTE")
+			return
+		}
+		info, vErr := h.downloadSvc.ValidateRoute(r.Context(), &downloader.Route{
+			Tag:  merged.Download.RouteTag,
+			Kind: strings.TrimSpace(merged.Download.RouteKind),
+		})
+		if vErr != nil {
+			response.ErrorWithStatus(w, http.StatusBadRequest, vErr.Error(), "INVALID_DOWNLOAD_ROUTE")
+			return
+		}
+		merged.Download.RouteKind = strings.TrimSpace(info.Kind)
+	}
 
 	// Validate usageLevel after merge. Empty merged.UsageLevel is
 	// impossible because oldSettings always carries a value (default

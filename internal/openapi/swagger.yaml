@@ -886,6 +886,9 @@ definitions:
     type: object
   api.DownloadSettingsDTO:
     properties:
+      routeKind:
+        example: direct
+        type: string
       routeTag:
         example: direct
         type: string
@@ -5577,9 +5580,9 @@ paths:
             $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: List geo download outbounds
+      summary: List service download outbounds
       tags:
-      - hydraroute
+      - download
   /events:
     get:
       produces:

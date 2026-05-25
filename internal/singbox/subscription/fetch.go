@@ -17,25 +17,6 @@ type FetchOpts struct {
 	UserAgent    string        // default "awg-manager"
 }
 
-type BodyDownloadRequest struct {
-	URL           string
-	Method        string
-	Headers       http.Header
-	Timeout       time.Duration
-	MaxBodyBytes  int64
-	UserAgent     string
-	CheckRedirect func(req *http.Request, via []*http.Request) error
-	AllowedStatus []int
-}
-
-type BodyDownloadMeta struct {
-	ContentType string
-}
-
-type Downloader interface {
-	ReadAll(ctx context.Context, req BodyDownloadRequest) ([]byte, BodyDownloadMeta, error)
-}
-
 // forbiddenHeaders are managed by Go's http client and cannot be set by users.
 var forbiddenHeaders = map[string]bool{
 	"host":              true,
@@ -49,29 +30,11 @@ var forbiddenHeaders = map[string]bool{
 // silently skipped — they're managed by net/http. Body is capped at
 // MaxBodyBytes (5 MiB default) to defend against runaway providers.
 func Fetch(url string, headers []Header, opts FetchOpts) ([]byte, string, error) {
-	return FetchWithRequest(context.Background(), buildRequest(url, headers, opts))
+	return FetchWithContext(context.Background(), url, headers, opts)
 }
 
-func FetchWithDownloader(ctx context.Context, d Downloader, url string, headers []Header, opts FetchOpts) ([]byte, string, error) {
-	if d == nil {
-		return nil, "", errors.New("subscription: downloader is not configured")
-	}
-	req := buildRequest(url, headers, opts)
-	metaReq := BodyDownloadRequest{
-		Method:        req.Method,
-		URL:           req.URL,
-		Headers:       req.Headers,
-		Timeout:       req.Timeout,
-		MaxBodyBytes:  req.MaxBodyBytes,
-		UserAgent:     req.UserAgent,
-		CheckRedirect: req.CheckRedirect,
-		AllowedStatus: req.AllowedStatus,
-	}
-	body, meta, err := d.ReadAll(ctx, metaReq)
-	if err != nil {
-		return nil, "", err
-	}
-	return body, meta.ContentType, nil
+func FetchWithContext(ctx context.Context, url string, headers []Header, opts FetchOpts) ([]byte, string, error) {
+	return FetchWithRequest(ctx, buildRequest(url, headers, opts))
 }
 
 func buildRequest(url string, headers []Header, opts FetchOpts) Request {

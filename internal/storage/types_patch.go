@@ -22,7 +22,7 @@ type SettingsPatch struct {
 	Logging                   *LoggingSettingsPatch  `json:"logging,omitempty"`
 	DisableMemorySaving       *bool                  `json:"disableMemorySaving,omitempty"`
 	Updates                   *UpdateSettings        `json:"updates,omitempty"`
-	Download                  *DownloadSettings      `json:"download,omitempty"`
+	Download                  *DownloadSettingsPatch `json:"download,omitempty"`
 	DNSRoute                  *DNSRouteSettings      `json:"dnsRoute,omitempty"`
 	UsageLevel                *string                `json:"usageLevel,omitempty"`
 	ServerInterfaces          *[]string              `json:"serverInterfaces,omitempty"`
@@ -33,6 +33,13 @@ type SettingsPatch struct {
 	SingboxRouter             *SingboxRouterSettings `json:"singboxRouter,omitempty"`
 	SingboxManuallyStopped    *bool                  `json:"singboxManuallyStopped,omitempty"`
 	CreateNDMSProxyForSingbox *bool                  `json:"createNDMSProxyForSingbox,omitempty"`
+}
+
+// DownloadSettingsPatch supports true partial updates for /settings/update
+// download block. nil field means "preserve existing value".
+type DownloadSettingsPatch struct {
+	RouteTag  *string `json:"routeTag,omitempty"`
+	RouteKind *string `json:"routeKind,omitempty"`
 }
 
 // LoggingSettingsPatch supports true partial updates for /settings/update logging block.

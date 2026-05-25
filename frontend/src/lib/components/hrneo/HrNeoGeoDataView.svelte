@@ -58,6 +58,7 @@
 		kind: 'add' | 'preset' | 'update' | 'sync';
 		target: string;
 		routeTag: string;
+		routeKind?: 'direct' | 'awg' | 'singbox' | 'subscription';
 		routeLabel: string;
 	};
 
@@ -71,8 +72,14 @@
 	let activeDownload = $state<DownloadOperation | null>(null);
 	let lastDownload = $state<LastDownload | null>(null);
 
-	function currentRouteTag(): string {
-		return $appSettings?.download?.routeTag?.trim() || 'direct';
+	function currentRoute(): { tag: string; kind?: 'direct' | 'awg' | 'singbox' | 'subscription' } {
+		const tag = $appSettings?.download?.routeTag?.trim() || 'direct';
+		const savedKind = $appSettings?.download?.routeKind?.trim();
+		if (tag === 'direct') {
+			return { tag: 'direct', kind: 'direct' };
+		}
+		const match = $downloadOutbounds.find((ob) => ob.tag === tag && (!savedKind || ob.kind === savedKind));
+		return { tag, kind: (savedKind || match?.kind) as 'direct' | 'awg' | 'singbox' | 'subscription' | undefined };
 	}
 
 	async function loadRouteDisplayState() {
@@ -83,11 +90,12 @@
 	}
 
 	function captureDownloadOperation(kind: DownloadOperation['kind'], target: string): DownloadOperation {
-		const tag = currentRouteTag();
+		const route = currentRoute();
 		return {
 			kind,
 			target,
-			routeTag: tag,
+			routeTag: route.tag,
+			routeKind: route.kind,
 			routeLabel: downloadRouteLabel,
 		};
 	}
@@ -119,7 +127,7 @@
 		inFlightAddUrl = submitted;
 		activeDownload = op;
 		try {
-			await api.addGeoFile(addType, submitted);
+			await api.addGeoFile(addType, submitted, { tag: op.routeTag, kind: op.routeKind });
 			addUrl = '';
 			lastDownload = {
 				ok: true,
@@ -153,7 +161,7 @@
 		inFlightAddUrl = url;
 		activeDownload = op;
 		try {
-			await api.addGeoFile(type, url);
+			await api.addGeoFile(type, url, { tag: op.routeTag, kind: op.routeKind });
 			lastDownload = {
 				ok: true,
 				action: 'Добавление пресета',
@@ -185,7 +193,7 @@
 		lastDownload = null;
 		activeDownload = op;
 		try {
-			await api.updateGeoFile(path);
+			await api.updateGeoFile(path, { tag: op.routeTag, kind: op.routeKind });
 			lastDownload = {
 				ok: true,
 				action: `Обновление ${fileName(path)}`,
@@ -235,7 +243,7 @@
 			await onrefresh();
 
 			try {
-				const upd = await api.updateGeoFile('');
+				const upd = await api.updateGeoFile('', { tag: op.routeTag, kind: op.routeKind });
 				await onrefresh();
 				if (upd.partial && upd.error) {
 					notes.push(

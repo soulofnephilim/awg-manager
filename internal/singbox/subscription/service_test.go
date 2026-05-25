@@ -10,24 +10,8 @@ import (
 	"testing"
 )
 
-type testDownloader struct{}
-
-func (testDownloader) ReadAll(ctx context.Context, req BodyDownloadRequest) ([]byte, BodyDownloadMeta, error) {
-	body, ct, err := FetchWithRequest(ctx, Request{
-		Method:        req.Method,
-		URL:           req.URL,
-		Headers:       req.Headers,
-		Timeout:       req.Timeout,
-		MaxBodyBytes:  req.MaxBodyBytes,
-		UserAgent:     req.UserAgent,
-		CheckRedirect: req.CheckRedirect,
-		AllowedStatus: req.AllowedStatus,
-	})
-	return body, BodyDownloadMeta{ContentType: ct}, err
-}
-
-func withTestDownloader(svc *Service) {
-	svc.SetDownloader(testDownloader{})
+func withLegacySetupNoop(svc *Service) {
+	_ = svc
 }
 
 // ensuredProxyCall records one EnsureProxy invocation with all arguments.
@@ -123,7 +107,7 @@ func TestService_Create_FetchAndMaterialize(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "test", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -150,7 +134,7 @@ func TestService_Create_FailsOnZeroOutbounds_ClashYAML(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	_, err := svc.Create(context.Background(), CreateInput{Label: "clash", URL: srv.URL, Enabled: true})
 	if err == nil {
@@ -188,7 +172,7 @@ rules:
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	_, err := svc.Create(context.Background(), CreateInput{Label: "expired", URL: srv.URL, Enabled: true})
 	if err == nil {
@@ -220,7 +204,7 @@ func TestService_Create_RollsBackProxyOnFetchFailure(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	// Three failed attempts at the same URL.
 	for i := 0; i < 3; i++ {
@@ -260,7 +244,7 @@ func TestService_Refresh_AddsNewMember(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "test", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -284,7 +268,7 @@ func TestService_Create_RegistersNDMSProxy(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "test", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -308,7 +292,7 @@ func TestService_Delete_AlwaysCleansEverything(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "x", URL: srv.URL, Enabled: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -363,7 +347,7 @@ func TestService_ListActiveMemberTags_FiltersDisabledAndEmpty(t *testing.T) {
 	store.Create(CreateInput{Label: "c", URL: "u", Enabled: true})
 
 	svc := NewService(store, &fakeMutator{})
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	tags := svc.ListActiveMemberTags()
 	if len(tags) != 1 {
 		t.Fatalf("expected 1 active tag, got %d: %v", len(tags), tags)
@@ -385,7 +369,7 @@ func TestService_SetActiveMember_UsesClashAPI(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "test", URL: srv.URL, Enabled: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -447,7 +431,7 @@ func TestService_Create_InlinePastedShareLinks(t *testing.T) {
 func TestService_Create_RejectsBothURLAndInline(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	svc := NewService(store, &fakeMutator{})
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	_, err := svc.Create(context.Background(), CreateInput{
 		Label:   "bad",
 		URL:     "https://example.com/sub",
@@ -462,7 +446,7 @@ func TestService_Create_RejectsBothURLAndInline(t *testing.T) {
 func TestService_Create_RejectsNoSource(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	svc := NewService(store, &fakeMutator{})
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	_, err := svc.Create(context.Background(), CreateInput{Label: "empty", Enabled: true})
 	if err == nil || !strings.Contains(err.Error(), "either URL or inline") {
 		t.Errorf("expected source-required error, got %v", err)
@@ -473,7 +457,7 @@ func TestService_Update_RejectsClearURLAndAddingURLToInline(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	inlineSub, err := svc.Create(context.Background(), CreateInput{
 		Label:   "inl",
 		Inline:  "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=h\n",
@@ -557,7 +541,7 @@ func TestService_AddManualMember_RejectsURLSub(t *testing.T) {
 	defer srv.Close()
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	svc := NewService(store, &fakeMutator{})
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "url", URL: srv.URL, Enabled: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -643,7 +627,7 @@ func TestService_SetActiveMember_RejectsURLTestMode(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	sub, err := svc.Create(context.Background(), CreateInput{
 		Label:   "test",
 		URL:     srv.URL,
@@ -703,7 +687,7 @@ proxies:
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "clash", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -765,7 +749,7 @@ proxies:
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "c", URL: srv.URL, Enabled: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -807,7 +791,7 @@ func TestService_Create_SingboxJSONConfig_Happy(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "happ", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -838,7 +822,7 @@ func TestService_Create_SingboxJSON_EmptyOutbounds(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	_, err := svc.Create(context.Background(), CreateInput{Label: "empty-sb", URL: srv.URL, Enabled: true})
 	if err == nil {
@@ -870,7 +854,7 @@ func TestService_Create_JSONBodyWithoutOutbounds_Errors(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	_, err := svc.Create(context.Background(), CreateInput{Label: "json-no-outbounds", URL: srv.URL, Enabled: true})
 	if err == nil {
@@ -903,7 +887,7 @@ func TestService_Create_SingboxJSON_BareOutboundsArray(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "hiddify", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -932,7 +916,7 @@ func TestService_Create_SingboxJSON_ArrayOfConfigs(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "multi", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -1111,7 +1095,7 @@ func TestUpdate_LabelChangeUpdatesProxyDescription(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	mutator := &fakeMutator{}
 	svc := NewService(store, mutator)
-	withTestDownloader(svc)
+	withLegacySetupNoop(svc)
 
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "Original Label", URL: srv.URL, Enabled: true})
 	if err != nil {
@@ -1142,7 +1126,7 @@ func TestUpdate_LabelChangeUpdatesProxyDescription(t *testing.T) {
 	}
 }
 
-func TestService_Create_URLRequiresDownloader(t *testing.T) {
+func TestService_Create_URLWorksWithoutDownloader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@example.com:443?security=tls&sni=h\n"))
 	}))
@@ -1151,8 +1135,8 @@ func TestService_Create_URLRequiresDownloader(t *testing.T) {
 	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	svc := NewService(store, &fakeMutator{})
 	_, err := svc.Create(context.Background(), CreateInput{Label: "url", URL: srv.URL, Enabled: true})
-	if err == nil || !strings.Contains(err.Error(), "downloader is not configured") {
-		t.Fatalf("expected downloader configuration error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected URL create to work without downloader, got %v", err)
 	}
 }
 
@@ -1166,5 +1150,21 @@ func TestService_Create_Inline_DoesNotRequireDownloader(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected inline create to work without downloader, got %v", err)
+	}
+}
+
+func TestService_Create_URLFetchError_DoesNotContainDownloadVia(t *testing.T) {
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	svc := NewService(store, &fakeMutator{})
+	_, err := svc.Create(context.Background(), CreateInput{
+		Label:   "url-fail",
+		URL:     "http://127.0.0.1:1/unreachable",
+		Enabled: true,
+	})
+	if err == nil {
+		t.Fatal("expected create fetch error")
+	}
+	if strings.Contains(err.Error(), "download via") {
+		t.Fatalf("error must not contain downloader route prefix: %v", err)
 	}
 }

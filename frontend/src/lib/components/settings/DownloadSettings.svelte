@@ -10,7 +10,7 @@
 		loading: boolean;
 		error: string;
 		onRefresh: () => void;
-		onSelectRoute: (routeTag: string) => void;
+		onSelectRoute: (routeTag: string, routeKind?: DownloadOutbound['kind']) => void;
 	}
 
 	let {
@@ -27,18 +27,49 @@
 		return `${displayOutboundName(ob)}${ob.available ? '' : ' (unavailable)'}`;
 	}
 
-	const selectedTag = $derived(settings.download?.routeTag || 'direct');
-	const hasSelected = $derived(outbounds.some((ob) => ob.tag === selectedTag));
+	function routeKey(tag: string, kind?: DownloadOutbound['kind']): string {
+		return JSON.stringify({ tag, kind: kind || '' });
+	}
+
+	function parseRouteKey(key: string): { tag: string; kind?: DownloadOutbound['kind'] } {
+		try {
+			const parsed = JSON.parse(key) as { tag?: string; kind?: string };
+			const tag = parsed.tag?.trim() || 'direct';
+			const kind = parsed.kind?.trim() as DownloadOutbound['kind'] | undefined;
+			return { tag, kind: kind || undefined };
+		} catch {
+			return { tag: key.trim() || 'direct' };
+		}
+	}
+
+	const selectedTag = $derived(settings.download?.routeTag?.trim() || 'direct');
+	const selectedKind = $derived(
+		settings.download?.routeKind?.trim() ||
+		(selectedTag === 'direct' ? 'direct' : ''),
+	);
+	const selectedValue = $derived.by(() => {
+		const exact = outbounds.find((ob) => ob.tag === selectedTag && (!selectedKind || ob.kind === selectedKind));
+		if (exact) {
+			return routeKey(exact.tag, exact.kind);
+		}
+		const tagOnly = outbounds.find((ob) => ob.tag === selectedTag);
+		if (tagOnly) {
+			return routeKey(tagOnly.tag, tagOnly.kind);
+		}
+		return routeKey(selectedTag, selectedKind as DownloadOutbound['kind']);
+	});
+	const hasSelected = $derived(outbounds.some((ob) => routeKey(ob.tag, ob.kind) === selectedValue));
 	const options = $derived.by(() => {
 		const built: DropdownOption<string>[] = outbounds.map((ob) => ({
-			value: ob.tag,
+			value: routeKey(ob.tag, ob.kind),
 			label: optionLabel(ob),
 			disabled: !ob.available,
 		}));
-		if (!hasSelected && selectedTag) {
+		if (!hasSelected && selectedValue) {
+			const extra = selectedKind ? `${maskSensitiveInText(selectedTag)} (${selectedKind})` : maskSensitiveInText(selectedTag);
 			built.unshift({
-				value: selectedTag,
-				label: `Недоступный маршрут: ${maskSensitiveInText(selectedTag)}`,
+				value: selectedValue,
+				label: `Недоступный маршрут: ${extra}`,
 				disabled: true,
 			});
 		}
@@ -46,7 +77,12 @@
 	});
 
 	function handleChange(v: string) {
-		onSelectRoute(v);
+		const selected = parseRouteKey(v);
+		if (selected.tag === 'direct') {
+			onSelectRoute('direct', 'direct');
+			return;
+		}
+		onSelectRoute(selected.tag, selected.kind);
 	}
 </script>
 
@@ -54,7 +90,7 @@
 	<div class="flex flex-col gap-1">
 		<span class="font-medium">Служебные загрузки AWGM</span>
 		<span class="setting-description">
-			Используется для обновлений AWGM, установки и обновления sing-box, загрузки geo.dat, sing-box URL-подписок и DNSRoute URL-списков: проверки, ручного и автообновления.
+			Используется для обновлений AWGM, загрузки geo.dat, DNSRoute URL-списков: проверки, ручного и автообновления, а также установки и обновления managed sing-box binary. Sing-box URL-подписки всегда выполняются напрямую через WAN.
 		</span>
 		{#if error}
 			<span class="download-error">{error}</span>
@@ -63,7 +99,7 @@
 	<div class="download-controls">
 		<div class="route-select">
 			<Dropdown
-				value={selectedTag}
+				value={selectedValue}
 				options={options}
 				onchange={handleChange}
 				disabled={saving || loading || options.length === 0}

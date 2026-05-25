@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type fixedChunkReader struct {
@@ -66,21 +67,46 @@ func TestReader_EmitsAtLeastOnceOnEOF(t *testing.T) {
 	}
 }
 
-func TestReader_EmitsAfterByteThreshold(t *testing.T) {
-	// Use deterministic 32KB chunks so 256KB always crosses the 64KB
-	// threshold exactly 4 times (EOF flush may or may not add another one
-	// depending on whether the final emit landed exactly at EOF).
-	src := bytes.Repeat([]byte("x"), 256*1024)
+func TestReader_DoesNotEmitOnEverySmallRead(t *testing.T) {
+	// Many tiny reads should not cause progress callback spam.
+	src := bytes.Repeat([]byte("x"), 64*1024)
 	var calls atomic.Int32
-	r := &fixedChunkReader{data: src, step: 32 * 1024}
-	pr := NewReader(r, int64(len(src)), func(downloaded, total int64) {
+	r := &fixedChunkReader{data: src, step: 16}
+	current := time.Unix(0, 0)
+	now := func() time.Time { return current }
+	pr := newReaderWithClock(r, int64(len(src)), func(downloaded, total int64) {
 		calls.Add(1)
-	})
+	}, now)
 	if _, err := io.ReadAll(pr); err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
-	if got := calls.Load(); got < 4 {
-		t.Errorf("expected ≥4 emits across 256KB stream, got %d", got)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("expected exactly final emit with frozen clock, got %d", got)
+	}
+}
+
+func TestReader_PeriodicEmitByTime(t *testing.T) {
+	src := bytes.Repeat([]byte("x"), 1536)
+	var calls atomic.Int32
+	r := &fixedChunkReader{data: src, step: 512}
+	current := time.Unix(0, 0)
+	now := func() time.Time { return current }
+	pr := newReaderWithClock(r, int64(len(src)), func(downloaded, total int64) {
+		calls.Add(1)
+	}, now)
+	buf := make([]byte, 512)
+	for {
+		_, err := pr.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		current = current.Add(210 * time.Millisecond)
+	}
+	if got := calls.Load(); got < 2 {
+		t.Errorf("expected periodic emits, got %d", got)
 	}
 }
 

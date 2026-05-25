@@ -25,6 +25,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/deviceproxy"
 	"github.com/hoaxisr/awg-manager/internal/diagnostics"
 	"github.com/hoaxisr/awg-manager/internal/dnscheck"
+	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/openapi"
@@ -118,6 +119,7 @@ type Server struct {
 	singboxOp              *singbox.Operator
 	singboxOrch            *singboxorch.Orchestrator
 	deviceProxySvc         *deviceproxy.Service
+	downloadSvc            *downloader.Service
 	monitoringService      *monitoring.Service
 	singboxSubMembersFn    func() []diagnostics.SingboxSubMember
 	singboxConfigPreviewFn func() (string, error)
@@ -290,6 +292,11 @@ func (s *Server) SetSingboxOperator(op *singbox.Operator) {
 // so the /api/proxy/* routes can be registered.
 func (s *Server) SetDeviceProxyService(svc *deviceproxy.Service) {
 	s.deviceProxySvc = svc
+}
+
+// SetDownloadService wires the shared downloader service.
+func (s *Server) SetDownloadService(svc *downloader.Service) {
+	s.downloadSvc = svc
 }
 
 // SetSingboxRouterHandler wires the sing-box router HTTP handler so the
@@ -535,6 +542,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		systemHandler.SetSlowRequestThresholdMs(ms)
 	}
 	settingsHandler := api.NewSettingsHandler(s.settings, appLog)
+	settingsHandler.SetDownloadService(s.downloadSvc)
 	settingsHandler.SetTunnelStore(s.tunnels)
 	settingsHandler.SetPingCheckService(s.pingCheckService)
 	settingsHandler.SetMonitoringService(s.monitoringService)
@@ -681,18 +689,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/system/all-interfaces", guarded(systemHandler.AllInterfaces))
 	mux.HandleFunc("/api/system/hydraroute-status", guarded(systemHandler.HydraRouteStatus))
 	mux.HandleFunc("/api/system/hydraroute-control", guarded(systemHandler.HydraRouteControl))
+	downloadHandler := api.NewDownloadHandler(s.downloadSvc)
+	mux.HandleFunc("/api/download/outbounds", guarded(downloadHandler.ListOutbounds))
 
 	// HydraRoute settings (protected + boot guarded)
 	if s.hydraService != nil {
-		hrHandler := api.NewHydraRouteHandler(s.hydraService)
+		hrHandler := api.NewHydraRouteHandler(s.hydraService, s.downloadSvc)
 		hrHandler.SetEventBus(s.bus)
-		hrHandler.SetDeviceProxyService(s.deviceProxySvc)
-		hrHandler.SetSingboxOperator(s.singboxOp)
-		hrHandler.SetSingboxOrchestrator(s.singboxOrch)
-		hrHandler.SetSettingsStore(s.settings)
 		mux.HandleFunc("/api/hydraroute/config", guarded(hrHandler.GetConfig))
 		mux.HandleFunc("/api/hydraroute/config/update", guarded(hrHandler.UpdateConfig))
-		mux.HandleFunc("/api/download/outbounds", guarded(hrHandler.ListDownloadOutbounds))
 		mux.HandleFunc("/api/hydraroute/geo-files", guarded(hrHandler.ListGeoFiles))
 		mux.HandleFunc("/api/hydraroute/geo-files/add", guarded(hrHandler.AddGeoFile))
 		mux.HandleFunc("/api/hydraroute/geo-files/delete", guarded(hrHandler.DeleteGeoFile))

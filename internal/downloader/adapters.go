@@ -97,5 +97,9 @@ func (p *settingsRouteProvider) GetDownloadRoute(ctx context.Context) (*Route, e
 	if tag == "" {
 		tag = "direct"
 	}
-	return &Route{Tag: tag}, nil
+	kind := strings.TrimSpace(st.Download.RouteKind)
+	if tag == "direct" {
+		kind = "direct"
+	}
+	return &Route{Tag: tag, Kind: kind}, nil
 }

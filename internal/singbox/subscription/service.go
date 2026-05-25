@@ -44,8 +44,6 @@ type ConfigMutator interface {
 type Service struct {
 	store     *Store
 	mutator   ConfigMutator
-	dlMu      sync.RWMutex
-	dl        Downloader
 	muById    sync.Map // map[string]*sync.Mutex
 	fetchOpts FetchOpts
 	log       *logging.ScopedLogger // nil-safe; populated via SetAppLogger
@@ -53,18 +51,6 @@ type Service struct {
 
 func NewService(store *Store, mutator ConfigMutator) *Service {
 	return &Service{store: store, mutator: mutator}
-}
-
-func (s *Service) SetDownloader(d Downloader) {
-	s.dlMu.Lock()
-	defer s.dlMu.Unlock()
-	s.dl = d
-}
-
-func (s *Service) downloader() Downloader {
-	s.dlMu.RLock()
-	defer s.dlMu.RUnlock()
-	return s.dl
 }
 
 // SetAppLogger wires UI-visible logging for events outside of the
@@ -203,12 +189,6 @@ func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult,
 		body = []byte(sub.Inline)
 		ct = "text/plain; charset=utf-8"
 	} else {
-		dl := s.downloader()
-		if dl == nil {
-			err := errors.New("subscription: downloader is not configured")
-			s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
-			return nil, err
-		}
 		// Rewrite well-known git-hosting web-view URLs (github blob /
 		// gitlab /-/blob/ / gitea src/branch/) to the raw-content URL.
 		// Skipping this leg downloads an HTML page whose embedded React
@@ -221,7 +201,7 @@ func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult,
 			s.logWarn("subscription-refresh", id,
 				"rewrote web-view URL to raw URL")
 		}
-		fetched, fetchedCT, fetchErr := FetchWithDownloader(ctx, dl, fetchURL, sub.Headers, s.fetchOpts)
+		fetched, fetchedCT, fetchErr := FetchWithContext(ctx, fetchURL, sub.Headers, s.fetchOpts)
 		if fetchErr != nil {
 			masked := fmt.Errorf("%s", MaskURL(fetchErr.Error(), sub.URL))
 			s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: masked})

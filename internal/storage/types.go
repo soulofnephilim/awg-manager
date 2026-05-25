@@ -43,7 +43,8 @@ type Settings struct {
 }
 
 type DownloadSettings struct {
-	RouteTag string `json:"routeTag"` // default: "direct"
+	RouteTag  string `json:"routeTag"`            // default: "direct"
+	RouteKind string `json:"routeKind,omitempty"` // default: "direct"
 }
 
 type SingboxRouterSettings struct {

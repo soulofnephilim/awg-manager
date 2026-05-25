@@ -260,7 +260,7 @@ func TestResolveClient_HappyPath(t *testing.T) {
 			items: []Outbound{
 				{Tag: "direct", Kind: "direct", Label: "Direct (WAN)"},
 				{Tag: "awg-test", Kind: "awg", Label: "AWG test"},
-				{Tag: "awg-test", Kind: "awg", Label: "AWG test duplicate"},
+				{Tag: "direct", Kind: "direct", Label: "Direct duplicate"},
 				{Tag: " ", Kind: "bad", Label: "bad"},
 			},
 		},
@@ -751,5 +751,225 @@ func TestDownloadFile_ReportsProgress(t *testing.T) {
 	}
 	if lastTotal != int64(len(body)) {
 		t.Fatalf("last total = %d, want %d", lastTotal, len(body))
+	}
+}
+
+func TestValidateRoute(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "direct", Kind: "direct", Label: "Direct (WAN)"},
+				{Tag: "awg-1", Kind: "awg", Label: "AWG"},
+			},
+		},
+	})
+
+	info, err := svc.ValidateRoute(context.Background(), &Route{Tag: "awg-1"})
+	if err != nil {
+		t.Fatalf("ValidateRoute known: %v", err)
+	}
+	if info.Tag != "awg-1" || info.Kind != "awg" {
+		t.Fatalf("unexpected info: %+v", info)
+	}
+
+	if _, err := svc.ValidateRoute(context.Background(), &Route{Tag: "missing"}); err == nil {
+		t.Fatal("expected unknown route error")
+	}
+}
+
+func TestValidateRoute_RespectsKind(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "same-tag", Kind: "subscription", Label: "Sub same"},
+			},
+		},
+	})
+
+	info, err := svc.ValidateRoute(context.Background(), &Route{Tag: "same-tag", Kind: "subscription"})
+	if err != nil {
+		t.Fatalf("ValidateRoute kind match: %v", err)
+	}
+	if info.Tag != "same-tag" || info.Kind != "subscription" {
+		t.Fatalf("unexpected info: %+v", info)
+	}
+}
+
+func TestValidateRoute_RejectsMismatchedKind(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "same-tag", Kind: "subscription", Label: "Sub same"},
+			},
+		},
+	})
+
+	_, err := svc.ValidateRoute(context.Background(), &Route{Tag: "same-tag", Kind: "awg"})
+	if err == nil {
+		t.Fatal("expected mismatch error")
+	}
+	if !strings.Contains(err.Error(), `kind "awg"`) {
+		t.Fatalf("expected kind-aware error, got: %v", err)
+	}
+}
+
+func TestDescribeRoute_RespectsKind(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "same-tag", Kind: "subscription", Label: "Sub same"},
+			},
+		},
+	})
+
+	info := svc.DescribeRoute(context.Background(), &Route{Tag: "same-tag", Kind: "subscription"})
+	if info.Tag != "same-tag" || info.Kind != "subscription" || info.Label != "Sub same" {
+		t.Fatalf("unexpected describe info: %+v", info)
+	}
+}
+
+func TestResolveClient_RespectsKind(t *testing.T) {
+	sb := &fakeSingbox{running: true}
+	slot := &fakeSlot{}
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "direct", Kind: "direct", Label: "Direct (WAN)"},
+				{Tag: "same-tag", Kind: "subscription", Label: "Sub same"},
+			},
+		},
+		Singbox: sb,
+		Slot:    slot,
+	})
+
+	lease, err := svc.ResolveClient(context.Background(), &Route{Tag: "same-tag", Kind: "subscription"})
+	if err != nil {
+		t.Fatalf("ResolveClient kind match: %v", err)
+	}
+	if lease.Route.Tag != "same-tag" || lease.Route.Kind != "subscription" {
+		t.Fatalf("unexpected lease route: %+v", lease.Route)
+	}
+	lease.Close()
+}
+
+func TestValidateRoute_ErrorMessagePreservesPercentLiterals(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "same", Kind: "subscription", Label: "Sub same"},
+			},
+		},
+	})
+
+	_, err := svc.ValidateRoute(context.Background(), &Route{Tag: "bad%v", Kind: "awg"})
+	if err == nil {
+		t.Fatal("expected unknown route error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `bad%v`) {
+		t.Fatalf("expected literal percent tag in message, got: %q", msg)
+	}
+	if strings.Contains(msg, "%!v(MISSING)") {
+		t.Fatalf("unexpected fmt placeholder expansion in message: %q", msg)
+	}
+}
+
+func TestValidateRoute_RejectsAmbiguousRuntimeTag(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "same-tag", Kind: "awg", Label: "A"},
+				{Tag: "same-tag", Kind: "subscription", Label: "B"},
+			},
+		},
+	})
+
+	_, err := svc.ValidateRoute(context.Background(), &Route{Tag: "same-tag", Kind: "subscription"})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguous runtime tag error, got: %v", err)
+	}
+}
+
+func TestResolveClient_RejectsAmbiguousRuntimeTag(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "direct", Kind: "direct", Label: "Direct (WAN)"},
+				{Tag: "same-tag", Kind: "awg", Label: "A"},
+				{Tag: "same-tag", Kind: "subscription", Label: "B"},
+			},
+		},
+		Singbox: &fakeSingbox{running: true},
+		Slot:    &fakeSlot{},
+	})
+
+	_, err := svc.ResolveClient(context.Background(), &Route{Tag: "same-tag", Kind: "subscription"})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguous runtime tag error, got: %v", err)
+	}
+}
+
+func TestResolveClient_DedupesSelectorMembers(t *testing.T) {
+	sb := &fakeSingbox{running: true}
+	slot := &fakeSlot{}
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "direct", Kind: "direct", Label: "Direct (WAN)"},
+				{Tag: "route-a", Kind: "awg", Label: "Route A"},
+				{Tag: "route-b", Kind: "subscription", Label: "Route B1"},
+				{Tag: "route-b", Kind: "subscription", Label: "Route B2"},
+			},
+		},
+		Singbox: sb,
+		Slot:    slot,
+	})
+
+	lease, err := svc.ResolveClient(context.Background(), &Route{Tag: "route-a", Kind: "awg"})
+	if err != nil {
+		t.Fatalf("resolve routed lease: %v", err)
+	}
+	lease.Close()
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(slot.lastJSON), &parsed); err != nil {
+		t.Fatalf("parse slot json: %v", err)
+	}
+	outbounds, ok := parsed["outbounds"].([]any)
+	if !ok || len(outbounds) == 0 {
+		t.Fatalf("slot outbounds shape: %#v", parsed["outbounds"])
+	}
+	selector, ok := outbounds[0].(map[string]any)
+	if !ok {
+		t.Fatalf("selector shape: %#v", outbounds[0])
+	}
+	membersAny, ok := selector["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("selector members shape: %#v", selector["outbounds"])
+	}
+	seen := map[string]int{}
+	for _, m := range membersAny {
+		s, _ := m.(string)
+		seen[s]++
+	}
+	if seen["route-b"] != 1 {
+		t.Fatalf("expected route-b deduped once, members=%v", membersAny)
+	}
+}
+
+func TestValidateRoute_AllowsKnownUnavailableOutbound(t *testing.T) {
+	svc := NewService(Deps{
+		Outbounds: &fakeOutboundsProvider{
+			items: []Outbound{
+				{Tag: "route-a", Kind: "subscription", Label: "Route A", Available: false},
+			},
+		},
+	})
+	info, err := svc.ValidateRoute(context.Background(), &Route{Tag: "route-a", Kind: "subscription"})
+	if err != nil {
+		t.Fatalf("ValidateRoute unavailable known outbound: %v", err)
+	}
+	if info.Tag != "route-a" || info.Kind != "subscription" {
+		t.Fatalf("unexpected route info: %+v", info)
 	}
 }
