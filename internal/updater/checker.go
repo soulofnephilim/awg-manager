@@ -63,17 +63,18 @@ func checkWithDownloader(ctx context.Context, currentVersion, channel string, dl
 		CheckedAt:      time.Now(),
 	}
 
+	cmp := versionComparator(channel)
 	base := channelBaseURL(channel)
 	archDir := archSuffixToRepoDir(archSuffix())
 	pkgsURL := fmt.Sprintf("%s/%s/Packages.gz", base, archDir)
 
-	pkg, err := fetchLatestPackageWithDownloader(ctx, dl, pkgsURL, pkgName)
+	pkg, err := fetchLatestPackageWithDownloader(ctx, dl, pkgsURL, pkgName, cmp)
 	if err != nil {
 		info.Error = fmt.Sprintf("entware repo: %s", err)
 		return info
 	}
 
-	if versionComparator(channel)(currentVersion, pkg.Version) >= 0 {
+	if cmp(currentVersion, pkg.Version) >= 0 {
 		return info
 	}
 
