@@ -20,6 +20,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/sys/httpdownload"
+	"github.com/hoaxisr/awg-manager/internal/sys/routerinfo"
 )
 
 // DefaultBinaryPath is where the managed sing-box binary is placed on disk.
@@ -54,7 +55,30 @@ type Downloader interface {
 	DownloadFile(ctx context.Context, req DownloadFileRequest) (DownloadFileResult, error)
 }
 
+// binaryMaxBytes is the fallback download ceiling used only when free disk
+// space can't be queried. Normally the limit is dynamic — actual free space
+// minus diskReserveBytes — so large (uncompressed) binaries download fine on
+// routers with roomy /opt (e.g. entware on external storage) while tiny-disk
+// routers are still protected.
 const binaryMaxBytes = 64 << 20
+
+// diskReserveBytes is kept free after the download so activation/other writes
+// don't fill the filesystem completely.
+const diskReserveBytes = 16 << 20
+
+// downloadByteLimit returns the max download size: free disk space minus a
+// reserve margin, or the static fallback when free space is unknown. Clamped
+// to be non-negative.
+func downloadByteLimit(freeBytes int64, freeOK bool, fallback, reserve int64) int64 {
+	if !freeOK {
+		return fallback
+	}
+	avail := freeBytes - reserve
+	if avail < 0 {
+		avail = 0
+	}
+	return avail
+}
 
 type DownloadFileRequest struct {
 	URL          string
@@ -132,11 +156,14 @@ func (i *Installer) Download(ctx context.Context, onProgress httpdownload.Progre
 		return "", fmt.Errorf("downloader is not configured")
 	}
 
+	free, freeOK := routerinfo.FreeBytes(filepath.Dir(i.binaryPath))
+	maxBytes := downloadByteLimit(free, freeOK, binaryMaxBytes, diskReserveBytes)
+
 	res, err := dl.DownloadFile(ctx, DownloadFileRequest{
 		URL:          i.spec.URL,
 		DestPath:     tmp,
 		Timeout:      5 * time.Minute,
-		MaxFileBytes: binaryMaxBytes,
+		MaxFileBytes: maxBytes,
 		Mode:         0o644,
 		Progress:     onProgress,
 	})
