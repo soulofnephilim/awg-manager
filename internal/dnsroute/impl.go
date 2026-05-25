@@ -27,6 +27,7 @@ type InterfaceResolver interface {
 // concurrent HTTP handlers, background scheduler, and tunnel lifecycle hooks.
 type ServiceImpl struct {
 	opMu               sync.Mutex
+	dlMu               sync.RWMutex
 	store              *Store
 	queries            *query.Queries
 	commands           *command.Commands
@@ -35,6 +36,11 @@ type ServiceImpl struct {
 	failover           *FailoverManager
 	hydra              *hydraroute.Service
 	policyOrchestrator policyOrchestrator
+	dl                 Downloader
+}
+
+type Downloader interface {
+	ReadAll(ctx context.Context, req SubscriptionDownloadRequest) ([]byte, SubscriptionDownloadMeta, error)
 }
 
 // NewService creates a new DNS route service.
@@ -46,6 +52,18 @@ func NewService(store *Store, queries *query.Queries, commands *command.Commands
 		resolver: resolver,
 		appLog:   logging.NewScopedLogger(appLogger, logging.GroupRouting, logging.SubDnsRoute),
 	}
+}
+
+func (s *ServiceImpl) SetDownloader(d Downloader) {
+	s.dlMu.Lock()
+	defer s.dlMu.Unlock()
+	s.dl = d
+}
+
+func (s *ServiceImpl) downloader() Downloader {
+	s.dlMu.RLock()
+	defer s.dlMu.RUnlock()
+	return s.dl
 }
 
 // SetFailoverManager sets the failover manager for DNS route failover.
@@ -665,7 +683,7 @@ func (s *ServiceImpl) SetEnabled(ctx context.Context, id string, enabled bool) e
 func (s *ServiceImpl) validateSubscriptions(ctx context.Context, subs []Subscription) error {
 	seenSubnets := make(map[string]struct{})
 	for _, sub := range subs {
-		domains, err := fetchSubscription(ctx, sub.URL)
+		domains, err := s.fetchSubscription(ctx, sub.URL)
 		if err != nil {
 			return fmt.Errorf("подписка %q: %w", sub.URL, err)
 		}
@@ -714,7 +732,7 @@ func (s *ServiceImpl) refreshSubscriptions(ctx context.Context, id string) error
 	var allSubDomains [][]string
 	for i := range list.Subscriptions {
 		sub := &list.Subscriptions[i]
-		domains, err := fetchSubscription(ctx, sub.URL)
+		domains, err := s.fetchSubscription(ctx, sub.URL)
 		sub.LastFetched = now
 		if err != nil {
 			sub.LastError = err.Error()

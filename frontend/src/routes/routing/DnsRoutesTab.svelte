@@ -16,6 +16,12 @@
     import { buildRoutingTunnelDropdownOptions } from '$lib/utils/routingTunnelOptions';
     import { notifications } from '$lib/stores/notifications';
     import { dnsRoutesStore } from '$lib/stores/routing';
+    import { settings } from '$lib/stores/settings';
+    import {
+        downloadOutbounds,
+        ensureDownloadOutboundsLoaded,
+        resolveDownloadRouteLabel,
+    } from '$lib/stores/downloadRoute';
     import RoutingTabBodySkeleton from './RoutingTabBodySkeleton.svelte';
 
     interface Props {
@@ -83,6 +89,7 @@
     let orphanDnsRoutes = $derived(dnsRoutes.filter(r => (r.routes?.length ?? 0) === 0));
     let boundDnsRoutes = $derived(dnsRoutes.filter(r => (r.routes?.length ?? 0) > 0));
     let dnsActiveCount = $derived(boundDnsRoutes.filter(r => r.enabled).length);
+    const downloadRouteLabel = $derived(resolveDownloadRouteLabel($settings, $downloadOutbounds));
 
     async function createDnsRoute(data: Partial<DnsRoute>) {
         dnsSaving = true;
@@ -105,6 +112,10 @@
             dnsSaving = false;
         }
     }
+
+    onMount(() => {
+        void ensureDownloadOutboundsLoaded();
+    });
 
     async function updateDnsRoute(data: Partial<DnsRoute>) {
         if (!editingDnsRoute) return;
@@ -440,6 +451,7 @@
                         selected={dnsSelected.has(route.id)}
                         onselect={() => toggleDnsSelect(route.id)}
                         onicon={() => { pickingForRoute = route; iconPickerOpen = true; }}
+                        {downloadRouteLabel}
                     />
                 {/each}
             </div>
@@ -461,6 +473,7 @@
                     selected={dnsSelected.has(route.id)}
                     onselect={() => toggleDnsSelect(route.id)}
                     onicon={() => { pickingForRoute = route; iconPickerOpen = true; }}
+                    {downloadRouteLabel}
                 />
             {/each}
         </div>

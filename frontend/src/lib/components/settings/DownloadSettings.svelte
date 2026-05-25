@@ -54,7 +54,7 @@
 	<div class="flex flex-col gap-1">
 		<span class="font-medium">Служебные загрузки AWGM</span>
 		<span class="setting-description">
-			Используется для загрузки geo.dat, обновлений AWGM, а также установки и обновления sing-box. Позже этот маршрут будет применяться к HydraRoute и спискам.
+			Используется для обновлений AWGM, установки и обновления sing-box, загрузки geo.dat, sing-box URL-подписок и DNSRoute URL-списков: проверки, ручного и автообновления.
 		</span>
 		{#if error}
 			<span class="download-error">{error}</span>

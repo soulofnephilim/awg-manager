@@ -10,6 +10,7 @@
 		buildRoutingTunnelDropdownOptions,
 		findRoutingTunnelLabel,
 	} from '$lib/utils/routingTunnelOptions';
+	import DownloadRouteNote from '$lib/components/downloads/DownloadRouteNote.svelte';
 
 	interface Props {
 		open: boolean;
@@ -366,6 +367,7 @@
 	<!-- Subscriptions -->
 	<div class="form-section">
 		<div class="section-title">Подписки</div>
+		<DownloadRouteNote text="URL-листы будут проверены и обновлены через" />
 		{#if subscriptions.length > 0}
 			<div class="sub-list">
 				{#each subscriptions as sub, i (sub.url)}

@@ -620,6 +620,35 @@ func TestReadAll_ExceedsLimit(t *testing.T) {
 	}
 }
 
+func TestReadAll_DirectFollowsRedirect(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("final-body"))
+	}))
+	defer final.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	svc := NewService(Deps{})
+	body, meta, err := svc.ReadAll(context.Background(), Request{
+		Purpose:      "test-readall-redirect",
+		URL:          redirect.URL,
+		MaxBodyBytes: 128,
+	})
+	if err != nil {
+		t.Fatalf("ReadAll redirect: %v", err)
+	}
+	if string(body) != "final-body" {
+		t.Fatalf("body = %q, want final-body", string(body))
+	}
+	if meta.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", meta.StatusCode)
+	}
+}
+
 func TestDownloadFile_Atomic(t *testing.T) {
 	svc := NewService(Deps{})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

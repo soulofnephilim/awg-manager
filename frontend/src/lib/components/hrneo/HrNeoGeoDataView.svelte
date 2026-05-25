@@ -1,9 +1,17 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api/client';
-	import type { GeoFileEntry, DownloadOutbound } from '$lib/types';
-	import { displayRouteName, maskSensitiveInText } from '$lib/utils/downloadRouteLabel';
+	import type { GeoFileEntry } from '$lib/types';
 	import { settings as appSettings, reloadSettings } from '$lib/stores/settings';
+	import {
+		downloadOutbounds,
+		downloadOutboundsLoaded,
+		downloadOutboundsLoading,
+		downloadOutboundsError,
+		downloadOutboundsStatus,
+		ensureDownloadOutboundsLoaded,
+		resolveDownloadRouteLabel,
+	} from '$lib/stores/downloadRoute';
 	import { ConfirmModal, Button, Dropdown } from '$lib/components/ui';
 	import { geoDownloadProgress } from '$lib/stores/geoDownload';
 
@@ -25,9 +33,16 @@
 	// lookup keyed by the live `addUrl` value would lose the bar
 	// mid-download.
 	let inFlightAddUrl = $state<string | null>(null);
-	let outbounds = $state<DownloadOutbound[]>([]);
-	let routeSettingsReady = $state(false);
-	let routeSettingsError = $state('');
+	const downloadRouteLabel = $derived(resolveDownloadRouteLabel($appSettings, $downloadOutbounds));
+	const routeSettingsReady = $derived(
+		$appSettings !== null && $downloadOutboundsLoaded && !$downloadOutboundsLoading,
+	);
+	const routeSettingsWarning = $derived(
+		$downloadOutboundsStatus === 'stale' ? $downloadOutboundsError : '',
+	);
+	const routeSettingsError = $derived(
+		$downloadOutboundsStatus === 'error' ? $downloadOutboundsError : '',
+	);
 	const routeActionsDisabled = $derived(busy !== null || !routeSettingsReady || !!routeSettingsError);
 	const GROUND_ZERRO_GEOIP_URL =
 		'https://raw.githubusercontent.com/Ground-Zerro/Geo-Aggregator/main/geodat/geoip_GA.dat';
@@ -60,39 +75,11 @@
 		return $appSettings?.download?.routeTag?.trim() || 'direct';
 	}
 
-	function outboundLabel(tag: string): string {
-		const normalized = tag?.trim() || 'direct';
-		const ob = outbounds.find((item) => item.tag === normalized);
-		if (ob) {
-			return `${displayRouteName(ob.label, ob.kind)}${ob.available ? '' : ' (недоступно)'}`;
-		}
-		if (normalized === 'direct') {
-			return 'Direct (WAN) — без туннеля';
-		}
-		return `Недоступный маршрут: ${maskSensitiveInText(normalized)}`;
-	}
-
-	async function loadOutboundsForDisplay() {
-		try {
-			const list = await api.listDownloadOutbounds();
-			outbounds = list.length ? list : [{ tag: 'direct', kind: 'direct', label: 'Direct (WAN)', available: true }];
-		} catch {
-			outbounds = [{ tag: 'direct', kind: 'direct', label: 'Direct (WAN)', available: true }];
-		}
-	}
-
 	async function loadRouteDisplayState() {
-		routeSettingsReady = false;
-		routeSettingsError = '';
-		await loadOutboundsForDisplay();
 		if (!$appSettings) {
-			const loaded = await reloadSettings();
-			if (!loaded) {
-				routeSettingsError = 'Не удалось загрузить настройки маршрута загрузок';
-				return;
-			}
+			await reloadSettings();
 		}
-		routeSettingsReady = true;
+		await ensureDownloadOutboundsLoaded();
 	}
 
 	function captureDownloadOperation(kind: DownloadOperation['kind'], target: string): DownloadOperation {
@@ -101,7 +88,7 @@
 			kind,
 			target,
 			routeTag: tag,
-			routeLabel: outboundLabel(tag),
+			routeLabel: downloadRouteLabel,
 		};
 	}
 
@@ -452,9 +439,13 @@
 			<div class="route-status route-status-live">
 				Загрузка настроек маршрута geo.dat…
 			</div>
+		{:else if routeSettingsWarning}
+			<div class="route-status route-status-warn">
+				Через: <strong>{downloadRouteLabel}</strong>. Не удалось обновить список маршрутов, используется последний известный список: {routeSettingsWarning}
+			</div>
 		{:else}
 			<div class="route-status route-status-live">
-				Через: <strong>{outboundLabel(currentRouteTag())}</strong>.
+				Через: <strong>{downloadRouteLabel}</strong>.
 				Изменяется в <a href="/settings#downloads" data-sveltekit-reload>Настройки → Загрузки</a>.
 			</div>
 		{/if}
@@ -526,7 +517,7 @@
 		{#if busy === 'add'}
 			<div class="busy-hint">
 				{#if progress?.phase === 'download'}
-					Скачивание через {activeDownload?.routeLabel ?? outboundLabel(currentRouteTag())}:
+					Скачивание через {activeDownload?.routeLabel ?? downloadRouteLabel}:
 					{fmtPercent(progress)} —
 					{humanSize(progress.downloaded)}{progress.total > 0
 						? ` из ${humanSize(progress.total)}`
@@ -534,7 +525,7 @@
 				{:else if progress?.phase === 'validate'}
 					Валидация файла…
 				{:else}
-					Подключение через {activeDownload?.routeLabel ?? outboundLabel(currentRouteTag())}…
+					Подключение через {activeDownload?.routeLabel ?? downloadRouteLabel}…
 				{/if}
 				<div class="progress-bar">
 					{#if progress && progress.total > 0}
@@ -802,6 +793,12 @@
 		background: rgba(247, 118, 142, 0.1);
 		color: var(--error);
 		border-left: 3px solid var(--error);
+	}
+
+	.route-status-warn {
+		background: rgba(245, 158, 11, 0.12);
+		color: var(--warning, #f59e0b);
+		border-left: 3px solid var(--warning, #f59e0b);
 	}
 
 	.add-type-select {

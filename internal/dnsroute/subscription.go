@@ -2,7 +2,9 @@ package dnsroute
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,7 +12,18 @@ import (
 	"time"
 )
 
-var subscriptionHTTPClient = &http.Client{Timeout: 30 * time.Second}
+const dnsRouteSubscriptionMaxBodyBytes int64 = 10 * 1024 * 1024
+
+type SubscriptionDownloadRequest struct {
+	URL           string
+	Timeout       time.Duration
+	MaxBodyBytes  int64
+	AllowedStatus []int
+}
+
+type SubscriptionDownloadMeta struct {
+	ContentType string
+}
 
 func isSupportedSubscriptionContentType(ct string) bool {
 	ct = strings.TrimSpace(strings.ToLower(ct))
@@ -21,26 +34,24 @@ func isSupportedSubscriptionContentType(ct string) bool {
 }
 
 // fetchSubscription downloads a domain list from a URL and parses it.
-func fetchSubscription(ctx context.Context, url string) ([]string, error) {
+func (s *ServiceImpl) fetchSubscription(ctx context.Context, url string) ([]string, error) {
+	dl := s.downloader()
+	if dl == nil {
+		return nil, errors.New("dnsroute: downloader is not configured")
+	}
 	url = normalizeGitHubURL(url)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	body, meta, err := dl.ReadAll(ctx, SubscriptionDownloadRequest{
+		URL:           url,
+		Timeout:       30 * time.Second,
+		MaxBodyBytes:  dnsRouteSubscriptionMaxBodyBytes,
+		AllowedStatus: []int{http.StatusOK},
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	resp, err := subscriptionHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	// Accept text lists from strict and generic servers.
-	ct := resp.Header.Get("Content-Type")
+	ct := meta.ContentType
 	if !isSupportedSubscriptionContentType(ct) {
 		if strings.TrimSpace(ct) == "" {
 			return nil, fmt.Errorf("сервер не указал Content-Type (нужен text/plain или application/octet-stream)")
@@ -50,7 +61,7 @@ func fetchSubscription(ctx context.Context, url string) ([]string, error) {
 
 	var domains []string
 	seen := make(map[string]bool)
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
 		d := parseDomainLine(scanner.Text())
 		if d != "" && !seen[d] {
@@ -147,8 +158,8 @@ func normalizeGitHubURL(url string) string {
 
 // validateSubscriptionURL fetches a URL and verifies it returns text/plain with parseable domains.
 // Used to reject invalid URLs at create/update time, not just at refresh time.
-func validateSubscriptionURL(ctx context.Context, url string) error {
-	domains, err := fetchSubscription(ctx, url)
+func (s *ServiceImpl) validateSubscriptionURL(ctx context.Context, url string) error {
+	domains, err := s.fetchSubscription(ctx, url)
 	if err != nil {
 		return err
 	}

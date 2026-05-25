@@ -4,6 +4,7 @@
     import { SERVICE_PRESETS, type ServicePreset } from '$lib/data/presets';
     import { buildRoutingTunnelDropdownOptions } from '$lib/utils/routingTunnelOptions';
     import type { RoutingTunnel } from '$lib/types';
+    import DownloadRouteNote from '$lib/components/downloads/DownloadRouteNote.svelte';
 
     interface Props {
         open: boolean;
@@ -166,6 +167,7 @@
             />
         </div>
     </div>
+    <DownloadRouteNote text="Если сервис использует URL-лист, он будет получен через" />
 
     {#if noTunnels}
         <p class="no-tunnels">Создайте хотя бы один туннель</p>

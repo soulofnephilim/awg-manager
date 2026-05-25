@@ -574,7 +574,6 @@ func main() {
 
 	// DNS route subscription auto-refresh scheduler
 	dnsRefreshScheduler := dnsroute.NewScheduler(dnsRouteService, settingsStore, loggingService)
-	dnsRefreshScheduler.Start()
 
 	// Access policy service (NDMS ip policy management) — wired to CQRS layer.
 	accessPolicySvc := accesspolicy.New(ndmsCommands.Policies, ndmsCommands.Interfaces, ndmsQueries, settingsStore, loggingService, ndmsquery.NewPolicyMarkStore(ndmsTransportClient, nil))
@@ -1019,6 +1018,9 @@ func main() {
 		sbOrch,
 		settingsStore,
 	)
+	dnsRouteService.SetDownloader(&dnsRouteDownloaderAdapter{svc: sharedDownloadSvc})
+	subSvc.SetDownloader(&singboxSubscriptionDownloaderAdapter{svc: sharedDownloadSvc})
+	dnsRefreshScheduler.Start()
 	updaterService.SetDownloader(sharedDownloadSvc)
 	if singboxInstaller != nil {
 		singboxInstaller.SetDownloader(&installerDownloaderAdapter{svc: sharedDownloadSvc})
@@ -1939,6 +1941,58 @@ type installerDownloaderAdapter struct {
 	svc *downloader.Service
 }
 
+type singboxSubscriptionDownloaderAdapter struct {
+	svc *downloader.Service
+}
+
+func (a *singboxSubscriptionDownloaderAdapter) ReadAll(
+	ctx context.Context,
+	req subscription.BodyDownloadRequest,
+) ([]byte, subscription.BodyDownloadMeta, error) {
+	if a == nil || a.svc == nil {
+		return nil, subscription.BodyDownloadMeta{}, fmt.Errorf("downloader service is not configured")
+	}
+	body, meta, err := a.svc.ReadAll(ctx, downloader.Request{
+		Purpose:       "singbox-subscription",
+		URL:           req.URL,
+		Method:        req.Method,
+		Headers:       req.Headers,
+		Timeout:       req.Timeout,
+		MaxBodyBytes:  req.MaxBodyBytes,
+		UserAgent:     req.UserAgent,
+		CheckRedirect: req.CheckRedirect,
+		AllowedStatus: req.AllowedStatus,
+	})
+	if err != nil {
+		return nil, subscription.BodyDownloadMeta{}, err
+	}
+	return body, subscription.BodyDownloadMeta{ContentType: meta.ContentType}, nil
+}
+
+type dnsRouteDownloaderAdapter struct {
+	svc *downloader.Service
+}
+
+func (a *dnsRouteDownloaderAdapter) ReadAll(
+	ctx context.Context,
+	req dnsroute.SubscriptionDownloadRequest,
+) ([]byte, dnsroute.SubscriptionDownloadMeta, error) {
+	if a == nil || a.svc == nil {
+		return nil, dnsroute.SubscriptionDownloadMeta{}, fmt.Errorf("downloader service is not configured")
+	}
+	body, meta, err := a.svc.ReadAll(ctx, downloader.Request{
+		Purpose:       "dnsroute-subscription",
+		URL:           req.URL,
+		Timeout:       req.Timeout,
+		MaxBodyBytes:  req.MaxBodyBytes,
+		AllowedStatus: req.AllowedStatus,
+	})
+	if err != nil {
+		return nil, dnsroute.SubscriptionDownloadMeta{}, err
+	}
+	return body, dnsroute.SubscriptionDownloadMeta{ContentType: meta.ContentType}, nil
+}
+
 func (a *installerDownloaderAdapter) DownloadFile(ctx context.Context, req installer.DownloadFileRequest) (installer.DownloadFileResult, error) {
 	if a == nil || a.svc == nil {
 		return installer.DownloadFileResult{}, fmt.Errorf("downloader service is not configured")
@@ -1959,8 +2013,8 @@ func (a *installerDownloaderAdapter) DownloadFile(ctx context.Context, req insta
 		Mode:         req.Mode,
 		// Intentional: do not atomically move to final binary here.
 		// Installer.Activate() performs chmod + final atomic rename.
-		Atomic:       false,
-		Progress:     req.Progress,
+		Atomic:   false,
+		Progress: req.Progress,
 	})
 	if err != nil {
 		return installer.DownloadFileResult{}, err

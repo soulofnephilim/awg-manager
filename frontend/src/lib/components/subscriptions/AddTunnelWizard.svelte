@@ -14,6 +14,7 @@
 		mergePastedShareList,
 		normalizeSpaceSeparatedShareLinks,
 	} from '$lib/utils/shareLinkListInput';
+	import DownloadRouteNote from '$lib/components/downloads/DownloadRouteNote.svelte';
 
 	type WizardKind = 'single' | 'inline' | 'url';
 
@@ -313,6 +314,7 @@
 			</label>
 
 			{#if kind === 'url'}
+				<DownloadRouteNote text="Подписка будет загружена через" />
 				<label class="row">
 					<span class="lbl">URL подписки</span>
 					<input

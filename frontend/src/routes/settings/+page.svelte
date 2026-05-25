@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from "svelte";
+	import { get } from "svelte/store";
 	import { afterNavigate } from "$app/navigation";
 	import { page } from "$app/stores";
 	import { api } from "$lib/api/client";
@@ -19,12 +20,18 @@
 		UsageLevelCard,
 	} from "$lib/components/settings";
 	import { setSettings as setGlobalSettings } from "$lib/stores/settings";
+	import {
+		downloadOutbounds,
+		downloadOutboundsLoading,
+		downloadOutboundsError,
+		ensureDownloadOutboundsLoaded,
+		resolveDownloadRouteLabel,
+	} from "$lib/stores/downloadRoute";
 	import type {
 		SystemInfo,
 		Settings,
 		UpdateInfo,
 		HydraRouteStatus,
-		DownloadOutbound,
 	} from "$lib/types";
 	import {
 		USAGE_LEVEL_LABELS,
@@ -35,7 +42,6 @@
 	} from "$lib/types/usageLevel";
 	import { usageLevel } from "$lib/stores/settings";
 	import { waitForBackendRestart } from "$lib/restartRecovery";
-	import { displayRouteName, maskSensitiveInText } from "$lib/utils/downloadRouteLabel";
 
 	const expandUsageLevel = $derived($page.url.searchParams.has('mode'));
 
@@ -47,10 +53,8 @@
 	const showSingboxIntegration = $derived(isSectionVisible($usageLevel, "singboxTunnels"));
 	const showHydraIntegration = $derived(isRoutingSubTabVisible($usageLevel, "hrNeo"));
 	const showDnsRouteCard = $derived(isRoutingSubTabVisible($usageLevel, "dnsRoutes"));
+	const downloadRouteLabel = $derived(resolveDownloadRouteLabel(settings, $downloadOutbounds));
 	let updateInfo: UpdateInfo | null = $state(null);
-	let downloadOutbounds = $state<DownloadOutbound[]>([]);
-	let downloadOutboundsLoading = $state(false);
-	let downloadOutboundsError = $state('');
 	let restarting = $state(false);
 	let restartConfirmOpen = $state(false);
 	let hydraStatus = $state<HydraRouteStatus | null>(null);
@@ -217,34 +221,21 @@
 	}
 
 	async function refreshDownloadOutbounds(showNotification = true) {
-		downloadOutboundsLoading = true;
-		downloadOutboundsError = '';
-		try {
-			const list = await api.listDownloadOutbounds();
-			downloadOutbounds = list;
-			if (showNotification) {
-				const tunnelCount = list.filter((ob) => ob.tag !== 'direct').length;
-				const availableTunnelCount = list.filter((ob) => ob.tag !== 'direct' && ob.available).length;
-				notifications.success(
-					tunnelCount > 0
-						? `Маршруты обновлены: найдено ${tunnelCount} туннелей (${availableTunnelCount} доступно)`
-						: 'Маршруты обновлены: туннели не найдены (доступен только Direct)'
-				);
-			}
-		} catch (e) {
-			downloadOutbounds = [];
-			const err = e as (Error & { status?: number; body?: { code?: string; message?: string } });
-			const code = err?.body?.code || '';
-			const message = err?.body?.message || err?.message || 'Не удалось загрузить список маршрутов';
-			const statusPart = err?.status ? ` [HTTP ${err.status}]` : '';
-			const codePart = code ? ` (${code})` : '';
-			downloadOutboundsError = `${message}${statusPart}${codePart}`;
-			if (showNotification) {
-				notifications.error(`Ошибка обновления маршрутов: ${downloadOutboundsError}`);
-			}
-		} finally {
-			downloadOutboundsLoading = false;
+		await ensureDownloadOutboundsLoaded(true);
+		if (!showNotification) return;
+		const err = get(downloadOutboundsError);
+		if (err) {
+			notifications.error(`Ошибка обновления маршрутов: ${err}`);
+			return;
 		}
+		const list = get(downloadOutbounds);
+		const tunnelCount = list.filter((ob) => ob.tag !== 'direct').length;
+		const availableTunnelCount = list.filter((ob) => ob.tag !== 'direct' && ob.available).length;
+		notifications.success(
+			tunnelCount > 0
+				? `Маршруты обновлены: найдено ${tunnelCount} туннелей (${availableTunnelCount} доступно)`
+				: 'Маршруты обновлены: туннели не найдены (доступен только Direct)'
+		);
 	}
 
 	async function selectDownloadRoute(routeTag: string) {
@@ -261,19 +252,6 @@
 		} finally {
 			saving = false;
 		}
-	}
-
-	function currentDownloadRouteLabel(): string {
-		const tag = settings?.download?.routeTag?.trim() || 'direct';
-		const match = downloadOutbounds.find((ob) => ob.tag === tag);
-		if (match) {
-			const rendered = displayRouteName(match.label, match.kind);
-			return `${rendered}${match.available ? '' : ' (недоступен)'}`;
-		}
-		if (tag === 'direct') {
-			return 'Direct (WAN) - без туннеля';
-		}
-		return `Недоступный маршрут: ${maskSensitiveInText(tag)}`;
 	}
 
 	function scrollToSettingsHashTarget() {
@@ -298,7 +276,7 @@ onMount(() => {
 			]);
 			settings = appSettings;
 			setGlobalSettings(appSettings);
-			await refreshDownloadOutbounds(false);
+			await ensureDownloadOutboundsLoaded();
 			scrollToSettingsHashTarget();
 		} catch (e) {
 			notifications.error(e instanceof Error ? e.message : "Не удалось загрузить настройки");
@@ -640,11 +618,11 @@ onMount(() => {
 				<div class="card">
 					<div class="section-label section-label-with-route">
 						<span>Обновление AWGM</span>
-						<span class="section-label-route" title={currentDownloadRouteLabel()}>
-							через {currentDownloadRouteLabel()}
+						<span class="section-label-route" title={downloadRouteLabel}>
+							через {downloadRouteLabel}
 						</span>
 					</div>
-					<UpdateSection bind:updateInfo downloadRouteLabel={currentDownloadRouteLabel()} />
+					<UpdateSection bind:updateInfo {downloadRouteLabel} />
 				</div>
 
 				<IntegrationsCard
@@ -661,7 +639,7 @@ onMount(() => {
 					onupdateSingbox={updateSingbox}
 					showSingbox={showSingboxIntegration}
 					showHydra={showHydraIntegration}
-					downloadRouteLabel={currentDownloadRouteLabel()}
+					{downloadRouteLabel}
 				/>
 			</aside>
 
@@ -711,9 +689,9 @@ onMount(() => {
 					<DownloadSettings
 						bind:settings
 						{saving}
-						outbounds={downloadOutbounds}
-						loading={downloadOutboundsLoading}
-						error={downloadOutboundsError}
+						outbounds={$downloadOutbounds}
+						loading={$downloadOutboundsLoading}
+						error={$downloadOutboundsError}
 						onRefresh={refreshDownloadOutbounds}
 						onSelectRoute={selectDownloadRoute}
 					/>
@@ -731,7 +709,12 @@ onMount(() => {
 
 				{#if systemInfo.isOS5 && showDnsRouteCard}
 					<div class="card">
-						<div class="section-label">DNS-маршрутизация</div>
+						<div class="section-label section-label-with-route">
+							<span>DNS-маршрутизация</span>
+							<span class="section-label-route" title={`DNSRoute URL-списки загружаются через ${downloadRouteLabel}`}>
+								списки через {downloadRouteLabel}
+							</span>
+						</div>
 						<DnsRouteSettings
 							bind:settings
 							{saving}
