@@ -1,9 +1,13 @@
 <script lang="ts">
     import { Modal, Button } from '$lib/components/ui';
     import AmneziaConfEditor from './AmneziaConfEditor.svelte';
+    import VpnLinkPasteImport from './VpnLinkPasteImport.svelte';
     import { api } from '$lib/api/client';
     import { notifications } from '$lib/stores/notifications';
-    import { decodeVpnLink, isVpnLink } from '$lib/utils/vpnlink';
+    import { isVpnLink } from '$lib/utils/vpnlink';
+    import { getVpnPastePresentation } from '$lib/utils/amneziaPremiumVpnPaste';
+
+    const PREMIUM_VPN_KEY_STORAGE = 'awgm.tunnels.replace.premiumVpnKey';
 
     interface Props {
         open: boolean;
@@ -33,10 +37,12 @@
     let activeTab = $state<'file' | 'paste' | 'link'>('file');
     let fileInput = $state<HTMLInputElement>();
     let dragOver = $state(false);
-    let linkInput = $state('');
+    let vpnPasteInput = $state('');
     let linkPreview = $state('');
-    let linkError = $state('');
+    let vpnPasteImport = $state<VpnLinkPasteImport>();
     let wasOpen = $state(false);
+
+    let vpnPastePresentation = $derived(getVpnPastePresentation(vpnPasteInput));
 
     // Reset state when modal opens (only once per open cycle so polling-tick
     // re-runs don't wipe user edits).
@@ -45,14 +51,13 @@
             wasOpen = false;
             return;
         }
-        if (wasOpen) return; // already initialised — user may be editing
+        if (wasOpen) return;
         wasOpen = true;
         importContent = '';
         newName = tunnelName;
         activeTab = 'file';
-        linkInput = '';
+        vpnPasteInput = '';
         linkPreview = '';
-        linkError = '';
         loading = false;
     });
 
@@ -86,20 +91,14 @@
         reader.readAsText(file);
     }
 
-    function handleLinkInput() {
-        linkError = '';
-        linkPreview = '';
-        if (!linkInput.trim()) {
-            importContent = '';
-            return;
-        }
-        try {
-            const result = decodeVpnLink(linkInput);
-            linkPreview = result.config;
-            importContent = result.config;
-        } catch (e) {
-            linkError = e instanceof Error ? e.message : 'Ошибка декодирования';
-            importContent = '';
+    function activateLinkTab() {
+        activeTab = 'link';
+        void vpnPasteImport?.analyzeNow();
+    }
+
+    function handlePremiumCountryConfig(_config: string, meta: { suggestedName?: string }) {
+        if (meta.suggestedName && newName === tunnelName) {
+            newName = meta.suggestedName;
         }
     }
 
@@ -107,15 +106,10 @@
         let content = importContent.trim();
         if (!content) return;
 
-        // Auto-detect vpn:// in paste tab
-        if (isVpnLink(content)) {
-            try {
-                const result = decodeVpnLink(content);
-                content = result.config;
-            } catch (e) {
-                notifications.error(e instanceof Error ? e.message : 'Ошибка декодирования vpn:// ссылки');
-                return;
-            }
+        // Auto-detect vpn:// in paste tab (link tab already decodes via VpnLinkPasteImport)
+        if (activeTab === 'paste' && isVpnLink(content)) {
+            notifications.error('Для vpn:// используйте вкладку «Ссылка»');
+            return;
         }
 
         loading = true;
@@ -172,12 +166,18 @@
             </svg>
             Вставить текст
         </button>
-        <button class="tab" class:tab-active={activeTab === 'link'} onclick={() => activeTab = 'link'}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-            </svg>
-            Ссылка
+        <button type="button" class="tab" class:tab-active={activeTab === 'link'} onclick={activateLinkTab}>
+            {#if vpnPastePresentation.kind === 'premium'}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true">
+                    <path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.078 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z" />
+                </svg>
+            {:else}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+            {/if}
+            {vpnPastePresentation.label}
         </button>
     </div>
 
@@ -226,18 +226,16 @@
                 placeholder={"[Interface]\nPrivateKey = ...\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = ...\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0"}
             />
         {:else if activeTab === 'link'}
-            <textarea
-                class="config-textarea link-input"
-                bind:value={linkInput}
-                oninput={handleLinkInput}
-                placeholder="Вставьте vpn:// ссылку из AmneziaVPN"
-            ></textarea>
-            {#if linkError}
-                <p class="link-error">{linkError}</p>
-            {/if}
-            {#if linkPreview}
-                <AmneziaConfEditor bind:value={linkPreview} variant="modal-preview" readonly />
-            {/if}
+            <VpnLinkPasteImport
+                bind:this={vpnPasteImport}
+                bind:value={vpnPasteInput}
+                bind:configContent={importContent}
+                bind:linkPreview
+                storageKey={PREMIUM_VPN_KEY_STORAGE}
+                variant="modal"
+                loadStoredKeyOnMount={true}
+                oncountryconfig={handlePremiumCountryConfig}
+            />
         {/if}
     </div>
 
@@ -331,30 +329,6 @@
         margin-top: 0;
     }
 
-    .config-textarea {
-        width: 100%;
-        min-height: 180px;
-        padding: 12px;
-        font-family: monospace;
-        font-size: 0.75rem;
-        line-height: 1.5;
-        background: var(--bg-primary);
-        border: 1px solid var(--border);
-        border-top: none;
-        border-radius: 0 0 8px 8px;
-        color: var(--text-primary);
-        resize: vertical;
-    }
-
-    .config-textarea:focus {
-        outline: none;
-        border-color: var(--accent);
-    }
-
-    .config-textarea::placeholder {
-        color: var(--text-muted);
-    }
-
     .file-drop-zone {
         margin-top: 1rem;
         min-height: 140px;
@@ -408,16 +382,6 @@
     .drop-hint {
         font-size: 0.75rem;
         color: var(--text-muted);
-    }
-
-    .link-input {
-        min-height: 80px;
-    }
-
-    .link-error {
-        font-size: 0.75rem;
-        color: var(--error);
-        margin: 6px 0 0;
     }
 
     .name-field {
