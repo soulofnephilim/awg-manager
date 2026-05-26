@@ -1156,6 +1156,7 @@ func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 					"tunnelId":    refErr.TunnelID,
 					"deviceProxy": refErr.DeviceProxy,
 					"routerRules": refErr.RouterRules,
+					"routerOther": refErr.RouterOther,
 				},
 			})
 			return
