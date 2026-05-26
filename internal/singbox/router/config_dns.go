@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -23,9 +24,19 @@ var validDNSStrategies = map[string]bool{
 }
 
 var validDNSRuleActions = map[string]bool{
-	"":       true,
-	"route":  true,
-	"reject": true,
+	"":           true,
+	"route":      true,
+	"reject":     true,
+	"predefined": true,
+}
+
+var validDNSRcodes = map[string]bool{
+	"NOERROR": true, "FORMERR": true, "SERVFAIL": true,
+	"NXDOMAIN": true, "NOTIMP": true, "REFUSED": true,
+}
+
+var validRejectMethods = map[string]bool{
+	"": true, "default": true, "drop": true,
 }
 
 func validateDNSServer(s DNSServer) error {
@@ -59,12 +70,27 @@ func validateDNSRule(r DNSRule, serverTags map[string]bool) error {
 	if !dnsRuleHasMatcher(r) {
 		return ErrInvalidMatchers
 	}
+	for _, rx := range r.DomainRegex {
+		if _, err := regexp.Compile(rx); err != nil {
+			return fmt.Errorf("dns rule: invalid domain_regex %q: %w", rx, err)
+		}
+	}
 	if !validDNSRuleActions[r.Action] {
 		return fmt.Errorf("dns rule: unknown action %q", r.Action)
 	}
-	if r.Action == "reject" {
+	switch r.Action {
+	case "reject":
+		if !validRejectMethods[r.RejectMethod] {
+			return fmt.Errorf("dns rule: unknown reject method %q", r.RejectMethod)
+		}
+		return nil
+	case "predefined":
+		if r.Rcode != "" && !validDNSRcodes[r.Rcode] {
+			return fmt.Errorf("dns rule: unknown rcode %q", r.Rcode)
+		}
 		return nil
 	}
+	// route (или пустое действие)
 	if strings.TrimSpace(r.Server) == "" {
 		return fmt.Errorf("dns rule: server is required when action is route")
 	}
@@ -79,6 +105,7 @@ func dnsRuleHasMatcher(r DNSRule) bool {
 		len(r.DomainSuffix) > 0 ||
 		len(r.Domain) > 0 ||
 		len(r.DomainKeyword) > 0 ||
+		len(r.DomainRegex) > 0 ||
 		len(r.QueryType) > 0
 }
 
