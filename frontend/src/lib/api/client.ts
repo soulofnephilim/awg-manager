@@ -79,6 +79,7 @@ import type {
 	SingboxRouterDNSRewrite,
 	SingboxRouterInspectRequest,
 	SingboxRouterInspectResult,
+	SingboxRouterInspectProgress,
 	SingboxProxiesListResponse,
 	SingboxProxiesSelectRequest,
 	SingboxProxiesTestRequest,
@@ -1962,6 +1963,51 @@ class ApiClient {
 			method: 'POST',
 			body: JSON.stringify(req),
 		});
+	}
+
+	singboxRouterInspectRouteStream(
+		req: SingboxRouterInspectRequest,
+		handlers: {
+			onProgress: (progress: SingboxRouterInspectProgress) => void;
+			onResult: (result: SingboxRouterInspectResult) => void;
+			onInspectError: (message: string) => void;
+			onError: (message: string) => void;
+		},
+	): EventSource {
+		const qs = new URLSearchParams();
+		qs.set('domain', req.domain);
+		if (typeof req.port === 'number') qs.set('port', String(req.port));
+		if (req.protocol) qs.set('protocol', req.protocol);
+		const es = new EventSource(`${this.baseUrl}/singbox/router/inspect/stream?${qs.toString()}`);
+		es.addEventListener('progress', (e) => {
+			try {
+				const payload = JSON.parse((e as MessageEvent).data);
+				if (payload?.progress) handlers.onProgress(payload.progress as SingboxRouterInspectProgress);
+			} catch {}
+		});
+		es.addEventListener('result', (e) => {
+			try {
+				const payload = JSON.parse((e as MessageEvent).data);
+				if (payload?.result) handlers.onResult(payload.result as SingboxRouterInspectResult);
+			} catch (err) {
+				handlers.onError(err instanceof Error ? err.message : 'Invalid stream result');
+			}
+			es.close();
+		});
+		es.addEventListener('inspect-error', (e) => {
+			try {
+				const payload = JSON.parse((e as MessageEvent).data);
+				handlers.onInspectError(String(payload?.error ?? 'Inspect failed'));
+			} catch {
+				handlers.onInspectError('Inspect failed');
+			}
+			es.close();
+		});
+		es.addEventListener('error', () => {
+			handlers.onError('Stream connection lost');
+			es.close();
+		});
+		return es;
 	}
 
 	async singboxRouterStagingStatus(): Promise<RouterStagingStatusResponse> {

@@ -5,6 +5,7 @@
 	import type {
 		SingboxRouterInspectResult,
 		SingboxRouterInspectMatch,
+		SingboxRouterInspectProgress,
 	} from '$lib/types';
 
 	interface Props {
@@ -23,6 +24,8 @@
 	let inspectStartedAt = $state<number | null>(null);
 	let elapsedSec = $state(0);
 	let progressTimer = $state<ReturnType<typeof setInterval> | null>(null);
+	let inspectStream = $state<EventSource | null>(null);
+	let progressEvents = $state<string[]>([]);
 	let result = $state<SingboxRouterInspectResult | null>(null);
 	let error = $state('');
 	let showAllRules = $state(false);
@@ -42,6 +45,25 @@
 		}
 		inspectStartedAt = null;
 		elapsedSec = 0;
+	}
+
+	function appendProgressEvent(line: string): void {
+		progressEvents = [...progressEvents, line].slice(-8);
+	}
+
+	function formatProgressFallback(progress: SingboxRouterInspectProgress): string {
+		switch (progress.phase) {
+			case 'rule_start':
+				return `Проверяем правило #${(progress.ruleIndex ?? 0) + 1} из ${progress.ruleTotal ?? 0}`;
+			case 'rule_done':
+				return `Проверка правила #${(progress.ruleIndex ?? 0) + 1} завершена`;
+			case 'rule_set_start':
+				return `Проверяем rule_set ${progress.ruleSetTag ?? ''}`.trim();
+			case 'rule_set_match_start':
+				return `Проверяем rule_set ${progress.ruleSetTag ?? ''} через sing-box…`.trim();
+			default:
+				return progress.phase;
+		}
 	}
 
 	const progressMessage = $derived.by(() => {
@@ -71,22 +93,59 @@
 		showAllRules = false;
 
 		try {
-			const next = await api.singboxRouterInspectRoute({
-				domain: trimmed,
-				port: typeof port === 'number' && port > 0 ? port : undefined,
-				protocol: protocol || undefined,
-			});
-			if (runId !== inspectRunId) return;
-			result = next;
+			progressEvents = [];
+			inspectStream?.close();
+			inspectStream = api.singboxRouterInspectRouteStream(
+				{
+					domain: trimmed,
+					port: typeof port === 'number' && port > 0 ? port : undefined,
+					protocol: protocol || undefined,
+				},
+				{
+					onProgress: (progress: SingboxRouterInspectProgress) => {
+						if (runId !== inspectRunId) return;
+						appendProgressEvent(progress.message || formatProgressFallback(progress));
+					},
+					onResult: (next) => {
+						if (runId !== inspectRunId) return;
+						result = next;
+						testing = false;
+						stopProgressTimer();
+						inspectStream?.close();
+						inspectStream = null;
+					},
+					onInspectError: (message) => {
+						if (runId !== inspectRunId) return;
+						error = message;
+						notifications.error(`Не удалось проверить маршрут: ${message}`);
+						testing = false;
+						stopProgressTimer();
+						inspectStream?.close();
+						inspectStream = null;
+					},
+					onError: (message) => {
+						if (runId !== inspectRunId) return;
+						error = message;
+						notifications.error(`Не удалось проверить маршрут: ${message}`);
+						testing = false;
+						stopProgressTimer();
+						inspectStream?.close();
+						inspectStream = null;
+					},
+				},
+			);
 		} catch (e) {
 			if (runId !== inspectRunId) return;
 			const msg = e instanceof Error ? e.message : String(e);
 			error = msg;
 			notifications.error(`Не удалось проверить маршрут: ${msg}`);
+			testing = false;
+			stopProgressTimer();
+			inspectStream?.close();
+			inspectStream = null;
 		} finally {
 			if (runId === inspectRunId) {
-				testing = false;
-				stopProgressTimer();
+				// SSE callbacks finalize the run.
 			}
 		}
 	}
@@ -104,6 +163,8 @@
 
 	function reset(): void {
 		inspectRunId += 1;
+		inspectStream?.close();
+		inspectStream = null;
 		stopProgressTimer();
 		inputValue = '';
 		port = '';
@@ -112,6 +173,7 @@
 		error = '';
 		showAllRules = false;
 		advancedOpen = false;
+		progressEvents = [];
 	}
 
 	function close(): void {
@@ -222,6 +284,13 @@
 				<div class="progress-message">{progressMessage}</div>
 				<div class="progress-elapsed">Прошло: {elapsedSec} сек</div>
 				<div class="progress-hint">Инспектор симулирует правила и может проверять rule_set через sing-box.</div>
+				{#if progressEvents.length > 0}
+					<ul class="progress-log">
+						{#each progressEvents as line, idx (`${idx}-${line}`)}
+							<li>{line}</li>
+						{/each}
+					</ul>
+				{/if}
 			</section>
 		{/if}
 
@@ -277,8 +346,10 @@
 					</div>
 				{:else}
 					<div class="match-detail no-match">
-						Ни одно правило не сработало — трафик пойдёт через
-						<strong>{result.final || 'direct'}</strong>.
+						<span>
+							Ни одно правило не сработало — трафик пойдёт через
+							<strong>{result.final || 'direct'}</strong>.
+						</span>
 					</div>
 				{/if}
 			</section>
@@ -563,8 +634,17 @@
 	}
 
 	.match-detail.no-match {
+		display: block;
 		color: var(--color-text-secondary);
 		font-size: 13px;
+		line-height: 1.5;
+	}
+
+	.match-detail.no-match strong {
+		display: inline;
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		color: var(--color-text-primary);
+		font-weight: 600;
 	}
 
 	.match-header {
@@ -777,5 +857,12 @@
 	.progress-hint {
 		font-size: 11px;
 		color: var(--color-text-muted);
+	}
+
+	.progress-log {
+		margin: 0.25rem 0 0;
+		padding-left: 1rem;
+		font-size: 11px;
+		color: var(--color-text-secondary);
 	}
 </style>

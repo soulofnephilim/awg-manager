@@ -2749,6 +2749,36 @@ definitions:
         example: 'совпало по: domain_suffix'
         type: string
     type: object
+  api.SingboxRouterInspectProgressDTO:
+    properties:
+      final:
+        example: direct
+        type: string
+      message:
+        example: Проверяем rule_set geosite-youtube через sing-box…
+        type: string
+      phase:
+        example: rule_set_match_start
+        type: string
+      ruleIndex:
+        example: 3
+        type: integer
+      ruleSetIndex:
+        example: 0
+        type: integer
+      ruleSetTag:
+        example: geosite-youtube
+        type: string
+      ruleSetTotal:
+        example: 2
+        type: integer
+      ruleTotal:
+        example: 17
+        type: integer
+      usingDraft:
+        example: true
+        type: boolean
+    type: object
   api.SingboxRouterInspectRequest:
     properties:
       domain:
@@ -2768,6 +2798,19 @@ definitions:
       success:
         example: true
         type: boolean
+    type: object
+  api.SingboxRouterInspectStreamEventDTO:
+    properties:
+      error:
+        example: 'load router config: ...'
+        type: string
+      progress:
+        $ref: '#/definitions/api.SingboxRouterInspectProgressDTO'
+      result:
+        $ref: '#/definitions/api.SingboxRouterInspectData'
+      type:
+        example: progress
+        type: string
     type: object
   api.SingboxRouterIssueDTO:
     properties:
@@ -8755,6 +8798,45 @@ paths:
       security:
       - CookieAuth: []
       summary: Inspect router routing decision
+      tags:
+      - singbox-router
+  /singbox/router/inspect/stream:
+    get:
+      description: 'Streams route-inspector progress via Server-Sent Events. Event
+        names: progress, result, inspect-error. Data payload for each event is JSON
+        shaped as SingboxRouterInspectStreamEventDTO.'
+      parameters:
+      - description: Domain or IP to test
+        in: query
+        name: domain
+        required: true
+        type: string
+      - description: Destination port, 0-65535
+        in: query
+        name: port
+        type: integer
+      - description: Protocol (tcp/udp)
+        in: query
+        name: protocol
+        type: string
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE event data payload
+          schema:
+            $ref: '#/definitions/api.SingboxRouterInspectStreamEventDTO'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Inspect router routing decision (SSE stream)
       tags:
       - singbox-router
   /singbox/router/outbounds/add:

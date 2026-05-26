@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -113,6 +114,17 @@ func (m *mockRouterSvc) SetDNSGlobals(ctx context.Context, final, strategy strin
 }
 func (m *mockRouterSvc) Inspect(ctx context.Context, input router.InspectInput) (router.InspectResult, error) {
 	return router.InspectResult{Input: input.Domain, InputType: "domain", Destination: "direct", MatchedRule: -1, Matches: []router.RuleMatchResult{}, Final: "direct"}, nil
+}
+func (m *mockRouterSvc) InspectStream(ctx context.Context, input router.InspectInput) (<-chan router.InspectStreamEvent, error) {
+	ch := make(chan router.InspectStreamEvent, 1)
+	ch <- router.InspectStreamEvent{
+		Type: "result",
+		Result: &router.InspectResult{
+			Input: input.Domain, InputType: "domain", Destination: "direct", MatchedRule: -1, Matches: []router.RuleMatchResult{}, Final: "direct",
+		},
+	}
+	close(ch)
+	return ch, nil
 }
 
 func (m *mockRouterSvc) StagingStatus(_ context.Context) router.StagingStatus {
@@ -412,5 +424,60 @@ func TestAddRule_RegressionStagesNotApplies(t *testing.T) {
 	activePath := filepath.Join(dir, "20-router.json")
 	if _, err := os.Stat(activePath); !os.IsNotExist(err) {
 		t.Errorf("active file should not exist, got err=%v", err)
+	}
+}
+
+func TestInspectStream_InvalidPortNotNumber_Returns400(t *testing.T) {
+	h := newMockRouterHandler(&mockRouterSvc{})
+	req := httptest.NewRequest(http.MethodGet, "/api/singbox/router/inspect/stream?domain=google.com&port=abc", nil)
+	rr := httptest.NewRecorder()
+	h.InspectStream(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInspectStream_InvalidPortRange_Returns400(t *testing.T) {
+	h := newMockRouterHandler(&mockRouterSvc{})
+	req := httptest.NewRequest(http.MethodGet, "/api/singbox/router/inspect/stream?domain=google.com&port=70000", nil)
+	rr := httptest.NewRecorder()
+	h.InspectStream(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInspectStream_InvalidProtocol_Returns400(t *testing.T) {
+	h := newMockRouterHandler(&mockRouterSvc{})
+	req := httptest.NewRequest(http.MethodGet, "/api/singbox/router/inspect/stream?domain=google.com&protocol=icmp", nil)
+	rr := httptest.NewRecorder()
+	h.InspectStream(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInspectStream_ValidParams_Returns200SSE(t *testing.T) {
+	h := newMockRouterHandler(&mockRouterSvc{})
+	req := httptest.NewRequest(http.MethodGet, "/api/singbox/router/inspect/stream?domain=google.com&port=443&protocol=tcp", nil)
+	rr := httptest.NewRecorder()
+	h.InspectStream(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("unexpected content-type: %q", got)
+	}
+}
+
+func TestInspectPost_InvalidPortAndProtocol_Returns400(t *testing.T) {
+	h := newMockRouterHandler(&mockRouterSvc{})
+	body := strings.NewReader(`{"domain":"google.com","port":70000,"protocol":"icmp"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/inspect", body)
+	rr := httptest.NewRecorder()
+	h.Inspect(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		b, _ := io.ReadAll(rr.Body)
+		t.Fatalf("want 400, got %d body=%s", rr.Code, string(b))
 	}
 }

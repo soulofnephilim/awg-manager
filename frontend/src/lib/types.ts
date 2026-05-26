@@ -1372,6 +1372,18 @@ export interface SingboxRouterInspectRequest {
 	protocol?: string;
 }
 
+export interface SingboxRouterInspectProgress {
+	phase: string;
+	message: string;
+	ruleIndex?: number;
+	ruleTotal?: number;
+	ruleSetTag?: string;
+	ruleSetIndex?: number;
+	ruleSetTotal?: number;
+	final?: string;
+	usingDraft?: boolean;
+}
+
 export interface SingboxRouterRuleSet {
 	tag: string;
 	type: 'remote' | 'local' | 'inline';

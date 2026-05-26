@@ -73,10 +73,18 @@ type Service interface {
 	SetDNSGlobals(ctx context.Context, final, strategy string) error
 
 	Inspect(ctx context.Context, input InspectInput) (InspectResult, error)
+	InspectStream(ctx context.Context, input InspectInput) (<-chan InspectStreamEvent, error)
 
 	StagingStatus(ctx context.Context) StagingStatus
 	ApplyStaging(ctx context.Context) (orchestrator.ValidationResult, error)
 	DiscardStaging(ctx context.Context) error
+}
+
+type InspectStreamEvent struct {
+	Type     string           `json:"type"`
+	Progress *InspectProgress `json:"progress,omitempty"`
+	Result   *InspectResult   `json:"result,omitempty"`
+	Error    string           `json:"error,omitempty"`
 }
 
 type SingboxController interface {
@@ -1660,6 +1668,73 @@ func (s *ServiceImpl) Inspect(ctx context.Context, input InspectInput) (InspectR
 		s.inspectCache = newRuleSetCache("")
 	})
 	return Inspect(input, cfg.Route.Rules, cfg.Route.RuleSet, final, binary, s.inspectCache), nil
+}
+
+func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-chan InspectStreamEvent, error) {
+	ch := make(chan InspectStreamEvent, 32)
+	go func() {
+		defer close(ch)
+		emitEvent := func(ev InspectStreamEvent) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case ch <- ev:
+				return true
+			}
+		}
+		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{Phase: "start", Message: "Запускаем инспектор маршрутов…"}}) {
+			return
+		}
+		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{Phase: "load_config", Message: "Загружаем конфигурацию маршрутизации…"}}) {
+			return
+		}
+		cfg, err := s.loadRouterConfig()
+		if err != nil {
+			emitEvent(InspectStreamEvent{Type: "inspect-error", Error: err.Error()})
+			return
+		}
+		if cfg == nil {
+			cfg = NewEmptyConfig()
+		}
+		final := cfg.Route.Final
+		if final == "" {
+			final = "direct"
+		}
+		usingDraft := false
+		if s.deps.Orch != nil {
+			usingDraft = s.deps.Orch.DraftInfo(orchestrator.SlotRouter).HasDraft
+		}
+		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{
+			Phase:      "config_loaded",
+			Message:    fmt.Sprintf("Конфигурация загружена: %d правил, %d rule_set, final: %s", len(cfg.Route.Rules), len(cfg.Route.RuleSet), final),
+			RuleTotal:  intPtr(len(cfg.Route.Rules)),
+			RuleSetTotal: intPtr(len(cfg.Route.RuleSet)),
+			Final:      final,
+			UsingDraft: usingDraft,
+		}}) {
+			return
+		}
+		binary := ""
+		if s.deps.Singbox != nil {
+			binary = s.deps.Singbox.Binary()
+		}
+		s.inspectCacheOnce.Do(func() {
+			s.inspectCache = newRuleSetCache("")
+		})
+		res := InspectWithProgress(input, cfg.Route.Rules, cfg.Route.RuleSet, final, binary, s.inspectCache, func(p InspectProgress) {
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- InspectStreamEvent{Type: "progress", Progress: &p}:
+			}
+		})
+		select {
+		case <-ctx.Done():
+			return
+		case ch <- InspectStreamEvent{Type: "result", Result: &res}:
+		}
+	}()
+	return ch, nil
 }
 
 // ---------------------------------------------------------------------------
