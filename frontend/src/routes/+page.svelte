@@ -3320,5 +3320,11 @@
 			width: 100%;
 			min-height: 32px;
 		}
+
+		/* When there's only "+ Добавить" (no GridListToggle), move it to the right cell. */
+		.toolbar-actions > :global(.btn):only-child {
+			grid-column: 2 / 3;
+			justify-self: stretch;
+		}
 	}
 </style>
