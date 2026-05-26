@@ -51,8 +51,9 @@
 	import { resolveSubscriptionMemberTag } from '$lib/utils/subscriptionMember';
 	import {
 		SINGBOX_LAYOUT_STORAGE_KEY,
-		TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX,
 		parseSingboxLayoutMode,
+		readTunnelMobileLayout,
+		subscribeTunnelMobileLayout,
 		type SingboxLayoutMode,
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode as getIsMockDevMode } from '$lib/env';
@@ -504,7 +505,7 @@
 	let activeTab = $state<TunnelTab>('awg');
 	let awgViewMode = $state<AwgTunnelViewMode>('compact');
 	let awgViewModeReady = false;
-	let isAwgMobile = $state(false);
+	let isAwgMobile = $state(readTunnelMobileLayout());
 	let showAwgViewModeSwitch = $derived($usageLevel !== 'basic');
 	let singboxTunnelsLayoutMode = $state<SingboxLayoutMode>('compact');
 	let singboxSubscriptionsLayoutMode = $state<SingboxLayoutMode>('compact');
@@ -521,7 +522,8 @@
 			? 'compact'
 			: singboxSubscriptionsLayoutMode,
 	);
-	let showSingboxGridListToggle = $derived(showSingboxListOption && !isAwgMobile);
+	let showSingboxLayoutPicker = $derived(!isAwgMobile);
+	let showSingboxGridListToggle = $derived(showSingboxListOption && showSingboxLayoutPicker);
 	let awgEffectiveViewMode = $derived<AwgTunnelViewMode>(
 		isAwgMobile || !showAwgViewModeSwitch ? 'compact' : awgViewMode
 	);
@@ -572,16 +574,9 @@
 		singboxSubscriptionsLayoutReady = true;
 	});
 
-	onMount(() => {
-		const media = window.matchMedia(`(max-width: ${TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX}px)`);
-		const sync = (event?: MediaQueryList | MediaQueryListEvent) => {
-			isAwgMobile = event ? event.matches : media.matches;
-		};
-
-		sync(media);
-		media.addEventListener('change', sync);
-		return () => media.removeEventListener('change', sync);
-	});
+	onMount(() => subscribeTunnelMobileLayout((mobile) => {
+		isAwgMobile = mobile;
+	}));
 
 	$effect(() => {
 		if (!awgViewModeReady) return;
@@ -601,6 +596,11 @@
 		);
 	});
 
+	$effect(() => {
+		if (!isAwgMobile) return;
+		if (singboxTunnelsLayoutMode === 'dense') singboxTunnelsLayoutMode = 'compact';
+		if (singboxSubscriptionsLayoutMode === 'dense') singboxSubscriptionsLayoutMode = 'compact';
+	});
 
 	let awgAutoConnectivityNonce = $state(0);
 	let singboxAutoDelayCheckNonce = $state(0);
@@ -1751,7 +1751,7 @@
 							{subscriptionsList.length === 1 ? 'подписка' : subscriptionsList.length < 5 ? 'подписки' : 'подписок'}
 						</span>
 						<div class="toolbar-actions">
-							{#if subscriptionsList.length > 0}
+							{#if subscriptionsList.length > 0 && showSingboxLayoutPicker}
 								<GridListToggle
 									value={singboxSubscriptionsEffectiveLayout}
 									showListOption={showSingboxGridListToggle}
@@ -1883,7 +1883,7 @@
 						{singboxTunnelsList.length === 1 ? 'туннель' : singboxTunnelsList.length < 5 ? 'туннеля' : 'туннелей'}
 					</span>
 					<div class="toolbar-actions">
-						{#if singboxTunnelsList.length > 0}
+						{#if singboxTunnelsList.length > 0 && showSingboxLayoutPicker}
 							<GridListToggle
 								value={singboxTunnelsEffectiveLayout}
 								showListOption={showSingboxGridListToggle}

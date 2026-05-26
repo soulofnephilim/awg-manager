@@ -174,29 +174,19 @@
 		display: flex;
 		padding: 5px;
 		background: none;
-		border: 1px solid transparent;
-		color: var(--text-muted);
+		border: none;
+		color: var(--border-hover);
 		cursor: pointer;
-		border-radius: 6px;
-		transition: all 0.15s;
+		border-radius: 4px;
+		transition: color 0.15s;
 	}
 
-	.action-btn.edit {
+	.action-btn:hover {
 		color: var(--accent);
-	}
-
-	.action-btn.danger {
-		color: var(--error);
-	}
-
-	.action-btn.edit:hover {
-		color: var(--accent);
-		background: var(--bg-hover);
 	}
 
 	.action-btn.danger:hover {
 		color: var(--error);
-		background: rgba(247, 118, 142, 0.1);
 	}
 
 	.select-cell {

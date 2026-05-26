@@ -812,13 +812,13 @@
 	}
 
 	.card.view-dense .dense-toolbar-top .dot {
-		width: 6px;
-		height: 6px;
+		width: var(--sbx-status-dot-dense);
+		height: var(--sbx-status-dot-dense);
 	}
 
 	.details-dense-cols {
 		display: grid;
-		grid-template-columns: minmax(0, 1.2fr) 4.75rem;
+		grid-template-columns: minmax(0, 1.2fr) 5.75rem;
 		gap: 10px 10px;
 		align-items: start;
 	}
@@ -860,20 +860,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		line-height: 1.25;
-	}
-
-	.card.view-dense .actions {
-		gap: 2px;
-		justify-content: center;
-		margin-top: 0;
-		padding: 0;
-		border: none;
-	}
-
-	.card.view-dense .action-btn {
-		padding: 3px 6px;
-		font-size: var(--sbx-card-action-dense);
-		gap: 3px;
 	}
 
 	.card.view-dense .details {
@@ -1051,8 +1037,8 @@
 		gap: 6px;
 	}
 	.dot {
-		width: 9px;
-		height: 9px;
+		width: var(--sbx-status-dot);
+		height: var(--sbx-status-dot);
 		border-radius: 50%;
 		background: var(--text-muted);
 	}
@@ -1064,6 +1050,7 @@
 	.title {
 		margin: 0;
 		font-size: var(--sbx-card-title);
+		line-height: var(--sbx-card-title-line-height);
 		font-weight: 600;
 		padding-right: 90px;
 	}
@@ -1231,10 +1218,18 @@
 		display: flex;
 		gap: 6px;
 		justify-content: flex-end;
+		align-items: center;
 		margin-top: 12px;
 		padding: 10px 0;
-		border-top: 1px solid var(--border);
-		border-bottom: 1px solid var(--border);
+		border-top: 1px solid var(--color-border);
+		border-bottom: 1px solid var(--color-border);
+	}
+	.card.view-dense .actions {
+		gap: 2px;
+		justify-content: center;
+		margin-top: 0;
+		padding: 0;
+		border: none;
 	}
 	.action-btn {
 		display: inline-flex;
@@ -1245,12 +1240,17 @@
 		font-weight: 500;
 		border: none;
 		background: transparent;
-		color: var(--color-text-muted);
+		color: var(--color-text-secondary);
 		cursor: pointer;
 		border-radius: var(--radius-sm);
 		text-decoration: none;
 		font-family: inherit;
 		transition: background var(--t-fast) ease, color var(--t-fast) ease;
+	}
+	.card.view-dense .action-btn {
+		padding: 3px 6px;
+		font-size: var(--sbx-card-action-dense);
+		gap: 3px;
 	}
 	.action-btn:hover:not(:disabled) {
 		background: var(--color-bg-hover);
@@ -1259,6 +1259,14 @@
 	.action-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+	.action-btn.action-danger:hover:not(:disabled) {
+		color: var(--color-error);
+		background: var(--color-error-tint);
+	}
+	.action-btn.action-test:hover:not(:disabled) {
+		color: var(--color-success);
+		background: var(--color-success-tint);
 	}
 	.chart-section {
 		margin: 0 -14px -12px;
@@ -1396,14 +1404,5 @@
 	.list-actions .action-btn {
 		justify-content: center;
 		padding: 0.375rem;
-	}
-	.action-danger:hover:not(:disabled),
-	.list-actions :global(.action-danger:hover:not(:disabled)) {
-		color: #ff6b6b;
-		background: rgba(239, 68, 68, 0.18);
-	}
-	.action-btn.action-test:hover:not(:disabled) {
-		color: var(--color-success, #9ece6a);
-		background: var(--color-success-tint, rgba(158, 206, 106, 0.28));
 	}
 </style>

@@ -244,6 +244,7 @@ html.light, [data-theme="light"] {
 
   /* Sing-box / subscription card typography — AWG TunnelCard .view-compact (px). */
   --sbx-card-title: 14px;
+  --sbx-card-title-line-height: 1.5;
   --sbx-card-meta: 11px;
   --sbx-card-note: 11px;
   --sbx-card-label: 10px;
@@ -252,6 +253,9 @@ html.light, [data-theme="light"] {
   --sbx-card-status: 12px;
   --sbx-card-action: 11px;
   --sbx-card-action-dense: 10px;
+  /* Status LED beside tunnel/subscription titles (list delay column uses --sbx-status-dot). */
+  --sbx-status-dot: 8px;
+  --sbx-status-dot-dense: 6px;
 
   /* Page / header gutters (по умолчанию; компакт — data-layout-compact). */
   --layout-gutter-x: 1.5rem;
@@ -704,6 +708,16 @@ label {
 }
 
 .setting-row + .setting-row {
+	border-top: 1px solid var(--border);
+}
+
+/* Expanded panel (e.g. DNS subscription refresh) breaks adjacent .setting-row chain */
+.setting-row + .settings-panel {
+	margin-top: 0.875rem;
+}
+
+.settings-panel + .setting-row {
+	margin-top: 0.875rem;
 	border-top: 1px solid var(--border);
 }
 
@@ -1164,6 +1178,14 @@ label {
 }
 .tunnel-grid > * {
 	min-width: 0;
+}
+
+/* Sing-box layout picker — hidden below 760px (see TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX) */
+@media (max-width: 760px) {
+	.members-toolbar,
+	.tunnels-toolbar .toolbar-actions > .view-mode-switch {
+		display: none !important;
+	}
 }
 
 /*

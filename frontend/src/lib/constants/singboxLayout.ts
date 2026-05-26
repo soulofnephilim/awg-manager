@@ -3,7 +3,7 @@ export type SingboxLayoutMode = 'dense' | 'compact' | 'list';
 
 /**
  * Same breakpoint as the AWG tunnels tab (`isAwgMobile` on the home page).
- * Below this width, sing-box list tables do not fit; surfaces stay compact grid and the view toggle is hidden.
+ * Below this width: layout picker hidden; cards always use compact grid.
  */
 export const TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX = 760;
 
@@ -14,4 +14,20 @@ export function parseSingboxLayoutMode(value: string | null): SingboxLayoutMode 
 	// Legacy: previous two-mode toggle stored `grid` for the default card grid.
 	if (value === 'grid') return 'compact';
 	return null;
+}
+
+export function readTunnelMobileLayout(): boolean {
+	if (typeof window === 'undefined') return false;
+	return window.matchMedia(`(max-width: ${TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX}px)`).matches;
+}
+
+export function subscribeTunnelMobileLayout(onChange: (mobile: boolean) => void): () => void {
+	if (typeof window === 'undefined') return () => {};
+	const media = window.matchMedia(`(max-width: ${TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX}px)`);
+	const sync = (event?: MediaQueryList | MediaQueryListEvent) => {
+		onChange(event ? event.matches : media.matches);
+	};
+	sync(media);
+	media.addEventListener('change', sync);
+	return () => media.removeEventListener('change', sync);
 }

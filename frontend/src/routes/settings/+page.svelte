@@ -1099,7 +1099,7 @@ onMount(() => {
 	}
 	.channel-option.active {
 		background: var(--accent);
-		color: #fff;
+		color: #fff !important;
 	}
 	.channel-option:disabled {
 		opacity: 0.6;

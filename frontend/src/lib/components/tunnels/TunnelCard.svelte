@@ -1062,6 +1062,7 @@
 		flex: 0 1 auto;
 		min-width: 0;
 		font-size: 13px;
+		line-height: var(--sbx-card-title-line-height);
 		font-weight: 600;
 	}
 
@@ -1316,6 +1317,7 @@
 		padding: 0;
 		font: inherit;
 		font-size: 15px;
+		line-height: var(--sbx-card-title-line-height);
 		font-weight: 600;
 		color: var(--color-text-primary);
 		text-align: left;
