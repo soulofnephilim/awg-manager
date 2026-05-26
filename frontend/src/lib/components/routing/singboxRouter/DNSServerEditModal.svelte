@@ -229,7 +229,7 @@
 			</label>
 		</section>
 
-		{#if type !== 'udp'}
+		{#if type !== 'udp' && type !== 'local'}
 			<section class="form-section">
 				<div class="section-label">Bootstrap resolver (для домена сервера)</div>
 
