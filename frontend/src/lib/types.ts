@@ -1475,7 +1475,7 @@ export interface SingboxRouterAvailableClient {
 	active?: boolean;
 }
 
-export type SingboxRouterDNSType = 'udp' | 'tls' | 'https' | 'quic' | 'h3';
+export type SingboxRouterDNSType = 'udp' | 'tls' | 'https' | 'quic' | 'h3' | 'local';
 
 export type SingboxRouterDNSStrategy =
 	| ''
@@ -1505,14 +1505,22 @@ export interface SingboxRouterDNSRule {
 	domain_suffix?: string[];
 	domain?: string[];
 	domain_keyword?: string[];
+	domain_regex?: string[];
 	query_type?: string[];
 	server?: string;
-	action?: '' | 'route' | 'reject';
+	action?: '' | 'route' | 'reject' | 'predefined';
+	rcode?: string;
+	method?: string;
 }
 
 export interface SingboxRouterDNSGlobals {
 	final: string;
 	strategy: SingboxRouterDNSStrategy;
+}
+
+export interface SingboxRouterDNSRewrite {
+	pattern: string;
+	ips: string[];
 }
 
 // #endregion

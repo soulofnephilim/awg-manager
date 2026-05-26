@@ -3,6 +3,7 @@
 	import { notifications } from '$lib/stores/notifications';
 	import type { SingboxRouterDNSRule, SingboxRouterDNSServer, SingboxRouterRuleSet } from '$lib/types';
 	import DNSRuleEditModal from './DNSRuleEditModal.svelte';
+	import { computeRuleSetUsage } from './ruleSetUsage';
 	import { Button } from '$lib/components/ui';
 	import ConfirmModal from '$lib/components/ui/ConfirmModal.svelte';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
@@ -27,12 +28,14 @@
 		if (r.domain_suffix?.length) parts.push(`suffix: ${r.domain_suffix[0]}${r.domain_suffix.length > 1 ? ` +${r.domain_suffix.length - 1}` : ''}`);
 		if (r.domain?.length) parts.push(`domain: ${r.domain[0]}${r.domain.length > 1 ? ` +${r.domain.length - 1}` : ''}`);
 		if (r.domain_keyword?.length) parts.push(`keyword: ${r.domain_keyword[0]}`);
+		if (r.domain_regex?.length) parts.push(`regex: ${r.domain_regex[0]}`);
 		if (r.query_type?.length) parts.push(`type: ${r.query_type.join(',')}`);
 		return parts.join(' · ') || '—';
 	}
 
 	function actionBadge(r: SingboxRouterDNSRule): { label: string; cls: string } {
-		if (r.action === 'reject') return { label: 'REJECT', cls: 'reject' };
+		if (r.action === 'reject') return { label: r.method === 'drop' ? 'DROP' : 'REFUSED', cls: 'reject' };
+		if (r.action === 'predefined') return { label: r.rcode || 'BLOCK', cls: 'reject' };
 		return { label: 'RESOLVE', cls: 'route' };
 	}
 
@@ -108,7 +111,7 @@
 				<div class="idx mono">{i}</div>
 				<span class="badge badge-{b.cls}">{b.label}</span>
 				<div class="matcher mono">{matcherSummary(r)}</div>
-				<div class="server mono">{r.server || (r.action === 'reject' ? '—' : '?')}</div>
+				<div class="server mono">{r.server || (r.action === 'reject' || r.action === 'predefined' ? '—' : '?')}</div>
 				<div class="order">
 					<button class="arrow" onclick={() => moveRule(i, i - 1)} disabled={i === 0} aria-label="Выше">↑</button>
 					<button class="arrow" onclick={() => moveRule(i, i + 1)} disabled={i === rules.length - 1} aria-label="Ниже">↓</button>
@@ -128,6 +131,7 @@
 	<DNSRuleEditModal
 		{servers}
 		{availableRuleSets}
+		ruleSetUsage={computeRuleSetUsage(rules)}
 		onClose={() => (addMode = false)}
 		onSave={async (rule) => {
 			await api.singboxRouterAddDNSRule(rule);
@@ -143,6 +147,7 @@
 		rule={rules[idx]}
 		{servers}
 		{availableRuleSets}
+		ruleSetUsage={computeRuleSetUsage(rules, idx)}
 		onClose={() => (editIndex = null)}
 		onSave={async (rule) => {
 			await api.singboxRouterUpdateDNSRule(idx, rule);
@@ -294,5 +299,16 @@
 	}
 	.final-info strong {
 		color: var(--success, #22c55e);
+	}
+
+	@media (max-width: 720px) {
+		.col-header,
+		.row {
+			grid-template-columns: 28px 80px 1fr 60px 24px 24px;
+		}
+		.col-header > :nth-child(4),
+		.row > :nth-child(4) {
+			display: none;
+		}
 	}
 </style>

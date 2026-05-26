@@ -186,9 +186,12 @@ type DNSRule struct {
 	DomainSuffix  []string `json:"domain_suffix,omitempty"`
 	Domain        []string `json:"domain,omitempty"`
 	DomainKeyword []string `json:"domain_keyword,omitempty"`
+	DomainRegex   []string `json:"domain_regex,omitempty"`
 	QueryType     []string `json:"query_type,omitempty"`
 	Server        string   `json:"server,omitempty"`
 	Action        string   `json:"action,omitempty"`
+	Rcode         string   `json:"rcode,omitempty"`
+	RejectMethod  string   `json:"method,omitempty"`
 }
 
 type DNS struct {

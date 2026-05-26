@@ -2446,6 +2446,51 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.SingboxDNSRewriteDTO:
+    properties:
+      ips:
+        example:
+        - 104.25.158.178
+        items:
+          type: string
+        type: array
+      pattern:
+        example: finland10*.discord.media
+        type: string
+    type: object
+  api.SingboxDNSRewriteDeleteRequest:
+    properties:
+      index:
+        example: 0
+        type: integer
+    type: object
+  api.SingboxDNSRewriteMoveRequest:
+    properties:
+      from:
+        example: 3
+        type: integer
+      to:
+        example: 0
+        type: integer
+    type: object
+  api.SingboxDNSRewriteUpdateRequest:
+    properties:
+      index:
+        example: 0
+        type: integer
+      rewrite:
+        $ref: '#/definitions/api.SingboxDNSRewriteDTO'
+    type: object
+  api.SingboxDNSRewritesListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.SingboxDNSRewriteDTO'
+        type: array
+      success:
+        example: true
+        type: boolean
+    type: object
   api.SingboxDNSRuleDTO:
     properties:
       action:
@@ -8187,6 +8232,160 @@ paths:
       security:
       - CookieAuth: []
       summary: Update singbox-router DNS globals
+      tags:
+      - singbox-router
+  /singbox/router/dns/rewrites/add:
+    post:
+      consumes:
+      - application/json
+      description: Appends a new DNS rewrite (glob pattern → IPs). The pattern must
+        be unique.
+      parameters:
+      - description: DNS rewrite descriptor
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxDNSRewriteDTO'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Add singbox-router DNS rewrite
+      tags:
+      - singbox-router
+  /singbox/router/dns/rewrites/delete:
+    post:
+      consumes:
+      - application/json
+      description: Removes the DNS rewrite at the given index (0-based priority slot).
+      parameters:
+      - description: Index of the rewrite to remove
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxDNSRewriteDeleteRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Delete singbox-router DNS rewrite
+      tags:
+      - singbox-router
+  /singbox/router/dns/rewrites/list:
+    get:
+      description: Returns all DNS rewrites (glob pattern → IPs) in priority order.
+        Always a JSON array, never null.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxDNSRewritesListResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List singbox-router DNS rewrites
+      tags:
+      - singbox-router
+  /singbox/router/dns/rewrites/move:
+    post:
+      consumes:
+      - application/json
+      description: Moves the DNS rewrite from index `from` to index `to` (both 0-based).
+      parameters:
+      - description: from/to indices
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxDNSRewriteMoveRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Move singbox-router DNS rewrite
+      tags:
+      - singbox-router
+  /singbox/router/dns/rewrites/update:
+    post:
+      consumes:
+      - application/json
+      description: Replaces the DNS rewrite at the given index (0-based priority slot)
+        with the provided one.
+      parameters:
+      - description: Index + replacement rewrite
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxDNSRewriteUpdateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Update singbox-router DNS rewrite
       tags:
       - singbox-router
   /singbox/router/dns/rules/add:

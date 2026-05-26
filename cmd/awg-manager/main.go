@@ -50,6 +50,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/singbox/awgoutbounds"
 	singboxcfg "github.com/hoaxisr/awg-manager/internal/singbox/configmerge"
+	"github.com/hoaxisr/awg-manager/internal/singbox/dnsrewrite"
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
@@ -1126,6 +1127,15 @@ func main() {
 	srv.SetSubscriptionHandler(api.NewSubscriptionHandler(subSvc, singboxOp, loggingService))
 	srv.AddShutdownHook(subSched.Stop)
 
+	// DNS Rewrites — sing-box slot 17-dns-rewrites.json.
+	dnsRewriteStorePath := filepath.Join(*dataDir, "dns_rewrites.json")
+	dnsRewriteStore := storage.NewDNSRewriteStore(dnsRewriteStorePath)
+	dnsRewriteSvc := dnsrewrite.NewService(dnsRewriteStore, &dnsRewriteOrchAdapter{orch: sbOrch}, eventBus)
+	if err := dnsRewriteSvc.Resync(); err != nil {
+		bootLog.Warn("dnsrewrite-resync", "", err.Error())
+	}
+	srv.SetDNSRewritesHandler(api.NewDNSRewritesHandler(dnsRewriteSvc))
+
 	// Boot status: 0 = booting, 1 = done. Used by /api/system/info.
 	var bootDone int32
 	srv.SetBootStatusFunc(func() bool { return atomic.LoadInt32(&bootDone) == 0 })
@@ -2051,4 +2061,19 @@ func (a subProxySet) SubscriptionProxies() []singbox.SubscriptionProxy {
 		})
 	}
 	return out
+}
+
+// dnsRewriteOrchAdapter adapts *singboxorch.Orchestrator to the
+// dnsrewrite.Orchestrator interface (which uses plain string so the
+// package stays decoupled from singboxorch.Slot).
+type dnsRewriteOrchAdapter struct {
+	orch *singboxorch.Orchestrator
+}
+
+func (a *dnsRewriteOrchAdapter) Save(slot string, data []byte) error {
+	return a.orch.Save(singboxorch.Slot(slot), data)
+}
+
+func (a *dnsRewriteOrchAdapter) SetEnabled(slot string, on bool) error {
+	return a.orch.SetEnabled(singboxorch.Slot(slot), on)
 }

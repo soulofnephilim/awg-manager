@@ -271,4 +271,15 @@
 	.icon-btn.danger {
 		color: var(--danger, #dc2626);
 	}
+
+	@media (max-width: 720px) {
+		.col-header,
+		.row {
+			grid-template-columns: 110px 60px 1fr 100px 24px 24px;
+		}
+		.col-header > :nth-child(5),
+		.row > :nth-child(5) {
+			display: none;
+		}
+	}
 </style>

@@ -76,6 +76,7 @@ import type {
 	SingboxRouterDNSServer,
 	SingboxRouterDNSRule,
 	SingboxRouterDNSGlobals,
+	SingboxRouterDNSRewrite,
 	SingboxRouterInspectRequest,
 	SingboxRouterInspectResult,
 	SingboxProxiesListResponse,
@@ -1898,6 +1899,38 @@ class ApiClient {
 
 	async singboxRouterMoveDNSRule(from: number, to: number): Promise<void> {
 		await this.request('/singbox/router/dns/rules/move', {
+			method: 'POST',
+			body: JSON.stringify({ from, to }),
+		});
+	}
+
+	async singboxRouterListDNSRewrites(): Promise<SingboxRouterDNSRewrite[]> {
+		return this.request('/singbox/router/dns/rewrites/list');
+	}
+
+	async singboxRouterAddDNSRewrite(rewrite: SingboxRouterDNSRewrite): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/add', {
+			method: 'POST',
+			body: JSON.stringify(rewrite),
+		});
+	}
+
+	async singboxRouterUpdateDNSRewrite(index: number, rewrite: SingboxRouterDNSRewrite): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/update', {
+			method: 'POST',
+			body: JSON.stringify({ index, rewrite }),
+		});
+	}
+
+	async singboxRouterDeleteDNSRewrite(index: number): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/delete', {
+			method: 'POST',
+			body: JSON.stringify({ index }),
+		});
+	}
+
+	async singboxRouterMoveDNSRewrite(from: number, to: number): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/move', {
 			method: 'POST',
 			body: JSON.stringify({ from, to }),
 		});

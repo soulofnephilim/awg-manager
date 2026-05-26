@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -11,20 +12,31 @@ var validDNSTypes = map[string]bool{
 	"https": true,
 	"quic":  true,
 	"h3":    true,
+	"local": true,
 }
 
 var validDNSStrategies = map[string]bool{
-	"":             true,
-	"prefer_ipv4":  true,
-	"prefer_ipv6":  true,
-	"ipv4_only":    true,
-	"ipv6_only":    true,
+	"":            true,
+	"prefer_ipv4": true,
+	"prefer_ipv6": true,
+	"ipv4_only":   true,
+	"ipv6_only":   true,
 }
 
 var validDNSRuleActions = map[string]bool{
-	"":       true,
-	"route":  true,
-	"reject": true,
+	"":           true,
+	"route":      true,
+	"reject":     true,
+	"predefined": true,
+}
+
+var validDNSRcodes = map[string]bool{
+	"NOERROR": true, "FORMERR": true, "SERVFAIL": true,
+	"NXDOMAIN": true, "NOTIMP": true, "REFUSED": true,
+}
+
+var validRejectMethods = map[string]bool{
+	"": true, "default": true, "drop": true,
 }
 
 func validateDNSServer(s DNSServer) error {
@@ -34,7 +46,7 @@ func validateDNSServer(s DNSServer) error {
 	if !validDNSTypes[s.Type] {
 		return fmt.Errorf("dns server %q: unknown type %q", s.Tag, s.Type)
 	}
-	if strings.TrimSpace(s.Server) == "" {
+	if s.Type != "local" && strings.TrimSpace(s.Server) == "" {
 		return fmt.Errorf("dns server %q: server is required", s.Tag)
 	}
 	if s.ServerPort < 0 || s.ServerPort > 65535 {
@@ -58,12 +70,27 @@ func validateDNSRule(r DNSRule, serverTags map[string]bool) error {
 	if !dnsRuleHasMatcher(r) {
 		return ErrInvalidMatchers
 	}
+	for _, rx := range r.DomainRegex {
+		if _, err := regexp.Compile(rx); err != nil {
+			return fmt.Errorf("dns rule: invalid domain_regex %q: %w", rx, err)
+		}
+	}
 	if !validDNSRuleActions[r.Action] {
 		return fmt.Errorf("dns rule: unknown action %q", r.Action)
 	}
-	if r.Action == "reject" {
+	switch r.Action {
+	case "reject":
+		if !validRejectMethods[r.RejectMethod] {
+			return fmt.Errorf("dns rule: unknown reject method %q", r.RejectMethod)
+		}
+		return nil
+	case "predefined":
+		if r.Rcode != "" && !validDNSRcodes[r.Rcode] {
+			return fmt.Errorf("dns rule: unknown rcode %q", r.Rcode)
+		}
 		return nil
 	}
+	// route (или пустое действие)
 	if strings.TrimSpace(r.Server) == "" {
 		return fmt.Errorf("dns rule: server is required when action is route")
 	}
@@ -78,6 +105,7 @@ func dnsRuleHasMatcher(r DNSRule) bool {
 		len(r.DomainSuffix) > 0 ||
 		len(r.Domain) > 0 ||
 		len(r.DomainKeyword) > 0 ||
+		len(r.DomainRegex) > 0 ||
 		len(r.QueryType) > 0
 }
 

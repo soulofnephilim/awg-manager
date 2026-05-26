@@ -13,6 +13,7 @@ import type {
 	SingboxRouterPreset,
 	SingboxRouterDNSServer,
 	SingboxRouterDNSRule,
+	SingboxRouterDNSRewrite,
 	SingboxRouterDNSGlobals,
 	RouterStagingStatusResponse,
 } from '$lib/types';
@@ -26,6 +27,7 @@ function createSingboxRouterStore() {
 	const presets = writable<SingboxRouterPreset[]>([]);
 	const dnsServers = writable<SingboxRouterDNSServer[]>([]);
 	const dnsRules = writable<SingboxRouterDNSRule[]>([]);
+	const dnsRewrites = writable<SingboxRouterDNSRewrite[]>([]);
 	const dnsGlobals = writable<SingboxRouterDNSGlobals>({ final: '', strategy: '' });
 	const staging = writable<RouterStagingStatusResponse | null>(null);
 	const loading = writable(false);
@@ -65,7 +67,7 @@ function createSingboxRouterStore() {
 		loading.set(true);
 		error.set(null);
 		try {
-			const [st, s, r, rs, o, p, ds, dr, dg] = await Promise.all([
+			const [st, s, r, rs, o, p, ds, dr, drw, dg] = await Promise.all([
 				api.singboxRouterStatus(),
 				api.singboxRouterGetSettings(),
 				api.singboxRouterListRules(),
@@ -74,6 +76,7 @@ function createSingboxRouterStore() {
 				api.singboxRouterListPresets(),
 				api.singboxRouterListDNSServers(),
 				api.singboxRouterListDNSRules(),
+				api.singboxRouterListDNSRewrites(),
 				api.singboxRouterGetDNSGlobals(),
 			]);
 			status.set(st);
@@ -84,6 +87,7 @@ function createSingboxRouterStore() {
 			presets.set(p);
 			dnsServers.set(ds);
 			dnsRules.set(dr);
+			dnsRewrites.set(drw);
 			dnsGlobals.set(dg);
 		} catch (e) {
 			error.set(e instanceof Error ? e.message : 'Не удалось загрузить singbox-router');
@@ -153,6 +157,10 @@ function createSingboxRouterStore() {
 		dnsRules.set(data);
 	}
 
+	function applyDNSRewrites(data: SingboxRouterDNSRewrite[]): void {
+		dnsRewrites.set(data);
+	}
+
 	function applyDNSGlobals(data: SingboxRouterDNSGlobals): void {
 		dnsGlobals.set(data);
 	}
@@ -166,6 +174,7 @@ function createSingboxRouterStore() {
 		presets: { subscribe: presets.subscribe },
 		dnsServers: { subscribe: dnsServers.subscribe },
 		dnsRules: { subscribe: dnsRules.subscribe },
+		dnsRewrites: { subscribe: dnsRewrites.subscribe },
 		dnsGlobals: { subscribe: dnsGlobals.subscribe },
 		staging: { subscribe: staging.subscribe } as import('svelte/store').Readable<RouterStagingStatusResponse | null>,
 		options: { subscribe: options.subscribe },
@@ -182,6 +191,7 @@ function createSingboxRouterStore() {
 		applyOutbounds,
 		applyDNSServers,
 		applyDNSRules,
+		applyDNSRewrites,
 		applyDNSGlobals,
 		setSettings: settings.set,
 	};

@@ -168,6 +168,23 @@ func TestDNSRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAddDNSServerLocal(t *testing.T) {
+	c := NewEmptyConfig()
+
+	// local без server/port — валиден
+	if err := c.AddDNSServer(DNSServer{Tag: "sys", Type: "local"}); err != nil {
+		t.Fatalf("local server should be valid: %v", err)
+	}
+	// udp без server — по-прежнему ошибка
+	if err := c.AddDNSServer(DNSServer{Tag: "u", Type: "udp"}); err == nil {
+		t.Error("udp without server must fail")
+	}
+	// неизвестный тип — ошибка
+	if err := c.AddDNSServer(DNSServer{Tag: "x", Type: "bogus", Server: "1.1.1.1"}); err == nil {
+		t.Error("unknown type must fail")
+	}
+}
+
 func TestSetDNSGlobalsRejectsUnknownServer(t *testing.T) {
 	c := NewEmptyConfig()
 	_ = c.AddDNSServer(makeDNSServer("s", "udp", "1.1.1.1", ""))
@@ -179,5 +196,35 @@ func TestSetDNSGlobalsRejectsUnknownServer(t *testing.T) {
 	}
 	if err := c.SetDNSGlobals("", "prefer_ipv4"); err != nil {
 		t.Errorf("empty final should be allowed: %v", err)
+	}
+}
+
+func TestDNSRuleRegexAndBlock(t *testing.T) {
+	c := NewEmptyConfig()
+	_ = c.AddDNSServer(makeDNSServer("up", "udp", "1.1.1.1", ""))
+
+	// domain_regex как валидный матчер + route
+	if err := c.AddDNSRule(DNSRule{DomainRegex: []string{`\.ru$`}, Server: "up", Action: "route"}); err != nil {
+		t.Fatalf("regex route: %v", err)
+	}
+	// блок через predefined NXDOMAIN — server не нужен
+	if err := c.AddDNSRule(DNSRule{DomainSuffix: []string{"doubleclick.net"}, Action: "predefined", Rcode: "NXDOMAIN"}); err != nil {
+		t.Fatalf("predefined block: %v", err)
+	}
+	// reject с методом drop
+	if err := c.AddDNSRule(DNSRule{DomainKeyword: []string{"ads"}, Action: "reject", RejectMethod: "drop"}); err != nil {
+		t.Fatalf("reject drop: %v", err)
+	}
+	// predefined с неизвестным rcode — ошибка
+	if err := c.AddDNSRule(DNSRule{Domain: []string{"x"}, Action: "predefined", Rcode: "BOGUS"}); err == nil {
+		t.Error("bad rcode must fail")
+	}
+	// reject с неизвестным методом — ошибка
+	if err := c.AddDNSRule(DNSRule{Domain: []string{"x"}, Action: "reject", RejectMethod: "bogus"}); err == nil {
+		t.Error("bad reject method must fail")
+	}
+	// невалидный domain_regex — ошибка
+	if err := c.AddDNSRule(DNSRule{DomainRegex: []string{"("}, Server: "up", Action: "route"}); err == nil {
+		t.Error("invalid regex must fail")
 	}
 }
