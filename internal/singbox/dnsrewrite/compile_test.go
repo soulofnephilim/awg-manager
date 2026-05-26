@@ -68,8 +68,28 @@ func TestCompileRewriteDualStackSplit(t *testing.T) {
 	}
 }
 
+func TestCompileRewriteLeadingStarWithPrefix(t *testing.T) {
+	rules, err := compileRewrite(DNSRewrite{Pattern: "*abc.discord.media", IPs: []string{"1.2.3.4"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rules[0]["domain_regex"], []string{`^[^.]*abc\.discord\.media$`}) {
+		t.Errorf("got %#v", rules[0])
+	}
+}
+
+func TestCompileRewrite4in6(t *testing.T) {
+	rules, err := compileRewrite(DNSRewrite{Pattern: "x.lan", IPs: []string{"::ffff:1.2.3.4"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rules[0]["answer"], []string{"x.lan. IN A 1.2.3.4"}) {
+		t.Errorf("got %#v", rules[0])
+	}
+}
+
 func TestCompileRewriteRejects(t *testing.T) {
-	for _, p := range []string{"", "finland10*", "*", "a*.b*.c", "no_dot_after*"} {
+	for _, p := range []string{"", "finland10*", "*", "a*.b*.c", "no_dot_after*", ".nas.lan"} {
 		if _, err := compileRewrite(DNSRewrite{Pattern: p, IPs: []string{"1.2.3.4"}}); err == nil {
 			t.Errorf("pattern %q must be rejected", p)
 		}

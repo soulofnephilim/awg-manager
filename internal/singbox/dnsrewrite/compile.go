@@ -74,6 +74,9 @@ func parsePattern(pattern string) (matcherKey, matcher, answerName string, err e
 	if p == "" {
 		return "", "", "", fmt.Errorf("пустой шаблон")
 	}
+	if strings.HasPrefix(p, ".") {
+		return "", "", "", fmt.Errorf("шаблон %q: лишняя ведущая точка", pattern)
+	}
 	n := strings.Count(p, "*")
 	if n == 0 {
 		return "domain", p, p + ".", nil
@@ -93,7 +96,7 @@ func parsePattern(pattern string) (matcherKey, matcher, answerName string, err e
 	}
 	answerName = "*." + tail + "."
 	// Ведущий "*." → чистый суффикс (домен + поддомены).
-	if i == 0 {
+	if i == 0 && dot == 0 {
 		return "domain_suffix", tail, answerName, nil
 	}
 	// Иначе — regex по экранированным литералам, * → [^.]*.
@@ -116,8 +119,8 @@ func splitIPs(ips []string) (v4, v6 []string, err error) {
 		if e != nil {
 			return nil, nil, fmt.Errorf("неверный IP %q", raw)
 		}
-		if addr.Is4() {
-			v4 = append(v4, s)
+		if addr.Is4() || addr.Is4In6() {
+			v4 = append(v4, addr.Unmap().String())
 		} else {
 			v6 = append(v6, s)
 		}
