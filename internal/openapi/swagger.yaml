@@ -4078,6 +4078,31 @@ definitions:
         example: My VPN
         type: string
     type: object
+  api.TunnelReferencedDetails:
+    properties:
+      deviceProxy:
+        example: false
+        type: boolean
+      routerOther:
+        items:
+          type: string
+        type: array
+      routerRules:
+        items:
+          type: integer
+        type: array
+      tunnelId:
+        example: tun-a
+        type: string
+    type: object
+  api.TunnelReferencedResponse:
+    properties:
+      details:
+        $ref: '#/definitions/api.TunnelReferencedDetails'
+      error:
+        example: tunnel_referenced
+        type: string
+    type: object
   api.TunnelStateInfoDTO:
     properties:
       hasHandshake:
@@ -11190,6 +11215,10 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.TunnelReferencedResponse'
         "500":
           description: Internal Server Error
           schema:

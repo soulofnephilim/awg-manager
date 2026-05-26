@@ -191,6 +191,24 @@ type TunnelDeleteResponse struct {
 	Data    TunnelDeleteResultData `json:"data"`
 }
 
+// TunnelReferencedDetails describes where a tunnel is still referenced
+// when deletion is refused (HTTP 409).
+type TunnelReferencedDetails struct {
+	TunnelID    string   `json:"tunnelId" example:"tun-a"`
+	DeviceProxy bool     `json:"deviceProxy" example:"false"`
+	RouterRules []int    `json:"routerRules"`
+	RouterOther []string `json:"routerOther"`
+}
+
+// TunnelReferencedResponse is the HTTP 409 body for POST /tunnels/delete
+// when the tunnel's outbound tag is still referenced by sing-box router
+// or device-proxy config. The client uses details to deeplink the user
+// to the referencing configuration.
+type TunnelReferencedResponse struct {
+	Error   string                  `json:"error" example:"tunnel_referenced"`
+	Details TunnelReferencedDetails `json:"details"`
+}
+
 const maxBodySize = 1 << 20 // 1 MB
 
 // validTunnelID matches safe tunnel identifiers: starts with a letter,
@@ -1117,6 +1135,7 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 //	@Param			id	query	string	true	"Tunnel id"
 //	@Success		200	{object}	TunnelDeleteResponse
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	TunnelReferencedResponse
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/tunnels/delete [post]
 func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -1150,13 +1169,13 @@ func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			h.log.Info("delete", tunnelName, "Refused: "+refErr.Error())
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]any{
-				"error": "tunnel_referenced",
-				"details": map[string]any{
-					"tunnelId":    refErr.TunnelID,
-					"deviceProxy": refErr.DeviceProxy,
-					"routerRules": refErr.RouterRules,
-					"routerOther": refErr.RouterOther,
+			json.NewEncoder(w).Encode(TunnelReferencedResponse{
+				Error: "tunnel_referenced",
+				Details: TunnelReferencedDetails{
+					TunnelID:    refErr.TunnelID,
+					DeviceProxy: refErr.DeviceProxy,
+					RouterRules: refErr.RouterRules,
+					RouterOther: refErr.RouterOther,
 				},
 			})
 			return
