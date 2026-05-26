@@ -176,7 +176,7 @@
 					{/if}
 				</button>
 			{:else if externalIPError}
-				<span class="info-val info-error">{externalIPError}</span>
+				<span class="info-val info-error" title={externalIPError}>{externalIPError}</span>
 			{:else}
 				<span class="info-val info-pending">Не проверен</span>
 			{/if}
@@ -279,6 +279,9 @@
 
 	.info-error {
 		color: var(--color-error);
+		white-space: normal;
+		overflow-wrap: anywhere;
+		max-width: 100%;
 	}
 
 	.info-pending {

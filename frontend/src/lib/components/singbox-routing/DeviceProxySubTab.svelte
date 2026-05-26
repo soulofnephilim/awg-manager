@@ -49,6 +49,7 @@
 	let runtimeIdsKey = $state('');
 	let runtimeRefreshKey = $state('');
 	let externalIPInitKey = $state('');
+	let externalIPTimers = $state<ReturnType<typeof setTimeout>[]>([]);
 	let collapsedById = $state<CollapsedById>({});
 	let externalIPById = $state<ExternalIPById>({});
 	let externalIPErrorById = $state<ExternalIPErrorById>({});
@@ -84,6 +85,7 @@
 		unsubInstances?.();
 		unsubOutbounds?.();
 		unsubRuntime?.();
+		for (const timer of externalIPTimers) clearTimeout(timer);
 	});
 
 	const instancesSnap = $derived($deviceProxyInstances);
@@ -116,15 +118,31 @@
 	});
 
 	$effect(() => {
-		const enabledIds = instances
-			.filter((in_) => in_.enabled)
-			.map((in_) => in_.id)
+		const ready = instances
+			.filter((in_) => {
+				const rt = runtimeFor(in_.id);
+				const tag = rt.activeTag || rt.defaultTag || in_.selectedOutbound;
+				return in_.enabled && rt.alive && !!tag;
+			})
+			.map((in_) => {
+				const rt = runtimeFor(in_.id);
+				const tag = rt.activeTag || rt.defaultTag || in_.selectedOutbound;
+				return `${in_.id}:${in_.port}:${tag}`;
+			})
 			.sort();
-		const nextKey = enabledIds.join('|');
-		if (!nextKey || nextKey === externalIPInitKey) return;
+		const nextKey = ready.join('|');
+		if (!nextKey) {
+			externalIPInitKey = '';
+			return;
+		}
+		if (nextKey === externalIPInitKey) return;
 		externalIPInitKey = nextKey;
-		for (const id of enabledIds) {
-			void refreshExternalIP(id);
+		for (const in_ of instances) {
+			const rt = runtimeFor(in_.id);
+			const tag = rt.activeTag || rt.defaultTag || in_.selectedOutbound;
+			if (in_.enabled && rt.alive && tag) {
+				scheduleExternalIPAutoCheck(in_.id);
+			}
 		}
 	});
 
@@ -173,9 +191,42 @@
 		return externalIPCheckedAtById[id] ?? null;
 	}
 
-	async function refreshExternalIP(id: string) {
+	function scheduleExternalIPAutoCheck(id: string, delay = 1800) {
+		const timer = setTimeout(() => {
+			externalIPTimers = externalIPTimers.filter((t) => t !== timer);
+			const in_ = instances.find((x) => x.id === id);
+			const rt = runtimeFor(id);
+			const tag = rt.activeTag || rt.defaultTag || in_?.selectedOutbound;
+			if (!in_?.enabled || !rt.alive || !tag) return;
+			void refreshExternalIP(id, { silentAuto: true });
+		}, delay);
+		externalIPTimers = [...externalIPTimers, timer];
+	}
+
+	function humanExternalIPError(message: string): string {
+		const lower = message.toLowerCase();
+		if (
+			lower.includes('failed to get ip through proxy') ||
+			lower.includes('connection refused') ||
+			lower.includes('request failed') ||
+			lower.includes('socks')
+		) {
+			return 'Прокси ещё не ответил. Подождите несколько секунд и нажмите «Проверить».';
+		}
+		if (lower.includes('sing-box') || lower.includes('singbox')) {
+			return 'Sing-box ещё не готов. Подождите несколько секунд и повторите проверку.';
+		}
+		return 'Не удалось проверить внешний IP через прокси.';
+	}
+
+	async function refreshExternalIP(
+		id: string,
+		opts: { silentAuto?: boolean } = {},
+	) {
 		externalIPLoadingById = { ...externalIPLoadingById, [id]: true };
-		externalIPErrorById = { ...externalIPErrorById, [id]: '' };
+		if (!opts.silentAuto) {
+			externalIPErrorById = { ...externalIPErrorById, [id]: '' };
+		}
 		try {
 			const data = await api.checkDeviceProxyInstanceExternalIP(id);
 			externalIPById = { ...externalIPById, [id]: data };
@@ -183,7 +234,11 @@
 		} catch (e) {
 			externalIPById = { ...externalIPById, [id]: null };
 			externalIPCheckedAtById = { ...externalIPCheckedAtById, [id]: 0 };
-			externalIPErrorById = { ...externalIPErrorById, [id]: (e as Error).message };
+			if (opts.silentAuto) {
+				externalIPErrorById = { ...externalIPErrorById, [id]: '' };
+			} else {
+				externalIPErrorById = { ...externalIPErrorById, [id]: humanExternalIPError((e as Error).message) };
+			}
 		} finally {
 			externalIPLoadingById = { ...externalIPLoadingById, [id]: false };
 		}
@@ -351,7 +406,6 @@
 	async function selectRuntime(in_: DeviceProxyInstance, tag: string) {
 		await api.selectDeviceProxyInstanceRuntime(in_.id, tag);
 		await refreshRuntime(in_.id);
-		await refreshExternalIP(in_.id);
 		deviceProxyRuntime.invalidate();
 	}
 
