@@ -96,6 +96,7 @@ import type {
 	ManagedServerDriftResponse,
 	ManagedServerRestoreResponse,
 	RestoreOptions,
+	DnsProxyInfo,
 } from '$lib/types';
 import { isMockDevMode } from '$lib/env';
 
@@ -1300,6 +1301,10 @@ class ApiClient {
 	/** Client IP, hostname, and policy only — no full DNS diagnostic suite. */
 	async getDnsCheckClient(): Promise<DnsCheckStartResponse> {
 		return this.request('/dns-check/client');
+	}
+
+	async getDnsProxyInfo(): Promise<DnsProxyInfo> {
+		return this.request('/diagnostics/dns-proxy');
 	}
 
 	// #endregion
