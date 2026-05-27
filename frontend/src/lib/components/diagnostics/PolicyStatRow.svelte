@@ -1,8 +1,9 @@
 <script lang="ts">
 	import type { DnsProxy } from '$lib/types';
 	interface Props { proxy: DnsProxy; open?: boolean; }
-	let { proxy, open = false }: Props = $props();
-	let expanded = $state(open);
+	let { proxy, open: initialOpen = false }: Props = $props();
+	// svelte-ignore state_referenced_locally — intentional: initial expanded state from prop, then user-controlled
+	let expanded = $state(initialOpen);
 
 	const cachePct = $derived(Math.round((proxy.stat.cacheHitRatio || 0) * 100));
 	const rawChip = $derived(
@@ -67,7 +68,7 @@
 	.faint { opacity: .65; }
 	.cache { display: flex; align-items: center; gap: 8px; }
 	.bar { width: 54px; height: 6px; border-radius: 999px; background: color-mix(in srgb, var(--text-muted) 18%, transparent); overflow: hidden; }
-	.bar > span { display: block; height: 100%; background: var(--primary); }
+	.bar > span { display: block; height: 100%; background: var(--accent); }
 	.pol-body { padding: 4px 14px 12px; border-top: 1px solid var(--border-soft, var(--border)); }
 	.pol-body table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 	.pol-body th { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; padding: 4px 10px 6px 0; text-align: left; }
@@ -75,5 +76,5 @@
 	.num { text-align: right; font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
 	th.num { text-align: right; }
 	.mono { font-family: ui-monospace, monospace; font-size: 13px; }
-	.rank { font-family: ui-monospace, monospace; font-size: 11px; font-weight: 650; color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); border-radius: 5px; padding: 1px 7px; }
+	.rank { font-family: ui-monospace, monospace; font-size: 11px; font-weight: 650; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 5px; padding: 1px 7px; }
 </style>

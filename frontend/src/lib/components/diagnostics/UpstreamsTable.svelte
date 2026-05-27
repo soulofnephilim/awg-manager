@@ -39,8 +39,8 @@
 	.muted { color: var(--text-muted); }
 	.enc { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 650; }
 	.enc-dot { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
-	.enc-doh { background: color-mix(in srgb, var(--primary) 15%, transparent); color: var(--primary); }
+	.enc-doh { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 	.enc-plain { background: color-mix(in srgb, var(--text-muted) 18%, transparent); color: var(--text-muted); }
 	.scope { font-size: 12px; color: var(--text-muted); }
-	.scope-ru { color: var(--primary); font-weight: 600; }
+	.scope-ru { color: var(--accent); font-weight: 600; }
 </style>

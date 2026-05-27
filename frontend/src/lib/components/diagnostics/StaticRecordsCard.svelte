@@ -42,5 +42,5 @@
 	.num { text-align: right; font-family: ui-monospace, monospace; }
 	th.num { text-align: right; }
 	.type { font-family: ui-monospace, monospace; font-size: 11px; font-weight: 650; color: var(--success); }
-	.type.aaaa { color: var(--primary); }
+	.type.aaaa { color: var(--accent); }
 </style>
