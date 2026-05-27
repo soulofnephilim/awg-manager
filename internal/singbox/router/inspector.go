@@ -46,6 +46,22 @@ type InspectResult struct {
 	Note        string            `json:"note,omitempty"`
 }
 
+type InspectProgress struct {
+	Phase        string `json:"phase"`
+	Message      string `json:"message"`
+	RuleIndex    *int   `json:"ruleIndex,omitempty"`
+	RuleTotal    *int   `json:"ruleTotal,omitempty"`
+	RuleSetTag   string `json:"ruleSetTag,omitempty"`
+	RuleSetIndex *int   `json:"ruleSetIndex,omitempty"`
+	RuleSetTotal *int   `json:"ruleSetTotal,omitempty"`
+	Final        string `json:"final,omitempty"`
+	UsingDraft   bool   `json:"usingDraft,omitempty"`
+}
+
+type InspectProgressFunc func(InspectProgress)
+
+func intPtr(v int) *int { return &v }
+
 // inspectEnv bundles the dependencies the rule_set matcher needs at
 // evaluation time. Kept as an internal struct so Inspect's public
 // signature stays narrow — callers thread these via Inspect's params.
@@ -93,6 +109,10 @@ type inspectEnv struct {
 // no-match with an explanatory reason. cache may be nil; in that case
 // remote rule_sets are skipped as unsupported but local ones still work.
 func Inspect(input InspectInput, rules []Rule, ruleSets []RuleSet, final string, singboxBinary string, cache *ruleSetCache) InspectResult {
+	return InspectWithProgress(input, rules, ruleSets, final, singboxBinary, cache, nil)
+}
+
+func InspectWithProgress(input InspectInput, rules []Rule, ruleSets []RuleSet, final string, singboxBinary string, cache *ruleSetCache, emit InspectProgressFunc) InspectResult {
 	res := InspectResult{
 		Input:       input.Domain,
 		Matches:     []RuleMatchResult{},
@@ -104,8 +124,14 @@ func Inspect(input InspectInput, rules []Rule, ruleSets []RuleSet, final string,
 	parsedIP := net.ParseIP(input.Domain)
 	if parsedIP != nil {
 		res.InputType = "ip"
+		if emit != nil {
+			emit(InspectProgress{Phase: "classify_input", Message: "Ввод распознан как IP"})
+		}
 	} else {
 		res.InputType = "domain"
+		if emit != nil {
+			emit(InspectProgress{Phase: "classify_input", Message: "Ввод распознан как домен"})
+		}
 	}
 
 	env := &inspectEnv{
@@ -117,10 +143,24 @@ func Inspect(input InspectInput, rules []Rule, ruleSets []RuleSet, final string,
 		env.ruleSetByTag[rs.Tag] = rs
 	}
 
+	if emit != nil {
+		emit(InspectProgress{Phase: "rule_walk_started", Message: fmt.Sprintf("Начинаем проверку %d правил маршрутизации", len(rules)), RuleTotal: intPtr(len(rules))})
+	}
 	for i, rule := range rules {
-		match := evaluateRule(input, parsedIP, rule, env)
+		if emit != nil {
+			emit(InspectProgress{Phase: "rule_start", Message: fmt.Sprintf("Проверяем правило #%d из %d", i+1, len(rules)), RuleIndex: intPtr(i), RuleTotal: intPtr(len(rules))})
+		}
+		match := evaluateRule(input, parsedIP, rule, env, emit, i, len(rules))
 		match.Index = i
 		res.Matches = append(res.Matches, match)
+		if emit != nil {
+			phase := "rule_done"
+			msg := fmt.Sprintf("Правило #%d не совпало", i+1)
+			if match.Matched {
+				msg = fmt.Sprintf("Правило #%d совпало", i+1)
+			}
+			emit(InspectProgress{Phase: phase, Message: msg, RuleIndex: intPtr(i), RuleTotal: intPtr(len(rules))})
+		}
 
 		if !match.Matched {
 			continue
@@ -136,13 +176,22 @@ func Inspect(input InspectInput, rules []Rule, ruleSets []RuleSet, final string,
 				} else {
 					res.Destination = "DIRECT"
 				}
+				if emit != nil {
+					emit(InspectProgress{Phase: "terminal_match", Message: fmt.Sprintf("Найдено финальное правило #%d → route", i+1), RuleIndex: intPtr(i), RuleTotal: intPtr(len(rules))})
+				}
 			}
 		case "reject":
 			if res.MatchedRule == -1 {
 				res.MatchedRule = i
 				res.Destination = "REJECT"
+				if emit != nil {
+					emit(InspectProgress{Phase: "terminal_match", Message: fmt.Sprintf("Найдено финальное правило #%d → reject", i+1), RuleIndex: intPtr(i), RuleTotal: intPtr(len(rules))})
+				}
 			}
 		case "sniff", "hijack-dns":
+			if emit != nil {
+				emit(InspectProgress{Phase: "non_terminal_match", Message: fmt.Sprintf("Нефинальное совпадение в правиле #%d", i+1), RuleIndex: intPtr(i), RuleTotal: intPtr(len(rules))})
+			}
 			// Non-terminal: matched but does not set Destination; walk
 			// continues so a later rule (or final) can claim it.
 		default:
@@ -181,6 +230,9 @@ func Inspect(input InspectInput, rules []Rule, ruleSets []RuleSet, final string,
 		}
 		res.Note = "Не удалось проверить rule_set: " + strings.Join(uniq, "; ")
 	}
+	if emit != nil {
+		emit(InspectProgress{Phase: "done", Message: "Инспектор завершил проверку"})
+	}
 
 	return res
 }
@@ -188,7 +240,7 @@ func Inspect(input InspectInput, rules []Rule, ruleSets []RuleSet, final string,
 // evaluateRule returns the per-rule decision. Empty rule (no matchers)
 // is defensively treated as no-match — it would otherwise sweep every
 // query into a "match" bucket and confuse the UI.
-func evaluateRule(input InspectInput, parsedIP net.IP, rule Rule, env *inspectEnv) RuleMatchResult {
+func evaluateRule(input InspectInput, parsedIP net.IP, rule Rule, env *inspectEnv, emit InspectProgressFunc, ruleIndex, ruleTotal int) RuleMatchResult {
 	out := RuleMatchResult{
 		Action:   rule.Action,
 		Outbound: rule.Outbound,
@@ -218,18 +270,35 @@ func evaluateRule(input InspectInput, parsedIP net.IP, rule Rule, env *inspectEn
 	if len(rule.RuleSet) > 0 {
 		ruleSetPart.present = true
 		probeInput := input.Domain
-		for _, tag := range rule.RuleSet {
+		for rsIdx, tag := range rule.RuleSet {
+			if emit != nil {
+				emit(InspectProgress{
+					Phase:        "rule_set_start",
+					Message:      fmt.Sprintf("Проверяем rule_set %s", tag),
+					RuleIndex:    intPtr(ruleIndex),
+					RuleTotal:    intPtr(ruleTotal),
+					RuleSetTag:   tag,
+					RuleSetIndex: intPtr(rsIdx),
+					RuleSetTotal: intPtr(len(rule.RuleSet)),
+				})
+			}
 			rs, known := env.ruleSetByTag[tag]
 			if !known {
+				if emit != nil {
+					emit(InspectProgress{Phase: "rule_set_undefined", Message: fmt.Sprintf("rule_set %s не определён", tag), RuleSetTag: tag})
+				}
 				out.Conditions = append(out.Conditions, fmt.Sprintf("rule_set %q → не определён", tag))
 				if env != nil {
 					env.unsupported = append(env.unsupported, fmt.Sprintf("%s (не определён в rule_set[])", tag))
 				}
 				continue
 			}
-			matched, supported, mErr := matchRuleSet(probeInput, rs, env.singboxBinary, env.cache)
+			matched, supported, mErr := matchRuleSet(probeInput, rs, env.singboxBinary, env.cache, emit)
 			switch {
 			case !supported:
+				if emit != nil {
+					emit(InspectProgress{Phase: "rule_set_match_error", Message: fmt.Sprintf("rule_set %s не удалось проверить", tag), RuleSetTag: tag})
+				}
 				reason := "не удалось проверить (нет sing-box или файла)"
 				if mErr != nil {
 					reason = fmt.Sprintf("ошибка: %v", mErr)
@@ -239,9 +308,15 @@ func evaluateRule(input InspectInput, parsedIP net.IP, rule Rule, env *inspectEn
 					env.unsupported = append(env.unsupported, fmt.Sprintf("%s (%s)", tag, reason))
 				}
 			case matched:
+				if emit != nil {
+					emit(InspectProgress{Phase: "rule_set_match_done", Message: fmt.Sprintf("rule_set %s совпал", tag), RuleSetTag: tag})
+				}
 				out.Conditions = append(out.Conditions, fmt.Sprintf("rule_set %q → совпало", tag))
 				ruleSetPart.hit = true
 			default:
+				if emit != nil {
+					emit(InspectProgress{Phase: "rule_set_match_done", Message: fmt.Sprintf("rule_set %s не совпал", tag), RuleSetTag: tag})
+				}
 				out.Conditions = append(out.Conditions, fmt.Sprintf("rule_set %q → не совпало", tag))
 			}
 			if ruleSetPart.hit {

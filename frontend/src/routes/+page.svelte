@@ -51,11 +51,13 @@
 	import { resolveSubscriptionMemberTag } from '$lib/utils/subscriptionMember';
 	import {
 		SINGBOX_LAYOUT_STORAGE_KEY,
-		TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX,
 		parseSingboxLayoutMode,
+		readTunnelMobileLayout,
+		subscribeTunnelMobileLayout,
 		type SingboxLayoutMode,
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode as getIsMockDevMode } from '$lib/env';
+	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 
 	type TunnelTab = 'awg' | 'singbox' | 'subscriptions';
 	type AwgTunnelViewMode = 'cards' | 'compact' | 'list';
@@ -504,7 +506,7 @@
 	let activeTab = $state<TunnelTab>('awg');
 	let awgViewMode = $state<AwgTunnelViewMode>('compact');
 	let awgViewModeReady = false;
-	let isAwgMobile = $state(false);
+	let isAwgMobile = $state(readTunnelMobileLayout());
 	let showAwgViewModeSwitch = $derived($usageLevel !== 'basic');
 	let singboxTunnelsLayoutMode = $state<SingboxLayoutMode>('compact');
 	let singboxSubscriptionsLayoutMode = $state<SingboxLayoutMode>('compact');
@@ -521,7 +523,8 @@
 			? 'compact'
 			: singboxSubscriptionsLayoutMode,
 	);
-	let showSingboxGridListToggle = $derived(showSingboxListOption && !isAwgMobile);
+	let showSingboxLayoutPicker = $derived(!isAwgMobile);
+	let showSingboxGridListToggle = $derived(showSingboxListOption && showSingboxLayoutPicker);
 	let awgEffectiveViewMode = $derived<AwgTunnelViewMode>(
 		isAwgMobile || !showAwgViewModeSwitch ? 'compact' : awgViewMode
 	);
@@ -572,16 +575,9 @@
 		singboxSubscriptionsLayoutReady = true;
 	});
 
-	onMount(() => {
-		const media = window.matchMedia(`(max-width: ${TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX}px)`);
-		const sync = (event?: MediaQueryList | MediaQueryListEvent) => {
-			isAwgMobile = event ? event.matches : media.matches;
-		};
-
-		sync(media);
-		media.addEventListener('change', sync);
-		return () => media.removeEventListener('change', sync);
-	});
+	onMount(() => subscribeTunnelMobileLayout((mobile) => {
+		isAwgMobile = mobile;
+	}));
 
 	$effect(() => {
 		if (!awgViewModeReady) return;
@@ -601,6 +597,11 @@
 		);
 	});
 
+	$effect(() => {
+		if (!isAwgMobile) return;
+		if (singboxTunnelsLayoutMode === 'dense') singboxTunnelsLayoutMode = 'compact';
+		if (singboxSubscriptionsLayoutMode === 'dense') singboxSubscriptionsLayoutMode = 'compact';
+	});
 
 	let awgAutoConnectivityNonce = $state(0);
 	let singboxAutoDelayCheckNonce = $state(0);
@@ -1027,6 +1028,10 @@
 
 </script>
 
+{#snippet createIcon()}
+	<CreateIcon />
+{/snippet}
+
 <svelte:head>
 	<title>Туннели - AWG Manager</title>
 </svelte:head>
@@ -1236,7 +1241,9 @@
 					<Button variant="secondary" size="md" onclick={handleExportAll} disabled={exporting} iconBefore={exportIcon}>
 						Экспорт
 					</Button>
-					<Button variant="primary" size="md" href="/tunnels/new">+ Создать</Button>
+					<Button variant="primary" size="md" onclick={() => goto('/tunnels/new')} iconBefore={createIcon}>
+						Создать
+					</Button>
 				</div>
 			</div>
 			{#if awgEffectiveViewMode === 'list'}
@@ -1749,14 +1756,21 @@
 							{subscriptionsList.length === 1 ? 'подписка' : subscriptionsList.length < 5 ? 'подписки' : 'подписок'}
 						</span>
 						<div class="toolbar-actions">
-							{#if subscriptionsList.length > 0}
+							{#if subscriptionsList.length > 0 && showSingboxLayoutPicker}
 								<GridListToggle
 									value={singboxSubscriptionsEffectiveLayout}
 									showListOption={showSingboxGridListToggle}
 									onchange={(v) => (singboxSubscriptionsLayoutMode = v)}
 								/>
 							{/if}
-							<Button variant="primary" size="md" onclick={() => openWizard('url')}>+ Добавить</Button>
+							<Button
+								variant="primary"
+								size="md"
+								onclick={() => openWizard('url')}
+								iconBefore={createIcon}
+							>
+								Добавить
+							</Button>
 						</div>
 					</div>
 					{#if subscriptionsList.length === 0}
@@ -1765,7 +1779,14 @@
 							<p class="subscription-empty-desc">
 								Добавьте подписку — мастер скачает список серверов и создаст selector-туннель.
 							</p>
-							<Button variant="primary" size="md" onclick={() => openWizard('url')}>+ Добавить подписку</Button>
+							<Button
+								variant="primary"
+								size="md"
+								onclick={() => openWizard('url')}
+								iconBefore={createIcon}
+							>
+								Добавить подписку
+							</Button>
 						</div>
 					{:else if singboxSubscriptionsEffectiveLayout === 'list'}
 						<div class="awg-summary-row">
@@ -1881,14 +1902,21 @@
 						{singboxTunnelsList.length === 1 ? 'туннель' : singboxTunnelsList.length < 5 ? 'туннеля' : 'туннелей'}
 					</span>
 					<div class="toolbar-actions">
-						{#if singboxTunnelsList.length > 0}
+						{#if singboxTunnelsList.length > 0 && showSingboxLayoutPicker}
 							<GridListToggle
 								value={singboxTunnelsEffectiveLayout}
 								showListOption={showSingboxGridListToggle}
 								onchange={(v) => (singboxTunnelsLayoutMode = v)}
 							/>
 						{/if}
-						<Button variant="primary" size="md" onclick={() => openWizard('choose')}>+ Добавить</Button>
+						<Button
+							variant="primary"
+							size="md"
+							onclick={() => openWizard('choose')}
+							iconBefore={createIcon}
+						>
+							Добавить
+						</Button>
 					</div>
 				</div>
 			{/if}
@@ -2035,7 +2063,7 @@
 	>
 		<p class="confirm-text">Удалить туннель <strong>{tunnelName}</strong>?</p>
 		{#snippet actions()}
-			<Button variant="ghost" size="md" onclick={() => deleteConfirmId = null}>Отмена</Button>
+			<Button variant="secondary" size="md" onclick={() => deleteConfirmId = null}>Отмена</Button>
 			<Button variant="danger" size="md" onclick={() => handleDelete(deleteConfirmId!)}>Удалить</Button>
 		{/snippet}
 	</Modal>
@@ -2203,22 +2231,43 @@
 		gap: 0.5rem;
 	}
 
+	.toolbar-actions :global(.btn.size-md) {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		box-sizing: border-box;
+		height: 32px;
+		min-height: 32px;
+		max-height: 32px;
+		padding-block: 0;
+	}
+
+	.toolbar-actions :global(.btn.variant-primary:hover:not(:disabled):not(.is-disabled)) {
+		background: transparent;
+		color: var(--color-accent);
+		border-color: var(--color-accent);
+		filter: none;
+	}
+
 	.view-mode-switch {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.25rem;
-		padding: 0.1875rem;
+		box-sizing: border-box;
+		height: 32px;
+		padding: 2px;
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm);
 		background: var(--color-bg-secondary);
+		flex-shrink: 0;
 	}
 
 	.view-mode-btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 2rem;
-		height: 2rem;
+		width: 28px;
+		height: 26px;
 		padding: 0;
 		border: none;
 		border-radius: calc(var(--radius-sm) - 2px);
@@ -3273,8 +3322,29 @@
 		}
 
 		.toolbar-actions {
-			justify-content: space-between;
-			flex-wrap: wrap;
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			align-items: stretch;
+			gap: 0.5rem;
+			width: 100%;
+		}
+
+		.toolbar-actions .view-mode-switch {
+			grid-column: 1 / -1;
+			width: 100%;
+			justify-content: center;
+		}
+
+		.toolbar-actions :global(.btn) {
+			width: 100%;
+			min-height: 32px;
+		}
+
+		/* When there's only "+ Добавить" (no GridListToggle), move it to the right cell. */
+		.toolbar-actions > :global(.btn):only-child {
+			grid-column: 2 / 3;
+			justify-self: stretch;
+			justify-content: center;
 		}
 	}
 </style>

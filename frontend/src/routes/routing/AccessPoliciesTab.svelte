@@ -257,8 +257,33 @@
     @media (max-width: 768px) {
         .policy-tab--edit,
         .policy-tab--list {
-            height: calc(100dvh - 11rem);
-            max-height: calc(100dvh - 11rem);
+            height: auto;
+            max-height: none;
+            overflow: visible;
+        }
+
+        .policy-list-scroll {
+            flex: none;
+            overflow-y: visible;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .section-buttons {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.5rem;
+            width: 100%;
+        }
+
+        .section-buttons > :global([role='status']) {
+            grid-column: 1 / -1;
+        }
+
+        .section-buttons :global(.btn) {
+            width: 100%;
+            min-height: 28px;
+            justify-content: center;
         }
     }
 </style>

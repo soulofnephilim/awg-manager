@@ -10,6 +10,8 @@
 		buildRoutingTunnelDropdownOptions,
 		findRoutingTunnelLabel,
 	} from '$lib/utils/routingTunnelOptions';
+	import DownloadRouteNote from '$lib/components/downloads/DownloadRouteNote.svelte';
+	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 
 	interface Props {
 		open: boolean;
@@ -301,6 +303,10 @@
 	}
 </script>
 
+{#snippet createIcon()}
+	<CreateIcon />
+{/snippet}
+
 <Modal {open} {title} size="lg" onclose={onclose} hasUnsavedChanges={() => isDirty}>
 	<!-- Name -->
 	<div class="form-group" class:field-error={nameError}>
@@ -366,6 +372,7 @@
 	<!-- Subscriptions -->
 	<div class="form-section">
 		<div class="section-title">Подписки</div>
+		<DownloadRouteNote text="URL-листы будут проверены и обновлены через" />
 		{#if subscriptions.length > 0}
 			<div class="sub-list">
 				{#each subscriptions as sub, i (sub.url)}
@@ -462,7 +469,9 @@
 							fullWidth
 						/>
 					</div>
-					<Button variant="primary" size="sm" onclick={addRoute}>+ Добавить</Button>
+					<Button variant="primary" size="sm" onclick={addRoute} iconBefore={createIcon}>
+						Добавить
+					</Button>
 				</div>
 			{/if}
 

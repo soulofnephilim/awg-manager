@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -116,6 +117,42 @@ func TestSetRouteFinal_RejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestRenameOutboundReferences_RewritesEveryReference(t *testing.T) {
+	cfg := NewEmptyConfig()
+	cfg.Route.Final = "old"
+	cfg.Route.Rules = []Rule{
+		{Action: "route", Outbound: "old"},
+		{Type: "logical", Mode: "or", Rules: []Rule{{Action: "route", Outbound: "old"}}},
+	}
+	cfg.Outbounds = []Outbound{
+		{Type: "selector", Tag: "group", Outbounds: []string{"old", "other"}, Default: "old"},
+	}
+	cfg.DNS.Servers = []DNSServer{
+		{Tag: "dns", Type: "https", Server: "dns.example", Detour: "old"},
+	}
+	cfg.Route.RuleSet = []RuleSet{
+		{Tag: "geo", Type: "remote", URL: "https://example.com/geo.srs", DownloadDetour: "old"},
+	}
+
+	cfg.renameOutboundReferences("old", "new")
+
+	if cfg.Route.Final != "new" {
+		t.Fatalf("route.final = %q, want new", cfg.Route.Final)
+	}
+	if cfg.Route.Rules[0].Outbound != "new" || cfg.Route.Rules[1].Rules[0].Outbound != "new" {
+		t.Fatalf("rules = %+v", cfg.Route.Rules)
+	}
+	if cfg.Outbounds[0].Outbounds[0] != "new" || cfg.Outbounds[0].Default != "new" {
+		t.Fatalf("composite outbound = %+v", cfg.Outbounds[0])
+	}
+	if cfg.DNS.Servers[0].Detour != "new" {
+		t.Fatalf("dns detour = %q, want new", cfg.DNS.Servers[0].Detour)
+	}
+	if cfg.Route.RuleSet[0].DownloadDetour != "new" {
+		t.Fatalf("download_detour = %q, want new", cfg.Route.RuleSet[0].DownloadDetour)
+	}
+}
+
 func TestStripLegacyAWGDirect(t *testing.T) {
 	in := []Outbound{
 		{Type: "direct", Tag: "legacy-a", BindInterface: "t2s0"},
@@ -177,5 +214,57 @@ func TestRuleUnmarshalJSON_LogicalWithScalarPort(t *testing.T) {
 	nested := r.Rules[1]
 	if len(nested.Port) != 1 || nested.Port[0] != 53 {
 		t.Errorf("nested rule: want Port=[53], got %v", nested.Port)
+	}
+}
+
+func TestOutboundReferencesExcludingRules(t *testing.T) {
+	cfg := &RouterConfig{
+		Outbounds: []Outbound{
+			{Type: "selector", Tag: "sel", Outbounds: []string{"awg-del"}, Default: "awg-del"},
+		},
+		DNS: DNS{
+			Servers: []DNSServer{{Tag: "dns1", Detour: "awg-del"}},
+		},
+		Route: Route{
+			Rules:   []Rule{{Outbound: "awg-del"}},
+			Final:   "awg-del",
+			RuleSet: []RuleSet{{Tag: "rs1", DownloadDetour: "awg-del"}},
+		},
+	}
+
+	locs := cfg.outboundReferencesExcludingRules("awg-del")
+
+	for _, l := range locs {
+		if strings.HasPrefix(l, "route.rules[") {
+			t.Errorf("route.rules entry must be excluded, got %q", l)
+		}
+	}
+	want := map[string]bool{
+		"route.final":                             false,
+		`outbounds[0="sel"].outbounds[0]`:         false,
+		`outbounds[0="sel"].default`:              false,
+		`dns.servers[0="dns1"].detour`:            false,
+		`route.rule_set[0="rs1"].download_detour`: false,
+	}
+	for _, l := range locs {
+		if _, ok := want[l]; !ok {
+			t.Errorf("unexpected location %q", l)
+			continue
+		}
+		want[l] = true
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("missing expected location %q", k)
+		}
+	}
+}
+
+func TestOutboundReferencesExcludingRules_OnlyRule(t *testing.T) {
+	cfg := &RouterConfig{
+		Route: Route{Rules: []Rule{{Outbound: "awg-del"}}},
+	}
+	if locs := cfg.outboundReferencesExcludingRules("awg-del"); len(locs) != 0 {
+		t.Errorf("expected empty (rule-only refs excluded), got %v", locs)
 	}
 }

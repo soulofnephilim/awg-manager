@@ -42,10 +42,32 @@ func (s *Store) load() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	needsSave := false
 	for _, item := range list {
+		if sanitizeLegacySubscriptionLastError(item) {
+			needsSave = true
+		}
 		s.data[item.ID] = item
 	}
+	if needsSave {
+		_ = s.saveLocked()
+	}
 	return nil
+}
+
+func sanitizeLegacySubscriptionLastError(sub *Subscription) bool {
+	if sub == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(sub.LastError))
+	if msg == "" {
+		return false
+	}
+	if strings.Contains(msg, "download via") && strings.Contains(msg, "(subscription)") {
+		sub.LastError = ""
+		return true
+	}
+	return false
 }
 
 func (s *Store) saveLocked() error {

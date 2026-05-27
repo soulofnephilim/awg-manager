@@ -99,7 +99,7 @@ type ClashStateProvider interface {
 // SingboxDelayProber issues an honest end-to-end latency probe through
 // a specific sing-box outbound to a specific URL via the Clash API
 // (/proxies/<tag>/delay). Used for sing-box matrix rows in place of
-// the curl-through-interface path, which can be short-circuited by
+// the HTTP-through-interface path, which can be short-circuited by
 // the user's sing-box DNS/route config and produce nonsense (1-2 ms)
 // numbers. Returns delay in ms, or error on transport / non-2xx /
 // outbound-failed responses. Optional — when nil, sing-box rows fall
@@ -181,7 +181,7 @@ func (s *Scheduler) SetClashState(p ClashStateProvider) {
 
 // SetSingboxDelay wires the Clash-API delay prober after construction.
 // Optional — when never set, sing-box rows fall back to the default
-// Prober (curl-through-interface).
+// Prober (HTTP-through-interface).
 func (s *Scheduler) SetSingboxDelay(p SingboxDelayProber) {
 	s.deps.SingboxDelay = p
 }

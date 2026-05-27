@@ -29,6 +29,16 @@
 					</span>
 				</li>
 			{/if}
+			{#if details.routerOther && details.routerOther.length > 0}
+				<li>
+					Используется в конфигурации sing-box router:
+					<ul class="ref-locations">
+						{#each details.routerOther as loc}
+							<li><code>{loc}</code></li>
+						{/each}
+					</ul>
+				</li>
+			{/if}
 		</ul>
 		<p class="hint">Удалите ссылки и попробуйте снова.</p>
 	{/if}
@@ -56,5 +66,14 @@
 		color: var(--color-text-muted);
 		font-size: 0.875rem;
 		margin: 0;
+	}
+	.ref-locations {
+		margin: 0.25rem 0 0;
+		padding-left: 1rem;
+	}
+	.ref-locations code {
+		font-family: var(--font-mono);
+		font-size: 0.8125rem;
+		color: var(--color-text-muted);
 	}
 </style>

@@ -1,9 +1,20 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api/client';
-	import type { GeoFileEntry, DownloadOutbound, DownloadRoute } from '$lib/types';
+	import type { GeoFileEntry } from '$lib/types';
+	import { settings as appSettings, reloadSettings } from '$lib/stores/settings';
+	import {
+		downloadOutbounds,
+		downloadOutboundsLoaded,
+		downloadOutboundsLoading,
+		downloadOutboundsError,
+		downloadOutboundsStatus,
+		ensureDownloadOutboundsLoaded,
+		resolveDownloadRouteLabel,
+	} from '$lib/stores/downloadRoute';
 	import { ConfirmModal, Button, Dropdown } from '$lib/components/ui';
 	import { geoDownloadProgress } from '$lib/stores/geoDownload';
+	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 
 	interface Props {
 		files: GeoFileEntry[];
@@ -23,12 +34,17 @@
 	// lookup keyed by the live `addUrl` value would lose the bar
 	// mid-download.
 	let inFlightAddUrl = $state<string | null>(null);
-	let outbounds = $state<DownloadOutbound[]>([]);
-	let routeTag = $state('');
-	let outboundsLoaded = $state(false);
-
-	const DOWNLOAD_ROUTE_STORAGE_KEY = 'awgm:geo-download-route';
-
+	const downloadRouteLabel = $derived(resolveDownloadRouteLabel($appSettings, $downloadOutbounds));
+	const routeSettingsReady = $derived(
+		$appSettings !== null && $downloadOutboundsLoaded && !$downloadOutboundsLoading,
+	);
+	const routeSettingsWarning = $derived(
+		$downloadOutboundsStatus === 'stale' ? $downloadOutboundsError : '',
+	);
+	const routeSettingsError = $derived(
+		$downloadOutboundsStatus === 'error' ? $downloadOutboundsError : '',
+	);
+	const routeActionsDisabled = $derived(busy !== null || !routeSettingsReady || !!routeSettingsError);
 	const GROUND_ZERRO_GEOIP_URL =
 		'https://raw.githubusercontent.com/Ground-Zerro/Geo-Aggregator/main/geodat/geoip_GA.dat';
 	const GROUND_ZERRO_GEOSITE_URL =
@@ -42,7 +58,8 @@
 	type DownloadOperation = {
 		kind: 'add' | 'preset' | 'update' | 'sync';
 		target: string;
-		route: DownloadRoute;
+		routeTag: string;
+		routeKind?: 'direct' | 'awg' | 'singbox' | 'subscription';
 		routeLabel: string;
 	};
 
@@ -56,91 +73,36 @@
 	let activeDownload = $state<DownloadOperation | null>(null);
 	let lastDownload = $state<LastDownload | null>(null);
 
-	function loadSavedRoute(): string {
-		try {
-			if (typeof localStorage === 'undefined') return 'direct';
-			return localStorage.getItem(DOWNLOAD_ROUTE_STORAGE_KEY) || 'direct';
-		} catch {
-			return 'direct';
+	function currentRoute(): { tag: string; kind?: 'direct' | 'awg' | 'singbox' | 'subscription' } {
+		const tag = $appSettings?.download?.routeTag?.trim() || 'direct';
+		const savedKind = $appSettings?.download?.routeKind?.trim();
+		if (tag === 'direct') {
+			return { tag: 'direct', kind: 'direct' };
 		}
+		const match = $downloadOutbounds.find((ob) => ob.tag === tag && (!savedKind || ob.kind === savedKind));
+		return { tag, kind: (savedKind || match?.kind) as 'direct' | 'awg' | 'singbox' | 'subscription' | undefined };
 	}
 
-	function saveRoute(tag: string) {
-		try {
-			if (typeof localStorage === 'undefined') return;
-			localStorage.setItem(DOWNLOAD_ROUTE_STORAGE_KEY, tag);
-		} catch {
-			// ignore storage errors
+	async function loadRouteDisplayState() {
+		if (!$appSettings) {
+			await reloadSettings();
 		}
+		await ensureDownloadOutboundsLoaded();
 	}
 
-	function outboundLabel(tag: string): string {
-		const ob = outbounds.find((item) => item.tag === tag);
-		if (!ob) return !tag || tag === 'direct' ? 'Direct (WAN) — без туннеля' : tag;
-		return `${maskSensitiveInText(ob.label)}${ob.detail ? ` — ${maskSensitiveInText(ob.detail)}` : ''}`;
-	}
-
-	function maskSensitiveToken(token: string): string {
-		if (!token) return token;
-		if (token.length <= 6) return '*'.repeat(token.length);
-		return `${token.slice(0, 3)}${'*'.repeat(token.length - 6)}${token.slice(-3)}`;
-	}
-
-	function maskSensitiveInText(text: string): string {
-		if (!text) return text;
-		const hostLike = /\b([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+|\d{1,3}(?:\.\d{1,3}){3})\b/g;
-		return text.replace(hostLike, (m) => maskSensitiveToken(m));
-	}
-
-	function captureRoute(): { route: DownloadRoute; routeLabel: string } {
-		const tag = routeTag || 'direct';
-		const ob = outbounds.find((item) => item.tag === tag);
+	function captureDownloadOperation(kind: DownloadOperation['kind'], target: string): DownloadOperation {
+		const route = currentRoute();
 		return {
-			route: { tag, kind: ob?.kind },
-			routeLabel: outboundLabel(tag),
+			kind,
+			target,
+			routeTag: route.tag,
+			routeKind: route.kind,
+			routeLabel: downloadRouteLabel,
 		};
 	}
 
-	async function loadOutbounds() {
-		outboundsLoaded = false;
-		const wanted = routeTag || loadSavedRoute();
-		try {
-			const list = await api.listDownloadOutbounds();
-			outbounds = list.length
-				? list
-				: [{ tag: 'direct', kind: 'direct', label: 'Direct (WAN)', available: true }];
-			if (!outbounds.some((o) => o.tag === wanted && o.available)) {
-				const fallback = outbounds.find((o) => o.available)?.tag ?? 'direct';
-				routeTag = fallback;
-				saveRoute(routeTag);
-			} else {
-				routeTag = wanted;
-			}
-		} catch {
-			outbounds = [{ tag: 'direct', kind: 'direct', label: 'Direct (WAN)', available: true }];
-			routeTag = 'direct';
-			saveRoute(routeTag);
-		} finally {
-			outboundsLoaded = true;
-		}
-	}
-
 	onMount(() => {
-		void loadOutbounds();
-	});
-
-	$effect(() => {
-		if (!outboundsLoaded) return;
-		if (!outbounds.some((o) => o.tag === routeTag && o.available)) {
-			const fallback = outbounds.find((o) => o.available)?.tag ?? 'direct';
-			routeTag = fallback;
-			saveRoute(routeTag);
-		}
-	});
-
-	$effect(() => {
-		if (!outboundsLoaded || !routeTag) return;
-		saveRoute(routeTag);
+		void loadRouteDisplayState();
 	});
 
 	function progressFor(url: string) {
@@ -156,31 +118,32 @@
 	}
 
 	async function add() {
+		if (!routeSettingsReady || routeSettingsError) return;
 		const submitted = addUrl.trim();
 		if (!submitted) return;
-		const { route, routeLabel } = captureRoute();
+		const op = captureDownloadOperation('add', submitted);
 		busy = 'add';
 		err = '';
 		lastDownload = null;
 		inFlightAddUrl = submitted;
-		activeDownload = { kind: 'add', target: submitted, route, routeLabel };
+		activeDownload = op;
 		try {
-			await api.addGeoFile(addType, submitted, route);
+			await api.addGeoFile(addType, submitted, { tag: op.routeTag, kind: op.routeKind });
 			addUrl = '';
 			lastDownload = {
 				ok: true,
 				action: 'Добавление geo-файла',
-				routeLabel,
+				routeLabel: op.routeLabel,
 				message: 'Файл скачан',
 			};
 			onrefresh();
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
-			err = `Не удалось скачать через «${routeLabel}»: ${msg}`;
+			err = `Не удалось скачать через «${op.routeLabel}»: ${msg}`;
 			lastDownload = {
 				ok: false,
 				action: 'Добавление geo-файла',
-				routeLabel,
+				routeLabel: op.routeLabel,
 				message: msg,
 			};
 		} finally {
@@ -191,28 +154,29 @@
 	}
 
 	async function addPreset(type: 'geoip' | 'geosite', url: string) {
-		const { route, routeLabel } = captureRoute();
+		if (!routeSettingsReady || routeSettingsError) return;
+		const op = captureDownloadOperation('preset', url);
 		busy = 'add';
 		err = '';
 		lastDownload = null;
 		inFlightAddUrl = url;
-		activeDownload = { kind: 'preset', target: url, route, routeLabel };
+		activeDownload = op;
 		try {
-			await api.addGeoFile(type, url, route);
+			await api.addGeoFile(type, url, { tag: op.routeTag, kind: op.routeKind });
 			lastDownload = {
 				ok: true,
 				action: 'Добавление пресета',
-				routeLabel,
+				routeLabel: op.routeLabel,
 				message: 'Пресет скачан',
 			};
 			onrefresh();
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
-			err = `Не удалось скачать через «${routeLabel}»: ${msg}`;
+			err = `Не удалось скачать через «${op.routeLabel}»: ${msg}`;
 			lastDownload = {
 				ok: false,
 				action: 'Добавление пресета',
-				routeLabel,
+				routeLabel: op.routeLabel,
 				message: msg,
 			};
 		} finally {
@@ -223,27 +187,28 @@
 	}
 
 	async function update(path: string) {
-		const { route, routeLabel } = captureRoute();
+		if (!routeSettingsReady || routeSettingsError) return;
+		const op = captureDownloadOperation('update', path);
 		busy = path;
 		err = '';
 		lastDownload = null;
-		activeDownload = { kind: 'update', target: path, route, routeLabel };
+		activeDownload = op;
 		try {
-			await api.updateGeoFile(path, route);
+			await api.updateGeoFile(path, { tag: op.routeTag, kind: op.routeKind });
 			lastDownload = {
 				ok: true,
 				action: `Обновление ${fileName(path)}`,
-				routeLabel,
+				routeLabel: op.routeLabel,
 				message: 'Файл обновлён',
 			};
 			onrefresh();
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
-			err = `Не удалось обновить через «${routeLabel}»: ${msg}`;
+			err = `Не удалось обновить через «${op.routeLabel}»: ${msg}`;
 			lastDownload = {
 				ok: false,
 				action: `Обновление ${fileName(path)}`,
-				routeLabel,
+				routeLabel: op.routeLabel,
 				message: msg,
 			};
 		} finally {
@@ -254,17 +219,19 @@
 
 	let pendingDelete = $state<GeoFileEntry | null>(null);
 	let pendingTakeControl = $state<GeoFileEntry | null>(null);
+	let expandedPaths = $state<Set<string>>(new Set());
 
 	function requestRemove(f: GeoFileEntry) {
 		pendingDelete = f;
 	}
 
 	async function syncFromHR() {
-		const { route, routeLabel } = captureRoute();
+		if (!routeSettingsReady || routeSettingsError) return;
+		const op = captureDownloadOperation('sync', 'all');
 		busy = 'sync';
 		err = '';
 		lastDownload = null;
-		activeDownload = { kind: 'sync', target: 'all', route, routeLabel };
+		activeDownload = op;
 		const notes: string[] = [];
 		try {
 			try {
@@ -277,7 +244,7 @@
 			await onrefresh();
 
 			try {
-				const upd = await api.updateGeoFile('', route);
+				const upd = await api.updateGeoFile('', { tag: op.routeTag, kind: op.routeKind });
 				await onrefresh();
 				if (upd.partial && upd.error) {
 					notes.push(
@@ -296,14 +263,14 @@
 				lastDownload = {
 					ok: false,
 					action: 'Синхронизация geo-файлов',
-					routeLabel,
+					routeLabel: op.routeLabel,
 					message: notes.join('; '),
 				};
 			} else {
 				lastDownload = {
 					ok: true,
 					action: 'Синхронизация geo-файлов',
-					routeLabel,
+					routeLabel: op.routeLabel,
 					message: 'Синхронизация выполнена',
 				};
 			}
@@ -359,7 +326,27 @@
 	function fileName(p: string): string {
 		return p.split('/').pop() ?? p;
 	}
+
+	function fileDir(p: string): string {
+		const base = fileName(p);
+		if (!base || p === base) return '';
+		return p.slice(0, p.length - base.length);
+	}
+
+	function togglePathExpanded(path: string) {
+		const next = new Set(expandedPaths);
+		if (next.has(path)) {
+			next.delete(path);
+		} else {
+			next.add(path);
+		}
+		expandedPaths = next;
+	}
 </script>
+
+{#snippet createIcon()}
+	<CreateIcon />
+{/snippet}
 
 <div class="geo-pane">
 	<header class="pane-header">
@@ -368,7 +355,7 @@
 		<Button
 			variant="ghost"
 			size="sm"
-			disabled={busy !== null || !outboundsLoaded}
+			disabled={routeActionsDisabled}
 			loading={busy === 'sync'}
 			onclick={syncFromHR}
 			title="Подтянуть пути из hrneo.conf (External) и перекачать файлы AWGM (External не трогаем — обновляйте в HR Neo)"
@@ -379,6 +366,39 @@
 
 	{#if err}<div class="error-banner">{err}</div>{/if}
 
+    <div>
+		{#if routeSettingsError}
+		<div class="route-status route-status-error">
+			{routeSettingsError}. Откройте Настройки → Загрузки и обновления или обновите страницу.
+		</div>
+		{:else if !routeSettingsReady}
+		<div class="route-status route-status-live">
+			Загрузка настроек маршрута geo.dat…
+		</div>
+		{:else if routeSettingsWarning}
+		<div class="route-status route-status-warn">
+			Через: <strong>{downloadRouteLabel}</strong>. Не удалось обновить список маршрутов, используется последний известный список: {routeSettingsWarning}
+		</div>
+		{:else}
+		<div class="route-status route-status-live">
+			Загрузка и обновления через: <strong>{downloadRouteLabel}</strong>.
+			Изменяется в <a href="/settings#downloads" data-sveltekit-reload>Настройки → Загрузки и обновления</a>.
+		</div>
+	{/if}
+	{#if activeDownload}
+		<div class="route-status route-status-live">
+			Текущая операция через <strong>{activeDownload.routeLabel}</strong>
+		</div>
+	{:else if lastDownload}
+		<div class="route-status {lastDownload.ok ? 'route-status-ok' : 'route-status-error'}">
+			{lastDownload.ok ? 'Последняя операция успешна' : 'Последняя операция завершилась ошибкой'}:
+			{lastDownload.action} ({lastDownload.routeLabel}){#if lastDownload.message}
+				— {lastDownload.message}
+			{/if}
+		</div>
+	{/if}
+	</div>
+	
 	{#if files.length === 0}
 		<div class="empty">Файлы не загружены. Добавьте URL ниже.</div>
 	{:else}
@@ -388,7 +408,20 @@
 				<div class="file-row">
 					<div class="file-info">
 						<span class="file-type type-{f.type}">{f.type}</span>
-						<span class="file-name" title={f.path}>{fileName(f.path)}</span>
+						<button
+							type="button"
+							class="file-name"
+							title={expandedPaths.has(f.path) ? 'Скрыть путь' : f.path}
+							onclick={() => togglePathExpanded(f.path)}
+						>
+							{#if expandedPaths.has(f.path)}
+								<span class="file-path">{fileDir(f.path)}</span><span
+									class="file-basename">{fileName(f.path)}</span
+								>
+							{:else}
+								{fileName(f.path)}
+							{/if}
+						</button>
 						{#if f.external}
 							<span
 								class="file-external"
@@ -421,7 +454,7 @@
 							<Button
 								variant="ghost"
 								size="sm"
-								disabled={busy !== null || !outboundsLoaded}
+								disabled={routeActionsDisabled}
 								loading={busy === f.path}
 								onclick={() => update(f.path)}
 							>
@@ -443,51 +476,13 @@
 		</div>
 	{/if}
 
-	<div class="route-box">
-		<div class="route-head">
-			<div class="form-label">Скачивать через</div>
-			<div class="route-current">Выбрано: {outboundLabel(routeTag)}</div>
-		</div>
-		<div class="route-row">
-			<select class="form-input" bind:value={routeTag} disabled={busy !== null || !outboundsLoaded}>
-				{#each outbounds as ob}
-					<option value={ob.tag} disabled={!ob.available}>
-						{maskSensitiveInText(ob.label)}{ob.detail ? ` — ${maskSensitiveInText(ob.detail)}` : ''}{ob.available
-							? ''
-							: ' (недоступно)'}
-					</option>
-				{/each}
-			</select>
-			<Button
-				size="sm"
-				variant="secondary"
-				disabled={busy !== null}
-				onclick={() => void loadOutbounds()}
-			>
-				Обновить список
-			</Button>
-		</div>
-		{#if activeDownload}
-			<div class="route-status route-status-live">
-				Текущая операция через <strong>{activeDownload.routeLabel}</strong>
-			</div>
-		{:else if lastDownload}
-			<div class="route-status {lastDownload.ok ? 'route-status-ok' : 'route-status-error'}">
-				{lastDownload.ok ? 'Последняя операция успешна' : 'Последняя операция завершилась ошибкой'}:
-				{lastDownload.action} ({lastDownload.routeLabel}){#if lastDownload.message}
-					— {lastDownload.message}
-				{/if}
-			</div>
-		{/if}
-	</div>
-
 	<div class="add-form">
 		<div class="form-label">Пресеты Ground-Zerro</div>
 		<div class="preset-row">
 			<Button
 				variant="secondary"
 				size="sm"
-				disabled={busy !== null || !outboundsLoaded}
+				disabled={routeActionsDisabled}
 				onclick={() => addPreset('geoip', GROUND_ZERRO_GEOIP_URL)}
 			>
 				+ geoip_GA.dat
@@ -495,7 +490,7 @@
 			<Button
 				variant="secondary"
 				size="sm"
-				disabled={busy !== null || !outboundsLoaded}
+				disabled={routeActionsDisabled}
 				onclick={() => addPreset('geosite', GROUND_ZERRO_GEOSITE_URL)}
 			>
 				+ geosite_GA.dat
@@ -511,7 +506,7 @@
 						{ value: 'geosite' as const, label: 'geosite' },
 						{ value: 'geoip' as const, label: 'geoip' },
 					]}
-					disabled={busy !== null || !outboundsLoaded}
+					disabled={routeActionsDisabled}
 					fullWidth
 				/>
 			</div>
@@ -520,22 +515,23 @@
 				type="url"
 				placeholder="https://.../{addType}.dat"
 				bind:value={addUrl}
-				disabled={busy !== null || !outboundsLoaded}
+				disabled={routeActionsDisabled}
 			/>
 			<Button
 				variant="primary"
 				size="sm"
 				onclick={add}
-				disabled={!addUrl.trim() || busy !== null || !outboundsLoaded}
+				disabled={!addUrl.trim() || routeActionsDisabled}
+				iconBefore={createIcon}
 				loading={busy === 'add'}
 			>
-				+ Добавить
+				Добавить
 			</Button>
 		</div>
 		{#if busy === 'add'}
 			<div class="busy-hint">
 				{#if progress?.phase === 'download'}
-					Скачивание через {activeDownload?.routeLabel ?? outboundLabel(routeTag)}:
+					Скачивание через {activeDownload?.routeLabel ?? downloadRouteLabel}:
 					{fmtPercent(progress)} —
 					{humanSize(progress.downloaded)}{progress.total > 0
 						? ` из ${humanSize(progress.total)}`
@@ -543,7 +539,7 @@
 				{:else if progress?.phase === 'validate'}
 					Валидация файла…
 				{:else}
-					Подключение через {activeDownload?.routeLabel ?? outboundLabel(routeTag)}…
+					Подключение через {activeDownload?.routeLabel ?? downloadRouteLabel}…
 				{/if}
 				<div class="progress-bar">
 					{#if progress && progress.total > 0}
@@ -690,7 +686,27 @@
 		font-family: ui-monospace, monospace;
 		color: var(--text-primary);
 		font-size: 0.875rem;
-		cursor: help;
+		cursor: pointer;
+		padding: 0;
+		border: none;
+		background: none;
+		text-align: left;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.file-name:hover .file-basename {
+		text-decoration: underline;
+	}
+
+	.file-path {
+		color: var(--text-muted);
+	}
+
+	.file-basename {
+		color: var(--text-primary);
 	}
 
 	.file-meta {
@@ -761,35 +777,6 @@
 		background: var(--bg-primary);
 	}
 
-	.route-head {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 8px;
-		margin-bottom: 6px;
-	}
-
-	.route-head .form-label {
-		margin: 0;
-	}
-
-	.route-row {
-		display: grid;
-		grid-template-columns: 1fr auto;
-		gap: 8px;
-		align-items: center;
-	}
-
-	.route-row .form-input {
-		width: 100%;
-	}
-
-	.route-current {
-		font-size: 0.75rem;
-		color: var(--text-muted);
-		text-align: right;
-	}
-
 	.route-status {
 		margin-top: 0.75rem;
 		padding: 8px 10px;
@@ -802,6 +789,13 @@
 		color: var(--text-primary);
 		border-left: 3px solid var(--accent);
 	}
+	.route-status a {
+		color: var(--accent);
+		text-decoration: none;
+	}
+	.route-status a:hover {
+		text-decoration: underline;
+	}
 
 	.route-status-ok {
 		background: rgba(74, 222, 128, 0.1);
@@ -813,6 +807,12 @@
 		background: rgba(247, 118, 142, 0.1);
 		color: var(--error);
 		border-left: 3px solid var(--error);
+	}
+
+	.route-status-warn {
+		background: rgba(245, 158, 11, 0.12);
+		color: var(--warning, #f59e0b);
+		border-left: 3px solid var(--warning, #f59e0b);
 	}
 
 	.add-type-select {
@@ -888,19 +888,6 @@
 		}
 		.add-row {
 			grid-template-columns: 1fr;
-		}
-		.route-row .form-input {
-			width: 100%;
-		}
-		.route-row {
-			grid-template-columns: 1fr;
-		}
-		.route-head {
-			flex-direction: column;
-			align-items: flex-start;
-		}
-		.route-current {
-			text-align: left;
 		}
 	}
 </style>

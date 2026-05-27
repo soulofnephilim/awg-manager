@@ -103,8 +103,9 @@
 	let grouped = $derived.by(() => {
 		const direct = outbounds.filter((o) => o.kind === 'direct');
 		const sb = outbounds.filter((o) => o.kind === 'singbox');
+		const sub = outbounds.filter((o) => o.kind === 'subscription');
 		const awg = outbounds.filter((o) => o.kind === 'awg');
-		return { direct, sb, awg };
+		return { direct, sb, sub, awg };
 	});
 
 	let listenOpts = $derived<DropdownOption[]>([
@@ -115,6 +116,11 @@
 	let outboundOpts = $derived<DropdownOption[]>([
 		...grouped.direct.map((ob) => ({ value: ob.tag, label: ob.label })),
 		...grouped.sb.map((ob) => ({ value: ob.tag, label: ob.label, group: 'Sing-box туннели' })),
+		...grouped.sub.map((ob) => ({
+			value: ob.tag,
+			label: ob.label || ob.tag,
+			group: 'Подписки'
+		})),
 		...grouped.awg.map((ob) => ({ value: ob.tag, label: `${ob.label} · ${ob.detail}`, group: 'Туннели' })),
 	]);
 </script>

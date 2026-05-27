@@ -10,8 +10,9 @@
 	import { usageLevel } from '$lib/stores/settings';
 	import {
 		SINGBOX_LAYOUT_STORAGE_KEY,
-		TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX,
 		parseSingboxLayoutMode,
+		readTunnelMobileLayout,
+		subscribeTunnelMobileLayout,
 		type SingboxLayoutMode,
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode } from '$lib/env';
@@ -41,7 +42,7 @@
 
 	let singboxLayoutMode = $state<SingboxLayoutMode>('compact');
 	let singboxLayoutReady = false;
-	let isSingboxMembersMobile = $state(false);
+	let isSingboxMembersMobile = $state(readTunnelMobileLayout());
 	const showSingboxListOption = $derived($usageLevel !== 'basic');
 	const singboxEffectiveLayout = $derived.by((): SingboxLayoutMode => {
 		if (isSingboxMembersMobile || (!showSingboxListOption && singboxLayoutMode === 'list')) {
@@ -51,7 +52,8 @@
 		if (singboxLayoutMode === 'dense') return 'compact';
 		return singboxLayoutMode;
 	});
-	const showSingboxGridListToggle = $derived(showSingboxListOption && !isSingboxMembersMobile);
+	const showSingboxLayoutPicker = $derived(!isSingboxMembersMobile);
+	const showSingboxGridListToggle = $derived(showSingboxListOption && showSingboxLayoutPicker);
 
 	let evtSrc: EventSource | null = null;
 
@@ -160,14 +162,13 @@
 		loadStream();
 	});
 
-	onMount(() => {
-		const media = window.matchMedia(`(max-width: ${TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX}px)`);
-		const sync = (event?: MediaQueryList | MediaQueryListEvent) => {
-			isSingboxMembersMobile = event ? event.matches : media.matches;
-		};
-		sync(media);
-		media.addEventListener('change', sync);
-		return () => media.removeEventListener('change', sync);
+	onMount(() => subscribeTunnelMobileLayout((mobile) => {
+		isSingboxMembersMobile = mobile;
+	}));
+
+	$effect(() => {
+		if (!isSingboxMembersMobile) return;
+		if (singboxLayoutMode === 'dense') singboxLayoutMode = 'compact';
 	});
 	onDestroy(() => {
 		evtSrc?.close();
@@ -269,7 +270,7 @@
 		{/if}
 		<section class="content">
 			{#if active === 'members'}
-				{#if subscription.memberTags.length > 0}
+				{#if subscription.memberTags.length > 0 && showSingboxLayoutPicker}
 					<div class="members-toolbar">
 						<GridListToggle
 							value={singboxEffectiveLayout}
@@ -302,6 +303,12 @@
 		display: flex;
 		justify-content: flex-end;
 		margin-bottom: 0.75rem;
+	}
+
+	@media (max-width: 760px) {
+		.members-toolbar {
+			display: none;
+		}
 	}
 	.loading-progress {
 		margin: 1rem 0;

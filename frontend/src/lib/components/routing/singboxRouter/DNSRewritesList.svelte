@@ -1,0 +1,160 @@
+<script lang="ts">
+	import { api } from '$lib/api/client';
+	import { notifications } from '$lib/stores/notifications';
+	import { Button } from '$lib/components/ui';
+	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
+	import type { SingboxRouterDNSRewrite } from '$lib/types';
+	import DNSRewriteEditModal from './DNSRewriteEditModal.svelte';
+
+	interface Props {
+		rewrites: SingboxRouterDNSRewrite[];
+		onChange: () => Promise<void> | void;
+	}
+	let { rewrites, onChange }: Props = $props();
+
+	let addMode = $state(false);
+	let editIndex = $state<number | null>(null);
+
+	async function remove(i: number): Promise<void> {
+		try {
+			await api.singboxRouterDeleteDNSRewrite(i);
+			await onChange();
+		} catch (e) {
+			notifications.error((e as Error).message);
+		}
+	}
+</script>
+
+{#snippet createIcon()}
+	<CreateIcon />
+{/snippet}
+
+<div class="header">
+	<div class="hint">{rewrites.length} перезаписей</div>
+	<Button variant="primary" size="sm" onclick={() => (addMode = true)} iconBefore={createIcon}>
+		Добавить
+	</Button>
+</div>
+
+{#if rewrites.length === 0}
+	<div class="empty-mild">
+		Перезаписей нет. «Перезапись» возвращает заданный IP для домена/паттерна.
+	</div>
+{:else}
+	<div class="col-header">
+		<div>Шаблон</div>
+		<div></div>
+		<div>IP-адреса</div>
+		<div></div>
+		<div></div>
+	</div>
+	<div class="rows">
+		{#each rewrites as rw, i (i)}
+			<div class="row">
+				<code class="pat mono">{rw.pattern}</code>
+				<span class="arrow">→</span>
+				<span class="ips mono">{rw.ips.join(', ')}</span>
+				<button class="icon-btn" onclick={() => (editIndex = i)} aria-label="Редактировать">✎</button>
+				<button class="icon-btn danger" onclick={() => remove(i)} aria-label="Удалить">✕</button>
+			</div>
+		{/each}
+	</div>
+{/if}
+
+{#if addMode}
+	<DNSRewriteEditModal
+		onClose={() => (addMode = false)}
+		onSave={async (rw) => {
+			await api.singboxRouterAddDNSRewrite(rw);
+			addMode = false;
+			await onChange();
+		}}
+	/>
+{/if}
+
+{#if editIndex !== null}
+	{@const idx = editIndex}
+	<DNSRewriteEditModal
+		rewrite={rewrites[idx]}
+		onClose={() => (editIndex = null)}
+		onSave={async (rw) => {
+			await api.singboxRouterUpdateDNSRewrite(idx, rw);
+			editIndex = null;
+			await onChange();
+		}}
+	/>
+{/if}
+
+<style>
+	.header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 0.75rem;
+	}
+	.hint {
+		color: var(--muted-text);
+		font-size: 0.85rem;
+	}
+	.empty-mild {
+		padding: 0.6rem 0.9rem;
+		background: var(--surface-bg);
+		border-radius: 4px;
+		color: var(--muted-text);
+		font-size: 0.85rem;
+	}
+	.col-header {
+		display: grid;
+		grid-template-columns: 1fr 16px 1fr 24px 24px;
+		gap: 0.4rem;
+		padding: 0.25rem 0.75rem;
+		font-size: 0.65rem;
+		letter-spacing: 0.5px;
+		text-transform: uppercase;
+		color: var(--muted-text);
+	}
+	.rows {
+		display: grid;
+		gap: 0.2rem;
+	}
+	.row {
+		display: grid;
+		grid-template-columns: 1fr 16px 1fr 24px 24px;
+		gap: 0.4rem;
+		align-items: center;
+		background: var(--surface-bg);
+		padding: 0.5rem 0.75rem;
+		border-radius: 4px;
+	}
+	.mono {
+		font-family: ui-monospace, monospace;
+		font-size: 0.8rem;
+	}
+	.pat {
+		color: var(--text);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.arrow {
+		opacity: 0.5;
+		text-align: center;
+	}
+	.ips {
+		color: var(--success, #22c55e);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.icon-btn {
+		background: transparent;
+		border: none;
+		color: var(--muted-text);
+		cursor: pointer;
+		font-size: 0.9rem;
+		padding: 0.15rem;
+	}
+	.icon-btn.danger {
+		color: var(--danger, #dc2626);
+	}
+</style>

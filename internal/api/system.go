@@ -84,15 +84,41 @@ type SystemInfoResponse struct {
 
 // HydraRouteStatusData mirrors frontend HydraRouteStatus.
 type HydraRouteStatusData struct {
-	Installed bool   `json:"installed" example:"true"`
-	Running   bool   `json:"running" example:"true"`
-	Version   string `json:"version,omitempty" example:"0.3.1"`
+	Installed    bool   `json:"installed" example:"true"`
+	Running      bool   `json:"running" example:"true"`
+	Version      string `json:"version,omitempty" example:"2.4.1"`
+	PID          int    `json:"pid,omitempty" example:"12345"`
+	StalePID     int    `json:"stalePid,omitempty" example:"12345"`
+	ProcessState string `json:"processState" example:"running" enums:"not_installed,stopped,running,dead"`
+	LastError    string `json:"lastError,omitempty" example:"neo restart: exit status 1"`
 }
 
 // HydraRouteStatusResponse is the envelope for GET /system/hydraroute-status.
 type HydraRouteStatusResponse struct {
 	Success bool                 `json:"success" example:"true"`
 	Data    HydraRouteStatusData `json:"data"`
+}
+
+func hydraRouteStatusData(s hydraroute.Status) HydraRouteStatusData {
+	state := s.ProcessState
+	if state == "" {
+		if !s.Installed {
+			state = hydraroute.StateNotInstalled
+		} else if s.Running {
+			state = hydraroute.StateRunning
+		} else {
+			state = hydraroute.StateStopped
+		}
+	}
+	return HydraRouteStatusData{
+		Installed:    s.Installed,
+		Running:      s.Running,
+		Version:      s.Version,
+		PID:          s.PID,
+		StalePID:     s.StalePID,
+		ProcessState: string(state),
+		LastError:    s.LastError,
+	}
 }
 
 // WANInterfaceDTO mirrors frontend WANInterface.
@@ -295,10 +321,14 @@ func (h *SystemHandler) HydraRouteStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if h.hydra == nil {
-		response.Success(w, hydraroute.Status{})
+		response.Success(w, hydraRouteStatusData(hydraroute.Status{
+			Installed:    false,
+			Running:      false,
+			ProcessState: hydraroute.StateNotInstalled,
+		}))
 		return
 	}
-	response.Success(w, h.hydra.RefreshStatus())
+	response.Success(w, hydraRouteStatusData(h.hydra.RefreshStatus()))
 }
 
 // HydraRouteControl starts/stops/restarts the HydraRoute daemon.
@@ -333,7 +363,7 @@ func (h *SystemHandler) HydraRouteControl(w http.ResponseWriter, r *http.Request
 		return
 	}
 	publishInvalidated(h.bus, ResourceRoutingHydrarouteStatus, "control-"+req.Action)
-	response.Success(w, h.hydra.GetStatus())
+	response.Success(w, hydraRouteStatusData(h.hydra.RefreshStatus()))
 }
 
 // Info returns system information.

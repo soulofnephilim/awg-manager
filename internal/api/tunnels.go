@@ -191,6 +191,24 @@ type TunnelDeleteResponse struct {
 	Data    TunnelDeleteResultData `json:"data"`
 }
 
+// TunnelReferencedDetails describes where a tunnel is still referenced
+// when deletion is refused (HTTP 409).
+type TunnelReferencedDetails struct {
+	TunnelID    string   `json:"tunnelId" example:"tun-a"`
+	DeviceProxy bool     `json:"deviceProxy" example:"false"`
+	RouterRules []int    `json:"routerRules"`
+	RouterOther []string `json:"routerOther"`
+}
+
+// TunnelReferencedResponse is the HTTP 409 body for POST /tunnels/delete
+// when the tunnel's outbound tag is still referenced by sing-box router
+// or device-proxy config. The client uses details to deeplink the user
+// to the referencing configuration.
+type TunnelReferencedResponse struct {
+	Error   string                  `json:"error" example:"tunnel_referenced"`
+	Details TunnelReferencedDetails `json:"details"`
+}
+
 const maxBodySize = 1 << 20 // 1 MB
 
 // validTunnelID matches safe tunnel identifiers: starts with a letter,
@@ -222,6 +240,39 @@ func stateToStatus(s tunnel.State) string {
 	default:
 		return "stopped"
 	}
+}
+
+// overlayPendingStatus refines the display status for a NativeWG tunnel the RCI
+// classifier reports as Broken. During boot bring-up such a tunnel is not
+// broken — NDMS raised its WireGuard but awg-manager has not yet attached the
+// kmod proxy. quiescentUntil is the orchestrator's per-tunnel bring-up window
+// (zero if no bring-up was attempted this session). now is injected for tests.
+// Only non-ASC nwg ever produces StateBroken from classifyNWGState; kernel and
+// every non-Broken state pass through unchanged.
+func overlayPendingStatus(rawState tunnel.State, backend string, quiescentUntil, now time.Time) string {
+	base := stateToStatus(rawState)
+	if backend != "nativewg" || rawState != tunnel.StateBroken {
+		return base
+	}
+	if quiescentUntil.IsZero() {
+		return stateToStatus(tunnel.StateNeedsStart) // bring-up not attempted yet
+	}
+	if now.Before(quiescentUntil) {
+		return stateToStatus(tunnel.StateStarting) // actively bringing up
+	}
+	return base // attempted, window elapsed, still broken (#183)
+}
+
+// statusForDisplay returns the UI status string for a tunnel, applying the
+// boot-pending overlay (see overlayPendingStatus). The per-tunnel quiescence
+// window comes from the orchestrator; if the orchestrator is not wired
+// (tests/edge) it falls back to the raw status via a zero window.
+func (h *TunnelsHandler) statusForDisplay(id, backend string, st tunnel.State) string {
+	var q time.Time
+	if h.orch != nil {
+		q = h.orch.QuiescentUntil(id)
+	}
+	return overlayPendingStatus(st, backend, q, time.Now())
 }
 
 // formatHandshake converts time to human-readable format.
@@ -441,30 +492,30 @@ func BuildTunnelResponse(r *http.Request, svc TunnelService, store *storage.AWGT
 
 // tunnelItem is the list-item DTO returned by List and used by SSE snapshots.
 type tunnelItem struct {
-	ID                        string                   `json:"id"`
-	Name                      string                   `json:"name"`
-	Type                      string                   `json:"type"`
-	Status                    string                   `json:"status"`
-	Enabled                   bool                     `json:"enabled"`
-	DefaultRoute              bool                     `json:"defaultRoute"`
-	ISPInterface              string                   `json:"ispInterface,omitempty"`
-	ISPInterfaceLabel         string                   `json:"ispInterfaceLabel,omitempty"`
-	ResolvedISPInterface      string                   `json:"resolvedIspInterface,omitempty"`
-	ResolvedISPInterfaceLabel string                   `json:"resolvedIspInterfaceLabel,omitempty"`
-	Endpoint                  string                   `json:"endpoint"`
-	Address                   string                   `json:"address"`
-	InterfaceName             string                   `json:"interfaceName"`
-	NDMSName                  string                   `json:"ndmsName,omitempty"`
-	HasAddressConflict        bool                     `json:"hasAddressConflict"`
-	RxBytes                   int64                    `json:"rxBytes"`
-	TxBytes                   int64                    `json:"txBytes"`
-	LastHandshake             string                   `json:"lastHandshake"`
-	Backend                   string                   `json:"backend"`
-	BackendType               string                   `json:"backendType,omitempty"`
-	AWGVersion                string                   `json:"awgVersion"`
-	MTU                       int                      `json:"mtu"`
-	StartedAt                 string                          `json:"startedAt,omitempty"`
-	PingCheck                 pingcheck.TunnelPingInfo        `json:"pingCheck"`
+	ID                        string                           `json:"id"`
+	Name                      string                           `json:"name"`
+	Type                      string                           `json:"type"`
+	Status                    string                           `json:"status"`
+	Enabled                   bool                             `json:"enabled"`
+	DefaultRoute              bool                             `json:"defaultRoute"`
+	ISPInterface              string                           `json:"ispInterface,omitempty"`
+	ISPInterfaceLabel         string                           `json:"ispInterfaceLabel,omitempty"`
+	ResolvedISPInterface      string                           `json:"resolvedIspInterface,omitempty"`
+	ResolvedISPInterfaceLabel string                           `json:"resolvedIspInterfaceLabel,omitempty"`
+	Endpoint                  string                           `json:"endpoint"`
+	Address                   string                           `json:"address"`
+	InterfaceName             string                           `json:"interfaceName"`
+	NDMSName                  string                           `json:"ndmsName,omitempty"`
+	HasAddressConflict        bool                             `json:"hasAddressConflict"`
+	RxBytes                   int64                            `json:"rxBytes"`
+	TxBytes                   int64                            `json:"txBytes"`
+	LastHandshake             string                           `json:"lastHandshake"`
+	Backend                   string                           `json:"backend"`
+	BackendType               string                           `json:"backendType,omitempty"`
+	AWGVersion                string                           `json:"awgVersion"`
+	MTU                       int                              `json:"mtu"`
+	StartedAt                 string                           `json:"startedAt,omitempty"`
+	PingCheck                 pingcheck.TunnelPingInfo         `json:"pingCheck"`
 	ConnectivityCheck         *storage.ConnectivityCheckConfig `json:"connectivityCheck,omitempty"`
 }
 
@@ -575,7 +626,7 @@ func (h *TunnelsHandler) listItems(ctx context.Context) ([]tunnelItem, error) {
 			ID:                        t.ID,
 			Name:                      t.Name,
 			Type:                      "awg",
-			Status:                    stateToStatus(t.State),
+			Status:                    h.statusForDisplay(t.ID, backend, t.State),
 			Enabled:                   t.Enabled,
 			DefaultRoute:              t.DefaultRoute,
 			ISPInterface:              ispInterface,
@@ -1117,6 +1168,7 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 //	@Param			id	query	string	true	"Tunnel id"
 //	@Success		200	{object}	TunnelDeleteResponse
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	TunnelReferencedResponse
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/tunnels/delete [post]
 func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -1150,12 +1202,13 @@ func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			h.log.Info("delete", tunnelName, "Refused: "+refErr.Error())
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]any{
-				"error": "tunnel_referenced",
-				"details": map[string]any{
-					"tunnelId":    refErr.TunnelID,
-					"deviceProxy": refErr.DeviceProxy,
-					"routerRules": refErr.RouterRules,
+			json.NewEncoder(w).Encode(TunnelReferencedResponse{
+				Error: "tunnel_referenced",
+				Details: TunnelReferencedDetails{
+					TunnelID:    refErr.TunnelID,
+					DeviceProxy: refErr.DeviceProxy,
+					RouterRules: refErr.RouterRules,
+					RouterOther: refErr.RouterOther,
 				},
 			})
 			return

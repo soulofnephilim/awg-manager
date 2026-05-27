@@ -16,7 +16,14 @@
     import { buildRoutingTunnelDropdownOptions } from '$lib/utils/routingTunnelOptions';
     import { notifications } from '$lib/stores/notifications';
     import { dnsRoutesStore } from '$lib/stores/routing';
+    import { settings } from '$lib/stores/settings';
+    import {
+        downloadOutbounds,
+        ensureDownloadOutboundsLoaded,
+        resolveDownloadRouteLabel,
+    } from '$lib/stores/downloadRoute';
     import RoutingTabBodySkeleton from './RoutingTabBodySkeleton.svelte';
+    import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 
     interface Props {
         dnsRoutes: DnsRoute[];
@@ -83,6 +90,7 @@
     let orphanDnsRoutes = $derived(dnsRoutes.filter(r => (r.routes?.length ?? 0) === 0));
     let boundDnsRoutes = $derived(dnsRoutes.filter(r => (r.routes?.length ?? 0) > 0));
     let dnsActiveCount = $derived(boundDnsRoutes.filter(r => r.enabled).length);
+    const downloadRouteLabel = $derived(resolveDownloadRouteLabel($settings, $downloadOutbounds));
 
     async function createDnsRoute(data: Partial<DnsRoute>) {
         dnsSaving = true;
@@ -105,6 +113,10 @@
             dnsSaving = false;
         }
     }
+
+    onMount(() => {
+        void ensureDownloadOutboundsLoaded();
+    });
 
     async function updateDnsRoute(data: Partial<DnsRoute>) {
         if (!editingDnsRoute) return;
@@ -308,6 +320,10 @@
     }
 </script>
 
+{#snippet createIcon()}
+    <CreateIcon />
+{/snippet}
+
 {#if !hasDnsEngine}
     <div class="empty-state">
         <p>Для DNS-маршрутизации требуется прошивка OS5 или <a href="https://github.com/Ground-Zerro/HydraRoute" target="_blank" rel="noopener">HydraRoute Neo</a></p>
@@ -329,8 +345,14 @@
                 <Button variant="ghost" size="sm" onclick={() => { dnsSelectionMode = true; dnsSelected = new Set(); }} disabled={bodyLoading}>Выбрать</Button>
             {/if}
             <div class="dropdown-wrapper">
-                <Button variant="primary" size="sm" disabled={bodyLoading} onclick={(e) => { e.stopPropagation(); addMenuOpen = !addMenuOpen; }}>
-                    + Добавить
+                <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={bodyLoading}
+                    onclick={(e) => { e.stopPropagation(); addMenuOpen = !addMenuOpen; }}
+                    iconBefore={createIcon}
+                >
+                    Добавить
                     {#snippet iconAfter()}
                         <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M2 4l3 3 3-3"/></svg>
                     {/snippet}
@@ -440,6 +462,7 @@
                         selected={dnsSelected.has(route.id)}
                         onselect={() => toggleDnsSelect(route.id)}
                         onicon={() => { pickingForRoute = route; iconPickerOpen = true; }}
+                        {downloadRouteLabel}
                     />
                 {/each}
             </div>
@@ -461,6 +484,7 @@
                     selected={dnsSelected.has(route.id)}
                     onselect={() => toggleDnsSelect(route.id)}
                     onicon={() => { pickingForRoute = route; iconPickerOpen = true; }}
+                    {downloadRouteLabel}
                 />
             {/each}
         </div>
@@ -628,15 +652,6 @@
         padding: 4px;
     }
 
-    @media (max-width: 480px) {
-        .dropdown-menu {
-            right: auto;
-            left: 0;
-            min-width: min(210px, calc(100vw - 32px));
-            max-width: calc(100vw - 32px);
-        }
-    }
-
     .dropdown-item {
         display: flex;
         align-items: center;
@@ -681,6 +696,30 @@
             flex-direction: column;
             align-items: center;
         }
-        /* TODO Phase 1: full-width Button on narrow viewport (was .empty-actions .btn { width: 100% }) */
+        .section-buttons {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.5rem;
+            width: 100%;
+        }
+
+        .section-buttons > :global([role='status']) {
+            grid-column: 1 / -1;
+        }
+
+        .section-buttons > .dropdown-wrapper {
+            width: 100%;
+        }
+
+        .section-buttons :global(.btn) {
+            width: 100%;
+            min-height: 28px;
+            justify-content: center;
+        }
+
+        .dropdown-wrapper {
+            position: relative;
+            overflow: visible;
+        }
     }
 </style>

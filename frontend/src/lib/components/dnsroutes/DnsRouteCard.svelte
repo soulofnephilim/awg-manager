@@ -16,6 +16,7 @@
 		onselect?: () => void;
 		hydrarouteInstalled?: boolean;
 		onicon?: () => void;
+		downloadRouteLabel?: string;
 	}
 
 	let {
@@ -30,7 +31,8 @@
 		selected = false,
 		onselect,
 		hydrarouteInstalled = false,
-		onicon
+		onicon,
+		downloadRouteLabel = ''
 	}: Props = $props();
 
 	let backendLabel = $derived.by(() => {
@@ -131,6 +133,11 @@
 			{#if sourceSummary}
 				<span class="card-source">{sourceSummary}</span>
 			{/if}
+			{#if subCount > 0 && downloadRouteLabel}
+				<span class="card-download-route" title={downloadRouteLabel}>
+					Обновление через {downloadRouteLabel}
+				</span>
+			{/if}
 			{#if hasDedups}
 				<span class="card-dedup" title={dedupReport?.items?.map(
 					i => `${i.domain} — ${i.reason === 'exact' ? 'дубль' : 'покрыт'} ${i.coveredBy} (${i.listName || i.listId})`
@@ -164,7 +171,11 @@
 				<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
 			</svg>
 		</button>
-		<button class="action-btn" title="Обновить подписки" onclick={() => onrefresh()}>
+		<button
+			class="action-btn"
+			title={downloadRouteLabel ? `Обновить подписки через ${downloadRouteLabel}` : 'Обновить подписки'}
+			onclick={() => onrefresh()}
+		>
 			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<polyline points="23 4 23 10 17 10"/>
 				<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
@@ -267,6 +278,15 @@
 		margin-top: 3px;
 	}
 
+	.card-download-route {
+		font-size: 0.625rem;
+		color: var(--text-muted);
+		max-width: 100%;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
 	.card-route code {
 		background: var(--bg-hover);
 		color: var(--text-primary);
@@ -279,7 +299,7 @@
 	.card-actions {
 		display: flex;
 		flex-direction: column;
-		align-items: center;
+		align-items: flex-end;
 		gap: 6px;
 		flex-shrink: 0;
 		margin-left: 8px;

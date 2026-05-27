@@ -20,6 +20,7 @@ const (
 	ActionReconcileKernel
 	ActionSuspendKernel
 	ActionResumeKernel
+	ActionReconcileNativeWG
 
 	// Live config
 	ActionApplyConfig

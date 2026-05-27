@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
@@ -14,6 +15,16 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/state"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 )
+
+// expectedHookTTL bounds how long a self-induced NDMS hook expectation
+// stays valid. Past it, the token is pruned so a stale expectation can't
+// absorb a later, legitimate external edge.
+const expectedHookTTL = 15 * time.Second
+
+// bootQuiescenceWindow is how long after we (re)start a NativeWG tunnel we
+// treat an incoming conf=disabled as transient NDMS settling rather than a
+// stop command. See decideNDMSHook + updateState.
+const bootQuiescenceWindow = 20 * time.Second
 
 // PingCheckExecutor is the interface for monitoring operations.
 // Satisfied by *pingcheck.Facade.
@@ -58,11 +69,11 @@ type Orchestrator struct {
 	expectedHooks []expectedHook
 
 	// Executors (no decision logic, only execution)
-	store      *storage.AWGTunnelStore
-	kernelOp   ops.Operator
-	nwgOp      *nwg.OperatorNativeWG
-	stateMgr   state.Manager
-	wanModel   *wan.Model
+	store    *storage.AWGTunnelStore
+	kernelOp ops.Operator
+	nwgOp    *nwg.OperatorNativeWG
+	stateMgr state.Manager
+	wanModel *wan.Model
 
 	// Downstream executors
 	pingCheck   PingCheckExecutor
@@ -75,6 +86,9 @@ type Orchestrator struct {
 
 	// Logging
 	appLog *logging.ScopedLogger
+
+	// clock returns current time; injectable for tests. nil → time.Now.
+	clock func() time.Time
 }
 
 // New creates a new Orchestrator.
@@ -94,6 +108,7 @@ func New(
 		stateMgr: stateMgr,
 		wanModel: wanModel,
 		appLog:   logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubOrchestrator),
+		clock:    time.Now,
 	}
 }
 
@@ -130,7 +145,7 @@ func (o *Orchestrator) SetSupportsASC(fn func() bool) {
 // the next lifecycle event and triggers NDMS "interface has no
 // assigned profile" warnings.
 //
-// Runtime-only fields (Running, Monitoring, ExternalRestart counters)
+// Runtime-only fields (Running, Monitoring, quiescentUntil)
 // live only in the orchestrator's cache, so they are preserved across
 // the refresh — reloading them from storage would clobber the action
 // layer's view of the world.
@@ -146,6 +161,7 @@ func (o *Orchestrator) RefreshTunnelState(tunnelID string) {
 	if cur, ok := o.state.tunnels[tunnelID]; ok {
 		fresh.Running = cur.Running
 		fresh.Monitoring = cur.Monitoring
+		fresh.quiescentUntil = cur.quiescentUntil
 	}
 	o.state.tunnels[tunnelID] = fresh
 }
@@ -181,21 +197,46 @@ func (o *Orchestrator) LoadState(ctx context.Context) {
 
 // expectedHook represents an NDMS hook we expect from our own actions.
 type expectedHook struct {
-	ndmsName string
-	level    string
+	ndmsName  string
+	level     string
+	expiresAt time.Time
+}
+
+// nowFn returns the current time, honouring an injected clock in tests.
+func (o *Orchestrator) nowFn() time.Time {
+	if o.clock != nil {
+		return o.clock()
+	}
+	return time.Now()
 }
 
 // ExpectHook registers an expected NDMS hook (implements tunnel.HookNotifier).
-// Called by operators before InterfaceUp/Down.
+// Called by operators before InterfaceUp/Down. The expectation expires after
+// expectedHookTTL so a stale token cannot absorb an unrelated later edge.
 func (o *Orchestrator) ExpectHook(ndmsName, level string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.expectedHooks = append(o.expectedHooks, expectedHook{ndmsName, level})
+	o.expectedHooks = append(o.expectedHooks, expectedHook{
+		ndmsName:  ndmsName,
+		level:     level,
+		expiresAt: o.nowFn().Add(expectedHookTTL),
+	})
 }
 
-// consumeExpectedHook checks if an NDMS hook matches an expected one.
-// If yes, removes it from the queue and returns true.
+// consumeExpectedHook checks if an NDMS hook matches a non-expired expected
+// one. It first prunes expired expectations, then removes and returns true on
+// the first matching live entry.
 func (o *Orchestrator) consumeExpectedHook(ndmsName, level string) bool {
+	now := o.nowFn()
+	kept := o.expectedHooks[:0]
+	for _, h := range o.expectedHooks {
+		if !now.Before(h.expiresAt) {
+			continue
+		}
+		kept = append(kept, h)
+	}
+	o.expectedHooks = kept
+
 	for i, h := range o.expectedHooks {
 		if h.ndmsName == ndmsName && h.level == level {
 			o.expectedHooks = append(o.expectedHooks[:i], o.expectedHooks[i+1:]...)
@@ -219,6 +260,10 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 		}
 	}
 
+	if event.Now.IsZero() {
+		event.Now = o.nowFn()
+	}
+
 	// Decide (under lock)
 	o.mu.Lock()
 	// Ensure tunnel is in cache (covers tunnels created/imported after startup)
@@ -235,8 +280,11 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 	// Per-tunnel lock for execution
 	tunnelID := event.Tunnel
 	if tunnelID == "" {
-		// Multi-tunnel events (Boot, Reconnect, WAN): execute inline
-		return o.executeActions(ctx, actions)
+		// Multi-tunnel events (Boot, Reconnect, WAN): group actions per
+		// tunnel and run each group under that tunnel's lock so a concurrent
+		// single-tunnel NDMS hook for the same tunnel cannot interleave a
+		// Stop into the middle of our Start sequence (the boot kill race).
+		return o.executeActionsGrouped(ctx, actions)
 	}
 
 	// Single-tunnel event: lock that tunnel
@@ -282,6 +330,59 @@ func (o *Orchestrator) executeActions(ctx context.Context, actions []Action) err
 	return firstErr
 }
 
+// groupContiguousByTunnel splits a flat action list into contiguous runs
+// sharing the same Tunnel value, preserving order. Boot/Reconnect/WANUp emit
+// each tunnel's actions contiguously, so those events are fully serialized
+// per tunnel. decideWANDown's non-ASC immediate-failover can emit a tunnel's
+// Suspend and failover-Start in separate phases (non-contiguous) → that
+// tunnel gets two groups and its lock is taken twice with a gap between;
+// still deadlock-free and correct in execution order, just not gap-free
+// against a concurrent hook. Tightening decideWANDown's ordering is tracked
+// separately (out of scope for the boot-race fix).
+func groupContiguousByTunnel(actions []Action) [][]Action {
+	var groups [][]Action
+	i := 0
+	for i < len(actions) {
+		tid := actions[i].Tunnel
+		j := i
+		for j < len(actions) && actions[j].Tunnel == tid {
+			j++
+		}
+		groups = append(groups, actions[i:j])
+		i = j
+	}
+	return groups
+}
+
+// executeActionsGrouped runs a multi-tunnel action list with per-tunnel
+// serialization. Each tunnel's contiguous group runs under that tunnel's
+// per-tunnel lock, acquired and released per group — never holding two
+// tunnel locks at once, so there is no lock-ordering deadlock against
+// concurrent single-tunnel hook events. Tunnel-less groups (Tunnel=="")
+// run unlocked.
+func (o *Orchestrator) executeActionsGrouped(ctx context.Context, actions []Action) error {
+	var firstErr error
+	for _, group := range groupContiguousByTunnel(actions) {
+		if err := o.executeGroup(ctx, group); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// executeGroup runs one same-tunnel action group. The per-tunnel lock is
+// released via defer (iteration-scoped here, matching the single-tunnel
+// path in HandleEvent) so a panic in executeActions cannot leak the lock.
+func (o *Orchestrator) executeGroup(ctx context.Context, group []Action) error {
+	tid := group[0].Tunnel
+	if tid == "" {
+		return o.executeActions(ctx, group)
+	}
+	o.lockTunnel(tid)
+	defer o.unlockTunnel(tid)
+	return o.executeActions(ctx, group)
+}
+
 // executeOne is implemented in execute.go.
 
 // updateState updates the internal state cache after a successful action.
@@ -295,8 +396,9 @@ func (o *Orchestrator) updateState(action Action) {
 	}
 
 	switch action.Type {
-	case ActionColdStartKernel, ActionStartNativeWG, ActionReconcileKernel, ActionResumeKernel:
+	case ActionColdStartKernel, ActionStartNativeWG, ActionReconcileNativeWG, ActionReconcileKernel, ActionResumeKernel:
 		t.Running = true
+		t.quiescentUntil = o.nowFn().Add(bootQuiescenceWindow)
 		// Refresh ActiveWAN from store. Execute layer persists the resolved
 		// WAN; we mirror it into the in-memory cache so decideWANDown can
 		// match correctly via affectedByWANDown.
@@ -322,7 +424,7 @@ func (o *Orchestrator) updateState(action Action) {
 	// Publish SSE event
 	if o.bus != nil && t != nil {
 		switch action.Type {
-		case ActionColdStartKernel, ActionStartNativeWG, ActionReconcileKernel, ActionResumeKernel:
+		case ActionColdStartKernel, ActionStartNativeWG, ActionReconcileNativeWG, ActionReconcileKernel, ActionResumeKernel:
 			// tunnel:state is still consumed internally by
 			// connectivity.Monitor (listens for "running" to trigger an
 			// immediate check). Keep it until that dependency is
@@ -346,6 +448,21 @@ func (o *Orchestrator) updateState(action Action) {
 	}
 }
 
+// QuiescentUntil returns the tunnel's current boot-quiescence deadline (the
+// time until which a just-(re)started tunnel is considered "coming up"), or
+// the zero time if the tunnel is unknown or no bring-up was attempted this
+// session. Pure read — the API status layer uses it to display
+// "pending/starting" instead of "broken" while a NativeWG tunnel is still
+// being brought up. Does not mutate any state.
+func (o *Orchestrator) QuiescentUntil(tunnelID string) time.Time {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if t, ok := o.state.tunnels[tunnelID]; ok {
+		return t.quiescentUntil
+	}
+	return time.Time{}
+}
+
 // publishInvalidatedBus posts a resource:invalidated hint. Duplicated
 // here (from internal/api.publishInvalidated) to avoid an import cycle
 // between the orchestrator and the api package.
@@ -363,4 +480,3 @@ func publishInvalidatedBus(bus *events.Bus, resource, reason string) {
 		Reason:   reason,
 	})
 }
-

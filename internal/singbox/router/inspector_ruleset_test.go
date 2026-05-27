@@ -25,7 +25,7 @@ func TestRuleSetCache_DownloadAndHit(t *testing.T) {
 	dir := t.TempDir()
 	cache := newRuleSetCache(dir)
 
-	first, err := cache.getOrDownload(srv.URL+"/list.srs", "binary")
+	first, err := cache.getOrDownload(srv.URL+"/list.srs", "binary", nil, "list.srs")
 	if err != nil {
 		t.Fatalf("first getOrDownload: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestRuleSetCache_DownloadAndHit(t *testing.T) {
 		t.Errorf("cache path %q does not end in .srs", first)
 	}
 
-	second, err := cache.getOrDownload(srv.URL+"/list.srs", "binary")
+	second, err := cache.getOrDownload(srv.URL+"/list.srs", "binary", nil, "list.srs")
 	if err != nil {
 		t.Fatalf("second getOrDownload: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRuleSetCache_TTLExpiry(t *testing.T) {
 
 	cache := newRuleSetCache(t.TempDir())
 
-	if _, err := cache.getOrDownload(srv.URL+"/x.srs", "binary"); err != nil {
+	if _, err := cache.getOrDownload(srv.URL+"/x.srs", "binary", nil, "x.srs"); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	if hits != 1 {
@@ -81,7 +81,7 @@ func TestRuleSetCache_TTLExpiry(t *testing.T) {
 	}
 	cache.mu.Unlock()
 
-	if _, err := cache.getOrDownload(srv.URL+"/x.srs", "binary"); err != nil {
+	if _, err := cache.getOrDownload(srv.URL+"/x.srs", "binary", nil, "x.srs"); err != nil {
 		t.Fatalf("download after expiry: %v", err)
 	}
 	if hits != 2 {
@@ -96,7 +96,7 @@ func TestRuleSetCache_NonOK(t *testing.T) {
 	}))
 	defer srv.Close()
 	cache := newRuleSetCache(t.TempDir())
-	_, err := cache.getOrDownload(srv.URL, "binary")
+	_, err := cache.getOrDownload(srv.URL, "binary", nil, "x")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -112,6 +112,7 @@ func TestMatchRuleSet_MissingBinary(t *testing.T) {
 		"google.com",
 		RuleSet{Tag: "x", Type: "local", Path: "/nonexistent"},
 		"", // no binary
+		nil,
 		nil,
 	)
 	if matched {
@@ -133,6 +134,7 @@ func TestMatchRuleSet_LocalFileMissing(t *testing.T) {
 		RuleSet{Tag: "x", Type: "local", Path: filepath.Join(t.TempDir(), "missing.srs")},
 		"/usr/bin/false", // pretend a binary exists; we won't reach it
 		nil,
+		nil,
 	)
 	if matched {
 		t.Errorf("matched = true, want false")
@@ -152,6 +154,7 @@ func TestMatchRuleSet_RemoteWithoutCache(t *testing.T) {
 		"google.com",
 		RuleSet{Tag: "x", Type: "remote", URL: "https://example.com/list.srs"},
 		"/usr/bin/sing-box",
+		nil,
 		nil,
 	)
 	if matched || supported || err != nil {
@@ -216,7 +219,7 @@ func TestMatchRuleSet_FakeExec(t *testing.T) {
 			}
 			defer func() { ruleSetMatchExec = origExec }()
 
-			matched, supported, err := matchRuleSet("google.com", rs, "/usr/bin/sing-box", nil)
+			matched, supported, err := matchRuleSet("google.com", rs, "/usr/bin/sing-box", nil, nil)
 			if matched != c.wantMatch {
 				t.Errorf("matched = %v, want %v", matched, c.wantMatch)
 			}

@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -146,5 +147,42 @@ func TestStore_MaybeRefresh(t *testing.T) {
 	}
 	if len(picked) > 0 && picked[0].ID != due.ID {
 		t.Errorf("picked wrong subscription: %v", picked)
+	}
+}
+
+func TestStore_Load_SanitizesLegacyDownloadViaSubscriptionError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "subscriptions.json")
+	legacy := []Subscription{
+		{
+			ID:          "legacy-sub",
+			Label:       "legacy",
+			URL:         "https://example.com/sub",
+			SelectorTag: "sub-legacy",
+			InboundTag:  "sub-legacy-in",
+			ProxyIndex:  -1,
+			MemberTags:  []string{},
+			Members:     []MemberInfo{},
+			LastError:   "download via sub-abc (subscription): request failed: get <subscription-url>: net/http: TLS handshake timeout",
+		},
+	}
+	raw, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	list := s.List()
+	if len(list) != 1 {
+		t.Fatalf("len=%d want 1", len(list))
+	}
+	if list[0].LastError != "" {
+		t.Fatalf("legacy subscription error must be cleared, got %q", list[0].LastError)
 	}
 }

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"testing"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -21,17 +22,18 @@ func TestDecide_Boot_StartsEnabledKernelTunnels(t *testing.T) {
 	assertNoActionForTunnel(t, actions, "awg2", ActionColdStartKernel)
 }
 
-func TestDecide_Boot_StartsNativeWGWithoutASC(t *testing.T) {
+func TestDecide_Boot_ReconcilesNativeWGWithoutASC(t *testing.T) {
 	s := newState()
 	s.supportsASC = false
 	s.tunnels["awg0"] = &tunnelState{ID: "awg0", Backend: "nativewg", Enabled: true, NWGIndex: 0}
 
 	actions := decide(Event{Type: EventBoot}, &s)
 
-	stops := filterActions(actions, ActionStopNativeWG)
-	starts := filterActions(actions, ActionStartNativeWG)
-	if len(stops) != 1 || len(starts) != 1 {
-		t.Errorf("expected Stop+Start for NativeWG without ASC, got %d stops, %d starts", len(stops), len(starts))
+	if n := len(filterActions(actions, ActionReconcileNativeWG)); n != 1 {
+		t.Errorf("expected 1 ReconcileNativeWG for non-ASC nativewg, got %d", n)
+	}
+	if n := len(filterActions(actions, ActionStopNativeWG)); n != 0 {
+		t.Errorf("boot must NOT Stop a nativewg tunnel (Stop+Start churns NDMS edges → race), got %d stops", n)
 	}
 }
 
@@ -329,6 +331,54 @@ func TestDecide_Start_NativeWGTunnel(t *testing.T) {
 	}
 }
 
+// External conf=running (e.g. user enabled the interface from the router's
+// own web UI) must start the tunnel even when awg-manager's store says
+// Enabled=false. The user's intent ("on") wins; the start path re-persists
+// Enabled=true. Self-induced hooks are already filtered upstream by
+// consumeExpectedHook, so a conf=running reaching decide is genuinely
+// external. (issue #183 — router-UI enable case.)
+func TestDecide_NDMSHook_Running_ExternalEnableWhileDisabled_Starts(t *testing.T) {
+	s := newState()
+	s.anyWANUpFn = func() bool { return true }
+	s.tunnels["awg0"] = &tunnelState{
+		ID: "awg0", Backend: "nativewg", Enabled: false, Running: false, NWGIndex: 0,
+	}
+
+	// NDMSName for NWGIndex 0 is "Wireguard0".
+	actions := decide(Event{Type: EventNDMSHook, NDMSName: "Wireguard0", Layer: "conf", Level: "running"}, &s)
+
+	if !hasAction(actions, ActionStartNativeWG) {
+		t.Error("expected ActionStartNativeWG — external conf=running must start even when Enabled=false")
+	}
+	if !hasAction(actions, ActionPersistRunning) {
+		t.Error("expected ActionPersistRunning to sync Enabled=true to the router-UI intent")
+	}
+}
+
+// The other two guards stay: no WAN up → no start (can't), and a tunnel we
+// already consider Running → no restart (avoids flap).
+func TestDecide_NDMSHook_Running_NoWAN_NoStart(t *testing.T) {
+	s := newState()
+	s.anyWANUpFn = func() bool { return false }
+	s.tunnels["awg0"] = &tunnelState{ID: "awg0", Backend: "nativewg", Enabled: false, Running: false, NWGIndex: 0}
+
+	actions := decide(Event{Type: EventNDMSHook, NDMSName: "Wireguard0", Layer: "conf", Level: "running"}, &s)
+	if len(actions) != 0 {
+		t.Errorf("no WAN up: expected no actions, got %d", len(actions))
+	}
+}
+
+func TestDecide_NDMSHook_Running_AlreadyRunning_NoStart(t *testing.T) {
+	s := newState()
+	s.anyWANUpFn = func() bool { return true }
+	s.tunnels["awg0"] = &tunnelState{ID: "awg0", Backend: "nativewg", Enabled: true, Running: true, NWGIndex: 0}
+
+	actions := decide(Event{Type: EventNDMSHook, NDMSName: "Wireguard0", Layer: "conf", Level: "running"}, &s)
+	if len(actions) != 0 {
+		t.Errorf("already running: expected no actions, got %d", len(actions))
+	}
+}
+
 func TestDecide_Start_AlreadyRunning(t *testing.T) {
 	s := newState()
 	s.tunnels["awg0"] = &tunnelState{ID: "awg0", Backend: "kernel", Running: true}
@@ -495,19 +545,10 @@ func TestDecide_NDMSHook_IgnoresAlreadyRunning(t *testing.T) {
 	}
 }
 
-func TestDecide_NDMSHook_IgnoresDisabled(t *testing.T) {
-	s := newState()
-	s.anyWANUpFn = func() bool { return true }
-	s.tunnels["awg0"] = &tunnelState{
-		ID: "awg0", Backend: "nativewg", Running: false, Enabled: false, NWGIndex: 0,
-	}
-
-	actions := decide(Event{Type: EventNDMSHook, NDMSName: "Wireguard0", Layer: "conf", Level: "running"}, &s)
-
-	if len(actions) != 0 {
-		t.Errorf("disabled tunnel should not be started, got %d actions", len(actions))
-	}
-}
+// NOTE: the former TestDecide_NDMSHook_IgnoresDisabled was removed — an
+// external conf=running now intentionally starts a disabled tunnel (the
+// user's router-UI "on" intent wins). See
+// TestDecide_NDMSHook_Running_ExternalEnableWhileDisabled_Starts.
 
 func TestDecide_NDMSHook_IgnoresNoWAN(t *testing.T) {
 	s := newState()
@@ -1428,5 +1469,45 @@ func TestDecideNDMSHook_ExternalDisabled_KernelTunnel(t *testing.T) {
 	}, &s)
 	if !hasAction(actions, ActionPersistStopped) {
 		t.Error("kernel tunnel: expected normal PersistStopped")
+	}
+}
+
+func TestDecide_NDMSHook_DisabledIgnoredDuringQuiescence(t *testing.T) {
+	s := newState()
+	now := time.Unix(2000, 0)
+	tun := &tunnelState{
+		ID: "awg11", Backend: "nativewg", Enabled: true, Running: true, NWGIndex: 2,
+		quiescentUntil: now.Add(10 * time.Second), // still settling
+	}
+	s.tunnels["awg11"] = tun
+	ev := Event{
+		Type: EventNDMSHook, Layer: "conf", Level: "disabled",
+		NDMSName: tun.ndmsName(), Now: now,
+	}
+
+	actions := decide(ev, &s)
+
+	if len(actions) != 0 {
+		t.Fatalf("a transient conf=disabled during quiescence must NOT stop the tunnel, got %d actions", len(actions))
+	}
+}
+
+func TestDecide_NDMSHook_DisabledStopsAfterQuiescence(t *testing.T) {
+	s := newState()
+	now := time.Unix(2000, 0)
+	tun := &tunnelState{
+		ID: "awg11", Backend: "nativewg", Enabled: true, Running: true, NWGIndex: 2,
+		quiescentUntil: now.Add(-1 * time.Second), // window elapsed
+	}
+	s.tunnels["awg11"] = tun
+	ev := Event{
+		Type: EventNDMSHook, Layer: "conf", Level: "disabled",
+		NDMSName: tun.ndmsName(), Now: now,
+	}
+
+	actions := decide(ev, &s)
+
+	if !hasAction(actions, ActionStopNativeWG) {
+		t.Fatal("a conf=disabled after the quiescence window must stop the tunnel (user intent honoured)")
 	}
 }

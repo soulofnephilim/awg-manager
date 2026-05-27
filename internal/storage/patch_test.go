@@ -83,6 +83,30 @@ func TestApplyPatch_AppliesAllFieldsInOnePass(t *testing.T) {
 	}
 }
 
+func TestApplyPatch_DownloadSettingsPatch_PartialKindPreservesTag(t *testing.T) {
+	dst := Settings{
+		Download: DownloadSettings{
+			RouteTag:  "awg-1",
+			RouteKind: "awg",
+		},
+	}
+	kind := "singbox"
+	patch := SettingsPatch{
+		Download: &DownloadSettingsPatch{
+			RouteKind: &kind,
+		},
+	}
+
+	ApplyPatch(&dst, &patch)
+
+	if dst.Download.RouteTag != "awg-1" {
+		t.Fatalf("routeTag = %q, want awg-1", dst.Download.RouteTag)
+	}
+	if dst.Download.RouteKind != "singbox" {
+		t.Fatalf("routeKind = %q, want singbox", dst.Download.RouteKind)
+	}
+}
+
 type tSliceDst struct {
 	Items []string
 }

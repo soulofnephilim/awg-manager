@@ -45,6 +45,9 @@ func TestSettingsStore_LoadDefault(t *testing.T) {
 	if !settings.SingboxRouter.SnifferEnabled {
 		t.Error("SingboxRouter.SnifferEnabled = false, want true")
 	}
+	if settings.Download.RouteTag != "direct" {
+		t.Errorf("Download.RouteTag = %q, want direct", settings.Download.RouteTag)
+	}
 }
 
 func TestSettingsStore_MigrateFromV1(t *testing.T) {
@@ -291,6 +294,30 @@ func TestSettingsStore_LoadDedupesManagedServers(t *testing.T) {
 	}
 }
 
+func TestSettings_MigrateV23toV24_KeepsLegacyNonDirectRouteKindEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "settings.json")
+	legacy := `{"schemaVersion":23,"authEnabled":false,"usageLevel":"basic","download":{"routeTag":"sample-route","routeKind":""}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewSettingsStore(tmpDir)
+	s, err := store.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if s.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema = %d, want %d", s.SchemaVersion, CurrentSchemaVersion)
+	}
+	if s.Download.RouteTag != "sample-route" {
+		t.Fatalf("download.routeTag = %q, want sample-route", s.Download.RouteTag)
+	}
+	if s.Download.RouteKind != "" {
+		t.Fatalf("download.routeKind = %q, want empty", s.Download.RouteKind)
+	}
+}
+
 func TestSettingsStore_GetManagedServersDedupes(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewSettingsStore(tmpDir)
@@ -435,11 +462,52 @@ func TestSettings_MigrateV20toV21_SetsSingboxLogLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if s.SchemaVersion != 21 {
-		t.Fatalf("schema = %d, want 21", s.SchemaVersion)
+	if s.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema = %d, want %d", s.SchemaVersion, CurrentSchemaVersion)
 	}
 	if s.Logging.SingboxLogLevel != DefaultSingboxLogLevel {
 		t.Fatalf("singboxLogLevel = %q, want %q", s.Logging.SingboxLogLevel, DefaultSingboxLogLevel)
+	}
+}
+
+func TestSettings_MigrateV21toV22_SetsDownloadRouteTag(t *testing.T) {
+	tmpDir := t.TempDir()
+	legacy := `{"schemaVersion":21,"authEnabled":false,"usageLevel":"basic","download":{"routeTag":""}}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	store := NewSettingsStore(tmpDir)
+	s, err := store.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if s.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema = %d, want %d", s.SchemaVersion, CurrentSchemaVersion)
+	}
+	if s.Download.RouteTag != "direct" {
+		t.Fatalf("download.routeTag = %q, want direct", s.Download.RouteTag)
+	}
+}
+
+func TestSettings_MigrateV23toV24_NormalizesDownloadRouteKind(t *testing.T) {
+	tmpDir := t.TempDir()
+	legacy := `{"schemaVersion":23,"authEnabled":false,"usageLevel":"basic","download":{"routeTag":"  ","routeKind":""}}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	store := NewSettingsStore(tmpDir)
+	s, err := store.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if s.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema = %d, want %d", s.SchemaVersion, CurrentSchemaVersion)
+	}
+	if s.Download.RouteTag != "direct" {
+		t.Fatalf("download.routeTag = %q, want direct", s.Download.RouteTag)
+	}
+	if s.Download.RouteKind != "direct" {
+		t.Fatalf("download.routeKind = %q, want direct", s.Download.RouteKind)
 	}
 }
 
@@ -485,6 +553,25 @@ func TestNormalizeUsageLevel(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("NormalizeUsageLevel(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestDefaultSettingsChannelIsStable(t *testing.T) {
+	s := (&SettingsStore{}).defaultSettings()
+	if s.Updates.Channel != "stable" {
+		t.Errorf("default Updates.Channel = %q, want \"stable\"", s.Updates.Channel)
+	}
+}
+
+func TestMigrateToV23SetsStableChannel(t *testing.T) {
+	var s Settings
+	s.SchemaVersion = 22
+	(&SettingsStore{}).migrateToV23(&s)
+	if s.Updates.Channel != "stable" {
+		t.Errorf("after migrateToV23 Channel = %q, want \"stable\"", s.Updates.Channel)
+	}
+	if s.SchemaVersion != 23 {
+		t.Errorf("SchemaVersion = %d, want 23", s.SchemaVersion)
 	}
 }
 

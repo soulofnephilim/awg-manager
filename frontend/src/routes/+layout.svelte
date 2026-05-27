@@ -26,6 +26,7 @@
 	import { invalidateResource, invalidateAll } from '$lib/stores/storeRegistry';
 	import { setDeviceProxyMissingTarget, clearDeviceProxyMissingTarget } from '$lib/stores/deviceproxy';
 	import { settings as settingsStore, reloadSettings, usageLevel } from '$lib/stores/settings';
+	import { donateModalOpen, openDonateModal, closeDonateModal } from '$lib/stores/donateModal';
 	import {
 		isSectionVisible,
 		pathToSection,
@@ -41,7 +42,6 @@
 	let { children }: { children: Snippet } = $props();
 
 	let mobileMenuOpen = $state(false);
-	let donateModalOpen = $state(false);
 	let booting = $state(false);
 
 	let backendOffline = $derived(!$serverOnline);
@@ -371,7 +371,7 @@
 		bind:mobileMenuOpen
 		onToggleThemeMode={() => theme.toggleMode()}
 		onLogout={() => auth.logout()}
-		onOpenDonate={() => (donateModalOpen = true)}
+		onOpenDonate={openDonateModal}
 	/>
 
 	{#if !$isAuthenticated && $page.url.pathname !== '/terms'}
@@ -408,7 +408,12 @@
 
 	{/if}
 
-	<Modal bind:open={donateModalOpen} title="Поддержать проект" size="sm" onclose={() => donateModalOpen = false}>
+	<Modal
+		open={$donateModalOpen}
+		title="Поддержать проект"
+		size="sm"
+		onclose={closeDonateModal}
+	>
 		<div class="donate-wallets">
 			<div class="donate-wallet">
 				<span class="donate-wallet-label">USDT / ETH</span>

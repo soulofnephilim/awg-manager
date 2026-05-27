@@ -602,6 +602,24 @@ func (c *RouterConfig) outboundReferences(tag string) []string {
 	return refs
 }
 
+// outboundReferencesExcludingRules returns all references to tag EXCEPT
+// route.rules[...] entries — those are reported separately as rule
+// indices by rulesReferencingOutbound (for UI deeplinking). Covers
+// route.final, composite members, composite default, dns.servers detour,
+// and rule_set download_detour — all the locations validateLocked flags
+// as unknown-outbound but that rulesReferencingOutbound does not see.
+func (c *RouterConfig) outboundReferencesExcludingRules(tag string) []string {
+	all := c.outboundReferences(tag)
+	out := make([]string, 0, len(all))
+	for _, ref := range all {
+		if strings.HasPrefix(ref, "route.rules[") {
+			continue
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
 func ruleReferencesOutbound(r Rule, tag string) bool {
 	if r.Outbound == tag {
 		return true

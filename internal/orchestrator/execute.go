@@ -20,6 +20,8 @@ func (o *Orchestrator) executeOne(ctx context.Context, action Action) error {
 		return o.executeColdStartKernel(ctx, action)
 	case ActionStartNativeWG:
 		return o.executeStartNativeWG(ctx, action)
+	case ActionReconcileNativeWG:
+		return o.executeReconcileNativeWG(ctx, action)
 	case ActionStopKernel:
 		return o.executeStopKernel(ctx, action)
 	case ActionStopNativeWG:
@@ -321,6 +323,30 @@ func (o *Orchestrator) executeStartNativeWG(ctx context.Context, action Action) 
 	}
 	o.appLog.Info("start", action.Tunnel, fmt.Sprintf("NativeWG started, active WAN: %s", wan))
 	return nil
+}
+
+// executeReconcileNativeWG brings a non-ASC NativeWG tunnel to its desired
+// state idempotently. If the tunnel is already running WITH a handshake we
+// skip the disruptive restart (which churns NDMS conf edges and feeds the
+// boot race). If it is NOT handshaking — including the #183 case where NDMS
+// brought the interface up without our kmod proxy (conf=running, peer up,
+// but no handshake) — we run the full Start to (re)attach the proxy.
+func (o *Orchestrator) executeReconcileNativeWG(ctx context.Context, action Action) error {
+	if o.nwgOp == nil {
+		return fmt.Errorf("NativeWG backend not available")
+	}
+	stored, err := o.store.Get(action.Tunnel)
+	if err != nil {
+		return tunnel.ErrNotFound
+	}
+
+	info := o.nwgOp.GetState(ctx, stored)
+	if info.State == tunnel.StateRunning && info.HasHandshake {
+		o.appLog.Info("reconcile", action.Tunnel, "NativeWG already running with handshake — skip restart")
+		return nil
+	}
+
+	return o.executeStartNativeWG(ctx, action)
 }
 
 // executeStopKernel stops a kernel tunnel.

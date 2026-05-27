@@ -1,10 +1,23 @@
 package hydraroute
 
 // Status represents the current state of HydraRoute Neo daemon.
+type ProcessState string
+
+const (
+	StateNotInstalled ProcessState = "not_installed"
+	StateStopped      ProcessState = "stopped"
+	StateRunning      ProcessState = "running"
+	StateDead         ProcessState = "dead"
+)
+
 type Status struct {
-	Installed bool   `json:"installed"`
-	Running   bool   `json:"running"`
-	Version   string `json:"version,omitempty"`
+	Installed    bool         `json:"installed"`
+	Version      string       `json:"version,omitempty"`
+	Running      bool         `json:"running"`
+	PID          int          `json:"pid,omitempty"`
+	StalePID     int          `json:"stalePid,omitempty"`
+	ProcessState ProcessState `json:"processState"`
+	LastError    string       `json:"lastError,omitempty"`
 }
 
 // ManagedEntry represents a single DNS list to be written into HydraRoute config files.

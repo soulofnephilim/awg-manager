@@ -526,6 +526,21 @@ func fetchStorageByPath(path string) string {
 	return formatBytesPair(used, total)
 }
 
+// FreeBytes returns the free space (bytes) on the filesystem containing path.
+// ok is false when the filesystem can't be queried (e.g. unsupported platform);
+// callers should fall back to a static bound in that case.
+func FreeBytes(path string) (free int64, ok bool) {
+	used, total, ok := statfsUsageFunc(path)
+	if !ok {
+		return 0, false
+	}
+	free = total - used
+	if free < 0 {
+		free = 0
+	}
+	return free, true
+}
+
 func anyToString(v any) string {
 	switch t := v.(type) {
 	case string:

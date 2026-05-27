@@ -6,6 +6,7 @@
 	import DNSServerEditModal from './DNSServerEditModal.svelte';
 	import { Button } from '$lib/components/ui';
 	import ConfirmModal from '$lib/components/ui/ConfirmModal.svelte';
+	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 
 	interface Props {
 		servers: SingboxRouterDNSServer[];
@@ -76,9 +77,20 @@
 	}
 </script>
 
+{#snippet createIcon()}
+	<CreateIcon />
+{/snippet}
+
 <div class="header">
 	<div class="hint">{servers.length} DNS серверов</div>
-	<Button variant="primary" size="sm" onclick={() => { addMode = true; editTag = null; }}>+ Добавить сервер</Button>
+	<Button
+		variant="primary"
+		size="sm"
+		onclick={() => { addMode = true; editTag = null; }}
+		iconBefore={createIcon}
+	>
+		Добавить сервер
+	</Button>
 </div>
 
 {#if servers.length === 0}
@@ -258,5 +270,16 @@
 	}
 	.icon-btn.danger {
 		color: var(--danger, #dc2626);
+	}
+
+	@media (max-width: 720px) {
+		.col-header,
+		.row {
+			grid-template-columns: 110px 60px 1fr 100px 24px 24px;
+		}
+		.col-header > :nth-child(5),
+		.row > :nth-child(5) {
+			display: none;
+		}
 	}
 </style>

@@ -1,34 +1,45 @@
 <script lang="ts">
-	import { onDestroy, onMount } from "svelte";
+	import { onMount } from "svelte";
+	import { get } from "svelte/store";
 	import { afterNavigate } from "$app/navigation";
 	import { page } from "$app/stores";
 	import { api } from "$lib/api/client";
 	import { notifications } from "$lib/stores/notifications";
 	import { singboxStatus } from "$lib/stores/singbox";
+	import { hydrarouteStatus } from "$lib/stores/hydraroute";
 	import { PageContainer, PageHeader, LoadingSpinner } from "$lib/components/layout";
 	import { Toggle, Modal, Button, ConfirmModal } from "$lib/components/ui";
 	import {
 		SystemInfoGrid,
 		LoggingSettings,
 		UpdateSection,
+		DownloadSettings,
 		DnsRouteSettings,
 		IntegrationsCard,
 		ThemeSchemeCard,
 		SettingsFooter,
 		UsageLevelCard,
+		DevelopChannelGateModal,
 	} from "$lib/components/settings";
 	import { setSettings as setGlobalSettings } from "$lib/stores/settings";
+	import {
+		downloadOutbounds,
+		downloadOutboundsLoading,
+		downloadOutboundsError,
+		ensureDownloadOutboundsLoaded,
+		resolveDownloadRouteLabel,
+	} from "$lib/stores/downloadRoute";
 	import type {
 		SystemInfo,
 		Settings,
 		UpdateInfo,
-		HydraRouteStatus,
 	} from "$lib/types";
 	import {
 		USAGE_LEVEL_LABELS,
 		isAppearanceSettingsVisible,
 		isSectionVisible,
 		isRoutingSubTabVisible,
+		isUpdateChannelSwitchVisible,
 		type UsageLevel,
 	} from "$lib/types/usageLevel";
 	import { usageLevel } from "$lib/stores/settings";
@@ -44,12 +55,10 @@
 	const showSingboxIntegration = $derived(isSectionVisible($usageLevel, "singboxTunnels"));
 	const showHydraIntegration = $derived(isRoutingSubTabVisible($usageLevel, "hrNeo"));
 	const showDnsRouteCard = $derived(isRoutingSubTabVisible($usageLevel, "dnsRoutes"));
+	const downloadRouteLabel = $derived(resolveDownloadRouteLabel(settings, $downloadOutbounds));
 	let updateInfo: UpdateInfo | null = $state(null);
 	let restarting = $state(false);
 	let restartConfirmOpen = $state(false);
-	let hydraStatus = $state<HydraRouteStatus | null>(null);
-	let hydraStatusLoading = $state(true);
-	let hydraProbeNote = $state<string | null>(null);
 	let hydraBusy = $state(false);
 	let singboxInstalling = $state(false);
 	let singboxInstallError = $state<string | null>(null);
@@ -59,10 +68,10 @@
 	let ndmsProxyBusy = $state(false);
 	let ndmsProxyConfirmOpen = $state(false);
 	let ndmsProxyConfirmEnable = $state(false); // true = подтверждение включения; false = выключения
-	let hydraProbeNoteTimer: ReturnType<typeof setTimeout> | null = null;
 	let systemInfoRefreshing = $state(false);
 	let systemInfoUpdatedAt = $state<string | null>(null);
 	let systemInfoInFlight: Promise<void> | null = null;
+	let developGateOpen = $state(false);
 
 	const singboxStatusValue = $derived($singboxStatus.data ?? null);
 	const singboxStatusLoading = $derived(
@@ -72,26 +81,14 @@
 	const singboxInstalled = $derived(singboxStatusValue?.installed ?? false);
 	const singboxRunning = $derived(singboxStatusValue?.running ?? false);
 	const ndmsProxyEnabled = $derived(singboxStatusValue?.ndmsProxyEnabled ?? true);
-	const hydraInstalled = $derived(hydraStatus?.installed ?? false);
-	const hydraRunning = $derived(hydraStatus?.running ?? false);
-
-	function setHydraProbeNote(note: string) {
-		hydraProbeNote = note;
-		if (hydraProbeNoteTimer) {
-			clearTimeout(hydraProbeNoteTimer);
-		}
-		hydraProbeNoteTimer = setTimeout(() => {
-			hydraProbeNote = null;
-			hydraProbeNoteTimer = null;
-		}, 4000);
-	}
-
-	onDestroy(() => {
-		if (hydraProbeNoteTimer) {
-			clearTimeout(hydraProbeNoteTimer);
-			hydraProbeNoteTimer = null;
-		}
-	});
+	const hydraStatusValue = $derived($hydrarouteStatus.data ?? null);
+	const hydraStatusLoading = $derived(
+		$hydrarouteStatus.lastFetchedAt === 0 &&
+		($hydrarouteStatus.status === 'idle' || $hydrarouteStatus.status === 'loading')
+	);
+	const hydraStatusError = $derived($hydrarouteStatus.error);
+	const hydraInstalled = $derived(hydraStatusValue?.installed ?? false);
+	const hydraRunning = $derived(hydraStatusValue?.running ?? false);
 
 	function handleNDMSProxyToggleClick(next: boolean) {
 		// next — желаемое состояние после клика. Открываем confirm-modal
@@ -146,7 +143,8 @@
 	async function controlHydra(action: 'start' | 'stop' | 'restart') {
 		hydraBusy = true;
 		try {
-			hydraStatus = await api.controlHydraRoute(action);
+			const fresh = await api.controlHydraRoute(action);
+			hydrarouteStatus.applyMutationResponse(fresh);
 			notifications.success(
 				action === 'restart' ? 'HydraRoute перезапущен' :
 				action === 'stop' ? 'HydraRoute остановлен' : 'HydraRoute запущен',
@@ -210,6 +208,51 @@
 		return systemInfoInFlight;
 	}
 
+	async function refreshDownloadOutbounds(showNotification = true) {
+		await ensureDownloadOutboundsLoaded(true);
+		if (!showNotification) return;
+		const err = get(downloadOutboundsError);
+		if (err) {
+			notifications.error(`Ошибка обновления маршрутов: ${err}`);
+			return;
+		}
+		const list = get(downloadOutbounds);
+		const tunnelCount = list.filter((ob) => ob.tag !== 'direct').length;
+		const availableTunnelCount = list.filter((ob) => ob.tag !== 'direct' && ob.available).length;
+		notifications.success(
+			tunnelCount > 0
+				? `Маршруты обновлены: найдено ${tunnelCount} туннелей (${availableTunnelCount} доступно)`
+				: 'Маршруты обновлены: туннели не найдены (доступен только Direct)'
+		);
+	}
+
+	async function selectDownloadRoute(routeTag: string, routeKind?: 'direct' | 'awg' | 'singbox' | 'subscription') {
+		if (!settings) return;
+		saving = true;
+		try {
+			const normalizedTag = routeTag.trim() || 'direct';
+			const normalizedKind = normalizedTag === 'direct' ? 'direct' : routeKind;
+			settings = await api.updateSettings({
+				download: { routeTag: normalizedTag, routeKind: normalizedKind },
+			});
+			setGlobalSettings(settings);
+			notifications.success('Маршрут загрузок сохранён');
+		} catch {
+			notifications.error('Не удалось сохранить маршрут загрузок');
+		} finally {
+			saving = false;
+		}
+	}
+
+	function scrollToSettingsHashTarget() {
+		if (typeof window === "undefined") return;
+		if (window.location.hash !== "#downloads") return;
+		window.requestAnimationFrame(() => {
+			const target = document.getElementById("downloads");
+			target?.scrollIntoView({ behavior: "smooth", block: "start" });
+		});
+	}
+
 onMount(() => {
 	const timer = setInterval(() => {
 		void fetchSystemInfo(true);
@@ -223,6 +266,8 @@ onMount(() => {
 			]);
 			settings = appSettings;
 			setGlobalSettings(appSettings);
+			await ensureDownloadOutboundsLoaded();
+			scrollToSettingsHashTarget();
 		} catch (e) {
 			notifications.error(e instanceof Error ? e.message : "Не удалось загрузить настройки");
 		} finally {
@@ -238,23 +283,6 @@ onMount(() => {
 				// Keep the page interactive; update widget can stay empty on transient errors.
 			});
 
-		try {
-			const hydraLoadStartedAt = Date.now();
-			hydraStatus = await api.getHydraRouteStatus();
-			setHydraProbeNote("данные получены");
-			// Keep a tiny visible loading phase so users can perceive that
-			// the probe actually happened, even on very fast responses.
-			const elapsed = Date.now() - hydraLoadStartedAt;
-			const minLoadingMs = 350;
-			if (elapsed < minLoadingMs) {
-				await new Promise((resolve) => setTimeout(resolve, minLoadingMs - elapsed));
-			}
-		} catch {
-			setHydraProbeNote("нет ответа");
-			/* ignore - HR may not be available */
-		} finally {
-			hydraStatusLoading = false;
-		}
 	})();
 
 	return () => {
@@ -429,6 +457,43 @@ onMount(() => {
 		}
 	}
 
+	function requestChannel(channel: 'stable' | 'develop') {
+		if (!settings || settings.updates.channel === channel) return;
+		if (channel === 'develop') {
+			developGateOpen = true;
+			return;
+		}
+		void selectChannel('stable');
+	}
+
+	async function selectChannel(channel: 'stable' | 'develop') {
+		if (!settings || settings.updates.channel === channel) return;
+		saving = true;
+		try {
+			settings = await api.updateSettings({
+				...settings,
+				updates: { ...settings.updates, channel },
+			});
+			setGlobalSettings(settings);
+			// Кэш проверки относится к прежнему каналу — перепроверяем.
+			updateInfo = await api.checkUpdate(true);
+			notifications.success(
+				channel === 'develop'
+					? 'Канал обновлений: develop (нестабильный)'
+					: 'Канал обновлений изменён на стабильный',
+			);
+		} catch {
+			notifications.error('Ошибка смены канала обновлений');
+		} finally {
+			saving = false;
+		}
+	}
+
+	async function confirmDevelopChannel() {
+		developGateOpen = false;
+		await selectChannel('develop');
+	}
+
 	async function selectUsageLevel(level: UsageLevel) {
 		if (!settings) return;
 		saving = true;
@@ -533,6 +598,7 @@ onMount(() => {
 		if (!from?.url || from.url.pathname !== "/settings") {
 			await fetchSystemInfo(true);
 		}
+		scrollToSettingsHashTarget();
 	});
 </script>
 
@@ -560,16 +626,21 @@ onMount(() => {
 				/>
 
 				<div class="card">
-					<div class="section-label">Обновление</div>
-					<UpdateSection bind:updateInfo />
+					<div class="section-label section-label-with-route">
+						<span>Обновление AWGM</span>
+						<span class="section-label-route" title={downloadRouteLabel}>
+							через {downloadRouteLabel}
+						</span>
+					</div>
+					<UpdateSection bind:updateInfo {downloadRouteLabel} />
 				</div>
 
 				<IntegrationsCard
 					singboxStatus={singboxStatusValue}
 					{singboxStatusLoading}
-					{hydraStatus}
+					hydraStatus={hydraStatusValue}
 					{hydraStatusLoading}
-					{hydraProbeNote}
+					hydraStatusError={hydraStatusError}
 					{singboxInstalling}
 					{singboxUpdating}
 					{singboxInstallError}
@@ -578,6 +649,7 @@ onMount(() => {
 					onupdateSingbox={updateSingbox}
 					showSingbox={showSingboxIntegration}
 					showHydra={showHydraIntegration}
+					{downloadRouteLabel}
 				/>
 			</aside>
 
@@ -608,7 +680,7 @@ onMount(() => {
 				</div>
 
 				<div class="card">
-					<div class="section-label">Обновления</div>
+					<div class="section-label">Загрузки и обновления</div>
 					<div class="setting-row toggle-inline-row">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Автопроверка обновлений</span>
@@ -620,6 +692,53 @@ onMount(() => {
 							disabled={saving}
 						/>
 					</div>
+					{#if systemInfo.isOS5 && showDnsRouteCard}
+						<DnsRouteSettings
+							bind:settings
+							{saving}
+							onToggle={toggleDnsAutoRefresh}
+							onSave={saveDnsRouteSettings}
+						/>
+					{/if}
+					{#if isUpdateChannelSwitchVisible(settings.usageLevel)}
+						<div class="setting-row toggle-inline-row">
+							<div class="flex flex-col gap-1">
+								<span class="font-medium">Канал обновлений</span>
+								<span class="setting-description">
+									develop — свежие, потенциально нестабильные сборки из ветки разработки.
+								</span>
+							</div>
+							<div class="channel-switch">
+								<button
+									type="button"
+									class="channel-option"
+									class:active={settings.updates.channel === 'stable'}
+									disabled={saving}
+									onclick={() => requestChannel('stable')}
+								>
+									Стабильный
+								</button>
+								<button
+									type="button"
+									class="channel-option"
+									class:active={settings.updates.channel === 'develop'}
+									disabled={saving}
+									onclick={() => requestChannel('develop')}
+								>
+									Канал разработки
+								</button>
+							</div>
+						</div>
+					{/if}
+					<DownloadSettings
+						bind:settings
+						{saving}
+						outbounds={$downloadOutbounds}
+						loading={$downloadOutboundsLoading}
+						error={$downloadOutboundsError}
+						onRefresh={refreshDownloadOutbounds}
+						onSelectRoute={selectDownloadRoute}
+					/>
 				</div>
 
 				<div class="card">
@@ -631,18 +750,6 @@ onMount(() => {
 						onSave={saveLoggingSettings}
 					/>
 				</div>
-
-				{#if systemInfo.isOS5 && showDnsRouteCard}
-					<div class="card">
-						<div class="section-label">DNS-маршрутизация</div>
-						<DnsRouteSettings
-							bind:settings
-							{saving}
-							onToggle={toggleDnsAutoRefresh}
-							onSave={saveDnsRouteSettings}
-						/>
-					</div>
-				{/if}
 
 				{#if $usageLevel === "expert"}
 				<div class="card">
@@ -690,6 +797,7 @@ onMount(() => {
 							</div>
 							<Toggle
 								checked={ndmsProxyEnabled}
+								controlled
 								disabled={ndmsProxyBusy}
 								onchange={handleNDMSProxyToggleClick}
 							/>
@@ -771,6 +879,13 @@ onMount(() => {
 		</div>
 		</div>
 	{/if}
+
+	<DevelopChannelGateModal
+		open={developGateOpen}
+		busy={saving}
+		onclose={() => (developGateOpen = false)}
+		onpassed={confirmDevelopChannel}
+	/>
 
 	<ConfirmModal
 		open={ndmsProxyConfirmOpen}
@@ -861,6 +976,24 @@ onMount(() => {
 		align-items: center;
 	}
 
+	.section-label-with-route {
+		display: flex;
+		align-items: baseline;
+		gap: 0.45rem;
+		min-width: 0;
+	}
+
+	.section-label-route {
+		text-transform: none;
+		letter-spacing: normal;
+		font-weight: 500;
+		opacity: 0.9;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
 	.api-key-controls {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
@@ -947,5 +1080,29 @@ onMount(() => {
 		.settings-left {
 			position: static;
 		}
+	}
+
+	.channel-switch {
+		display: inline-flex;
+		border: 1px solid var(--border);
+		border-radius: 0.5rem;
+		overflow: hidden;
+		flex-shrink: 0;
+	}
+	.channel-option {
+		padding: 0.35rem 0.75rem;
+		font-size: 0.85rem;
+		background: transparent;
+		color: var(--text-secondary);
+		border: none;
+		cursor: pointer;
+	}
+	.channel-option.active {
+		background: var(--accent);
+		color: #000 !important;
+	}
+	.channel-option:disabled {
+		opacity: 0.6;
+		cursor: default;
 	}
 </style>

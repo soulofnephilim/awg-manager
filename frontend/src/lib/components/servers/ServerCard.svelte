@@ -9,8 +9,8 @@
 	import { Button } from '$lib/components/ui';
 
 	function peerIP(p: WireguardServerPeer): string {
-		return p.allowedIPs?.find(ip => ip.includes('/32'))?.split('/')[0]
-			?? p.allowedIPs?.[0]?.split('/')[0]
+		return p.allowedIPs?.find(ip => ip.includes('/32'))
+			?? p.allowedIPs?.[0]
 			?? '';
 	}
 

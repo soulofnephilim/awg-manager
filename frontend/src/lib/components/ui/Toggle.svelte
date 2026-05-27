@@ -1,3 +1,7 @@
+<script lang="ts" module>
+    export type ToggleSpinnerPosition = 'before' | 'after';
+</script>
+
 <script lang="ts">
     interface Props {
         checked: boolean;
@@ -8,6 +12,15 @@
         hint?: string;
         size?: 'sm' | 'md';
         variant?: 'slider' | 'flip';
+        /** Spinner slot relative to the slider track (flip variant ignores this). */
+        spinner?: ToggleSpinnerPosition;
+        // controlled: parent owns the state. The toggle does NOT self-commit
+        // the click — it reverts the DOM to `checked` and lets the parent
+        // drive the value via onchange. Needed when onchange defers the change
+        // (e.g. behind a confirm modal): on cancel the prop never changes, so
+        // the toggle must not stay visually flipped. Default keeps the legacy
+        // optimistic behaviour (and bind:checked support).
+        controlled?: boolean;
     }
 
     let {
@@ -19,6 +32,8 @@
         hint = '',
         size = 'md',
         variant = 'slider',
+        spinner = 'before',
+        controlled = false,
     }: Props = $props();
 
     function handleInput(event: Event) {
@@ -28,6 +43,13 @@
         }
         const input = event.currentTarget as HTMLInputElement;
         const nextChecked = input.checked;
+        if (controlled) {
+            // Revert the browser's optimistic flip; the parent re-renders
+            // `checked` only if it accepts the change.
+            input.checked = checked;
+            if (onchange) onchange(nextChecked);
+            return;
+        }
         checked = nextChecked;
         if (onchange) onchange(nextChecked);
     }
@@ -44,6 +66,11 @@
                             <span class="flip-spinner"></span>
                         {/if}
                     </span>
+                </span>
+            {:else if spinner === 'after'}
+                <span class="toggle-slider"></span>
+                <span class="toggle-spinner-slot" aria-hidden="true">
+                    {#if loading}<span class="toggle-spinner"></span>{/if}
                 </span>
             {:else}
                 <span class="toggle-spinner-slot" aria-hidden="true">
@@ -69,6 +96,11 @@
                         <span class="flip-spinner"></span>
                     {/if}
                 </span>
+            </span>
+        {:else if spinner === 'after'}
+            <span class="toggle-slider"></span>
+            <span class="toggle-spinner-slot" aria-hidden="true">
+                {#if loading}<span class="toggle-spinner"></span>{/if}
             </span>
         {:else}
             <span class="toggle-spinner-slot" aria-hidden="true">

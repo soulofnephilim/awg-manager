@@ -155,6 +155,7 @@
 			<Toggle
 				checked={policy.standalone}
 				onchange={toggleStandalone}
+				spinner="after"
 				label="Standalone"
 				hint="Политика действует самостоятельно, без привязки к глобальным правилам, статические маршруты из основных настроек не копируются"
 			/>
@@ -279,12 +280,25 @@
 	@media (max-width: 768px) {
 		.edit-layout {
 			grid-template-columns: 1fr;
-			grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+			grid-template-rows: auto;
+			height: auto;
+			overflow: visible;
 		}
 
 		.left-panel {
 			border-right: none !important;
 			border-bottom: 1px solid var(--border);
+			overflow: visible;
+			min-height: auto;
+		}
+
+		.right-panel {
+			overflow: visible;
+			min-height: auto;
+		}
+
+		.right-panel-hr {
+			overflow-y: visible;
 		}
 	}
 

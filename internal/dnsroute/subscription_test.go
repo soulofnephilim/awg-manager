@@ -2,11 +2,74 @@ package dnsroute
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type dnsrouteTestDownloader struct{}
+
+func statusAllowed(status int, allowed []int) bool {
+	if len(allowed) == 0 {
+		return status == http.StatusOK
+	}
+	for _, v := range allowed {
+		if v == status {
+			return true
+		}
+	}
+	return false
+}
+
+func (dnsrouteTestDownloader) ReadAll(ctx context.Context, req SubscriptionDownloadRequest) ([]byte, SubscriptionDownloadMeta, error) {
+	client := &http.Client{}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL, nil)
+	if err != nil {
+		return nil, SubscriptionDownloadMeta{}, err
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, SubscriptionDownloadMeta{}, err
+	}
+	defer resp.Body.Close()
+	if !statusAllowed(resp.StatusCode, req.AllowedStatus) {
+		return nil, SubscriptionDownloadMeta{}, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, req.MaxBodyBytes+1))
+	if err != nil {
+		return nil, SubscriptionDownloadMeta{}, err
+	}
+	if int64(len(body)) > req.MaxBodyBytes {
+		return nil, SubscriptionDownloadMeta{}, fmt.Errorf("body exceeds limit (%d bytes)", req.MaxBodyBytes)
+	}
+	return body, SubscriptionDownloadMeta{ContentType: resp.Header.Get("Content-Type")}, nil
+}
+
+func TestFetchSubscription_FollowsRedirect(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("example.com\n"))
+	}))
+	defer final.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	svc := NewService(nil, nil, nil, nil, nil)
+	svc.SetDownloader(dnsrouteTestDownloader{})
+	got, err := svc.fetchSubscription(context.Background(), redirect.URL)
+	if err != nil {
+		t.Fatalf("fetchSubscription() error = %v", err)
+	}
+	if len(got) != 1 || got[0] != "example.com" {
+		t.Fatalf("unexpected parsed domains: %#v", got)
+	}
+}
 
 func TestParseDomainLine(t *testing.T) {
 	tests := []struct {
@@ -156,7 +219,9 @@ func TestFetchSubscription_ContentType(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		got, err := fetchSubscription(context.Background(), srv.URL)
+		svc := NewService(nil, nil, nil, nil, nil)
+		svc.SetDownloader(dnsrouteTestDownloader{})
+		got, err := svc.fetchSubscription(context.Background(), srv.URL)
 		if err != nil {
 			t.Fatalf("fetchSubscription() error = %v", err)
 		}
@@ -172,7 +237,9 @@ func TestFetchSubscription_ContentType(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		_, err := fetchSubscription(context.Background(), srv.URL)
+		svc := NewService(nil, nil, nil, nil, nil)
+		svc.SetDownloader(dnsrouteTestDownloader{})
+		_, err := svc.fetchSubscription(context.Background(), srv.URL)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -188,7 +255,9 @@ func TestFetchSubscription_ContentType(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		_, err := fetchSubscription(context.Background(), srv.URL)
+		svc := NewService(nil, nil, nil, nil, nil)
+		svc.SetDownloader(dnsrouteTestDownloader{})
+		_, err := svc.fetchSubscription(context.Background(), srv.URL)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}

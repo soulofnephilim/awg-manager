@@ -76,8 +76,10 @@ import type {
 	SingboxRouterDNSServer,
 	SingboxRouterDNSRule,
 	SingboxRouterDNSGlobals,
+	SingboxRouterDNSRewrite,
 	SingboxRouterInspectRequest,
 	SingboxRouterInspectResult,
+	SingboxRouterInspectProgress,
 	SingboxProxiesListResponse,
 	SingboxProxiesSelectRequest,
 	SingboxProxiesTestRequest,
@@ -94,6 +96,7 @@ import type {
 	ManagedServerDriftResponse,
 	ManagedServerRestoreResponse,
 	RestoreOptions,
+	DnsProxyInfo,
 } from '$lib/types';
 import { isMockDevMode } from '$lib/env';
 
@@ -254,7 +257,8 @@ class ApiClient {
 			const details: TunnelReferencedError = body?.details ?? {
 				tunnelId: id,
 				deviceProxy: false,
-				routerRules: []
+				routerRules: [],
+				routerOther: []
 			};
 			const err = new Error('tunnel_referenced') as Error & {
 				details: TunnelReferencedError;
@@ -549,9 +553,7 @@ class ApiClient {
 
 	async getUpdateChangelog(from: string, to: string): Promise<{ entries: ChangelogEntry[] }> {
 		const parts = [`to=${encodeURIComponent(to)}`];
-		// Omit `from` to request the single-version view for `to` — backend
-		// returns just that one entry (used by "Что нового" when no update
-		// is pending).
+		// Omit `from` for the current minor line up to `to` (2.11.0…2.11.2 on 2.11.2+r70).
 		if (from) parts.push(`from=${encodeURIComponent(from)}`);
 		return this.request(`/system/update/changelog?${parts.join('&')}`);
 	}
@@ -1301,6 +1303,10 @@ class ApiClient {
 		return this.request('/dns-check/client');
 	}
 
+	async getDnsProxyInfo(): Promise<DnsProxyInfo> {
+		return this.request('/diagnostics/dns-proxy');
+	}
+
 	// #endregion
 
 	// ─────────────────────────────────────────────
@@ -1492,6 +1498,10 @@ class ApiClient {
 			}
 			outbound.transport = { type: t.transport || 'tcp' };
 			if (Object.keys(tls).length > 0) outbound.tls = tls;
+		} else if (t.protocol === 'mieru') {
+			outbound.transport = (t.transport || 'TCP').toUpperCase();
+			outbound.username = t.username || '';
+			outbound.password = '';
 		}
 
 		return outbound;
@@ -1501,6 +1511,13 @@ class ApiClient {
 		return this.request(`/singbox/tunnels?tag=${encodeURIComponent(tag)}`, {
 			method: 'PUT',
 			body: JSON.stringify({ outbound })
+		});
+	}
+
+	async singboxRenameTunnel(oldTag: string, newTag: string): Promise<SingboxTunnel[]> {
+		return this.request('/singbox/tunnels/rename', {
+			method: 'PATCH',
+			body: JSON.stringify({ oldTag, newTag })
 		});
 	}
 
@@ -1894,6 +1911,38 @@ class ApiClient {
 		});
 	}
 
+	async singboxRouterListDNSRewrites(): Promise<SingboxRouterDNSRewrite[]> {
+		return this.request('/singbox/router/dns/rewrites/list');
+	}
+
+	async singboxRouterAddDNSRewrite(rewrite: SingboxRouterDNSRewrite): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/add', {
+			method: 'POST',
+			body: JSON.stringify(rewrite),
+		});
+	}
+
+	async singboxRouterUpdateDNSRewrite(index: number, rewrite: SingboxRouterDNSRewrite): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/update', {
+			method: 'POST',
+			body: JSON.stringify({ index, rewrite }),
+		});
+	}
+
+	async singboxRouterDeleteDNSRewrite(index: number): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/delete', {
+			method: 'POST',
+			body: JSON.stringify({ index }),
+		});
+	}
+
+	async singboxRouterMoveDNSRewrite(from: number, to: number): Promise<void> {
+		await this.request('/singbox/router/dns/rewrites/move', {
+			method: 'POST',
+			body: JSON.stringify({ from, to }),
+		});
+	}
+
 	async singboxRouterGetDNSGlobals(): Promise<SingboxRouterDNSGlobals> {
 		return this.request('/singbox/router/dns/globals');
 	}
@@ -1919,6 +1968,51 @@ class ApiClient {
 			method: 'POST',
 			body: JSON.stringify(req),
 		});
+	}
+
+	singboxRouterInspectRouteStream(
+		req: SingboxRouterInspectRequest,
+		handlers: {
+			onProgress: (progress: SingboxRouterInspectProgress) => void;
+			onResult: (result: SingboxRouterInspectResult) => void;
+			onInspectError: (message: string) => void;
+			onError: (message: string) => void;
+		},
+	): EventSource {
+		const qs = new URLSearchParams();
+		qs.set('domain', req.domain);
+		if (typeof req.port === 'number') qs.set('port', String(req.port));
+		if (req.protocol) qs.set('protocol', req.protocol);
+		const es = new EventSource(`${this.baseUrl}/singbox/router/inspect/stream?${qs.toString()}`);
+		es.addEventListener('progress', (e) => {
+			try {
+				const payload = JSON.parse((e as MessageEvent).data);
+				if (payload?.progress) handlers.onProgress(payload.progress as SingboxRouterInspectProgress);
+			} catch {}
+		});
+		es.addEventListener('result', (e) => {
+			try {
+				const payload = JSON.parse((e as MessageEvent).data);
+				if (payload?.result) handlers.onResult(payload.result as SingboxRouterInspectResult);
+			} catch (err) {
+				handlers.onError(err instanceof Error ? err.message : 'Invalid stream result');
+			}
+			es.close();
+		});
+		es.addEventListener('inspect-error', (e) => {
+			try {
+				const payload = JSON.parse((e as MessageEvent).data);
+				handlers.onInspectError(String(payload?.error ?? 'Inspect failed'));
+			} catch {
+				handlers.onInspectError('Inspect failed');
+			}
+			es.close();
+		});
+		es.addEventListener('error', () => {
+			handlers.onError('Stream connection lost');
+			es.close();
+		});
+		return es;
 	}
 
 	async singboxRouterStagingStatus(): Promise<RouterStagingStatusResponse> {

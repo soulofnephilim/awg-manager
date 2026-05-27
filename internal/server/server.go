@@ -25,6 +25,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/deviceproxy"
 	"github.com/hoaxisr/awg-manager/internal/diagnostics"
 	"github.com/hoaxisr/awg-manager/internal/dnscheck"
+	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/openapi"
@@ -114,10 +115,12 @@ type Server struct {
 	singboxProxiesHandler  *api.SingboxProxiesHandler
 	awgOutboundsHandler    *api.AWGOutboundsHandler
 	subscriptionHandler    *api.SubscriptionHandler
+	dnsRewritesHandler     *api.DNSRewritesHandler
 	clashProxy             *api.ClashProxy
 	singboxOp              *singbox.Operator
 	singboxOrch            *singboxorch.Orchestrator
 	deviceProxySvc         *deviceproxy.Service
+	downloadSvc            *downloader.Service
 	monitoringService      *monitoring.Service
 	singboxSubMembersFn    func() []diagnostics.SingboxSubMember
 	singboxConfigPreviewFn func() (string, error)
@@ -292,6 +295,11 @@ func (s *Server) SetDeviceProxyService(svc *deviceproxy.Service) {
 	s.deviceProxySvc = svc
 }
 
+// SetDownloadService wires the shared downloader service.
+func (s *Server) SetDownloadService(svc *downloader.Service) {
+	s.downloadSvc = svc
+}
+
 // SetSingboxRouterHandler wires the sing-box router HTTP handler so the
 // /api/singbox/router/* routes can be registered.
 func (s *Server) SetSingboxRouterHandler(h *api.SingboxRouterHandler) {
@@ -323,6 +331,12 @@ func (s *Server) SetSingboxProxiesHandler(h *api.SingboxProxiesHandler) {
 // /api/singbox/subscriptions/* routes can be registered.
 func (s *Server) SetSubscriptionHandler(h *api.SubscriptionHandler) {
 	s.subscriptionHandler = h
+}
+
+// SetDNSRewritesHandler wires the DNS rewrites CRUD handler so the
+// /api/singbox/router/dns/rewrites/* routes can be registered.
+func (s *Server) SetDNSRewritesHandler(h *api.DNSRewritesHandler) {
+	s.dnsRewritesHandler = h
 }
 
 // generateInstanceID creates a random 16-byte hex string (32 chars).
@@ -535,6 +549,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		systemHandler.SetSlowRequestThresholdMs(ms)
 	}
 	settingsHandler := api.NewSettingsHandler(s.settings, appLog)
+	settingsHandler.SetDownloadService(s.downloadSvc)
 	settingsHandler.SetTunnelStore(s.tunnels)
 	settingsHandler.SetPingCheckService(s.pingCheckService)
 	settingsHandler.SetMonitoringService(s.monitoringService)
@@ -681,17 +696,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/system/all-interfaces", guarded(systemHandler.AllInterfaces))
 	mux.HandleFunc("/api/system/hydraroute-status", guarded(systemHandler.HydraRouteStatus))
 	mux.HandleFunc("/api/system/hydraroute-control", guarded(systemHandler.HydraRouteControl))
+	downloadHandler := api.NewDownloadHandler(s.downloadSvc)
+	mux.HandleFunc("/api/download/outbounds", guarded(downloadHandler.ListOutbounds))
 
 	// HydraRoute settings (protected + boot guarded)
 	if s.hydraService != nil {
-		hrHandler := api.NewHydraRouteHandler(s.hydraService)
+		hrHandler := api.NewHydraRouteHandler(s.hydraService, s.downloadSvc)
 		hrHandler.SetEventBus(s.bus)
-		hrHandler.SetDeviceProxyService(s.deviceProxySvc)
-		hrHandler.SetSingboxOperator(s.singboxOp)
-		hrHandler.SetSingboxOrchestrator(s.singboxOrch)
 		mux.HandleFunc("/api/hydraroute/config", guarded(hrHandler.GetConfig))
 		mux.HandleFunc("/api/hydraroute/config/update", guarded(hrHandler.UpdateConfig))
-		mux.HandleFunc("/api/download/outbounds", guarded(hrHandler.ListDownloadOutbounds))
 		mux.HandleFunc("/api/hydraroute/geo-files", guarded(hrHandler.ListGeoFiles))
 		mux.HandleFunc("/api/hydraroute/geo-files/add", guarded(hrHandler.AddGeoFile))
 		mux.HandleFunc("/api/hydraroute/geo-files/delete", guarded(hrHandler.DeleteGeoFile))
@@ -939,6 +952,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnostics/result", guarded(diagHandler.Result))
 	mux.HandleFunc("/api/diagnostics/stream", guarded(diagHandler.Stream))
 
+	// DNS proxy info (read-only ndnproxy state). ndmsQueries may be nil on
+	// platforms without NDMS wiring — guard the construction.
+	if s.ndmsQueries != nil && s.ndmsQueries.DNSProxyStatus != nil {
+		dnsProxyInfoHandler := api.NewDnsProxyInfoHandler(s.ndmsQueries.DNSProxyStatus, s.accessPolicyService)
+		mux.HandleFunc("/api/diagnostics/dns-proxy", guarded(dnsProxyInfoHandler.Get))
+	}
+
 	// Connections viewer (protected)
 	mux.HandleFunc("/api/connections", guarded(connectionsHandler.List))
 
@@ -1041,6 +1061,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/api/singbox/tunnels/test/connectivity", guarded(s.singboxHandler.CheckConnectivity))
 		mux.HandleFunc("/api/singbox/tunnels/test/ip", guarded(s.singboxHandler.CheckIP))
 		mux.HandleFunc("/api/singbox/tunnels/test/speed/stream", guarded(s.singboxHandler.SpeedTestStream))
+		mux.HandleFunc("/api/singbox/tunnels/rename", guarded(s.singboxHandler.RenameTunnel))
 		mux.HandleFunc("/api/singbox/tunnels", guarded(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
@@ -1121,6 +1142,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		}))
 		mux.HandleFunc("/api/singbox/router/route/final", guarded(rh.SetRouteFinal))
 		mux.HandleFunc("/api/singbox/router/inspect", guarded(rh.Inspect))
+		mux.HandleFunc("/api/singbox/router/inspect/stream", guarded(rh.InspectStream))
 		mux.HandleFunc("/api/singbox/router/staging", guarded(rh.GetStaging))
 		mux.HandleFunc("/api/singbox/router/staging/apply", guarded(rh.PostStagingApply))
 		mux.HandleFunc("/api/singbox/router/staging/discard", guarded(rh.PostStagingDiscard))
@@ -1150,6 +1172,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/api/singbox/subscriptions/orphans/delete", guarded(sh.OrphansDelete))
 		mux.HandleFunc("/api/singbox/subscriptions/members/add", guarded(sh.AddMember))
 		mux.HandleFunc("/api/singbox/subscriptions/members/remove", guarded(sh.RemoveMember))
+	}
+
+	if s.dnsRewritesHandler != nil {
+		rw := s.dnsRewritesHandler
+		mux.HandleFunc("/api/singbox/router/dns/rewrites/list", guarded(rw.List))
+		mux.HandleFunc("/api/singbox/router/dns/rewrites/add", guarded(rw.Add))
+		mux.HandleFunc("/api/singbox/router/dns/rewrites/update", guarded(rw.Update))
+		mux.HandleFunc("/api/singbox/router/dns/rewrites/delete", guarded(rw.Delete))
+		mux.HandleFunc("/api/singbox/router/dns/rewrites/move", guarded(rw.Move))
 	}
 
 	// Static files (SPA) - must be last.

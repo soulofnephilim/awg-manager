@@ -50,10 +50,12 @@ func decideBoot(state *State) []Action {
 
 		case "nativewg":
 			if !state.supportsASC {
-				actions = append(actions,
-					Action{Type: ActionStopNativeWG, Tunnel: t.ID},
-					Action{Type: ActionStartNativeWG, Tunnel: t.ID},
-				)
+				// Reconcile-to-desired instead of unconditional Stop+Start:
+				// the executor skips the disruptive restart when the tunnel
+				// is already running WITH a handshake, and still re-attaches
+				// the proxy for the #183 case (NDMS brought the interface up
+				// without our kmod proxy → conf=running but no handshake).
+				actions = append(actions, Action{Type: ActionReconcileNativeWG, Tunnel: t.ID})
 				actions = appendPostStartActions(actions, t)
 			}
 		}
@@ -211,7 +213,15 @@ func decideNDMSHook(event Event, state *State) []Action {
 
 	switch event.Level {
 	case "running":
-		if t.Running || !t.Enabled || !state.anyWANUp() {
+		// A conf=running edge that reaches decide is genuinely external —
+		// self-induced ones (our own Start) are filtered upstream by
+		// consumeExpectedHook. So an external enable (router web UI, manual
+		// NDMS toggle) must start the tunnel even when our store says
+		// Enabled=false: the user's "on" intent wins, and decideStart's
+		// ActionPersistRunning re-syncs Enabled=true. We deliberately do NOT
+		// guard on !t.Enabled here (issue #183 — router-UI enable left a
+		// NativeWG interface up but without its kmod proxy → dead handshake).
+		if t.Running || !state.anyWANUp() {
 			return nil
 		}
 		return decideStart(Event{Type: EventStart, Tunnel: t.ID}, state)
@@ -220,10 +230,15 @@ func decideNDMSHook(event Event, state *State) []Action {
 		if !t.Running {
 			return nil
 		}
-		// User intent (admin UI toggle) is respected. The previous nativewg
-		// branch fired ActionExternalRestart on every external disable —
-		// that caused the "tunnel re-enables itself after a manual disable"
-		// bug. Both backends now persist the disabled state cleanly.
+		// Boot-quiescence: ignore a transient conf=disabled that arrives while
+		// we are still bringing this tunnel up. NDMS emits its own disabled→
+		// running churn as it settles its WireGuard; acting on it here tears
+		// down a tunnel we just started (observed at boot: tunnel handshakes,
+		// then a stray disabled kills it ~1s later).
+		if !event.Now.IsZero() && event.Now.Before(t.quiescentUntil) {
+			return nil
+		}
+		// Outside the quiescence window, treat conf=disabled as user intent and stop.
 		return decideStop(Event{Type: EventStop, Tunnel: t.ID}, state)
 	}
 

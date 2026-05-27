@@ -110,6 +110,12 @@ type Operator struct {
 	clash     *ClashClient
 	bus       *events.Bus
 
+	// subProxies enumerates NDMS proxies created for subscription composites
+	// (a managed set separate from Tunnels()). Used by the NDMS-proxy
+	// enable/disable migration and orphan cleanup so composite proxies are
+	// removed/recreated symmetrically with tunnel proxies. nil-safe.
+	subProxies SubscriptionProxySet
+
 	// processLogger forwards sing-box stdout/stderr lines into the app
 	// log under singbox/process so users can see daemon output at
 	// /diagnostics?tab=logs without ssh'ing in. nil-safe (ScopedLogger
@@ -177,6 +183,13 @@ type Operator struct {
 	// during AddTunnels could leave a tunnel with NDMS state inconsistent
 	// with the new mode.
 	migrationMu sync.Mutex
+
+	outboundRefs outboundReferenceRenamer
+}
+
+type outboundReferenceRenamer interface {
+	IsOutboundTagInUse(ctx context.Context, tag string) bool
+	RenameExternalOutboundTag(ctx context.Context, oldTag, newTag string) error
 }
 
 // OperatorDeps are external dependencies for DI.
@@ -400,6 +413,26 @@ func (o *Operator) Process() *Process { return o.proc }
 // uses it (when non-nil) to write 10-tunnels.json through the slot
 // writer instead of the legacy direct-write path.
 func (o *Operator) SetOrch(orch *orchestrator.Orchestrator) { o.orch = orch }
+
+// SetSubscriptionProxySet wires the enumerator of subscription composite
+// proxies, so NDMS-proxy enable/disable and orphan cleanup manage them
+// alongside tunnel proxies. nil-safe.
+func (o *Operator) SetSubscriptionProxySet(s SubscriptionProxySet) { o.subProxies = s }
+
+// subscriptionProxies returns the current subscription composite proxies, or
+// nil when no enumerator is wired.
+func (o *Operator) subscriptionProxies() []SubscriptionProxy {
+	if o.subProxies == nil {
+		return nil
+	}
+	return o.subProxies.SubscriptionProxies()
+}
+
+// SetOutboundReferenceRenamer wires the singbox-router reference updater.
+// Optional: when nil, RenameTunnel only updates 10-tunnels.json.
+func (o *Operator) SetOutboundReferenceRenamer(r outboundReferenceRenamer) {
+	o.outboundRefs = r
+}
 
 // SetInstaller wires the managed-binary installer. Optional — Operator
 // works without it for read-only paths; install/update/cleanup of the
@@ -1801,6 +1834,104 @@ func (o *Operator) UpdateTunnel(ctx context.Context, tag string, outbound json.R
 	return nil
 }
 
+var reservedOutboundTags = map[string]struct{}{
+	"direct": {},
+	"block":  {},
+	"dns":    {},
+}
+
+// RenameTunnel changes a single sing-box tunnel tag and rewrites every
+// singbox-router reference that points at that outbound.
+func (o *Operator) RenameTunnel(ctx context.Context, oldTag, newTag string) error {
+	defer perftrace.LogDuration(o.runtimeLogger, "perf", "RenameTunnel", "total", time.Now())
+	oldTag = strings.TrimSpace(oldTag)
+	newTag = strings.TrimSpace(newTag)
+	if oldTag == "" || newTag == "" {
+		return ErrInvalidTunnelTag
+	}
+	if _, reserved := reservedOutboundTags[newTag]; reserved {
+		return fmt.Errorf("%w: %q is reserved", ErrInvalidTunnelTag, newTag)
+	}
+
+	o.migrationMu.Lock()
+	defer o.migrationMu.Unlock()
+	if o.runtimeLogger != nil {
+		o.runtimeLogger.Info("single-rename", oldTag, "start new="+newTag)
+	}
+
+	cfg, err := o.loadConfig()
+	if err != nil {
+		if o.runtimeLogger != nil {
+			o.runtimeLogger.Error("single-rename", oldTag, "load config failed: "+err.Error())
+		}
+		return err
+	}
+	var renamed TunnelInfo
+	found := false
+	for _, t := range cfg.Tunnels() {
+		if t.Tag == oldTag {
+			renamed = t
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("%w: %q", ErrTunnelNotFound, oldTag)
+	}
+	if oldTag == newTag {
+		return nil
+	}
+	for _, t := range cfg.Tunnels() {
+		if t.Tag == newTag {
+			return fmt.Errorf("%w: %q", ErrTunnelTagConflict, newTag)
+		}
+	}
+	for _, v := range cfg.outbounds() {
+		ob, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := ob["tag"].(string); t == newTag {
+			return fmt.Errorf("%w: %q", ErrTunnelTagConflict, newTag)
+		}
+	}
+	if o.outboundRefs != nil && o.outboundRefs.IsOutboundTagInUse(ctx, newTag) {
+		return fmt.Errorf("%w: %q", ErrTunnelTagConflict, newTag)
+	}
+
+	if err := cfg.RenameTunnel(oldTag, newTag); err != nil {
+		return err
+	}
+	refsRenamed := false
+	if o.outboundRefs != nil {
+		if err := o.outboundRefs.RenameExternalOutboundTag(ctx, oldTag, newTag); err != nil {
+			return err
+		}
+		refsRenamed = true
+	}
+	if err := o.ApplyConfig(ctx, cfg); err != nil {
+		if refsRenamed {
+			_ = o.outboundRefs.RenameExternalOutboundTag(context.Background(), newTag, oldTag)
+		}
+		return err
+	}
+
+	if o.isNDMSProxyEnabled() && renamed.ProxyInterface != "" {
+		if idx, err := parseProxyIdx(renamed.ProxyInterface); err == nil && idx >= 0 {
+			if err := o.proxyMgr.EnsureProxy(ctx, idx, renamed.ListenPort, newTag); err != nil {
+				o.log.Warn("rename proxy description failed", "old", oldTag, "new", newTag, "err", err)
+			}
+		}
+	}
+	if o.bus != nil {
+		o.bus.Publish("singbox:tunnels-changed", nil)
+	}
+	if o.runtimeLogger != nil {
+		o.runtimeLogger.Info("single-rename", oldTag, "done new="+newTag)
+	}
+	return nil
+}
+
 // MarkNeedsOrphanCleanup поднимает one-shot флаг для Reconcile —
 // при следующем тике он почистит зомби-ProxyN, оставшиеся в NDMS
 // после перехода в disabled-режим. CAS гарантирует ровно один sweep
@@ -1826,7 +1957,13 @@ func (o *Operator) removeOrphanSingboxProxies(ctx context.Context) error {
 			}
 		}
 	}
-	return o.proxyMgr.RemoveOrphanSingboxProxies(ctx, tunnelTags, portSlots)
+	// Subscription composites are tracked by explicit proxy index (their
+	// description is the user label, not a tunnel tag).
+	subProxyIdx := map[int]bool{}
+	for _, sp := range o.subscriptionProxies() {
+		subProxyIdx[sp.Index] = true
+	}
+	return o.proxyMgr.RemoveOrphanSingboxProxies(ctx, tunnelTags, portSlots, subProxyIdx)
 }
 
 // Reconcile: ensure process is running if config has tunnels; ensure Proxies are up.

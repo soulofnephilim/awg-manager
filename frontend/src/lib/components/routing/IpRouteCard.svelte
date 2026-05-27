@@ -218,7 +218,7 @@
 	.card-actions {
 		display: flex;
 		flex-direction: column;
-		align-items: center;
+		align-items: flex-end;
 		gap: 6px;
 		flex-shrink: 0;
 		margin-left: 8px;

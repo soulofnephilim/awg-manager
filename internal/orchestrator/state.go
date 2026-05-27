@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"time"
+
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
@@ -12,14 +14,18 @@ type tunnelState struct {
 	Name         string
 	Backend      string // "kernel" | "nativewg"
 	Enabled      bool
-	Running      bool   // orchestrator's belief: tunnel is running
-	Monitoring   bool   // monitor goroutine is active
+	Running      bool // orchestrator's belief: tunnel is running
+	Monitoring   bool // monitor goroutine is active
 	ActiveWAN    string
 	NWGIndex     int
 	PingCheck    *storage.TunnelPingCheck
 	DefaultRoute bool
 	ISPInterface string
 	Endpoint     string // peer endpoint (host:port)
+
+	// quiescentUntil: while now < this, a conf=disabled edge for this tunnel
+	// is treated as transient NDMS settling (do not stop). Set on (re)start.
+	quiescentUntil time.Time
 }
 
 // ndmsName returns the NDMS interface name for this tunnel.
@@ -41,7 +47,7 @@ func (t *tunnelState) ifaceName() string {
 // State is the orchestrator's complete view of the system.
 type State struct {
 	tunnels     map[string]*tunnelState // tunnelID → state
-	anyWANUpFn  func() bool            // delegates to wanModel.AnyUp()
+	anyWANUpFn  func() bool             // delegates to wanModel.AnyUp()
 	supportsASC bool
 }
 

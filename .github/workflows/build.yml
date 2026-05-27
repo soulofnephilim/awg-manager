@@ -13,8 +13,8 @@ permissions:
   contents: write
 
 env:
-  SINGBOX_VERSION: 1.14.0-alpha.21
-  SINGBOX_REF: v1.14.0-alpha.21
+  SINGBOX_VERSION: 1.14.0-alpha.25
+  SINGBOX_REF: v1.14.0-alpha.25
 
 jobs:
   frontend:
@@ -43,11 +43,48 @@ jobs:
           path: frontend/build
           if-no-files-found: error
 
+  version:
+    name: Resolve IPK version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ipk_version: ${{ steps.resolve.outputs.ipk_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Resolve revision for current patch
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          REV=1
+          PREV=""
+
+          mkdir -p /tmp/prev-release
+          if gh release download latest --dir /tmp/prev-release --pattern VERSION 2>/dev/null \
+            && [[ -f /tmp/prev-release/VERSION ]]; then
+            PREV="$(tr -d '[:space:]' < /tmp/prev-release/VERSION)"
+            esc="${VERSION//./\\.}"
+            if [[ "$PREV" =~ ^${esc}\+r([0-9]+)$ ]]; then
+              REV=$((BASH_REMATCH[1] + 1))
+            fi
+          fi
+
+          IPK_VERSION="${VERSION}+r${REV}"
+          echo "Resolved ${IPK_VERSION} (previous: ${PREV:-none})"
+          echo "ipk_version=${IPK_VERSION}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ubuntu-latest
     needs:
       - frontend
+      - version
     timeout-minutes: 120
     strategy:
       fail-fast: true
@@ -88,13 +125,16 @@ jobs:
         id: singbox-cache
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
-          key: sing-box-${{ matrix.arch }}-${{ env.SINGBOX_VERSION }}-${{ env.SINGBOX_REF }}
+          key: sing-box-${{ matrix.arch }}-${{ env.SINGBOX_VERSION }}-${{ env.SINGBOX_REF }}-repo-${{ hashFiles('scripts/build-singbox.sh', 'scripts/patches/**') }}
           path: |
             dist/sing-box-${{ env.SINGBOX_VERSION }}-${{ matrix.arch }}
+            dist/sing-box-${{ env.SINGBOX_VERSION }}-${{ matrix.arch }}.sha256
             internal/singbox/installer/embedded.go
 
       - name: Build sing-box
         if: steps.singbox-cache.outputs.cache-hit != 'true'
+        env:
+          RELEASE_BASE_URL: http://repo.hoaxisr.ru/develop/singbox/${{ env.SINGBOX_VERSION }}
         run: |
           set -euo pipefail
 
@@ -104,9 +144,10 @@ jobs:
         if: steps.singbox-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
-          key: sing-box-${{ matrix.arch }}-${{ env.SINGBOX_VERSION }}-${{ env.SINGBOX_REF }}
+          key: sing-box-${{ matrix.arch }}-${{ env.SINGBOX_VERSION }}-${{ env.SINGBOX_REF }}-repo-${{ hashFiles('scripts/build-singbox.sh', 'scripts/patches/**') }}
           path: |
             dist/sing-box-${{ env.SINGBOX_VERSION }}-${{ matrix.arch }}
+            dist/sing-box-${{ env.SINGBOX_VERSION }}-${{ matrix.arch }}.sha256
             internal/singbox/installer/embedded.go
 
       - name: Build
@@ -126,8 +167,7 @@ jobs:
             exit 1
           fi
 
-          BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
-          IPK_VERSION="$(cat VERSION)+r${BUILD_NUMBER}"
+          IPK_VERSION="${{ needs.version.outputs.ipk_version }}"
           printf '%s\n' "$IPK_VERSION" > dist/VERSION
 
           SKIP_FRONTEND_BUILD=1 ./scripts/build-ipk.sh "$IPK_VERSION" "${{ matrix.arch }}"
@@ -139,6 +179,7 @@ jobs:
           path: |
             dist/awg-manager_*_${{ matrix.arch }}-kn.ipk
             dist/sing-box-${{ env.SINGBOX_VERSION }}-${{ matrix.arch }}
+            dist/sing-box-${{ env.SINGBOX_VERSION }}-${{ matrix.arch }}.sha256
             dist/VERSION
           if-no-files-found: error
 
@@ -181,10 +222,13 @@ jobs:
     needs:
       - build
       - test
+      - version
 
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
 
       - name: Download build results
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -192,6 +236,51 @@ jobs:
           pattern: result-*
           path: dist
           merge-multiple: true
+
+      - name: Setup go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: 1.25.10
+
+      - name: Generate develop changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IPK_VERSION: ${{ needs.version.outputs.ipk_version }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          go build -o /tmp/changelog-gen ./cmd/changelog-gen
+
+          mkdir -p /tmp/prevcl
+          gh release download latest --dir /tmp/prevcl \
+            --pattern CHANGELOG.md --pattern RELEASED_SHA 2>/dev/null || true
+
+          START=""
+          if [[ -f /tmp/prevcl/RELEASED_SHA ]]; then
+            START="$(tr -d '[:space:]' < /tmp/prevcl/RELEASED_SHA)"
+          fi
+          if [[ -z "$START" ]] || ! git cat-file -e "${START}^{commit}" 2>/dev/null; then
+            START="$EVENT_BEFORE"
+          fi
+          if [[ -z "$START" ]] || [[ "$START" =~ ^0+$ ]] || ! git cat-file -e "${START}^{commit}" 2>/dev/null; then
+            START="${GITHUB_SHA}~1"
+          fi
+
+          echo "changelog range: ${START}..${GITHUB_SHA}"
+          git log --format='%s' "${START}..${GITHUB_SHA}" \
+            | /tmp/changelog-gen --version "$IPK_VERSION" --date "$(date +%F)" > /tmp/delta.md
+
+          PREV=/tmp/prevcl/CHANGELOG.md
+          [[ -f "$PREV" ]] || PREV=/dev/null
+          if [[ -s /tmp/delta.md ]]; then
+            cat /tmp/delta.md "$PREV" > dist/CHANGELOG.md
+          else
+            cat "$PREV" > dist/CHANGELOG.md
+          fi
+          printf '%s\n' "$GITHUB_SHA" > dist/RELEASED_SHA
+          echo "=== dist/CHANGELOG.md (head) ==="; head -20 dist/CHANGELOG.md || true
 
       - name: Publish pre-release
         env:
@@ -201,7 +290,7 @@ jobs:
           set -euo pipefail
 
           shopt -s nullglob
-          files=(./dist/awg-manager_* ./dist/sing-box-* ./dist/VERSION)
+          files=(./dist/awg-manager_* ./dist/sing-box-* ./dist/VERSION ./dist/CHANGELOG.md ./dist/RELEASED_SHA)
 
           if (( ${#files[@]} == 0 )); then
             echo "No release files found in ./dist"

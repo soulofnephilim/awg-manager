@@ -45,6 +45,8 @@
 {#if href}
   <a
     class="btn"
+    class:has-icon-before={!!iconBefore}
+    class:has-icon-after={!!iconAfter}
     class:variant-primary={variant === 'primary'}
     class:variant-secondary={variant === 'secondary'}
     class:variant-ghost={variant === 'ghost'}
@@ -65,13 +67,21 @@
     role="button"
     tabindex={isDisabled ? -1 : 0}
   >
-    {#if loading}<span class="spinner" aria-hidden="true"></span>{:else if iconBefore}{@render iconBefore()}{/if}
+    {#if loading}
+      <span class="spinner" aria-hidden="true"></span>
+    {:else if iconBefore}
+      <span class="icon icon-before" aria-hidden="true">{@render iconBefore()}</span>
+    {/if}
     <span class="label">{@render children()}</span>
-    {#if iconAfter && !loading}{@render iconAfter()}{/if}
+    {#if iconAfter && !loading}
+      <span class="icon icon-after" aria-hidden="true">{@render iconAfter()}</span>
+    {/if}
   </a>
 {:else}
   <button
     class="btn"
+    class:has-icon-before={!!iconBefore}
+    class:has-icon-after={!!iconAfter}
     class:variant-primary={variant === 'primary'}
     class:variant-secondary={variant === 'secondary'}
     class:variant-ghost={variant === 'ghost'}
@@ -88,9 +98,15 @@
     {onclick}
     {title}
   >
-    {#if loading}<span class="spinner" aria-hidden="true"></span>{:else if iconBefore}{@render iconBefore()}{/if}
+    {#if loading}
+      <span class="spinner" aria-hidden="true"></span>
+    {:else if iconBefore}
+      <span class="icon icon-before" aria-hidden="true">{@render iconBefore()}</span>
+    {/if}
     <span class="label">{@render children()}</span>
-    {#if iconAfter && !loading}{@render iconAfter()}{/if}
+    {#if iconAfter && !loading}
+      <span class="icon icon-after" aria-hidden="true">{@render iconAfter()}</span>
+    {/if}
   </button>
 {/if}
 
@@ -100,8 +116,10 @@
     align-items: center;
     justify-content: center;
     gap: 0.4375rem;
+    box-sizing: border-box;
     font-family: inherit;
     font-weight: 500;
+    line-height: 1;
     border-radius: var(--radius-sm);
     border: 1px solid transparent;
     cursor: pointer;
@@ -110,20 +128,64 @@
     text-decoration: none;
     user-select: none;
     white-space: nowrap;
+    vertical-align: middle;
   }
 
-  .btn.full-width { width: 100%; }
+  button.btn {
+    margin: 0;
+    appearance: none;
+  }
+
+  .btn .label {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    line-height: 1;
+  }
+
+  .btn .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    pointer-events: none;
+  }
+
+  .btn.full-width {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .btn.full-width .label {
+    justify-content: center;
+    text-align: center;
+  }
+
+  .btn.full-width:not(:has(.icon-before)):not(:has(.icon-after)):not(:has(.spinner)) .label {
+    flex: 1;
+  }
+
+  .btn.full-width:has(.spinner) {
+    justify-content: center;
+  }
   .btn:disabled, .btn.is-disabled { opacity: 0.5; cursor: not-allowed; }
   .btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 
   .size-sm {
     height: 28px;
-    padding: 0 0.625rem;
+    min-height: 28px;
+    max-height: 28px;
+    padding-block: 0;
+    padding-inline: 0.625rem;
     font-size: 12px;
   }
   .size-md {
     height: 32px;
-    padding: 0 0.875rem;
+    min-height: 32px;
+    max-height: 32px;
+    padding-block: 0;
+    padding-inline: 0.875rem;
     font-size: 13px;
   }
 
@@ -191,7 +253,7 @@
   }
 
   /* Keep the ring circular in tight flex rows (e.g. diagnostics group headers). */
-  .btn:has(.spinner) {
+  .btn:has(.spinner):not(.full-width) {
     flex-shrink: 0;
     min-width: max-content;
   }
@@ -210,7 +272,8 @@
     to { transform: rotate(360deg); }
   }
 
-  :global(.btn > svg) {
+  :global(.btn > svg),
+  :global(.btn .icon > svg) {
     width: 14px;
     height: 14px;
     flex-shrink: 0;

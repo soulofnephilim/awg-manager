@@ -481,6 +481,10 @@ export interface HydraRouteStatus {
 	installed: boolean;
 	running: boolean;
 	version?: string;
+	pid?: number;
+	stalePid?: number;
+	processState?: 'not_installed' | 'stopped' | 'running' | 'dead';
+	lastError?: string;
 }
 
 export interface HydraRouteConfig {
@@ -672,6 +676,12 @@ export interface LoggingSettings {
 
 export interface UpdateSettings {
 	checkEnabled: boolean;
+	channel: 'stable' | 'develop';
+}
+
+export interface DownloadSettings {
+	routeTag: string;
+	routeKind?: 'direct' | 'awg' | 'singbox' | 'subscription';
 }
 
 export interface DNSRouteSettings {
@@ -690,6 +700,7 @@ export interface Settings {
 	logging: LoggingSettings;
 	disableMemorySaving: boolean;
 	updates: UpdateSettings;
+	download: DownloadSettings;
 	dnsRoute: DNSRouteSettings;
 	usageLevel: UsageLevel;
 	hiddenSystemTunnels?: string[];
@@ -835,7 +846,7 @@ export interface DeviceProxyInstance extends DeviceProxyConfig {
 	name: string;
 }
 
-export type DeviceProxyOutboundKind = 'direct' | 'singbox' | 'awg';
+export type DeviceProxyOutboundKind = 'direct' | 'singbox' | 'subscription' | 'awg';
 
 export interface DeviceProxyOutbound {
 	tag: string;
@@ -1087,7 +1098,7 @@ export type {
 
 export interface SingboxTunnel {
 	tag: string;
-	protocol: 'vless' | 'hysteria2' | 'naive' | 'trojan' | 'shadowsocks';
+	protocol: 'vless' | 'hysteria2' | 'naive' | 'trojan' | 'shadowsocks' | 'mieru';
 	server: string;
 	port: number;
 	security: 'reality' | 'tls' | 'none';
@@ -1361,6 +1372,18 @@ export interface SingboxRouterInspectRequest {
 	protocol?: string;
 }
 
+export interface SingboxRouterInspectProgress {
+	phase: string;
+	message: string;
+	ruleIndex?: number;
+	ruleTotal?: number;
+	ruleSetTag?: string;
+	ruleSetIndex?: number;
+	ruleSetTotal?: number;
+	final?: string;
+	usingDraft?: boolean;
+}
+
 export interface SingboxRouterRuleSet {
 	tag: string;
 	type: 'remote' | 'local' | 'inline';
@@ -1464,7 +1487,7 @@ export interface SingboxRouterAvailableClient {
 	active?: boolean;
 }
 
-export type SingboxRouterDNSType = 'udp' | 'tls' | 'https' | 'quic' | 'h3';
+export type SingboxRouterDNSType = 'udp' | 'tls' | 'https' | 'quic' | 'h3' | 'local';
 
 export type SingboxRouterDNSStrategy =
 	| ''
@@ -1494,14 +1517,22 @@ export interface SingboxRouterDNSRule {
 	domain_suffix?: string[];
 	domain?: string[];
 	domain_keyword?: string[];
+	domain_regex?: string[];
 	query_type?: string[];
 	server?: string;
-	action?: '' | 'route' | 'reject';
+	action?: '' | 'route' | 'reject' | 'predefined';
+	rcode?: string;
+	method?: string;
 }
 
 export interface SingboxRouterDNSGlobals {
 	final: string;
 	strategy: SingboxRouterDNSStrategy;
+}
+
+export interface SingboxRouterDNSRewrite {
+	pattern: string;
+	ips: string[];
 }
 
 // #endregion
@@ -1526,6 +1557,7 @@ export interface TunnelReferencedError {
 	tunnelId: string;
 	deviceProxy: boolean;
 	routerRules: number[];
+	routerOther: string[];
 }
 
 // #endregion
@@ -1541,7 +1573,9 @@ export interface AmneziaPremiumCountry {
 /** Запись из `data.issued_configs` (уже выданные конфиги в Amnezia CP). */
 export interface AmneziaPremiumIssuedConfig {
 	installation_uuid?: string;
+	/** Время последнего изменения адреса/воркера на стороне CP. */
 	worker_last_updated?: string;
+	/** Время последней выдачи конфига клиенту; если раньше worker_last_updated — конфиг устарел. */
 	last_downloaded?: string;
 	server_country_code?: string;
 	server_country_name?: string;
@@ -1735,3 +1769,59 @@ export interface RouterStagingValidationError {
 	validation?: RouterValidationDTO;
 	sbCheck?: string;
 }
+
+// ─────────────────────────────────────────────
+// #region DNS Proxy Info
+// ─────────────────────────────────────────────
+
+export interface DnsUpstream {
+	address: string;
+	port: number;
+	encryption: 'DoT' | 'DoH' | 'plain';
+	sni: string;
+	scope: string; // 'all' | 'ru' | ...
+	rSent: number;
+	aRcvd: number;
+	nxRcvd: number;
+	medResp: string;
+	avgResp: string;
+	rank: number;
+}
+
+export interface DnsStaticRecord {
+	host: string;
+	type: 'A' | 'AAAA';
+	value: string;
+	flag: number;
+}
+
+export interface DnsRebind {
+	enabled: boolean;
+	nets: string[];
+	excludes: string[];
+}
+
+export interface DnsProxyStat {
+	totalRequests: number;
+	proxyRequestsSent: number;
+	cacheHitRatio: number;
+	cacheHits: number;
+	memory: string;
+}
+
+export interface DnsProxy {
+	name: string;
+	displayName: string;
+	tcpPort: number;
+	udpPort: number;
+	stat: DnsProxyStat;
+	upstreams: DnsUpstream[];
+	staticRecords: DnsStaticRecord[];
+	rebind: DnsRebind;
+}
+
+export interface DnsProxyInfo {
+	proxies: DnsProxy[];
+}
+
+// #endregion

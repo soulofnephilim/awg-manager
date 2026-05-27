@@ -23,6 +23,7 @@
 		{ value: 'https', label: 'DoH (DNS over HTTPS)' },
 		{ value: 'quic', label: 'DoQ (DNS over QUIC)' },
 		{ value: 'h3', label: 'DoH3' },
+		{ value: 'local', label: 'Local (системный resolver роутера)' },
 	];
 
 	const STRATEGY_OPTIONS: DropdownOption<SingboxRouterDNSStrategy>[] = [
@@ -120,7 +121,7 @@
 		);
 	});
 
-	const needsResolver = $derived(type !== 'udp' && !isIPLiteral(serverAddr));
+	const needsResolver = $derived(type !== 'udp' && type !== 'local' && !isIPLiteral(serverAddr));
 	const availableResolvers = $derived(servers.filter((s) => s.tag !== tag).map((s) => s.tag));
 	const resolverServerOptions = $derived<DropdownOption[]>([
 		{ value: '', label: '— выберите —' },
@@ -136,21 +137,25 @@
 		error = '';
 		try {
 			if (!tag.trim()) { error = 'Tag обязателен'; busy = false; return; }
-			if (!serverAddr.trim()) { error = 'Server обязателен'; busy = false; return; }
+			if (type !== 'local' && !serverAddr.trim()) { error = 'Server обязателен'; busy = false; return; }
 			if (resolverEnabled && !resolverServer) { error = 'Укажите domain_resolver'; busy = false; return; }
 
 			const built: SingboxRouterDNSServer = {
 				tag: tag.trim(),
 				type,
-				server: serverAddr.trim(),
+				server: type === 'local' ? '' : serverAddr.trim(),
 			};
-			if (serverPort !== '' && Number(serverPort) > 0) built.server_port = Number(serverPort);
-			if (path.trim()) built.path = path.trim();
-			if (detour) built.detour = detour;
-			if (strategy) built.domain_strategy = strategy;
-			if (resolverEnabled && resolverServer) {
-				built.domain_resolver = { server: resolverServer };
-				if (resolverStrategy) built.domain_resolver.strategy = resolverStrategy;
+			if (type !== 'local') {
+				if (serverPort !== '' && Number(serverPort) > 0) built.server_port = Number(serverPort);
+				if (path.trim()) built.path = path.trim();
+				if (resolverEnabled && resolverServer) {
+					built.domain_resolver = { server: resolverServer };
+					if (resolverStrategy) built.domain_resolver.strategy = resolverStrategy;
+				}
+			}
+			if (type !== 'local') {
+				if (detour) built.detour = detour;
+				if (strategy) built.domain_strategy = strategy;
 			}
 
 			await onSave(built);
@@ -181,48 +186,56 @@
 				<Dropdown bind:value={type} options={TYPE_OPTIONS} fullWidth />
 			</label>
 
-			<label class="field span-full">
-				<div class="lbl">Server <span class="req">*</span></div>
-				<input bind:value={serverAddr} placeholder={type === 'udp' ? '1.1.1.1' : 'cloudflare-dns.com'} />
-			</label>
-
-			<label class="field" class:span-full={type !== 'https'}>
-				<div class="lbl">Server port</div>
-				<input type="number" bind:value={serverPort} placeholder={type === 'udp' ? '53' : type === 'https' ? '443' : '853'} />
-			</label>
-
-			{#if type === 'https'}
-				<label class="field">
-					<div class="lbl">Path</div>
-					<input bind:value={path} placeholder="/dns-query" />
+			{#if type !== 'local'}
+				<label class="field span-full">
+					<div class="lbl">Server <span class="req">*</span></div>
+					<input bind:value={serverAddr} placeholder={type === 'udp' ? '1.1.1.1' : 'cloudflare-dns.com'} />
 				</label>
+
+				<label class="field" class:span-full={type !== 'https'}>
+					<div class="lbl">Server port</div>
+					<input type="number" bind:value={serverPort} placeholder={type === 'udp' ? '53' : type === 'https' ? '443' : '853'} />
+				</label>
+
+				{#if type === 'https'}
+					<label class="field">
+						<div class="lbl">Path</div>
+						<input bind:value={path} placeholder="/dns-query" />
+					</label>
+				{/if}
+			{:else}
+				<div class="field span-full hint">
+					Local-сервер резолвит через системный resolver роутера (NDMS/AdGuard/Pi-hole). Адрес и порт не требуются.
+				</div>
 			{/if}
 		</div>
 
-		<section class="form-section">
-			<div class="section-label">Маршрутизация</div>
+		{#if type !== 'local'}
+			<section class="form-section">
+				<div class="section-label">Маршрутизация</div>
 
-			<label class="field">
-				<div class="lbl">Detour (outbound)</div>
-				<Dropdown bind:value={detour} options={detourOptions} fullWidth />
-				<div class="hint">
-					{#if server}
-						Через какой outbound сам сервер отправляет запросы. <code>direct</code> — через провайдера,
-						выбранный туннель — через VPN (шифрованный DNS без утечек).
-					{:else}
-						Через какой outbound сам сервер отправляет запросы.
-						Выбранный туннель — через VPN (шифрованный DNS без утечек).
-					{/if}
-				</div>
-			</label>
+				<label class="field">
+					<div class="lbl">Detour (outbound)</div>
+					<Dropdown bind:value={detour} options={detourOptions} fullWidth />
+					<div class="hint">
+						{#if server}
+							Через какой outbound сам сервер отправляет запросы. <code>direct</code> — через провайдера,
+							выбранный туннель — через VPN (шифрованный DNS без утечек).
+						{:else}
+							Через какой outbound сам сервер отправляет запросы.
+							Выбранный туннель — через VPN (шифрованный DNS без утечек).
+						{/if}
+					</div>
+				</label>
 
-			<label class="field">
-				<div class="lbl">Стратегия (IPv4/IPv6)</div>
-				<Dropdown bind:value={strategy} options={STRATEGY_OPTIONS} fullWidth />
-			</label>
-		</section>
+				<label class="field">
+					<div class="lbl">Стратегия (IPv4/IPv6)</div>
+					<Dropdown bind:value={strategy} options={STRATEGY_OPTIONS} fullWidth />
+				</label>
+			</section>
+		{/if}
 
-		{#if type !== 'udp'}
+		{#if type !== 'udp' && type !== 'local'}
 			<section class="form-section">
 				<div class="section-label">Bootstrap resolver (для домена сервера)</div>
 

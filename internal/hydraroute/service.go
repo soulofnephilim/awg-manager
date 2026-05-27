@@ -3,6 +3,8 @@ package hydraroute
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,16 +22,22 @@ type KernelIfaceResolver interface {
 
 // Service manages HydraRoute Neo integration: detection, config writes, daemon control.
 type Service struct {
-	resolver        KernelIfaceResolver
-	appLog          *logging.ScopedLogger
-	mu              sync.Mutex
-	status          Status
-	restartTimer    *time.Timer
-	geodata         *GeoDataStore
-	dnsListProvider func() []DnsListInfo
-	queries         *query.Queries
-	policies        *command.PolicyCommands
+	resolver                 KernelIfaceResolver
+	appLog                   *logging.ScopedLogger
+	mu                       sync.Mutex
+	status                   Status
+	restartTimer             *time.Timer
+	geodata                  *GeoDataStore
+	dnsListProvider          func() []DnsListInfo
+	queries                  *query.Queries
+	policies                 *command.PolicyCommands
+	lastError                string
+	versionCached            string
+	versionFetchedAt         time.Time
+	versionBinaryFingerprint string
 }
+
+const versionCacheTTL = 5 * time.Minute
 
 // NewService creates a new HydraRoute service. Detects HRNeo on creation.
 func NewService(resolver KernelIfaceResolver, appLogger logging.AppLogger) *Service {
@@ -64,7 +72,13 @@ func (s *Service) HealInvalidRuntimeConfig() {
 func (s *Service) GetStatus() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.status
+	status := s.status
+	if status.Running {
+		status.LastError = ""
+	} else {
+		status.LastError = s.lastError
+	}
+	return status
 }
 
 // RefreshStatus re-detects HydraRoute and updates cached status.
@@ -72,6 +86,12 @@ func (s *Service) RefreshStatus() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status = Detect()
+	s.status.Version = s.getVersionCachedLocked()
+	if s.status.Running {
+		s.status.LastError = ""
+	} else {
+		s.status.LastError = s.lastError
+	}
 	return s.status
 }
 
@@ -89,19 +109,27 @@ func (s *Service) Control(action string) error {
 	defer s.mu.Unlock()
 
 	if !s.status.Installed {
-		return fmt.Errorf("HydraRoute Neo is not installed")
+		err := fmt.Errorf("HydraRoute Neo is not installed")
+		s.lastError = err.Error()
+		return err
 	}
 
 	switch action {
 	case "start", "stop", "restart":
 		result, err := exec.Run(context.Background(), neoCommand, action)
 		if err != nil {
-			return fmt.Errorf("neo %s: %w", action, exec.FormatError(result, err))
+			formatted := fmt.Errorf("neo %s: %w", action, exec.FormatError(result, err))
+			s.lastError = formatted.Error()
+			return formatted
 		}
 		s.status = Detect()
+		s.status.Version = s.getVersionCachedLocked()
+		s.lastError = ""
 		return nil
 	default:
-		return fmt.Errorf("unknown action: %s", action)
+		err := fmt.Errorf("unknown action: %s", action)
+		s.lastError = err.Error()
+		return err
 	}
 }
 
@@ -134,14 +162,75 @@ func (s *Service) scheduleRestart(reason string) {
 		if err != nil {
 			s.appLog.Warn("restart", "neo", exec.FormatError(result, err).Error())
 			s.appLog.Warn("restart", "", fmt.Sprintf("neo restart failed: %v", exec.FormatError(result, err)))
+			s.mu.Lock()
+			s.lastError = fmt.Sprintf("neo restart: %v", exec.FormatError(result, err))
+			s.mu.Unlock()
 		} else {
 			s.appLog.Info("restart", "neo", "restarted")
 			s.appLog.Info("restart", "", "neo restarted")
+			s.mu.Lock()
+			s.lastError = ""
+			s.mu.Unlock()
 		}
 		s.mu.Lock()
 		s.status = Detect()
+		s.status.Version = s.getVersionCachedLocked()
+		if s.status.Running {
+			s.status.LastError = ""
+		} else {
+			s.status.LastError = s.lastError
+		}
 		s.mu.Unlock()
 	})
+}
+
+func (s *Service) getVersionCachedLocked() string {
+	if !s.status.Installed {
+		s.versionCached = ""
+		s.versionFetchedAt = time.Time{}
+		s.versionBinaryFingerprint = ""
+		return ""
+	}
+
+	now := time.Now()
+	currentFingerprint := hydraBinaryFingerprint()
+	if currentFingerprint == "" {
+		s.versionCached = ""
+		s.versionFetchedAt = now
+		s.versionBinaryFingerprint = ""
+		return ""
+	}
+	fingerprintChanged := s.versionBinaryFingerprint != "" &&
+		currentFingerprint != s.versionBinaryFingerprint
+
+	if fingerprintChanged {
+		s.versionCached = ""
+		s.versionFetchedAt = time.Time{}
+	}
+
+	if !fingerprintChanged && !s.versionFetchedAt.IsZero() && now.Sub(s.versionFetchedAt) < versionCacheTTL {
+		return s.versionCached
+	}
+
+	version := detectVersion(context.Background())
+	s.versionCached = version
+	s.versionFetchedAt = now
+	s.versionBinaryFingerprint = currentFingerprint
+	return s.versionCached
+}
+
+func hydraBinaryFingerprint() string {
+	st, err := os.Stat(hrneoBinary)
+	if err != nil || st.IsDir() {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s|%s|%s|%d",
+		filepath.Clean(hrneoBinary),
+		st.ModTime().UTC().Format(time.RFC3339Nano),
+		st.Mode().String(),
+		st.Size(),
+	)
 }
 
 // SetGeoDataStore sets the GeoDataStore used for syncing geo file paths to config.

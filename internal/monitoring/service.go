@@ -70,7 +70,7 @@ func (s *Service) SetClashState(p ClashStateProvider) {
 
 // SetSingboxDelay delegates to the scheduler. main.go uses this to wire
 // singboxOp.Clash() so sing-box matrix rows probe via the Clash API delay
-// endpoint instead of curl-through-interface (which can be short-circuited
+// endpoint instead of HTTP-through-interface (which can be short-circuited
 // by the user's sing-box DNS/route config and produce nonsense numbers).
 func (s *Service) SetSingboxDelay(p SingboxDelayProber) {
 	s.scheduler.SetSingboxDelay(p)

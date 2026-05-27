@@ -17,6 +17,7 @@
 import { derived, type Readable } from 'svelte/store';
 import { createPollingStore, type PollingStore, type PollingState } from './polling';
 import { registerStore, type ResourceKey } from './storeRegistry';
+import { hydrarouteStatus as hydrarouteStatusStore } from './hydraroute';
 import type {
 	DnsRoute,
 	StaticRouteList,
@@ -74,22 +75,7 @@ export const routingTunnelsStore = createSection<RoutingTunnel[]>(
 	'routing.tunnels'
 );
 
-// HR Neo status is a single object, not an array — use a dedicated
-// fetcher so the empty-body fallback is a real Status rather than an
-// empty array. Backed by the existing /api/system/hydraroute-status.
-export const hydrarouteStatusStore: PollingStore<HydraRouteStatus> = createPollingStore<HydraRouteStatus>(
-	async () => {
-		const res = await fetch('/api/system/hydraroute-status');
-		if (!res.ok) throw new Error(`routing.hydrarouteStatus ${res.status}`);
-		const body = await res.json();
-		return (body.data ?? { installed: false, running: false }) as HydraRouteStatus;
-	},
-	{
-		staleTime: 30_000,
-		pollInterval: 30_000,
-	}
-);
-registerStore('routing.hydrarouteStatus', hydrarouteStatusStore);
+export { hydrarouteStatusStore };
 
 /** First successful fetch or terminal error — section can render cached/empty body. */
 function sectionFetched(s: PollingState<unknown>): boolean {

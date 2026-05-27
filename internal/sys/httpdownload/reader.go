@@ -10,11 +10,8 @@ import (
 	"time"
 )
 
-// emitInterval throttles progress callbacks. 64 KB or 200 ms (whichever
-// fires first) keeps SSE traffic sane during a download — at full router
-// uplink speeds (~5 MB/s) this caps notifications around ~5 / s.
+// emitDuration throttles periodic progress callbacks to avoid SSE spam.
 const (
-	emitBytes    = 64 * 1024
 	emitDuration = 200 * time.Millisecond
 )
 
@@ -24,8 +21,8 @@ const (
 type ProgressFn func(downloaded, total int64)
 
 // Reader wraps an io.Reader and calls onProgress periodically with the
-// cumulative bytes read so far. Throttled to emit at most every ~64 KB
-// or 200 ms (whichever comes first), plus once on EOF so callers can
+// cumulative bytes read so far. Throttled to emit at most every 200 ms,
+// plus once on EOF so callers can
 // render a final "100%" frame deterministically.
 type Reader struct {
 	r          io.Reader
@@ -34,17 +31,26 @@ type Reader struct {
 	lastEmit   int64
 	lastTime   time.Time
 	onProgress ProgressFn
+	now        func() time.Time
 }
 
 // NewReader wraps r with throttled progress reporting. total is the
 // expected size (typically resp.ContentLength); pass 0 when unknown
 // — callers that want a percent UI must handle total == 0.
 func NewReader(r io.Reader, total int64, onProgress ProgressFn) *Reader {
+	return newReaderWithClock(r, total, onProgress, time.Now)
+}
+
+func newReaderWithClock(r io.Reader, total int64, onProgress ProgressFn, now func() time.Time) *Reader {
+	if now == nil {
+		now = time.Now
+	}
 	return &Reader{
 		r:          r,
 		total:      total,
-		lastTime:   time.Now(),
+		lastTime:   now(),
 		onProgress: onProgress,
+		now:        now,
 	}
 }
 
@@ -56,12 +62,14 @@ func (p *Reader) Read(buf []byte) (int, error) {
 	if n > 0 {
 		p.read += int64(n)
 		if p.onProgress != nil {
-			shouldEmit := p.read-p.lastEmit >= emitBytes ||
-				time.Since(p.lastTime) >= emitDuration
+			now := p.now()
+			// Emit periodic progress at most every emitDuration.
+			shouldEmit := now.Sub(p.lastTime) >= emitDuration &&
+				p.read > p.lastEmit
 			if shouldEmit {
 				p.onProgress(p.read, p.total)
 				p.lastEmit = p.read
-				p.lastTime = time.Now()
+				p.lastTime = now
 			}
 		}
 	}

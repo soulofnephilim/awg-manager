@@ -61,12 +61,19 @@ const LEVEL_RANK: Record<UsageLevel, number> = { basic: 0, advanced: 1, expert: 
 /** Блок «Внешний вид» / цветовая схема — не ниже «Расширенного». */
 export const APPEARANCE_SETTINGS_MIN_LEVEL: UsageLevel = 'advanced';
 
+/** Переключатель stable/develop — только на «Продвинутом». */
+export const UPDATE_CHANNEL_MIN_LEVEL: UsageLevel = 'expert';
+
 export function isUsageLevelAtLeast(level: UsageLevel, minimum: UsageLevel): boolean {
 	return LEVEL_RANK[level] >= LEVEL_RANK[minimum];
 }
 
 export function isAppearanceSettingsVisible(level: UsageLevel): boolean {
 	return isUsageLevelAtLeast(level, APPEARANCE_SETTINGS_MIN_LEVEL);
+}
+
+export function isUpdateChannelSwitchVisible(level: UsageLevel): boolean {
+	return isUsageLevelAtLeast(level, UPDATE_CHANNEL_MIN_LEVEL);
 }
 
 export function isSectionVisible(level: UsageLevel, section: Section): boolean {

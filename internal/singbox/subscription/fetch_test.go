@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,5 +96,65 @@ func TestFetch_BodyLimit(t *testing.T) {
 	body, _, err := Fetch(srv.URL, nil, FetchOpts{Timeout: 5 * time.Second, MaxBodyBytes: 5 * 1024 * 1024})
 	if err == nil {
 		t.Errorf("expected body-limit error, body len=%d", len(body))
+	}
+}
+
+func TestFetch_FollowsRedirect(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok-final"))
+	}))
+	defer final.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	body, _, err := Fetch(redirect.URL, nil, FetchOpts{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("fetch redirect err: %v", err)
+	}
+	if string(body) != "ok-final" {
+		t.Fatalf("body=%q, want ok-final", body)
+	}
+}
+
+func TestFetch_RedirectLimitFive(t *testing.T) {
+	// 6 redirects in chain should hit explicit redirect guard (>5).
+	var servers [7]*httptest.Server
+	for i := 0; i < 6; i++ {
+		next := i + 1
+		idx := i
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, servers[next].URL, http.StatusFound)
+		}))
+		_ = idx
+	}
+	servers[6] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("never"))
+	}))
+	defer func() {
+		for _, s := range servers {
+			s.Close()
+		}
+	}()
+
+	_, _, err := Fetch(servers[0].URL, nil, FetchOpts{Timeout: 5 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "too many redirects") {
+		t.Fatalf("expected too many redirects error, got %v", err)
+	}
+}
+
+func TestFetchWithContext_UsesCallerContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := FetchWithContext(ctx, "https://example.test/sub", nil, FetchOpts{
+		Timeout:      12 * time.Second,
+		MaxBodyBytes: 1234,
+	})
+	if err == nil {
+		t.Fatal("expected canceled context error")
 	}
 }

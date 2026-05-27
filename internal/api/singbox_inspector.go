@@ -1,7 +1,10 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
@@ -43,6 +46,27 @@ type SingboxRouterInspectResponse struct {
 	Data    SingboxRouterInspectData `json:"data"`
 }
 
+// SingboxRouterInspectProgressDTO mirrors router.InspectProgress.
+type SingboxRouterInspectProgressDTO struct {
+	Phase        string `json:"phase" example:"rule_set_match_start"`
+	Message      string `json:"message" example:"Проверяем rule_set geosite-youtube через sing-box…"`
+	RuleIndex    *int   `json:"ruleIndex,omitempty" example:"3"`
+	RuleTotal    *int   `json:"ruleTotal,omitempty" example:"17"`
+	RuleSetTag   string `json:"ruleSetTag,omitempty" example:"geosite-youtube"`
+	RuleSetIndex *int   `json:"ruleSetIndex,omitempty" example:"0"`
+	RuleSetTotal *int   `json:"ruleSetTotal,omitempty" example:"2"`
+	Final        string `json:"final,omitempty" example:"direct"`
+	UsingDraft   bool   `json:"usingDraft,omitempty" example:"true"`
+}
+
+// SingboxRouterInspectStreamEventDTO mirrors router.InspectStreamEvent.
+type SingboxRouterInspectStreamEventDTO struct {
+	Type     string                            `json:"type" example:"progress"`
+	Progress *SingboxRouterInspectProgressDTO  `json:"progress,omitempty"`
+	Result   *SingboxRouterInspectData         `json:"result,omitempty"`
+	Error    string                            `json:"error,omitempty" example:"load router config: ..."`
+}
+
 // Inspect simulates which router rule would match the given domain/IP.
 //
 //	@Summary		Inspect router routing decision
@@ -70,6 +94,10 @@ func (h *SingboxRouterHandler) Inspect(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, "domain обязателен", "MISSING_DOMAIN")
 		return
 	}
+	if err := validateInspectParams(req.Port, req.Protocol); err != nil {
+		response.Error(w, err.message, err.code)
+		return
+	}
 	res, err := h.svc.Inspect(r.Context(), router.InspectInput{
 		Domain:   req.Domain,
 		Port:     req.Port,
@@ -80,4 +108,102 @@ func (h *SingboxRouterHandler) Inspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, res)
+}
+
+// InspectStream streams route-inspector progress events via SSE.
+//
+// Event names:
+//   - progress
+//   - result
+//   - inspect-error
+//
+// Each SSE event `data` is a JSON object matching SingboxRouterInspectStreamEventDTO.
+//
+//	@Summary		Inspect router routing decision (SSE stream)
+//	@Description	Streams route-inspector progress via Server-Sent Events. Event names: progress, result, inspect-error. Data payload for each event is JSON shaped as SingboxRouterInspectStreamEventDTO.
+//	@Tags			singbox-router
+//	@Produce		text/event-stream
+//	@Security		CookieAuth
+//	@Param			domain		query		string	true	"Domain or IP to test"
+//	@Param			port		query		int		false	"Destination port, 0-65535"
+//	@Param			protocol	query		string	false	"Protocol (tcp/udp)"
+//	@Success		200			{object}	SingboxRouterInspectStreamEventDTO	"SSE event data payload"
+//	@Failure		400			{object}	APIErrorEnvelope
+//	@Failure		500			{object}	APIErrorEnvelope
+//	@Router			/singbox/router/inspect/stream [get]
+func (h *SingboxRouterHandler) InspectStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		response.MethodNotAllowed(w)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		response.Error(w, "streaming not supported", "SSE_NOT_SUPPORTED")
+		return
+	}
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		response.Error(w, "domain обязателен", "MISSING_DOMAIN")
+		return
+	}
+	port := 0
+	if raw := r.URL.Query().Get("port"); raw != "" {
+		p, err := strconv.Atoi(raw)
+		if err != nil {
+			response.Error(w, "port должен быть числом от 0 до 65535", "INVALID_PORT")
+			return
+		}
+		port = p
+	}
+	protocol := r.URL.Query().Get("protocol")
+	if err := validateInspectParams(port, protocol); err != nil {
+		response.Error(w, err.message, err.code)
+		return
+	}
+	ch, err := h.svc.InspectStream(r.Context(), router.InspectInput{
+		Domain: domain, Port: port, Protocol: protocol,
+	})
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher.Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data)
+			flusher.Flush()
+		}
+	}
+}
+
+type inspectValidationError struct {
+	message string
+	code    string
+}
+
+func validateInspectParams(port int, protocol string) *inspectValidationError {
+	if port < 0 || port > 65535 {
+		return &inspectValidationError{
+			message: "port должен быть числом от 0 до 65535",
+			code:    "INVALID_PORT",
+		}
+	}
+	if protocol != "" && protocol != "tcp" && protocol != "udp" {
+		return &inspectValidationError{
+			message: "protocol должен быть tcp или udp",
+			code:    "INVALID_PROTOCOL",
+		}
+	}
+	return nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -31,6 +32,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/diagnostics"
 	"github.com/hoaxisr/awg-manager/internal/dnscheck"
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
+	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
@@ -48,6 +50,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/singbox/awgoutbounds"
 	singboxcfg "github.com/hoaxisr/awg-manager/internal/singbox/configmerge"
+	"github.com/hoaxisr/awg-manager/internal/singbox/dnsrewrite"
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
@@ -572,10 +575,13 @@ func main() {
 
 	// DNS route subscription auto-refresh scheduler
 	dnsRefreshScheduler := dnsroute.NewScheduler(dnsRouteService, settingsStore, loggingService)
-	dnsRefreshScheduler.Start()
 
 	// Access policy service (NDMS ip policy management) — wired to CQRS layer.
 	accessPolicySvc := accesspolicy.New(ndmsCommands.Policies, ndmsCommands.Interfaces, ndmsQueries, settingsStore, loggingService, ndmsquery.NewPolicyMarkStore(ndmsTransportClient, nil))
+	// Route SetInterfaceUp for managed tunnels through the orchestrator
+	// lifecycle (NativeWG needs kmod proxy + endpoint rewrite, not a raw NDMS
+	// flip — issue #183). System interfaces keep the raw flip.
+	accessPolicySvc.SetTunnelLifecycle(orchLifecycleAdapter{orch}, storeManagedTunnelResolver{awgStore})
 
 	// HydraRoute NDMS wiring — now that ndmsCommands/Queries are ready.
 	hydraService.SetQueries(ndmsQueries)
@@ -767,6 +773,10 @@ func main() {
 	subSvc := subscription.NewService(subStore, subAdapter)
 	subSvc.SetAppLogger(loggingService)
 
+	// Let NDMS-proxy enable/disable + orphan cleanup manage subscription
+	// composite proxies (a set separate from Tunnels()).
+	singboxOp.SetSubscriptionProxySet(subProxySet{store: subStore})
+
 	// Wire orchestrator into Operator so ApplyConfig writes 10-tunnels.json
 	// through SlotTunnels rather than an in-place write that bypasses
 	// the orchestrator's validate / debounced reload.
@@ -775,6 +785,7 @@ func main() {
 	// Wire managed-binary installer into Operator. The installer is keyed
 	// by the build-time arch string (e.g. "mipsel-3.4") so it can resolve
 	// the correct download URL and SHA256 from EmbeddedBinaries.
+	var singboxInstaller *installer.Installer
 	arch := detectArch()
 	if arch == "" {
 		bootLog.Warn("managed-singbox", runtime.GOARCH, "could not derive arch — install/update disabled")
@@ -783,7 +794,7 @@ func main() {
 		if !ok {
 			bootLog.Warn("managed-singbox", arch, "no embedded BinarySpec — install/update disabled")
 		} else {
-			singboxInstaller := installer.New(installer.DefaultBinaryPath, arch, spec, loggingService)
+			singboxInstaller = installer.New(installer.DefaultBinaryPath, arch, spec, loggingService)
 			singboxOp.SetInstaller(singboxInstaller)
 
 			// Stream sing-box install/update lifecycle over SSE so the UI
@@ -798,23 +809,6 @@ func main() {
 				})
 			})
 
-			// Auto-migration goroutine: when legacy sing-box-naive opkg
-			// package is present but managed binary is missing, run the
-			// jump from opkg → managed in the background. Failures keep
-			// awg-manager on the legacy install — retry happens on next boot.
-			go func() {
-				ctx := context.Background()
-				if singboxInstaller.CurrentVersion(ctx) != "" {
-					return // managed binary already in place
-				}
-				if !singboxInstaller.IsLegacyOpkgInstalled(ctx) {
-					return // nothing to migrate
-				}
-				lc := &operatorLifecycle{op: singboxOp}
-				if err := singboxInstaller.Migrate(ctx, lc); err != nil {
-					bootLog.Warn("singbox-auto-migration", "", "deferred: "+err.Error())
-				}
-			}()
 		}
 	}
 
@@ -1023,8 +1017,38 @@ func main() {
 	if err := deviceProxySvc.Reconcile(context.Background()); err != nil {
 		bootLog.Warn("deviceproxy-reconcile", "", err.Error())
 	}
+	sharedDownloadSvc := downloader.NewSettingsBackedService(
+		deviceProxySvc,
+		singboxOp,
+		sbOrch,
+		settingsStore,
+	)
+	dnsRouteService.SetDownloader(&dnsRouteDownloaderAdapter{svc: sharedDownloadSvc})
+	dnsRefreshScheduler.Start()
+	updaterService.SetDownloader(sharedDownloadSvc)
+	if singboxInstaller != nil {
+		singboxInstaller.SetDownloader(&installerDownloaderAdapter{svc: sharedDownloadSvc})
+		// Auto-migration goroutine: when legacy sing-box-naive opkg
+		// package is present but managed binary is missing, run the
+		// jump from opkg → managed in the background. Failures keep
+		// awg-manager on the legacy install — retry happens on next boot.
+		go func() {
+			ctx := context.Background()
+			if singboxInstaller.CurrentVersion(ctx) != "" {
+				return // managed binary already in place
+			}
+			if !singboxInstaller.IsLegacyOpkgInstalled(ctx) {
+				return // nothing to migrate
+			}
+			lc := &operatorLifecycle{op: singboxOp}
+			if err := singboxInstaller.Migrate(ctx, lc); err != nil {
+				bootLog.Warn("singbox-auto-migration", "", "deferred: "+err.Error())
+			}
+		}()
+	}
 
 	srv.SetDeviceProxyService(deviceProxySvc)
+	srv.SetDownloadService(sharedDownloadSvc)
 	// Note: legacy awg-* outbound cleanup happens lazily on first
 	// deviceproxy CRUD via pruneAWGOutbounds(nil) inside EnsureDeviceProxy.
 	// We deliberately do NOT call ForceApply on boot because it triggers
@@ -1052,6 +1076,7 @@ func main() {
 		Orch:                   sbOrch,
 		WANInterfaces:          &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces},
 	})
+	singboxOp.SetOutboundReferenceRenamer(routerSvc)
 	tunnelService.SetAWGSyncer(awgoutboundsSvc)
 	tunnelService.SetDeviceProxyRefChecker(deviceProxySvc)
 	tunnelService.SetRouterRefChecker(routerSvc)
@@ -1101,6 +1126,15 @@ func main() {
 	subSched.Start(context.Background())
 	srv.SetSubscriptionHandler(api.NewSubscriptionHandler(subSvc, singboxOp, loggingService))
 	srv.AddShutdownHook(subSched.Stop)
+
+	// DNS Rewrites — sing-box slot 17-dns-rewrites.json.
+	dnsRewriteStorePath := filepath.Join(*dataDir, "dns_rewrites.json")
+	dnsRewriteStore := storage.NewDNSRewriteStore(dnsRewriteStorePath)
+	dnsRewriteSvc := dnsrewrite.NewService(dnsRewriteStore, &dnsRewriteOrchAdapter{orch: sbOrch}, eventBus)
+	if err := dnsRewriteSvc.Resync(); err != nil {
+		bootLog.Warn("dnsrewrite-resync", "", err.Error())
+	}
+	srv.SetDNSRewritesHandler(api.NewDNSRewritesHandler(dnsRewriteSvc))
 
 	// Boot status: 0 = booting, 1 = done. Used by /api/system/info.
 	var bootDone int32
@@ -1863,6 +1897,45 @@ func (s *monitoringSystemTunnelAdapter) List(ctx context.Context) ([]monitoring.
 	return out, nil
 }
 
+// orchLifecycleAdapter routes accesspolicy.SetInterfaceUp for managed tunnels
+// to the orchestrator lifecycle (full start/stop incl. NativeWG kmod proxy).
+type orchLifecycleAdapter struct{ orch *orchestrator.Orchestrator }
+
+func (a orchLifecycleAdapter) Start(ctx context.Context, id string) error {
+	err := a.orch.HandleEvent(ctx, orchestrator.Event{Type: orchestrator.EventStart, Tunnel: id})
+	if errors.Is(err, tunnel.ErrAlreadyRunning) {
+		return nil // already running — user's "on" intent fulfilled
+	}
+	return err
+}
+
+func (a orchLifecycleAdapter) Stop(ctx context.Context, id string) error {
+	return a.orch.HandleEvent(ctx, orchestrator.Event{Type: orchestrator.EventStop, Tunnel: id})
+}
+
+// storeManagedTunnelResolver maps an NDMS interface name to a managed tunnel
+// ID by scanning the AWG tunnel store. ok=false for plain system interfaces.
+type storeManagedTunnelResolver struct{ store *storage.AWGTunnelStore }
+
+func (r storeManagedTunnelResolver) ManagedTunnelByNDMSName(_ context.Context, ndmsName string) (string, bool) {
+	tunnels, err := r.store.List()
+	if err != nil {
+		return "", false
+	}
+	for _, t := range tunnels {
+		var nm string
+		if t.Backend == "nativewg" {
+			nm = nwg.NewNWGNames(t.NWGIndex).NDMSName
+		} else {
+			nm = tunnel.NewNames(t.ID).NDMSName
+		}
+		if nm != "" && nm == ndmsName {
+			return t.ID, true
+		}
+	}
+	return "", false
+}
+
 // operatorLifecycle adapts *singbox.Operator to installer.Lifecycle so
 // the installer can stop/start the daemon during migration without the
 // installer package taking a circular dependency on singbox.
@@ -1876,6 +1949,66 @@ func (l *operatorLifecycle) Stop(ctx context.Context) error {
 
 func (l *operatorLifecycle) Start(ctx context.Context) error {
 	return l.op.Control(ctx, "start")
+}
+
+type installerDownloaderAdapter struct {
+	svc *downloader.Service
+}
+
+type dnsRouteDownloaderAdapter struct {
+	svc *downloader.Service
+}
+
+func (a *dnsRouteDownloaderAdapter) ReadAll(
+	ctx context.Context,
+	req dnsroute.SubscriptionDownloadRequest,
+) ([]byte, dnsroute.SubscriptionDownloadMeta, error) {
+	if a == nil || a.svc == nil {
+		return nil, dnsroute.SubscriptionDownloadMeta{}, fmt.Errorf("downloader service is not configured")
+	}
+	body, meta, err := a.svc.ReadAll(ctx, downloader.Request{
+		Purpose:       "dnsroute-subscription",
+		URL:           req.URL,
+		Timeout:       req.Timeout,
+		MaxBodyBytes:  req.MaxBodyBytes,
+		AllowedStatus: req.AllowedStatus,
+	})
+	if err != nil {
+		return nil, dnsroute.SubscriptionDownloadMeta{}, err
+	}
+	return body, dnsroute.SubscriptionDownloadMeta{ContentType: meta.ContentType}, nil
+}
+
+func (a *installerDownloaderAdapter) DownloadFile(ctx context.Context, req installer.DownloadFileRequest) (installer.DownloadFileResult, error) {
+	if a == nil || a.svc == nil {
+		return installer.DownloadFileResult{}, fmt.Errorf("downloader service is not configured")
+	}
+
+	res, err := a.svc.DownloadFile(ctx, downloader.FileRequest{
+		Request: downloader.Request{
+			Purpose: "singbox-binary",
+			URL:     req.URL,
+			Timeout: req.Timeout,
+		},
+		// Intentional: req.DestPath is already "<binary>.tmp" from installer.
+		// We keep temp == dest here, and activation of live binary is done
+		// separately in Installer.Activate().
+		DestPath:     req.DestPath,
+		TempPath:     req.DestPath,
+		MaxFileBytes: req.MaxFileBytes,
+		Mode:         req.Mode,
+		// Intentional: do not atomically move to final binary here.
+		// Installer.Activate() performs chmod + final atomic rename.
+		Atomic:   false,
+		Progress: req.Progress,
+	})
+	if err != nil {
+		return installer.DownloadFileResult{}, err
+	}
+	return installer.DownloadFileResult{
+		Path: res.Path,
+		Size: res.Size,
+	}, nil
 }
 
 // singboxAndSubLister satisfies singbox.tunnelLister by combining the regular
@@ -1903,4 +2036,44 @@ type orchValidatorAdapter struct {
 
 func (a *orchValidatorAdapter) Validate(ctx context.Context, configDir string) error {
 	return a.v.Validate(configDir)
+}
+
+// subProxySet adapts the subscription store to singbox.SubscriptionProxySet,
+// exposing each subscription's allocated NDMS composite proxy (index/port/label)
+// so the NDMS-proxy migration and orphan cleanup manage them.
+type subProxySet struct {
+	store *subscription.Store
+}
+
+func (a subProxySet) SubscriptionProxies() []singbox.SubscriptionProxy {
+	if a.store == nil {
+		return nil
+	}
+	var out []singbox.SubscriptionProxy
+	for _, sub := range a.store.List() {
+		if sub.ProxyIndex < 0 || sub.ListenPort == 0 {
+			continue
+		}
+		out = append(out, singbox.SubscriptionProxy{
+			Index: sub.ProxyIndex,
+			Port:  int(sub.ListenPort),
+			Label: sub.Label,
+		})
+	}
+	return out
+}
+
+// dnsRewriteOrchAdapter adapts *singboxorch.Orchestrator to the
+// dnsrewrite.Orchestrator interface (which uses plain string so the
+// package stays decoupled from singboxorch.Slot).
+type dnsRewriteOrchAdapter struct {
+	orch *singboxorch.Orchestrator
+}
+
+func (a *dnsRewriteOrchAdapter) Save(slot string, data []byte) error {
+	return a.orch.Save(singboxorch.Slot(slot), data)
+}
+
+func (a *dnsRewriteOrchAdapter) SetEnabled(slot string, on bool) error {
+	return a.orch.SetEnabled(singboxorch.Slot(slot), on)
 }

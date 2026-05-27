@@ -11,7 +11,7 @@ import (
 // it to drive their own logic.
 //
 // IfaceName is the KERNEL name (e.g. "nwg0", "opkgtun1") — used by
-// connectivity probes that hit the kernel (ip, ping, curl via interface).
+// connectivity probes that hit the kernel (ip, ping, HTTP via interface).
 // NDMSName is the NDMS logical name (e.g. "Wireguard3", "OpkgTun0") —
 // used when calling NDMS RCI endpoints. Code that confuses the two
 // produces 404s against /show/interface/<name>/...

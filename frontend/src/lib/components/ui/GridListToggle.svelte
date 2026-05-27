@@ -73,18 +73,21 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.25rem;
-		padding: 0.1875rem;
+		box-sizing: border-box;
+		height: 32px;
+		padding: 2px;
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm);
 		background: var(--color-bg-secondary);
+		flex-shrink: 0;
 	}
 
 	.view-mode-btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 2rem;
-		height: 2rem;
+		width: 28px;
+		height: 26px;
 		padding: 0;
 		border: none;
 		border-radius: calc(var(--radius-sm) - 2px);

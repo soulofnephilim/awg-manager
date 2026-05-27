@@ -19,6 +19,7 @@ const (
 	SlotBase          Slot = "base"          // 00-base.json — always on
 	SlotTunnels       Slot = "tunnels"       // 10-tunnels.json
 	SlotAwg           Slot = "awg"           // 15-awg.json
+	SlotDNSRewrites   Slot = "dns-rewrites"  // 17-dns-rewrites.json
 	SlotRouter        Slot = "router"        // 20-router.json
 	SlotDeviceProxy   Slot = "deviceproxy"   // 30-deviceproxy.json
 	SlotDownloadProxy Slot = "downloadproxy" // 35-download-proxy.json
@@ -64,6 +65,7 @@ func KnownSlots() []SlotMeta {
 		{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true},
 		{Slot: SlotTunnels, Filename: "10-tunnels.json", AlwaysOn: true},
 		{Slot: SlotAwg, Filename: "15-awg.json", AlwaysOn: true},
+		{Slot: SlotDNSRewrites, Filename: "17-dns-rewrites.json"},
 		{Slot: SlotRouter, Filename: "20-router.json"},
 		{Slot: SlotDeviceProxy, Filename: "30-deviceproxy.json"},
 		{Slot: SlotDownloadProxy, Filename: "35-download-proxy.json"},

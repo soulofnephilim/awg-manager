@@ -13,8 +13,9 @@
 	import ChecksTab from './ChecksTab.svelte';
 	import AwgConfigAnalyzerTab from './AwgConfigAnalyzerTab.svelte';
 	import AboutDeviceTab from './AboutDeviceTab.svelte';
+	import DnsInfoTab from './DnsInfoTab.svelte';
 
-	type ActiveTab = 'logs' | 'connections' | 'checks' | 'about' | 'awgConfig';
+	type ActiveTab = 'logs' | 'connections' | 'checks' | 'about' | 'awgConfig' | 'dns';
 
 	function initialDiagnosticsTab(): ActiveTab {
 		const tab = $page.url.searchParams.get('tab');
@@ -23,6 +24,7 @@
 		if (tab === 'checks') return 'checks';
 		if (tab === 'about') return 'about';
 		if (tab === 'awgConfig') return 'awgConfig';
+		if (tab === 'dns') return 'dns';
 
 		// legacy aliases, чтобы первый render тоже сразу попадал в checks
 		if (tab === 'tests' || tab === 'dnscheck') return 'checks';
@@ -51,6 +53,9 @@
 		if ($usageLevel === 'expert') {
 			base.push({ id: 'awgConfig', label: 'Конфиг AWG' });
 		}
+		if ($usageLevel === 'expert') {
+			base.push({ id: 'dns', label: 'Сведения о DNS' });
+		}
 		return base;
 	});
 
@@ -60,11 +65,11 @@
 		// Ждём загрузки settings — Tabs сам восстановит вкладку из URL.
 		if ($settings === null) return;
 		if ($usageLevel === 'expert') return;
-		if (activeTab === 'awgConfig') {
+		if (activeTab === 'awgConfig' || activeTab === 'dns') {
 			activeTab = 'logs';
 		}
 		const tab = $page.url.searchParams.get('tab');
-		if (tab === 'awgConfig') {
+		if (tab === 'awgConfig' || tab === 'dns') {
 			const url = new URL($page.url);
 			url.searchParams.delete('tab');
 			const q = url.searchParams.toString();
@@ -152,6 +157,7 @@
 		activeTab === 'checks' ? 'Проверки · Диагностика' :
 		activeTab === 'about' ? 'Окружение · Диагностика' :
 		activeTab === 'awgConfig' ? 'Конфиг AWG · Диагностика' :
+		activeTab === 'dns' ? 'Сведения о DNS · Диагностика' :
 		'Журнал · Диагностика',
 	);
 </script>
@@ -181,5 +187,7 @@
 		<AboutDeviceTab />
 	{:else if activeTab === 'awgConfig'}
 		<AwgConfigAnalyzerTab />
+	{:else if activeTab === 'dns'}
+		<DnsInfoTab />
 	{/if}
 </PageContainer>

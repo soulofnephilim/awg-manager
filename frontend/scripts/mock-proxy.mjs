@@ -48,6 +48,53 @@ const VALID = new Set(['basic', 'advanced', 'expert']);
 // realistic case for development against the redesigned routing page.
 let usageLevel = 'expert';
 let singboxLogLevel = 'trace';
+let downloadRouteTag = 'direct';
+let updateChannel = 'stable';
+let updateCheckEnabled = true;
+const MOCK_DOWNLOAD_OUTBOUNDS = [
+	{
+		tag: 'direct',
+		kind: 'direct',
+		label: 'Direct (WAN)',
+		detail: 'без туннеля',
+		available: true,
+	},
+	{
+		tag: 'awg-de-frankfurt',
+		kind: 'awg',
+		label: 'DE Frankfurt',
+		detail: 'awg0 · de-fra.demo.example:51820',
+		available: true,
+	},
+	{
+		tag: 'awg-nl-amsterdam',
+		kind: 'awg',
+		label: 'NL Amsterdam',
+		detail: 'opkgtun0 · nl-ams.demo.example:51820',
+		available: true,
+	},
+	{
+		tag: 'sb-vless-1',
+		kind: 'vless',
+		label: 'VLESS EU-1',
+		detail: 'eu1.vpn.example:443',
+		available: true,
+	},
+	{
+		tag: 'sb-subscription-1',
+		kind: 'subscription',
+		label: 'Sing subscription RU',
+		detail: 'sub-ru.demo.example',
+		available: true,
+	},
+	{
+		tag: 'sb-wg-reserve',
+		kind: 'wireguard',
+		label: 'WireGuard Reserve',
+		detail: 'wg-reserve.demo.example:51820',
+		available: false,
+	},
+];
 let singboxInstallShouldFail = process.env.MOCK_SINGBOX_INSTALL_FAIL === '1';
 let mockProxyInstances = [
 	{
@@ -1517,11 +1564,84 @@ const mockDnsCheckClientPayload = {
 	],
 };
 
+/** Диагностика → «Сведения о DNS»: распарсенный /show/dns-proxy
+ *  (GET /diagnostics/dns-proxy). displayName уже заполнен — на проде это
+ *  делает handler через access-policies; здесь отдаём готовую форму. */
+const mockDnsProxyInfo = {
+	proxies: [
+		{
+			name: 'System',
+			displayName: 'Системный',
+			tcpPort: 53,
+			udpPort: 53,
+			stat: { totalRequests: 1242, proxyRequestsSent: 318, cacheHitRatio: 0.744, cacheHits: 924, memory: '13.33K' },
+			upstreams: [
+				{ address: '8.8.8.8', port: 0, encryption: 'DoT', sni: 'dns.google', scope: 'all', rSent: 120, aRcvd: 120, nxRcvd: 4, medResp: '38ms', avgResp: '41ms', rank: 6 },
+				{ address: '77.88.8.8', port: 853, encryption: 'DoT', sni: 'common.dot.dns.yandex.net', scope: 'ru', rSent: 64, aRcvd: 64, nxRcvd: 1, medResp: '70ms', avgResp: '78ms', rank: 4 },
+				{ address: '9.9.9.9', port: 0, encryption: 'DoT', sni: '', scope: 'all', rSent: 134, aRcvd: 132, nxRcvd: 2, medResp: '52ms', avgResp: '60ms', rank: 5 },
+			],
+			staticRecords: [
+				{ host: 'host1.example.net', type: 'A', value: '203.0.113.10', flag: 1 },
+				{ host: 'host1.example.net', type: 'AAAA', value: '2001:db8::1', flag: 1 },
+				{ host: 'awgm-dnscheck.test', type: 'A', value: '10.10.10.1', flag: 0 },
+				{ host: 'host2.example.com', type: 'A', value: '203.0.113.10', flag: 1 },
+				{ host: 'host2.example.com', type: 'AAAA', value: '2001:db8::1', flag: 1 },
+				{ host: 'host3.example.ru', type: 'A', value: '203.0.113.10', flag: 1 },
+			],
+			rebind: { enabled: true, nets: ['10.10.10.1:24', '10.10.20.1:24', '172.16.6.1:24', '255.255.255.255:32'], excludes: ['ru', '*.ru'] },
+		},
+		{
+			name: 'Policy0',
+			displayName: 'IoT_VPN',
+			tcpPort: 41100,
+			udpPort: 41100,
+			stat: { totalRequests: 87, proxyRequestsSent: 30, cacheHitRatio: 0.655, cacheHits: 57, memory: '12.75K' },
+			upstreams: [
+				{ address: '8.8.8.8', port: 0, encryption: 'DoT', sni: 'dns.google', scope: 'all', rSent: 6, aRcvd: 6, nxRcvd: 0, medResp: '44ms', avgResp: '49ms', rank: 5 },
+				{ address: '77.88.8.8', port: 853, encryption: 'DoT', sni: 'common.dot.dns.yandex.net', scope: 'ru', rSent: 3, aRcvd: 3, nxRcvd: 0, medResp: '120ms', avgResp: '120ms', rank: 4 },
+				{ address: '9.9.9.9', port: 0, encryption: 'DoT', sni: '', scope: 'all', rSent: 21, aRcvd: 21, nxRcvd: 1, medResp: '58ms', avgResp: '63ms', rank: 5 },
+			],
+			staticRecords: [{ host: 'awgm-dnscheck.test', type: 'A', value: '10.10.10.1', flag: 0 }],
+			rebind: { enabled: true, nets: ['10.10.10.1:24'], excludes: ['ru', '*.ru'] },
+		},
+		{
+			name: 'Policy1',
+			displayName: 'Netflix',
+			tcpPort: 41101,
+			udpPort: 41101,
+			stat: { totalRequests: 283, proxyRequestsSent: 102, cacheHitRatio: 0.64, cacheHits: 181, memory: '17.25K' },
+			upstreams: [
+				{ address: '8.8.8.8', port: 0, encryption: 'DoT', sni: 'dns.google', scope: 'all', rSent: 4, aRcvd: 4, nxRcvd: 0, medResp: '144ms', avgResp: '143ms', rank: 4 },
+				{ address: '77.88.8.8', port: 853, encryption: 'DoT', sni: 'common.dot.dns.yandex.net', scope: 'ru', rSent: 11, aRcvd: 11, nxRcvd: 0, medResp: '70ms', avgResp: '60ms', rank: 8 },
+				{ address: '9.9.9.9', port: 0, encryption: 'DoT', sni: '', scope: 'all', rSent: 87, aRcvd: 87, nxRcvd: 0, medResp: '147ms', avgResp: '109ms', rank: 4 },
+			],
+			staticRecords: [{ host: 'awgm-dnscheck.test', type: 'A', value: '10.10.10.1', flag: 0 }],
+			rebind: { enabled: true, nets: ['10.10.10.1:24'], excludes: ['ru', '*.ru'] },
+		},
+		{
+			name: 'Policy2',
+			displayName: 'Policy2',
+			tcpPort: 41102,
+			udpPort: 41102,
+			stat: { totalRequests: 0, proxyRequestsSent: 0, cacheHitRatio: 0, cacheHits: 0, memory: '12.75K' },
+			upstreams: [
+				{ address: '8.8.8.8', port: 0, encryption: 'DoT', sni: 'dns.google', scope: 'all', rSent: 0, aRcvd: 0, nxRcvd: 0, medResp: '0ms', avgResp: '0ms', rank: 1 },
+				{ address: '77.88.8.8', port: 853, encryption: 'DoT', sni: 'common.dot.dns.yandex.net', scope: 'ru', rSent: 0, aRcvd: 0, nxRcvd: 0, medResp: '0ms', avgResp: '0ms', rank: 1 },
+				{ address: '9.9.9.9', port: 0, encryption: 'DoT', sni: '', scope: 'all', rSent: 0, aRcvd: 0, nxRcvd: 0, medResp: '0ms', avgResp: '0ms', rank: 1 },
+			],
+			staticRecords: [],
+			rebind: { enabled: false, nets: [], excludes: [] },
+		},
+	],
+};
+
 /** HydraRoute Neo в блоке AWGM (GET /system/hydraroute-status). */
 const mockHydraRouteStatus = {
 	installed: true,
 	running: true,
 	version: '2.4.1',
+	pid: 2345,
+	processState: 'running',
 };
 
 const mockRoutingDnsRoutes = [
@@ -2324,6 +2444,7 @@ const MOCK_AMNEZIA_PREMIUM_SID = 'mock-v_sid-amnezia-premium-dev';
 const MOCK_AMNEZIA_PREMIUM_COUNTRIES = [
 	{ server_country_code: 'ru', server_country_name: 'Russia (mock)' },
 	{ server_country_code: 'nl', server_country_name: 'Netherlands (mock)' },
+	{ server_country_code: 'ee', server_country_name: 'Estonia (mock stale)' },
 ];
 
 function buildMockAmneziaPremiumConf(countryCode) {
@@ -2392,8 +2513,25 @@ const server = http.createServer(async (req, res) => {
 					body.data.logging = {};
 				}
 				body.data.logging.singboxLogLevel = singboxLogLevel;
+				if (!body.data.download || typeof body.data.download !== 'object') {
+					body.data.download = {};
+				}
+				body.data.download.routeTag = downloadRouteTag;
+				if (!body.data.updates || typeof body.data.updates !== 'object') {
+					body.data.updates = { checkEnabled: true, channel: 'stable' };
+				}
+				body.data.updates.channel = updateChannel;
+				body.data.updates.checkEnabled = updateCheckEnabled;
 			}
 			send(res, status, body);
+		});
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/download/outbounds') {
+		send(res, 200, {
+			success: true,
+			data: MOCK_DOWNLOAD_OUTBOUNDS,
 		});
 		return;
 	}
@@ -2424,6 +2562,28 @@ const server = http.createServer(async (req, res) => {
 				) {
 					singboxLogLevel = payload.logging.singboxLogLevel;
 				}
+				if (
+					payload &&
+					typeof payload === 'object' &&
+					payload.download &&
+					typeof payload.download === 'object' &&
+					typeof payload.download.routeTag === 'string'
+				) {
+					downloadRouteTag = payload.download.routeTag;
+				}
+				if (
+					payload &&
+					typeof payload === 'object' &&
+					payload.updates &&
+					typeof payload.updates === 'object'
+				) {
+					if (payload.updates.channel === 'stable' || payload.updates.channel === 'develop') {
+						updateChannel = payload.updates.channel;
+					}
+					if (typeof payload.updates.checkEnabled === 'boolean') {
+						updateCheckEnabled = payload.updates.checkEnabled;
+					}
+				}
 				const { status, body } = await fetchJSON('/settings/get');
 				if (body && typeof body === 'object' && body.data) {
 					body.data.usageLevel = usageLevel;
@@ -2431,9 +2591,20 @@ const server = http.createServer(async (req, res) => {
 						body.data.logging = {};
 					}
 					body.data.logging.singboxLogLevel = singboxLogLevel;
+					if (!body.data.download || typeof body.data.download !== 'object') {
+						body.data.download = {};
+					}
+					body.data.download.routeTag = downloadRouteTag;
+					if (!body.data.updates || typeof body.data.updates !== 'object') {
+						body.data.updates = { checkEnabled: true, channel: 'stable' };
+					}
+					body.data.updates.channel = updateChannel;
+					body.data.updates.checkEnabled = updateCheckEnabled;
 				}
 				send(res, status, body);
-				console.log(`[mock-proxy] usageLevel → ${usageLevel}, singboxLogLevel → ${singboxLogLevel}`);
+				console.log(
+					`[mock-proxy] usageLevel → ${usageLevel}, singboxLogLevel → ${singboxLogLevel}, downloadRouteTag → ${downloadRouteTag}, updateChannel → ${updateChannel}`,
+				);
 			} catch (e) {
 				send(res, 500, { success: false, error: String(e) });
 			}
@@ -2492,10 +2663,20 @@ const server = http.createServer(async (req, res) => {
 							{
 								server_country_code: 'nl',
 								server_country_name: 'Netherlands (mock issued)',
+								worker_last_updated: '2026-02-03T13:49:07.090912Z',
 								last_downloaded: new Date().toISOString(),
 								source_type: 'country_config',
 								os_version: 'Web',
 								installation_uuid: '00000000-0000-4000-8000-000000000001',
+							},
+							{
+								server_country_code: 'ee',
+								server_country_name: 'Estonia (mock stale)',
+								worker_last_updated: '2026-04-30T17:34:17.821424Z',
+								last_downloaded: '2026-04-23T16:07:43.367914Z',
+								source_type: 'country_config',
+								os_version: 'Web',
+								installation_uuid: '00000000-0000-4000-8000-000000000002',
 							},
 						],
 						subscription_status: 'active',
@@ -3099,6 +3280,11 @@ const server = http.createServer(async (req, res) => {
 
 	if (req.method === 'GET' && path === '/dns-check/client') {
 		send(res, 200, { success: true, data: mockDnsCheckClientPayload });
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/diagnostics/dns-proxy') {
+		send(res, 200, { success: true, data: mockDnsProxyInfo });
 		return;
 	}
 

@@ -94,7 +94,7 @@
 
 <style>
 	.login-container {
-		min-height: 100vh;
+		min-height: calc(100dvh - 56px);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -123,6 +123,22 @@
 		margin-bottom: 0.75rem;
 	}
 
+	.login-brand :global(.brand-logo-mark) {
+		width: 52px;
+		height: 52px;
+	}
+
+	@media (min-width: 641px) and (max-width: 1050px) {
+		.login-brand :global(.brand-logo-mark) {
+			width: 44px;
+			height: 44px;
+		}
+
+		.login-header h1 {
+			font-size: 1.375rem;
+		}
+	}
+
 	.login-header h1 {
 		font-size: 1.5rem;
 		margin-bottom: 0.25rem;
@@ -147,7 +163,7 @@
 	.login-form {
 		display: flex;
 		flex-direction: column;
-		gap: 1rem;
+		gap: 0rem;
 	}
 
 	.form-group {
@@ -157,7 +173,7 @@
 	}
 
 	.login-button {
-		margin-top: 0.5rem;
+		margin-top: 1rem;
 	}
 
 	.login-hint {

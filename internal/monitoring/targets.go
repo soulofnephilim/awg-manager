@@ -13,7 +13,7 @@ package monitoring
 // /proxies/<tag>/delay). HTTP is unsafe — sing-box upstream
 // forces HTTPS in this endpoint (sagernet/sing-box#3604) — so
 // callers must pass HTTPS URLs only. AWG rows ignore URL and
-// probe Host directly via curl bound to the tunnel interface.
+// probe Host directly via HTTP bound to the tunnel interface.
 type Target struct {
 	ID   string `json:"id"`
 	Host string `json:"host"`

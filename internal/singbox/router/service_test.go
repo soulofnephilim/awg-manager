@@ -121,6 +121,7 @@ func (f *fakeSingbox) IsRunning() (bool, int) {
 	return false, 0
 }
 func (f *fakeSingbox) Start() error                              { return nil }
+func (f *fakeSingbox) Stop() error                               { return nil }
 func (f *fakeSingbox) ValidateConfigDir(_ context.Context) error { return nil }
 func (f *fakeSingbox) ConfigDir() string                         { return f.dir }
 func (f *fakeSingbox) Binary() string                            { return f.binary }
@@ -242,6 +243,51 @@ func TestSetRouteFinal_AllowsSubscriptionCompositeTag(t *testing.T) {
 	}
 	if cfg.Route.Final != "sub-test" {
 		t.Fatalf("route.final: want sub-test, got %q", cfg.Route.Final)
+	}
+}
+
+func TestRenameExternalOutboundTag_UpdatesActiveAndPending(t *testing.T) {
+	dir := t.TempDir()
+	orch := orchestrator.New(dir, &fakeSingbox{dir: dir})
+	if err := orch.Register(orchestrator.SlotMeta{Slot: orchestrator.SlotRouter, Filename: "20-router.json"}); err != nil {
+		t.Fatalf("Register router slot: %v", err)
+	}
+	if err := orch.Bootstrap(); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if err := orch.SetEnabled(orchestrator.SlotRouter, true); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	active := []byte(`{"inbounds":[],"outbounds":[{"type":"selector","tag":"g","outbounds":["old"],"default":"old"}],"route":{"rules":[{"action":"route","outbound":"old"}],"final":"old"},"dns":{"servers":[{"tag":"d","type":"https","server":"example","detour":"old"}]}}`)
+	if err := orch.Save(orchestrator.SlotRouter, active); err != nil {
+		t.Fatalf("Save active: %v", err)
+	}
+	pending := []byte(`{"inbounds":[],"outbounds":[],"route":{"rules":[{"type":"logical","rules":[{"outbound":"old"}]}],"final":"direct","rule_set":[{"tag":"rs","type":"remote","url":"https://example.com/rs.srs","download_detour":"old"}]}}`)
+	if err := orch.SaveDraft(orchestrator.SlotRouter, pending); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	svc := &ServiceImpl{deps: Deps{Singbox: &fakeSingbox{dir: dir}, Orch: orch}}
+
+	if err := svc.RenameExternalOutboundTag(context.Background(), "old", "new"); err != nil {
+		t.Fatalf("RenameExternalOutboundTag: %v", err)
+	}
+
+	activeCfg, err := LoadConfig(filepath.Join(dir, "20-router.json"))
+	if err != nil {
+		t.Fatalf("Load active: %v", err)
+	}
+	if activeCfg.Route.Final != "new" || activeCfg.Route.Rules[0].Outbound != "new" ||
+		activeCfg.Outbounds[0].Outbounds[0] != "new" || activeCfg.Outbounds[0].Default != "new" ||
+		activeCfg.DNS.Servers[0].Detour != "new" {
+		t.Fatalf("active refs not renamed: %+v", activeCfg)
+	}
+	pendingCfg, err := LoadConfig(filepath.Join(dir, "pending", "20-router.json"))
+	if err != nil {
+		t.Fatalf("Load pending: %v", err)
+	}
+	if pendingCfg.Route.Rules[0].Rules[0].Outbound != "new" ||
+		pendingCfg.Route.RuleSet[0].DownloadDetour != "new" {
+		t.Fatalf("pending refs not renamed: %+v", pendingCfg)
 	}
 }
 
@@ -1001,6 +1047,120 @@ func TestUpdateRuleSet_InlineRenameRewritesVisibleAndMaterializedRefs(t *testing
 	}
 	if len(cfg.DNS.Rules) != 1 || cfg.DNS.Rules[0].RuleSet[0] != "new-inline-srs" {
 		t.Fatalf("materialized dns refs = %+v", cfg.DNS.Rules)
+	}
+}
+
+// TestUpdateRuleSet_InlineRulesEditOnAppliedSet_NoPhantomDraft verifies the
+// phantom-draft guard: editing only the rules of an already-applied inline
+// rule-set recompiles the live .srs (sing-box hot-reloads it) but does NOT
+// create a pending draft, because the materialized 20-router.json is
+// byte-identical to active (the rules live in a sidecar, not in the config).
+func TestUpdateRuleSet_InlineRulesEditOnAppliedSet_NoPhantomDraft(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+	svc.deps.Singbox.(*fakeSingbox).binary = "/opt/bin/sing-box"
+	compileCalls := 0
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		compileCalls++
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+	// SlotBase provides "direct" so ApplyStaging's cross-slot validation passes.
+	_ = svc.deps.Orch.Register(orchestrator.SlotMeta{Slot: orchestrator.SlotBase, Filename: "00-base.json", AlwaysOn: true})
+	_ = os.WriteFile(filepath.Join(dir, "00-base.json"),
+		[]byte(`{"outbounds":[{"tag":"direct","type":"direct"}]}`), 0644)
+
+	// Create the inline rule-set and apply it so it lives in active/20-router.json.
+	if err := svc.AddRuleSet(context.Background(), RuleSet{
+		Tag:   "custom-inline",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{".one.example"}}},
+	}); err != nil {
+		t.Fatalf("AddRuleSet: %v", err)
+	}
+	if res, err := svc.ApplyStaging(context.Background()); err != nil || !res.Ok() {
+		t.Fatalf("ApplyStaging: err=%v res=%s", err, res.Error())
+	}
+	if svc.StagingStatus(context.Background()).HasDraft {
+		t.Fatal("draft should be cleared after Apply")
+	}
+
+	bus := svc.deps.Bus.(*mockBus)
+	bus.Reset()
+	callsBefore := compileCalls
+
+	// Edit ONLY the rules of the already-applied inline rule-set.
+	if err := svc.UpdateRuleSet(context.Background(), "custom-inline", RuleSet{
+		Tag:   "custom-inline",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{".two.example"}}},
+	}); err != nil {
+		t.Fatalf("UpdateRuleSet: %v", err)
+	}
+
+	// No phantom draft: a rules-only edit must not stage anything.
+	if svc.StagingStatus(context.Background()).HasDraft {
+		t.Fatal("rules-only edit must NOT create a pending draft")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pending", "20-router.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending file should not exist after rules-only edit: %v", err)
+	}
+	// The guard emits a "discarded" staging event so the UI banner clears.
+	if !bus.HasEvent("singbox.router.staging") {
+		t.Errorf("expected staging event from phantom-draft guard; got: %v", bus.Events())
+	}
+	// The live .srs was recompiled — this is what sing-box hot-reloads.
+	if compileCalls <= callsBefore {
+		t.Fatalf("expected recompile of .srs, calls %d -> %d", callsBefore, compileCalls)
+	}
+	// The source sidecar reflects the new rule content.
+	srcRaw, err := os.ReadFile(filepath.Join(dir, "rule-sets", "inline", "custom-inline.json"))
+	if err != nil {
+		t.Fatalf("source sidecar missing: %v", err)
+	}
+	if !strings.Contains(string(srcRaw), "two.example") {
+		t.Fatalf("sidecar not updated with new rule: %s", srcRaw)
+	}
+}
+
+// TestAddRule_StructuralChangeAfterApply_StillDrafts pins the invariant the
+// phantom-draft guard relies on: a genuinely structural change (here, adding a
+// route rule that references the rule-set) perturbs the materialized
+// 20-router.json, so it is never byte-equal to active and must create a draft.
+func TestAddRule_StructuralChangeAfterApply_StillDrafts(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+	svc.deps.Singbox.(*fakeSingbox).binary = "/opt/bin/sing-box"
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+	_ = svc.deps.Orch.Register(orchestrator.SlotMeta{Slot: orchestrator.SlotBase, Filename: "00-base.json", AlwaysOn: true})
+	_ = os.WriteFile(filepath.Join(dir, "00-base.json"),
+		[]byte(`{"outbounds":[{"tag":"direct","type":"direct"}]}`), 0644)
+
+	if err := svc.AddRuleSet(context.Background(), RuleSet{
+		Tag:   "custom-inline",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{".one.example"}}},
+	}); err != nil {
+		t.Fatalf("AddRuleSet: %v", err)
+	}
+	if res, err := svc.ApplyStaging(context.Background()); err != nil || !res.Ok() {
+		t.Fatalf("ApplyStaging: err=%v res=%s", err, res.Error())
+	}
+	if svc.StagingStatus(context.Background()).HasDraft {
+		t.Fatal("draft should be cleared after Apply")
+	}
+
+	// Structural change: add a route rule referencing the rule-set.
+	if err := svc.AddRule(context.Background(), Rule{
+		RuleSet:  []string{"custom-inline"},
+		Action:   "route",
+		Outbound: "direct",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	if !svc.StagingStatus(context.Background()).HasDraft {
+		t.Fatal("structural change must create a pending draft (Apply required)")
 	}
 }
 

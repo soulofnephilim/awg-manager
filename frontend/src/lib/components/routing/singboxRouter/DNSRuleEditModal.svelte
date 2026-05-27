@@ -48,11 +48,31 @@
 	// svelte-ignore state_referenced_locally
 	let domainKeywordStr = $state((rule?.domain_keyword ?? []).join(', '));
 	// svelte-ignore state_referenced_locally
-	let queryTypeStr = $state((rule?.query_type ?? []).join(', '));
+	let domainRegexStr = $state((rule?.domain_regex ?? []).join('\n'));
 	// svelte-ignore state_referenced_locally
-	let action: 'route' | 'reject' = $state(rule?.action === 'reject' ? 'reject' : 'route');
+	let queryTypeStr = $state((rule?.query_type ?? []).join(', '));
+
+	function initAction(r?: SingboxRouterDNSRule): 'route' | 'block' {
+		if (r?.action === 'reject' || r?.action === 'predefined') return 'block';
+		return 'route';
+	}
+	function initBlockMethod(r?: SingboxRouterDNSRule): 'nxdomain' | 'refused' | 'drop' {
+		if (r?.action === 'predefined') return 'nxdomain';
+		if (r?.action === 'reject' && r?.method === 'drop') return 'drop';
+		return 'refused';
+	}
+	// svelte-ignore state_referenced_locally
+	let action = $state<'route' | 'block'>(initAction(rule));
+	// svelte-ignore state_referenced_locally
+	let blockMethod = $state<'nxdomain' | 'refused' | 'drop'>(initBlockMethod(rule));
 	// svelte-ignore state_referenced_locally
 	let server = $state(rule?.server ?? '');
+
+	const blockMethodOptions = [
+		{ value: 'nxdomain', label: 'NXDOMAIN (нет такого домена)' },
+		{ value: 'refused', label: 'REFUSED' },
+		{ value: 'drop', label: 'Drop (без ответа)' },
+	];
 
 	let busy = $state(false);
 	let error = $state('');
@@ -62,8 +82,10 @@
 	let initialDomainSuffixStr = $state('');
 	let initialDomainStr = $state('');
 	let initialDomainKeywordStr = $state('');
+	let initialDomainRegexStr = $state('');
 	let initialQueryTypeStr = $state('');
-	let initialAction: 'route' | 'reject' = $state('route');
+	let initialAction: 'route' | 'block' = $state('route');
+	let initialBlockMethod: 'nxdomain' | 'refused' | 'drop' = $state('refused');
 	let initialServer = $state('');
 
 	// Initialize snapshot when modal opens
@@ -73,16 +95,20 @@
 			initialDomainSuffixStr = (rule.domain_suffix ?? []).join('\n');
 			initialDomainStr = (rule.domain ?? []).join('\n');
 			initialDomainKeywordStr = (rule.domain_keyword ?? []).join(', ');
+			initialDomainRegexStr = (rule.domain_regex ?? []).join('\n');
 			initialQueryTypeStr = (rule.query_type ?? []).join(', ');
-			initialAction = rule.action === 'reject' ? 'reject' : 'route';
+			initialAction = initAction(rule);
+			initialBlockMethod = initBlockMethod(rule);
 			initialServer = rule.server ?? '';
 		} else {
 			initialRuleSetTagsSnapshot = [];
 			initialDomainSuffixStr = '';
 			initialDomainStr = '';
 			initialDomainKeywordStr = '';
+			initialDomainRegexStr = '';
 			initialQueryTypeStr = '';
 			initialAction = 'route';
+			initialBlockMethod = 'refused';
 			initialServer = '';
 		}
 	});
@@ -93,8 +119,10 @@
 			domainSuffixStr !== initialDomainSuffixStr ||
 			domainStr !== initialDomainStr ||
 			domainKeywordStr !== initialDomainKeywordStr ||
+			domainRegexStr !== initialDomainRegexStr ||
 			queryTypeStr !== initialQueryTypeStr ||
 			action !== initialAction ||
+			blockMethod !== initialBlockMethod ||
 			server !== initialServer
 		);
 	});
@@ -107,6 +135,7 @@
 			const domain_suffix = domainSuffixStr.split('\n').map((s) => s.trim()).filter(Boolean);
 			const domain = domainStr.split('\n').map((s) => s.trim()).filter(Boolean);
 			const domain_keyword = domainKeywordStr.split(',').map((s) => s.trim()).filter(Boolean);
+			const domain_regex = domainRegexStr.split('\n').map((s) => s.trim()).filter(Boolean);
 			const query_type = queryTypeStr.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
 
 			const hasMatcher =
@@ -114,14 +143,10 @@
 				domain_suffix.length > 0 ||
 				domain.length > 0 ||
 				domain_keyword.length > 0 ||
+				domain_regex.length > 0 ||
 				query_type.length > 0;
 			if (!hasMatcher) {
 				error = 'Нужен хотя бы один matcher';
-				busy = false;
-				return;
-			}
-			if (action === 'route' && !server) {
-				error = 'Выберите DNS сервер';
 				busy = false;
 				return;
 			}
@@ -131,10 +156,24 @@
 				domain_suffix: domain_suffix.length ? domain_suffix : undefined,
 				domain: domain.length ? domain : undefined,
 				domain_keyword: domain_keyword.length ? domain_keyword : undefined,
+				domain_regex: domain_regex.length ? domain_regex : undefined,
 				query_type: query_type.length ? query_type : undefined,
-				action: action === 'reject' ? 'reject' : undefined,
-				server: action === 'route' ? server : undefined,
 			};
+
+			if (action === 'route') {
+				if (!server) { error = 'Выберите DNS сервер'; busy = false; return; }
+				built.action = 'route';
+				built.server = server;
+			} else if (blockMethod === 'nxdomain') {
+				built.action = 'predefined';
+				built.rcode = 'NXDOMAIN';
+			} else if (blockMethod === 'drop') {
+				built.action = 'reject';
+				built.method = 'drop';
+			} else {
+				built.action = 'reject';
+				built.method = 'default';
+			}
 
 			await onSave(built);
 		} catch (e) {
@@ -176,6 +215,11 @@
 		</label>
 
 		<label class="field">
+			<div class="lbl">Domain regex (по строке)</div>
+			<textarea bind:value={domainRegexStr} rows="2" placeholder={"^ads?\\d+\\."}></textarea>
+		</label>
+
+		<label class="field">
 			<div class="lbl">Query type (через запятую)</div>
 			<input bind:value={queryTypeStr} placeholder="A, AAAA, HTTPS" />
 		</label>
@@ -184,13 +228,18 @@
 			<div class="section-label">Действие</div>
 			<div class="segment">
 				<button class:active={action === 'route'} onclick={() => (action = 'route')} type="button">Резолвить</button>
-				<button class:active={action === 'reject'} onclick={() => (action = 'reject')} type="button">Заблокировать</button>
+				<button class:active={action === 'block'} onclick={() => (action = 'block')} type="button">Заблокировать</button>
 			</div>
 
 			{#if action === 'route'}
 				<label class="field">
 					<div class="lbl">DNS сервер</div>
 					<Dropdown bind:value={server} options={serverOptions} fullWidth />
+				</label>
+			{:else}
+				<label class="field">
+					<div class="lbl">Метод блокировки</div>
+					<Dropdown bind:value={blockMethod} options={blockMethodOptions} fullWidth />
 				</label>
 			{/if}
 		</div>

@@ -73,10 +73,18 @@ type Service interface {
 	SetDNSGlobals(ctx context.Context, final, strategy string) error
 
 	Inspect(ctx context.Context, input InspectInput) (InspectResult, error)
+	InspectStream(ctx context.Context, input InspectInput) (<-chan InspectStreamEvent, error)
 
 	StagingStatus(ctx context.Context) StagingStatus
 	ApplyStaging(ctx context.Context) (orchestrator.ValidationResult, error)
 	DiscardStaging(ctx context.Context) error
+}
+
+type InspectStreamEvent struct {
+	Type     string           `json:"type"`
+	Progress *InspectProgress `json:"progress,omitempty"`
+	Result   *InspectResult   `json:"result,omitempty"`
+	Error    string           `json:"error,omitempty"`
 }
 
 type SingboxController interface {
@@ -462,6 +470,28 @@ func (s *ServiceImpl) persistConfig(ctx context.Context, cfg *RouterConfig) erro
 		data, err := json.MarshalIndent(materialized, "", "  ")
 		if err != nil {
 			return fmt.Errorf("marshal router config: %w", err)
+		}
+		// Phantom-draft guard: an inline rule-set's rules live in sidecar
+		// artifacts, not in 20-router.json (which carries only a
+		// {type:local,format:binary,path} reference). Editing only the rules
+		// of an already-applied inline rule-set therefore leaves the
+		// materialized config byte-identical to active — materializeConfig
+		// has already rewritten the live .srs and sing-box hot-reloads it
+		// without SIGHUP. There is no real config change to stage, so a draft
+		// would only raise a phantom "unsaved changes" banner. Drop any stale
+		// draft and return. This guard's safety rests on the invariant that
+		// any genuinely structural change (new rule-set, tag rename, route/DNS/
+		// outbound edit) perturbs the materialized bytes and so is never
+		// byte-equal. A missing/unreadable active file (router disabled, first
+		// Enable, slot parked under disabled/) is NOT equal — fall through to
+		// staging so the change is applied normally.
+		activePath := filepath.Join(s.deps.Orch.ConfigDir(), "20-router.json")
+		if existing, rerr := os.ReadFile(activePath); rerr == nil && bytes.Equal(existing, data) {
+			if err := s.deps.Orch.DiscardDraft(orchestrator.SlotRouter); err != nil {
+				return err
+			}
+			s.emitStagingEvent("discarded")
+			return nil
 		}
 		if err := s.deps.Orch.SaveDraft(orchestrator.SlotRouter, data); err != nil {
 			return err
@@ -1039,6 +1069,15 @@ func (s *ServiceImpl) emitCfgEvent(event string, cfg *RouterConfig) {
 		return
 	}
 	switch event {
+	case "all":
+		s.deps.Events.Publish("singbox-router:rules", cfg.Route.Rules)
+		s.deps.Events.Publish("singbox-router:rulesets", cfg.Route.RuleSet)
+		s.deps.Events.Publish("singbox-router:outbounds", cfg.CompositeOutbounds())
+		s.deps.Events.Publish("singbox-router:dns-servers", cfg.DNS.Servers)
+		s.deps.Events.Publish("singbox-router:dns-rules", cfg.DNS.Rules)
+		s.deps.Events.Publish("singbox-router:dns-globals", map[string]string{
+			"final": cfg.DNS.Final, "strategy": cfg.DNS.Strategy,
+		})
 	case "rules":
 		s.deps.Events.Publish("singbox-router:rules", cfg.Route.Rules)
 	case "rulesets":
@@ -1057,6 +1096,106 @@ func (s *ServiceImpl) emitCfgEvent(event string, cfg *RouterConfig) {
 	if status, err := s.GetStatus(context.Background()); err == nil {
 		s.deps.Events.Publish("singbox-router:status", status)
 	}
+}
+
+// IsOutboundTagInUse reports whether tag is already occupied by any outbound
+// catalog visible to singbox-router.
+func (s *ServiceImpl) IsOutboundTagInUse(ctx context.Context, tag string) bool {
+	cfg, err := s.loadRouterConfig()
+	if err != nil {
+		cfg = NewEmptyConfig()
+	}
+	return s.isKnownOutboundTag(ctx, tag, cfg)
+}
+
+// RenameExternalOutboundTag rewrites references to a base outbound owned by
+// another producer (for example a single sing-box tunnel in 10-tunnels.json).
+// It updates both live/disabled router config and the pending draft, if any.
+func (s *ServiceImpl) RenameExternalOutboundTag(ctx context.Context, oldTag, newTag string) error {
+	oldTag = strings.TrimSpace(oldTag)
+	newTag = strings.TrimSpace(newTag)
+	if oldTag == "" || newTag == "" || oldTag == newTag {
+		return nil
+	}
+	if s.deps.Orch == nil {
+		return s.withConfig(ctx, "all", func(c *RouterConfig) error {
+			c.renameOutboundReferences(oldTag, newTag)
+			return nil
+		})
+	}
+
+	configDir := s.deps.Orch.ConfigDir()
+	activePath := filepath.Join(configDir, "20-router.json")
+	disabledPath := filepath.Join(configDir, "disabled", "20-router.json")
+	pendingPath := filepath.Join(configDir, "pending", "20-router.json")
+	changed := false
+
+	if data, ok, err := rewriteRouterConfigOutboundRefs(activePath, oldTag, newTag); err != nil {
+		return err
+	} else if ok {
+		if err := s.deps.Orch.Save(orchestrator.SlotRouter, data); err != nil {
+			return err
+		}
+		changed = true
+	}
+	if data, ok, err := rewriteRouterConfigOutboundRefs(disabledPath, oldTag, newTag); err != nil {
+		return err
+	} else if ok {
+		if err := writeRouterConfigAtomic(disabledPath, data); err != nil {
+			return err
+		}
+		changed = true
+	}
+	if data, ok, err := rewriteRouterConfigOutboundRefs(pendingPath, oldTag, newTag); err != nil {
+		return err
+	} else if ok {
+		if err := s.deps.Orch.SaveDraft(orchestrator.SlotRouter, data); err != nil {
+			return err
+		}
+		s.emitStagingEvent("staged")
+		changed = true
+	}
+	if changed {
+		if cfg, err := s.loadRouterConfig(); err == nil {
+			s.emitCfgEvent("all", s.ruleSetMaterializer().restoreConfig(cfg))
+		}
+	}
+	return nil
+}
+
+func rewriteRouterConfigOutboundRefs(path, oldTag, newTag string) ([]byte, bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	cfg := NewEmptyConfig()
+	if err := json.Unmarshal(raw, cfg); err != nil {
+		return nil, false, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(cfg.outboundReferences(oldTag)) == 0 {
+		return nil, false, nil
+	}
+	cfg.renameOutboundReferences(oldTag, newTag)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func writeRouterConfigAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (s *ServiceImpl) ListRules(ctx context.Context) ([]Rule, error) {
@@ -1461,6 +1600,19 @@ func (s *ServiceImpl) RulesReferencing(tag string) []int {
 	return cfg.rulesReferencingOutbound(tag)
 }
 
+// OutboundReferenceLocations returns human-readable locations in the
+// router config that reference tag, EXCLUDING route.rules[...] (covered
+// by RulesReferencing). Used by the tunnel-delete guard to refuse
+// deletion of a tunnel still referenced via composite member, route
+// final, dns detour, or rule_set download_detour.
+func (s *ServiceImpl) OutboundReferenceLocations(tag string) []string {
+	cfg, err := s.loadRouterConfig()
+	if err != nil || cfg == nil {
+		return nil
+	}
+	return cfg.outboundReferencesExcludingRules(tag)
+}
+
 func (s *ServiceImpl) ListPolicies(ctx context.Context) ([]PolicyInfo, error) {
 	if s.deps.Policies == nil {
 		return nil, fmt.Errorf("access policy provider not configured")
@@ -1538,6 +1690,73 @@ func (s *ServiceImpl) Inspect(ctx context.Context, input InspectInput) (InspectR
 		s.inspectCache = newRuleSetCache("")
 	})
 	return Inspect(input, cfg.Route.Rules, cfg.Route.RuleSet, final, binary, s.inspectCache), nil
+}
+
+func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-chan InspectStreamEvent, error) {
+	ch := make(chan InspectStreamEvent, 32)
+	go func() {
+		defer close(ch)
+		emitEvent := func(ev InspectStreamEvent) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case ch <- ev:
+				return true
+			}
+		}
+		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{Phase: "start", Message: "Запускаем инспектор маршрутов…"}}) {
+			return
+		}
+		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{Phase: "load_config", Message: "Загружаем конфигурацию маршрутизации…"}}) {
+			return
+		}
+		cfg, err := s.loadRouterConfig()
+		if err != nil {
+			emitEvent(InspectStreamEvent{Type: "inspect-error", Error: err.Error()})
+			return
+		}
+		if cfg == nil {
+			cfg = NewEmptyConfig()
+		}
+		final := cfg.Route.Final
+		if final == "" {
+			final = "direct"
+		}
+		usingDraft := false
+		if s.deps.Orch != nil {
+			usingDraft = s.deps.Orch.DraftInfo(orchestrator.SlotRouter).HasDraft
+		}
+		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{
+			Phase:      "config_loaded",
+			Message:    fmt.Sprintf("Конфигурация загружена: %d правил, %d rule_set, final: %s", len(cfg.Route.Rules), len(cfg.Route.RuleSet), final),
+			RuleTotal:  intPtr(len(cfg.Route.Rules)),
+			RuleSetTotal: intPtr(len(cfg.Route.RuleSet)),
+			Final:      final,
+			UsingDraft: usingDraft,
+		}}) {
+			return
+		}
+		binary := ""
+		if s.deps.Singbox != nil {
+			binary = s.deps.Singbox.Binary()
+		}
+		s.inspectCacheOnce.Do(func() {
+			s.inspectCache = newRuleSetCache("")
+		})
+		res := InspectWithProgress(input, cfg.Route.Rules, cfg.Route.RuleSet, final, binary, s.inspectCache, func(p InspectProgress) {
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- InspectStreamEvent{Type: "progress", Progress: &p}:
+			}
+		})
+		select {
+		case <-ctx.Done():
+			return
+		case ch <- InspectStreamEvent{Type: "result", Result: &res}:
+		}
+	}()
+	return ch, nil
 }
 
 // ---------------------------------------------------------------------------
