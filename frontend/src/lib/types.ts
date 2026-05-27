@@ -1769,3 +1769,59 @@ export interface RouterStagingValidationError {
 	validation?: RouterValidationDTO;
 	sbCheck?: string;
 }
+
+// ─────────────────────────────────────────────
+// #region DNS Proxy Info
+// ─────────────────────────────────────────────
+
+export interface DnsUpstream {
+	address: string;
+	port: number;
+	encryption: 'DoT' | 'DoH' | 'plain';
+	sni: string;
+	scope: string; // 'all' | 'ru' | ...
+	rSent: number;
+	aRcvd: number;
+	nxRcvd: number;
+	medResp: string;
+	avgResp: string;
+	rank: number;
+}
+
+export interface DnsStaticRecord {
+	host: string;
+	type: 'A' | 'AAAA';
+	value: string;
+	flag: number;
+}
+
+export interface DnsRebind {
+	enabled: boolean;
+	nets: string[];
+	excludes: string[];
+}
+
+export interface DnsProxyStat {
+	totalRequests: number;
+	proxyRequestsSent: number;
+	cacheHitRatio: number;
+	cacheHits: number;
+	memory: string;
+}
+
+export interface DnsProxy {
+	name: string;
+	displayName: string;
+	tcpPort: number;
+	udpPort: number;
+	stat: DnsProxyStat;
+	upstreams: DnsUpstream[];
+	staticRecords: DnsStaticRecord[];
+	rebind: DnsRebind;
+}
+
+export interface DnsProxyInfo {
+	proxies: DnsProxy[];
+}
+
+// #endregion

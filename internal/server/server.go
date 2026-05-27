@@ -952,6 +952,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnostics/result", guarded(diagHandler.Result))
 	mux.HandleFunc("/api/diagnostics/stream", guarded(diagHandler.Stream))
 
+	// DNS proxy info (read-only ndnproxy state). ndmsQueries may be nil on
+	// platforms without NDMS wiring — guard the construction.
+	if s.ndmsQueries != nil && s.ndmsQueries.DNSProxyStatus != nil {
+		dnsProxyInfoHandler := api.NewDnsProxyInfoHandler(s.ndmsQueries.DNSProxyStatus, s.accessPolicyService)
+		mux.HandleFunc("/api/diagnostics/dns-proxy", guarded(dnsProxyInfoHandler.Get))
+	}
+
 	// Connections viewer (protected)
 	mux.HandleFunc("/api/connections", guarded(connectionsHandler.List))
 

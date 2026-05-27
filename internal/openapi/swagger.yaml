@@ -758,6 +758,21 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.DnsProxyInfoData:
+    properties:
+      proxies:
+        items:
+          $ref: '#/definitions/diagnostics.DNSProxy'
+        type: array
+    type: object
+  api.DnsProxyInfoEnvelope:
+    properties:
+      data:
+        $ref: '#/definitions/api.DnsProxyInfoData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.DnsRouteDTO:
     properties:
       backend:
@@ -4489,6 +4504,94 @@ definitions:
         example: 524288
         type: integer
     type: object
+  diagnostics.DNSProxy:
+    properties:
+      displayName:
+        type: string
+      name:
+        type: string
+      rebind:
+        $ref: '#/definitions/diagnostics.DNSRebind'
+      stat:
+        $ref: '#/definitions/diagnostics.DNSProxyStat'
+      staticRecords:
+        items:
+          $ref: '#/definitions/diagnostics.DNSStaticRecord'
+        type: array
+      tcpPort:
+        type: integer
+      udpPort:
+        type: integer
+      upstreams:
+        items:
+          $ref: '#/definitions/diagnostics.DNSUpstream'
+        type: array
+    type: object
+  diagnostics.DNSProxyStat:
+    properties:
+      cacheHitRatio:
+        type: number
+      cacheHits:
+        type: integer
+      memory:
+        type: string
+      proxyRequestsSent:
+        type: integer
+      totalRequests:
+        type: integer
+    type: object
+  diagnostics.DNSRebind:
+    properties:
+      enabled:
+        type: boolean
+      excludes:
+        items:
+          type: string
+        type: array
+      nets:
+        items:
+          type: string
+        type: array
+    type: object
+  diagnostics.DNSStaticRecord:
+    properties:
+      flag:
+        type: integer
+      host:
+        type: string
+      type:
+        description: A | AAAA
+        type: string
+      value:
+        type: string
+    type: object
+  diagnostics.DNSUpstream:
+    properties:
+      aRcvd:
+        type: integer
+      address:
+        type: string
+      avgResp:
+        type: string
+      encryption:
+        description: DoT | DoH | plain
+        type: string
+      medResp:
+        type: string
+      nxRcvd:
+        type: integer
+      port:
+        type: integer
+      rSent:
+        type: integer
+      rank:
+        type: integer
+      scope:
+        description: '"all" or a domain like "ru"'
+        type: string
+      sni:
+        type: string
+    type: object
 info:
   contact: {}
   description: HTTP API for the AWG Manager daemon (tunnels, routing, system).
@@ -5265,6 +5368,30 @@ paths:
       summary: Toggle tunnel autostart
       tags:
       - control
+  /diagnostics/dns-proxy:
+    get:
+      description: 'Running ndnproxy state: upstreams, per-policy stats, static records,
+        rebind.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.DnsProxyInfoEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: DNS proxy info
+      tags:
+      - diagnostics
   /diagnostics/result:
     get:
       produces:

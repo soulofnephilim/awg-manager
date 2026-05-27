@@ -1,0 +1,323 @@
+package diagnostics
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"strconv"
+	"strings"
+)
+
+// DNSProxy is one ndnproxy profile (System or PolicyN) from /show/dns-proxy.
+// DisplayName is left empty by the parser and filled by the API handler.
+type DNSProxy struct {
+	Name        string            `json:"name"`
+	DisplayName string            `json:"displayName"`
+	TCPPort     int               `json:"tcpPort"`
+	UDPPort     int               `json:"udpPort"`
+	Stat        DNSProxyStat      `json:"stat"`
+	Upstreams   []DNSUpstream     `json:"upstreams"`
+	Static      []DNSStaticRecord `json:"staticRecords"`
+	Rebind      DNSRebind         `json:"rebind"`
+}
+
+type DNSProxyStat struct {
+	TotalRequests     int     `json:"totalRequests"`
+	ProxyRequestsSent int     `json:"proxyRequestsSent"`
+	CacheHitRatio     float64 `json:"cacheHitRatio"`
+	CacheHits         int     `json:"cacheHits"`
+	Memory            string  `json:"memory"`
+}
+
+type DNSUpstream struct {
+	Address    string `json:"address"`
+	Port       int    `json:"port"`
+	Encryption string `json:"encryption"` // DoT | DoH | plain
+	SNI        string `json:"sni"`
+	Scope      string `json:"scope"` // "all" or a domain like "ru"
+	RSent      int    `json:"rSent"`
+	ARcvd      int    `json:"aRcvd"`
+	NXRcvd     int    `json:"nxRcvd"`
+	MedResp    string `json:"medResp"`
+	AvgResp    string `json:"avgResp"`
+	Rank       int    `json:"rank"`
+	localPort  int    // join key, not serialized
+}
+
+type DNSStaticRecord struct {
+	Host  string `json:"host"`
+	Type  string `json:"type"` // A | AAAA
+	Value string `json:"value"`
+	Flag  int    `json:"flag"`
+}
+
+type DNSRebind struct {
+	Enabled  bool     `json:"enabled"`
+	Nets     []string `json:"nets"`
+	Excludes []string `json:"excludes"`
+}
+
+// dnsTLSEntry is one entry from proxy-tls.server-tls.
+type dnsTLSEntry struct {
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+	SNI     string `json:"sni"`
+	Domain  string `json:"domain"`
+}
+
+// dnsHTTPSEntry is one entry from proxy-https.server-https.
+type dnsHTTPSEntry struct {
+	Address string `json:"address"`
+}
+
+// dnsProxyWire mirrors the relevant subset of /show/dns-proxy JSON.
+type dnsProxyWire struct {
+	Status []struct {
+		Name   string `json:"proxy-name"`
+		Config string `json:"proxy-config"`
+		Stat   string `json:"proxy-stat"`
+		TLS    struct {
+			ServerTLS []dnsTLSEntry `json:"server-tls"`
+		} `json:"proxy-tls"`
+		HTTPS struct {
+			ServerHTTPS []dnsHTTPSEntry `json:"server-https"`
+		} `json:"proxy-https"`
+	} `json:"proxy-status"`
+}
+
+// ParseDNSProxy converts the router's /show/dns-proxy payload into a clean
+// slice of DNSProxy. It tolerates empty/unknown blocks and never panics on
+// malformed text lines (they are skipped).
+func ParseDNSProxy(raw []byte) ([]DNSProxy, error) {
+	var w dnsProxyWire
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, fmt.Errorf("decode dns-proxy: %w", err)
+	}
+	out := make([]DNSProxy, 0, len(w.Status))
+	for _, s := range w.Status {
+		p := DNSProxy{Name: s.Name}
+		p.Upstreams, p.Static, p.Rebind, p.TCPPort, p.UDPPort = parseConfig(s.Config)
+		statSummary, serverStats := parseStat(s.Stat)
+		p.Stat = statSummary
+		applyEncryption(p.Upstreams, s.TLS.ServerTLS, s.HTTPS.ServerHTTPS)
+		joinServerStats(p.Upstreams, serverStats)
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// parseConfig walks the proxy-config text block.
+func parseConfig(cfg string) (ups []DNSUpstream, static []DNSStaticRecord, rb DNSRebind, tcp, udp int) {
+	for _, raw := range strings.Split(cfg, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "dns_server"):
+			if u, ok := parseDNSServer(line); ok {
+				ups = append(ups, u)
+			}
+		case strings.HasPrefix(line, "static_aaaa"):
+			if r, ok := parseStatic(line); ok {
+				static = append(static, r)
+			}
+		case strings.HasPrefix(line, "static_a "), strings.HasPrefix(line, "static_a="):
+			if r, ok := parseStatic(line); ok {
+				static = append(static, r)
+			}
+		case strings.HasPrefix(line, "norebind_ctl"):
+			rb.Enabled = afterEquals(line) == "on"
+		case strings.HasPrefix(line, "norebind_ip4net"):
+			if v := afterEquals(line); v != "" {
+				rb.Nets = append(rb.Nets, v)
+			}
+		case strings.HasPrefix(line, "norebind_exclude"):
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				rb.Excludes = append(rb.Excludes, parts[1])
+			}
+		case strings.HasPrefix(line, "dns_tcp_port"):
+			tcp = atoiSafe(afterEquals(line))
+		case strings.HasPrefix(line, "dns_udp_port"):
+			udp = atoiSafe(afterEquals(line))
+		}
+	}
+	return ups, static, rb, tcp, udp
+}
+
+// parseDNSServer parses lines like:
+//
+//	dns_server = 127.0.0.1:40500 . # 8.8.8.8@dns.google
+//	dns_server = 127.0.0.1:40501 ru # 77.88.8.8:853@common.dot.dns.yandex.net
+//	dns_server = 127.0.0.1:40502 . # 9.9.9.9
+func parseDNSServer(line string) (DNSUpstream, bool) {
+	val := afterEquals(line)
+	if val == "" {
+		return DNSUpstream{}, false
+	}
+	var comment string
+	if i := strings.Index(val, "#"); i >= 0 {
+		comment = strings.TrimSpace(val[i+1:])
+		val = strings.TrimSpace(val[:i])
+	}
+	fields := strings.Fields(val)
+	if len(fields) == 0 {
+		return DNSUpstream{}, false
+	}
+	u := DNSUpstream{Scope: "all"}
+	if _, portStr, ok := splitHostPort(fields[0]); ok {
+		u.localPort = atoiSafe(portStr)
+	}
+	if len(fields) >= 2 && fields[1] != "." && fields[1] != "" {
+		u.Scope = fields[1]
+	}
+	if comment != "" {
+		addrPart := comment
+		if at := strings.Index(comment, "@"); at >= 0 {
+			addrPart = comment[:at]
+			u.SNI = comment[at+1:]
+		}
+		if host, portStr, err := net.SplitHostPort(addrPart); err == nil {
+			u.Address = host
+			u.Port = atoiSafe(portStr)
+		} else {
+			u.Address = addrPart
+		}
+	}
+	return u, u.Address != "" || u.localPort != 0
+}
+
+// parseStatic parses "static_a = host ip flag" / "static_aaaa = host ip flag".
+func parseStatic(line string) (DNSStaticRecord, bool) {
+	typ := "A"
+	if strings.HasPrefix(line, "static_aaaa") {
+		typ = "AAAA"
+	}
+	val := afterEquals(line)
+	fields := strings.Fields(val)
+	if len(fields) < 2 {
+		return DNSStaticRecord{}, false
+	}
+	r := DNSStaticRecord{Host: fields[0], Type: typ, Value: fields[1]}
+	if len(fields) >= 3 {
+		r.Flag = atoiSafe(fields[2])
+	}
+	return r, true
+}
+
+// serverStat is one row of the proxy-stat "DNS Servers" table, keyed by local port.
+type serverStat struct {
+	rSent, aRcvd, nxRcvd, rank int
+	medResp, avgResp           string
+}
+
+func parseStat(stat string) (DNSProxyStat, map[int]serverStat) {
+	var summary DNSProxyStat
+	servers := map[int]serverStat{}
+	inTable := false
+	for _, raw := range strings.Split(stat, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "Total incoming requests:"):
+			summary.TotalRequests = atoiSafe(afterColon(line))
+		case strings.HasPrefix(line, "Proxy requests sent:"):
+			summary.ProxyRequestsSent = atoiSafe(afterColon(line))
+		case strings.HasPrefix(line, "Cache hits ratio:"):
+			rest := afterColon(line)
+			f := strings.Fields(rest)
+			if len(f) >= 1 {
+				summary.CacheHitRatio, _ = strconv.ParseFloat(f[0], 64)
+			}
+			if i := strings.Index(rest, "("); i >= 0 {
+				inner := strings.Trim(rest[i+1:], ") ")
+				summary.CacheHits = atoiSafe(inner)
+			}
+		case strings.HasPrefix(line, "Memory usage:"):
+			summary.Memory = strings.TrimSpace(afterColon(line))
+		case strings.HasPrefix(line, "Ip") && strings.Contains(line, "Port"):
+			inTable = true
+		case inTable && line != "":
+			f := strings.Fields(line)
+			if len(f) >= 8 {
+				port := atoiSafe(f[1])
+				servers[port] = serverStat{
+					rSent:   atoiSafe(f[2]),
+					aRcvd:   atoiSafe(f[3]),
+					nxRcvd:  atoiSafe(f[4]),
+					medResp: f[5],
+					avgResp: f[6],
+					rank:    atoiSafe(f[7]),
+				}
+			}
+		}
+	}
+	return summary, servers
+}
+
+// applyEncryption sets Encryption + SNI on each upstream from proxy-tls / proxy-https.
+func applyEncryption(ups []DNSUpstream, tls []dnsTLSEntry, https []dnsHTTPSEntry) {
+	tlsByAddr := map[string]string{}
+	for _, t := range tls {
+		tlsByAddr[t.Address] = t.SNI
+	}
+	httpsAddr := map[string]bool{}
+	for _, h := range https {
+		httpsAddr[h.Address] = true
+	}
+	for i := range ups {
+		switch {
+		case httpsAddr[ups[i].Address]:
+			ups[i].Encryption = "DoH"
+		default:
+			if sni, ok := tlsByAddr[ups[i].Address]; ok {
+				ups[i].Encryption = "DoT"
+				if ups[i].SNI == "" {
+					ups[i].SNI = sni
+				}
+			} else {
+				ups[i].Encryption = "plain"
+			}
+		}
+	}
+}
+
+func joinServerStats(ups []DNSUpstream, servers map[int]serverStat) {
+	for i := range ups {
+		if s, ok := servers[ups[i].localPort]; ok {
+			ups[i].RSent = s.rSent
+			ups[i].ARcvd = s.aRcvd
+			ups[i].NXRcvd = s.nxRcvd
+			ups[i].MedResp = s.medResp
+			ups[i].AvgResp = s.avgResp
+			ups[i].Rank = s.rank
+		}
+	}
+}
+
+func afterEquals(line string) string {
+	if i := strings.Index(line, "="); i >= 0 {
+		return strings.TrimSpace(line[i+1:])
+	}
+	return ""
+}
+
+func afterColon(line string) string {
+	if i := strings.Index(line, ":"); i >= 0 {
+		return strings.TrimSpace(line[i+1:])
+	}
+	return ""
+}
+
+func atoiSafe(s string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(s))
+	return n
+}
+
+// splitHostPort splits "1.2.3.4:853" -> ("1.2.3.4","853",true). No colon -> false.
+func splitHostPort(s string) (host, port string, ok bool) {
+	if i := strings.LastIndex(s, ":"); i >= 0 {
+		return s[:i], s[i+1:], true
+	}
+	return s, "", false
+}
