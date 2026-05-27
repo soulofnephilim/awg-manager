@@ -448,6 +448,21 @@ func (o *Orchestrator) updateState(action Action) {
 	}
 }
 
+// QuiescentUntil returns the tunnel's current boot-quiescence deadline (the
+// time until which a just-(re)started tunnel is considered "coming up"), or
+// the zero time if the tunnel is unknown or no bring-up was attempted this
+// session. Pure read — the API status layer uses it to display
+// "pending/starting" instead of "broken" while a NativeWG tunnel is still
+// being brought up. Does not mutate any state.
+func (o *Orchestrator) QuiescentUntil(tunnelID string) time.Time {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if t, ok := o.state.tunnels[tunnelID]; ok {
+		return t.quiescentUntil
+	}
+	return time.Time{}
+}
+
 // publishInvalidatedBus posts a resource:invalidated hint. Duplicated
 // here (from internal/api.publishInvalidated) to avoid an import cycle
 // between the orchestrator and the api package.
