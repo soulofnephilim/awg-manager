@@ -17,7 +17,15 @@
 	let showConfirm = $state(false);
 	let showChangelog = $state(false);
 
+	const manualCheckTitle = $derived(
+		updateInfo?.available ? 'Проверить наличие более новой версии' : 'Проверить обновления'
+	);
+	const manualCheckLabel = $derived(
+		checking ? 'Проверка...' : updateInfo?.available ? 'Проверить ещё' : 'Проверить'
+	);
+
 	async function checkForUpdates() {
+		if (checking) return;
 		checking = true;
 		try {
 			updateInfo = await api.checkUpdate(true);
@@ -42,10 +50,12 @@
 	}
 
 	function confirmUpgrade() {
+		if (checking || !updateInfo?.available) return;
 		showConfirm = true;
 	}
 
 	async function applyUpgrade() {
+		if (checking || !updateInfo?.available) return;
 		showConfirm = false;
 		upgrading = true;
 
@@ -124,22 +134,25 @@
 					Что нового
 				</Button>
 			{/if}
+			<!-- Manual check must stay available even when an update is already cached:
+				repo may publish a newer build after the cached result was fetched. -->
+			<Button
+				variant="secondary"
+				size="sm"
+				onclick={checkForUpdates}
+				loading={checking}
+				title={manualCheckTitle}
+			>
+				{manualCheckLabel}
+			</Button>
 			{#if updateInfo?.available}
 				<Button
 					variant="primary"
 					size="sm"
 					onclick={confirmUpgrade}
+					disabled={checking}
 				>
 					Обновить
-				</Button>
-			{:else}
-				<Button
-					variant="secondary"
-					size="sm"
-					onclick={checkForUpdates}
-					loading={checking}
-				>
-					{checking ? 'Проверка...' : 'Проверить'}
 				</Button>
 			{/if}
 		{/if}
