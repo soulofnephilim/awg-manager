@@ -971,4 +971,13 @@
 		outline: 2px solid color-mix(in srgb, var(--color-error) 45%, transparent);
 		outline-offset: 2px;
 	}
+
+	@media (max-width: 768px) {
+		.mobile-tunnel-title-row :global(.badge) {
+			flex: 0 0 auto;
+			width: auto;
+			max-width: max-content;
+			margin-top: 0;
+		}
+	}
 </style>
