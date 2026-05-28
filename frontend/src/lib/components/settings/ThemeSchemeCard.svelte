@@ -712,4 +712,33 @@
 			min-width: 0;
 		}
 	}
+
+	@media (min-width: 641px) {
+		.scheme-toggle {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr);
+			align-items: stretch;
+			gap: 0.75rem;
+		}
+
+		.scheme-toggle > :first-child {
+			width: 100%;
+		}
+
+		.header-meta {
+			width: 100%;
+			min-width: 0;
+			box-sizing: border-box;
+			justify-content: space-between;
+			padding: 0.45rem 0.625rem;
+			border: 1px solid var(--color-border);
+			border-radius: var(--radius-sm);
+			background: var(--color-bg-tertiary);
+		}
+
+		.current-theme {
+			max-width: none;
+			min-width: 0;
+		}
+	}
 </style>

@@ -127,7 +127,7 @@
 		{:else}
 			{#if updateInfo?.currentVersion}
 				<Button
-					variant="ghost"
+					variant="secondary"
 					size="sm"
 					onclick={() => (showChangelog = true)}
 				>
