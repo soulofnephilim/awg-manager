@@ -62,6 +62,19 @@ func (h *SubscriptionHandler) ndmsProxyEnabled() bool {
 	return h.settings.IsSingboxNDMSProxyEnabled()
 }
 
+// respondServiceError routes a subscription.Service mutation error to
+// the appropriate HTTP status. subscription.ErrValidation (Pass-2 sing-
+// box check rejected the merged config) → 422 VALIDATION_FAILED so the
+// frontend can surface a "your subscription has invalid outbound(s)"
+// banner instead of a generic 500. Other errors fall through to 500.
+func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, err error) {
+	if errors.Is(err, subscription.ErrValidation) {
+		response.ErrorWithStatus(w, http.StatusUnprocessableEntity, err.Error(), "VALIDATION_FAILED")
+		return
+	}
+	response.InternalError(w, err.Error())
+}
+
 // SubscriptionMemberDTO carries per-member parsed metadata for the UI.
 type SubscriptionMemberDTO struct {
 	Tag       string `json:"tag" example:"sub-abc12345-aabbccdd"`
@@ -431,7 +444,7 @@ func (h *SubscriptionHandler) List(w http.ResponseWriter, r *http.Request) {
 // Create handles POST /api/singbox/subscriptions/create
 //
 //	@Summary		Create sing-box subscription
-//	@Description	Creates subscription from URL or inline share links.
+//	@Description	Creates subscription from URL or inline share links. Returns 422 VALIDATION_FAILED when the merged sing-box config is rejected by `sing-box check` (e.g. reality outbound without uTLS).
 //	@Tags			subscriptions
 //	@Accept			json
 //	@Produce		json
@@ -439,6 +452,7 @@ func (h *SubscriptionHandler) List(w http.ResponseWriter, r *http.Request) {
 //	@Success		200	{object}	SubscriptionResponse
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		412	{object}	APIErrorEnvelope
+//	@Failure		422	{object}	APIErrorEnvelope	"sing-box validation rejected the subscription"
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/subscriptions/create [post]
 func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -480,7 +494,7 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	sub, err := h.svc.Create(r.Context(), in)
 	if err != nil {
 		h.log.Warn("subscription-create", req.Label, "failed: "+err.Error())
-		response.InternalError(w, err.Error())
+		h.respondServiceError(w, err)
 		return
 	}
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))
@@ -517,6 +531,7 @@ func (h *SubscriptionHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Update handles PUT /api/singbox/subscriptions/update?id=
 //
 //	@Summary		Update sing-box subscription
+//	@Description	Updates subscription metadata or refreshes from a new URL. Returns 422 VALIDATION_FAILED when the new merged config is rejected by `sing-box check`.
 //	@Tags			subscriptions
 //	@Accept			json
 //	@Produce		json
@@ -524,6 +539,7 @@ func (h *SubscriptionHandler) Get(w http.ResponseWriter, r *http.Request) {
 //	@Param			req	body		UpdateSubscriptionRequest	true	"update request"
 //	@Success		200	{object}	SubscriptionResponse
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		422	{object}	APIErrorEnvelope	"sing-box validation rejected the subscription"
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/subscriptions/update [put]
 func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -566,7 +582,7 @@ func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, err := h.svc.Update(id, patch)
 	if err != nil {
-		response.InternalError(w, err.Error())
+		h.respondServiceError(w, err)
 		return
 	}
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))
@@ -599,10 +615,12 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 // Refresh handles POST /api/singbox/subscriptions/refresh?id=
 //
 //	@Summary		Refresh sing-box subscription
+//	@Description	Re-fetches the provider URL and re-runs Pass 1 / Pass 2 validation. Returns 422 VALIDATION_FAILED when the refreshed config is rejected by `sing-box check`.
 //	@Tags			subscriptions
 //	@Produce		json
 //	@Param			id	query		string	false	"subscription id"
 //	@Success		200	{object}	SubscriptionResponse
+//	@Failure		422	{object}	APIErrorEnvelope	"sing-box validation rejected the refreshed subscription"
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/subscriptions/refresh [post]
 func (h *SubscriptionHandler) Refresh(w http.ResponseWriter, r *http.Request) {
@@ -614,7 +632,7 @@ func (h *SubscriptionHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("subscription-refresh", id, "requested via API")
 	res, err := h.svc.Refresh(r.Context(), id)
 	if err != nil {
-		response.InternalError(w, err.Error())
+		h.respondServiceError(w, err)
 		return
 	}
 	response.Success(w, res)
@@ -804,6 +822,8 @@ func (h *SubscriptionHandler) OrphansDelete(w http.ResponseWriter, r *http.Reque
 //	@Success		200		{object}	SubscriptionResponse
 //	@Failure		400		{object}	APIErrorEnvelope
 //	@Failure		409		{object}	APIErrorEnvelope
+//	@Failure		422		{object}	APIErrorEnvelope	"sing-box validation rejected the new member"
+//	@Failure		500		{object}	APIErrorEnvelope
 //	@Router			/singbox/subscriptions/members/add [post]
 func (h *SubscriptionHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -831,7 +851,7 @@ func (h *SubscriptionHandler) AddMember(w http.ResponseWriter, r *http.Request) 
 		case errors.Is(err, subscription.ErrMemberDuplicate):
 			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "MEMBER_DUPLICATE")
 		default:
-			response.InternalError(w, err.Error())
+			h.respondServiceError(w, err)
 		}
 		return
 	}
@@ -853,6 +873,8 @@ func (h *SubscriptionHandler) AddMember(w http.ResponseWriter, r *http.Request) 
 //	@Success		200		{object}	APIEnvelope
 //	@Failure		400		{object}	APIErrorEnvelope
 //	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		422		{object}	APIErrorEnvelope	"sing-box validation rejected the remainder"
+//	@Failure		500		{object}	APIErrorEnvelope
 //	@Router			/singbox/subscriptions/members/remove [post]
 func (h *SubscriptionHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -878,7 +900,7 @@ func (h *SubscriptionHandler) RemoveMember(w http.ResponseWriter, r *http.Reques
 		case errors.Is(err, subscription.ErrMemberNotFound):
 			response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "MEMBER_NOT_FOUND")
 		default:
-			response.InternalError(w, err.Error())
+			h.respondServiceError(w, err)
 		}
 		return
 	}

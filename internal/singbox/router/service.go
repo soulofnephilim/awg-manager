@@ -649,7 +649,7 @@ func (s *ServiceImpl) Enable(ctx context.Context) error {
 		bootWait = 60 * time.Second
 	}
 	if err := s.waitForSingbox(ctx, bootWait); err != nil {
-		return fmt.Errorf("sing-box did not become ready within %s — refusing to install iptables (would orphan DNS:53 redirect): %w", bootWait, err)
+		return fmt.Errorf("%w: waited %s (%v)", ErrSingboxNotReady, bootWait, err)
 	}
 
 	// Collect WAN IPs BEFORE Install: the router's own public-IP

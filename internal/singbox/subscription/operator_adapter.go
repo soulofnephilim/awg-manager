@@ -432,7 +432,7 @@ func (a *OperatorAdapter) flush() error {
 		idx, ok := parseSingboxOutboundIndex(res.Error())
 		if !ok {
 			// Unknown error class — cannot isolate, give up.
-			return fmt.Errorf("subscription adapter: validation failed and could not isolate outbound: %s", res.Error())
+			return fmt.Errorf("%w: could not isolate outbound: %s", ErrValidation, res.Error())
 		}
 		tag, err := dropOutboundAndCleanRefs(&a.cfg, idx)
 		if err != nil {
@@ -443,7 +443,7 @@ func (a *OperatorAdapter) flush() error {
 	}
 
 	if len(a.cfg.Outbounds) == 0 {
-		return fmt.Errorf("subscription adapter: rejected — no valid outbounds left after filtering (dropped: %s)", formatDropList(dropped))
+		return fmt.Errorf("%w: no valid outbounds left after filtering (dropped: %s)", ErrValidation, formatDropList(dropped))
 	}
 
 	// All outbounds clean — commit and enable.
