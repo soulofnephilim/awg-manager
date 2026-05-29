@@ -15,6 +15,7 @@
 		clearStoredPremiumVpnKeyFromStorage,
 		isPremiumCountryConfigStale,
 		isPremiumCountryIssued,
+		premiumActiveDevicesForCountry,
 		readStoredPremiumVpnKey,
 		savePremiumVpnKeyToStorage
 	} from '$lib/utils/amneziaPremiumVpnPaste';
@@ -361,6 +362,7 @@
 			{#each premiumCountries as c (c.server_country_code)}
 				{@const issued = isPremiumCountryIssued(premiumIssuedConfigs, c.server_country_code)}
 				{@const stale = isPremiumCountryConfigStale(premiumIssuedConfigs, c.server_country_code)}
+				{@const activeDevices = premiumActiveDevicesForCountry(premiumIssuedConfigs, c.server_country_code)}
 				<li>
 					<button
 						type="button"
@@ -378,6 +380,14 @@
 							>ТРЕБУЕТСЯ ПЕРЕВЫПУСК</span>
 						{:else if issued}
 							<span class="premium-country-issued-badge">Выдано</span>
+						{/if}
+						{#if activeDevices.length > 0}
+							<span
+								class="premium-country-active-device-badge"
+								title="В Amnezia Premium есть активное устройство в этой стране; это не конфигурация для перевыпуска"
+							>
+								Активное устройство
+							</span>
 						{/if}
 						<span class="premium-country-code">{c.server_country_code.toUpperCase()}</span>
 						{#if premiumPickBusy === c.server_country_code}
@@ -590,5 +600,17 @@
 		font-size: 13px;
 		color: var(--accent, var(--color-accent));
 		flex-shrink: 0;
+	}
+
+	.premium-country-active-device-badge {
+		flex-shrink: 0;
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--text-muted, var(--color-text-muted));
+		padding: 2px 8px;
+		border-radius: 4px;
+		background: var(--bg-tertiary, var(--color-bg-tertiary));
+		border: 1px solid var(--border, var(--color-border));
 	}
 </style>
