@@ -88,6 +88,7 @@
 			<input
 				type="file"
 				id="config-file"
+				accept=".conf"
 				onchange={handleFileSelect}
 			/>
 		</div>

@@ -280,6 +280,7 @@
 			>
 				<input
 					type="file"
+					accept=".conf"
 					bind:this={fileInput}
 					onchange={handleFileSelect}
 					style="display: none"
