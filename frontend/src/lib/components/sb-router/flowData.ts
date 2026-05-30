@@ -1,70 +1,52 @@
-/**
- * Pure helper: SingboxRouterOutbound[] → FlowOutbound[] с tone colors.
- *
- * Используется FlowGraph hero для рендера Outbounds 2×2 grid.
- * Tone маппится по типу outbound'а (см. JSX дизайна — success для tunnel/composite,
- * error для block/reject, muted для direct, warning для unknown).
- */
+import type { SingboxRouterRule, SingboxRouterDNSServer, SingboxRouterDNSGlobals } from '$lib/types';
 
-import type { SingboxRouterOutbound } from '$lib/types';
-
-export type FlowOutboundTone = 'success' | 'error' | 'muted' | 'accent' | 'warning';
-
-export type FlowOutboundKind = 'direct' | 'tunnel';
-
-export interface FlowOutbound {
-  /** Outbound tag (key, для дедупликации в #each). */
-  tag: string;
-  /** Отображаемая надпись справа от dot'а (truncated до ≤20 chars). */
-  label: string;
-  /** Цвет dot'а: см. tone mapping выше. */
-  tone: FlowOutboundTone;
-  /** Группа: direct (muted tone) vs. tunnel (всё остальное — composite/wireguard/etc). */
-  kind: FlowOutboundKind;
+export interface RoutingSummary {
+  /** Подпись выхода по умолчанию: «Напрямую» если route.final = direct, иначе тег. */
+  defaultLabel: string;
+  /** DNS для ветки по умолчанию: server final-сервера, иначе «системный». */
+  defaultDnsLabel: string;
+  /** Уникальные теги туннельных outbound'ов, используемых правилами (в порядке появления). */
+  tunnels: string[];
+  /** Кол-во туннелируемых правил. */
+  tunneledRuleCount: number;
+  /** DNS туннельной ветки: server первого detour-сервера, иначе null. */
+  tunnelDnsLabel: string | null;
 }
 
-const LABEL_MAX = 20;
-const DEFAULT_MAX_ITEMS = 4;
+function isTunneled(r: SingboxRouterRule): boolean {
+  return !!r.outbound && r.outbound !== 'direct' && r.action !== 'reject';
+}
 
-const COMPOSITE_TYPES = new Set(['selector', 'urltest', 'loadbalance']);
+function dnsLabelByTag(servers: SingboxRouterDNSServer[], tag: string): string | null {
+  const s = servers.find((x) => x.tag === tag);
+  if (!s) return null;
+  return s.server || s.tag;
+}
 
-function classifyTone(o: SingboxRouterOutbound): FlowOutboundTone {
-  const type = (o as { type?: string }).type ?? '';
-  const tag = (o as { tag?: string }).tag ?? '';
-  if (type === 'direct' || tag === 'direct') return 'muted';
-  if (type === 'block' || tag === 'block' || tag === 'reject') return 'error';
-  if (COMPOSITE_TYPES.has(type)) return 'success';
-  if (type === '') return 'warning';
-  // Любой "содержательный" type (wireguard, http, socks, etc.) → tunnel
-  if (type === 'wireguard' || type === 'http' || type === 'socks' || type === 'shadowsocks' ||
-      type === 'vmess' || type === 'vless' || type === 'trojan' || type === 'tuic' ||
-      type === 'hysteria' || type === 'hysteria2' || type === 'wireguard-server') {
-    return 'success';
+export function deriveRoutingSummary(
+  rules: SingboxRouterRule[],
+  routeFinal: string,
+  dnsServers: SingboxRouterDNSServer[],
+  dnsGlobals: SingboxRouterDNSGlobals,
+): RoutingSummary {
+  const tunneled = rules.filter(isTunneled);
+  const tunnels: string[] = [];
+  for (const r of tunneled) {
+    const tag = r.outbound as string;
+    if (!tunnels.includes(tag)) tunnels.push(tag);
   }
-  // Неизвестный type — warning, чтобы пользователь обратил внимание
-  return 'warning';
-}
 
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + '…';
-}
+  const defaultLabel = routeFinal && routeFinal !== 'direct' ? routeFinal : 'Напрямую';
+  const defaultDnsLabel = dnsLabelByTag(dnsServers, dnsGlobals.final) ?? 'системный';
 
-export function deriveOutboundList(
-  outbounds: SingboxRouterOutbound[],
-  maxItems: number = DEFAULT_MAX_ITEMS,
-): { items: FlowOutbound[]; hiddenCount: number } {
-  const visible = outbounds.slice(0, maxItems);
-  const items: FlowOutbound[] = visible.map((o) => {
-    const tag = (o as { tag?: string }).tag ?? '?';
-    const tone = classifyTone(o);
-    return {
-      tag,
-      label: truncate(tag, LABEL_MAX),
-      tone,
-      kind: tone === 'muted' ? 'direct' : 'tunnel',
-    };
-  });
-  const hiddenCount = Math.max(0, outbounds.length - visible.length);
-  return { items, hiddenCount };
+  const detourServer = dnsServers.find((s) => !!s.detour);
+  const tunnelDnsLabel = detourServer ? (detourServer.server || detourServer.tag) : null;
+
+  return {
+    defaultLabel,
+    defaultDnsLabel,
+    tunnels,
+    tunneledRuleCount: tunneled.length,
+    tunnelDnsLabel,
+  };
 }

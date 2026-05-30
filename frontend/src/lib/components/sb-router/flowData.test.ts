@@ -1,99 +1,53 @@
 import { describe, it, expect } from 'vitest';
-import { deriveOutboundList } from './flowData';
-import type { SingboxRouterOutbound } from '$lib/types';
+import { deriveRoutingSummary } from './flowData';
+import type { SingboxRouterRule, SingboxRouterDNSServer, SingboxRouterDNSGlobals } from '$lib/types';
 
-function ob(partial: { tag: string; type?: string; [k: string]: unknown }): SingboxRouterOutbound {
-  return partial as unknown as SingboxRouterOutbound;
-}
+const dnsServers: SingboxRouterDNSServer[] = [
+  { tag: 'dns-direct', type: 'udp', server: '77.88.8.8' },
+  { tag: 'dns-tunnel', type: 'udp', server: '9.9.9.9', detour: 'my-selector' },
+];
+const globals: SingboxRouterDNSGlobals = { final: 'dns-direct', strategy: 'ipv4_only' };
 
-describe('deriveOutboundList', () => {
-  it('empty array → пустой результат', () => {
-    expect(deriveOutboundList([])).toEqual({ items: [], hiddenCount: 0 });
-  });
-
-  it('direct outbound — tone muted', () => {
-    const r = deriveOutboundList([ob({ tag: 'direct', type: 'direct' })]);
-    expect(r.items[0].tone).toBe('muted');
-    expect(r.items[0].label).toBe('direct');
-  });
-
-  it('block/reject — tone error', () => {
-    const r1 = deriveOutboundList([ob({ tag: 'block', type: 'block' })]);
-    expect(r1.items[0].tone).toBe('error');
-    const r2 = deriveOutboundList([ob({ tag: 'reject', type: 'block' })]);
-    expect(r2.items[0].tone).toBe('error');
-  });
-
-  it('tunnel (wireguard etc) — tone success', () => {
-    const r = deriveOutboundList([ob({ tag: 'warp', type: 'wireguard' })]);
-    expect(r.items[0].tone).toBe('success');
-  });
-
-  it('composite (selector/urltest/loadbalance) — tone success', () => {
-    const sel = deriveOutboundList([ob({ tag: 'sel', type: 'selector' })]);
-    expect(sel.items[0].tone).toBe('success');
-    const ut = deriveOutboundList([ob({ tag: 'best', type: 'urltest' })]);
-    expect(ut.items[0].tone).toBe('success');
-    const lb = deriveOutboundList([ob({ tag: 'lb', type: 'loadbalance' })]);
-    expect(lb.items[0].tone).toBe('success');
-  });
-
-  it('unknown type — tone warning', () => {
-    const r = deriveOutboundList([ob({ tag: 'mystery', type: 'unknown-type' })]);
-    expect(r.items[0].tone).toBe('warning');
-  });
-
-  it('no type field — tone warning', () => {
-    const r = deriveOutboundList([{ tag: 'naked' } as unknown as SingboxRouterOutbound]);
-    expect(r.items[0].tone).toBe('warning');
-  });
-
-  it('label truncation для длинных tag', () => {
-    const longTag = 'very-long-outbound-tag-that-exceeds-twenty-chars';
-    const r = deriveOutboundList([ob({ tag: longTag, type: 'wireguard' })]);
-    expect(r.items[0].label.length).toBeLessThanOrEqual(20);
-  });
-
-  it('maxItems 4 — 5 outbounds → 4 visible + hiddenCount 1', () => {
-    const five: SingboxRouterOutbound[] = [
-      ob({ tag: 'a', type: 'wireguard' }),
-      ob({ tag: 'b', type: 'wireguard' }),
-      ob({ tag: 'c', type: 'wireguard' }),
-      ob({ tag: 'd', type: 'wireguard' }),
-      ob({ tag: 'e', type: 'wireguard' }),
+describe('deriveRoutingSummary', () => {
+  it('1 туннель + 2 сервиса: defaultLabel Напрямую, dns по веткам', () => {
+    const rules: SingboxRouterRule[] = [
+      { rule_set: ['geosite-netflix'], outbound: 'my-selector', action: 'route' },
+      { rule_set: ['geosite-youtube'], outbound: 'my-selector', action: 'route' },
     ];
-    const r = deriveOutboundList(five, 4);
-    expect(r.items).toHaveLength(4);
-    expect(r.hiddenCount).toBe(1);
+    const s = deriveRoutingSummary(rules, 'direct', dnsServers, globals);
+    expect(s.defaultLabel).toBe('Напрямую');
+    expect(s.defaultDnsLabel).toBe('77.88.8.8');
+    expect(s.tunnels).toEqual(['my-selector']);
+    expect(s.tunneledRuleCount).toBe(2);
+    expect(s.tunnelDnsLabel).toBe('9.9.9.9');
   });
 
-  it('maxItems равен размеру — hiddenCount 0', () => {
-    const four: SingboxRouterOutbound[] = [
-      ob({ tag: 'a', type: 'wireguard' }),
-      ob({ tag: 'b', type: 'wireguard' }),
-      ob({ tag: 'c', type: 'wireguard' }),
-      ob({ tag: 'd', type: 'wireguard' }),
+  it('reject и direct правила не считаются туннелируемыми', () => {
+    const rules: SingboxRouterRule[] = [
+      { rule_set: ['ads'], action: 'reject' },
+      { domain_suffix: ['x.com'], outbound: 'direct', action: 'route' },
+      { rule_set: ['svc'], outbound: 'wg-nl', action: 'route' },
     ];
-    const r = deriveOutboundList(four, 4);
-    expect(r.hiddenCount).toBe(0);
+    const s = deriveRoutingSummary(rules, 'direct', dnsServers, globals);
+    expect(s.tunnels).toEqual(['wg-nl']);
+    expect(s.tunneledRuleCount).toBe(1);
   });
 
-  it('default maxItems 4 если не задан', () => {
-    const six: SingboxRouterOutbound[] = Array.from({ length: 6 }, (_, i) =>
-      ob({ tag: `o${i}`, type: 'wireguard' }),
-    );
-    const r = deriveOutboundList(six);
-    expect(r.items).toHaveLength(4);
-    expect(r.hiddenCount).toBe(2);
-  });
-
-  it('сохраняет порядок входного списка', () => {
-    const list: SingboxRouterOutbound[] = [
-      ob({ tag: 'first',  type: 'wireguard' }),
-      ob({ tag: 'second', type: 'direct' }),
-      ob({ tag: 'third',  type: 'block' }),
+  it('>1 туннель: оба тега, общий счётчик', () => {
+    const rules: SingboxRouterRule[] = [
+      { rule_set: ['a'], outbound: 'wg-nl', action: 'route' },
+      { rule_set: ['b'], outbound: 'wg-us', action: 'route' },
+      { rule_set: ['c'], outbound: 'wg-nl', action: 'route' },
     ];
-    const r = deriveOutboundList(list);
-    expect(r.items.map((i) => i.tag)).toEqual(['first', 'second', 'third']);
+    const s = deriveRoutingSummary(rules, 'direct', dnsServers, globals);
+    expect(s.tunnels).toEqual(['wg-nl', 'wg-us']);
+    expect(s.tunneledRuleCount).toBe(3);
+  });
+
+  it('final не dns-direct / нет detour-сервера → системный DNS / null', () => {
+    const s = deriveRoutingSummary([], 'direct', [{ tag: 'dns-bootstrap', type: 'udp', server: '1.1.1.1' }], { final: 'dns-bootstrap', strategy: 'ipv4_only' });
+    expect(s.defaultDnsLabel).toBe('1.1.1.1');
+    expect(s.tunnelDnsLabel).toBeNull();
+    expect(s.tunnels).toEqual([]);
   });
 });
