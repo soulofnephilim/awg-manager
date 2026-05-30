@@ -37,7 +37,6 @@
   import DnsServersCompact from './DnsServersCompact.svelte';
   import DeviceProxyCompact from './DeviceProxyCompact.svelte';
   import ConnectionsCompact from './ConnectionsCompact.svelte';
-  import { openAddWizard } from './addWizardStore';
 
   import RuleEditModal from '$lib/components/routing/singboxRouter/RuleEditModal.svelte';
   import RuleSetAddModal from '$lib/components/routing/singboxRouter/RuleSetAddModal.svelte';
@@ -67,6 +66,7 @@
 
   // Modal state
   let ruleEditIdx = $state<number | null>(null);
+  let ruleAddOpen = $state(false);
   let rsEditTag = $state<string | null>(null);
   let rsAddOpen = $state(false);
   let outboundEditTag = $state<string | null>(null);
@@ -157,6 +157,7 @@
       await api.singboxRouterAddRule(rule);
     }
     ruleEditIdx = null;
+    ruleAddOpen = false;
     await singboxRouterStore.loadAll();
   }
 
@@ -255,7 +256,7 @@
         title="Правила маршрутизации"
         count={String($storeRules.length)}
         actionLabel="+ Правило"
-        onAction={() => openAddWizard()}
+        onAction={() => (ruleAddOpen = true)}
       >
         <div class="panel-cap">first-match-wins · final → direct</div>
         <RoutingTable
@@ -341,7 +342,18 @@
   </div>
 </div>
 
-<!-- RuleEditModal: add-mode (ruleEditIdx stays null until modal closes) -->
+<!-- RuleEditModal: add -->
+{#if ruleAddOpen}
+  <RuleEditModal
+    outboundOptions={$storeOptions}
+    availableRuleSets={$storeRuleSets}
+    ruleSetUsage={ruleSetUsageForRuleAdd}
+    onClose={() => (ruleAddOpen = false)}
+    onSave={handleRuleSave}
+  />
+{/if}
+
+<!-- RuleEditModal: edit -->
 {#if ruleEditIdx !== null && ruleEditTarget !== undefined}
   <RuleEditModal
     rule={ruleEditTarget}
