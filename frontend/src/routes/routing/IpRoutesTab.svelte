@@ -199,6 +199,7 @@
                     name: route.name,
                     subnets: route.subnets,
                     enabled: route.enabled,
+                    iconUrl: route.iconUrl,
                     tunnelID: route.tunnelID,
                 });
                 count++;

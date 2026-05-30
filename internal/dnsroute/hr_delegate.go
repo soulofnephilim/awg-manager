@@ -74,9 +74,18 @@ func (s *ServiceImpl) listHydraRoute(ctx context.Context) ([]DomainList, error) 
 		policySet[n] = true
 	}
 
+	icons := map[string]string{}
+	if data := s.store.GetCached(); data != nil && data.HRRuleIcons != nil {
+		icons = data.HRRuleIcons
+	}
+
 	result := make([]DomainList, 0, len(rules))
 	for _, r := range rules {
-		result = append(result, hrRuleToDomainList(r, policySet))
+		dl := hrRuleToDomainList(r, policySet)
+		if iconURL := strings.TrimSpace(icons[r.Name]); iconURL != "" {
+			dl.IconURL = iconURL
+		}
+		result = append(result, dl)
 	}
 	return result, nil
 }
@@ -162,10 +171,27 @@ func (s *ServiceImpl) createHydraRoute(ctx context.Context, list DomainList) (*D
 	if err := s.applyPolicyInterfaces(ctx, list); err != nil {
 		return nil, err
 	}
+	iconURL := strings.TrimSpace(list.IconURL)
+	if data := s.store.GetCached(); data != nil {
+		if data.HRRuleIcons == nil {
+			data.HRRuleIcons = map[string]string{}
+		}
+		if iconURL == "" {
+			delete(data.HRRuleIcons, created.Name)
+		} else {
+			data.HRRuleIcons[created.Name] = iconURL
+		}
+		if err := s.store.Save(data); err != nil {
+			return nil, fmt.Errorf("save HR rule icon: %w", err)
+		}
+	}
 
 	s.appLog.Info("hydraroute-create", created.Name, "dns-route created")
 
 	dl := hrRuleToDomainList(*created, s.currentPolicySet(ctx))
+	if iconURL != "" {
+		dl.IconURL = iconURL
+	}
 	dl.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	dl.UpdatedAt = dl.CreatedAt
 	return &dl, nil
@@ -200,9 +226,29 @@ func (s *ServiceImpl) updateHydraRoute(ctx context.Context, id string, list Doma
 	if err := s.applyPolicyInterfaces(ctx, list); err != nil {
 		return nil, err
 	}
+	iconURL := strings.TrimSpace(list.IconURL)
+	if data := s.store.GetCached(); data != nil {
+		if data.HRRuleIcons == nil {
+			data.HRRuleIcons = map[string]string{}
+		}
+		if originalName != updated.Name {
+			delete(data.HRRuleIcons, originalName)
+		}
+		if iconURL == "" {
+			delete(data.HRRuleIcons, updated.Name)
+		} else {
+			data.HRRuleIcons[updated.Name] = iconURL
+		}
+		if err := s.store.Save(data); err != nil {
+			return nil, fmt.Errorf("save HR rule icon: %w", err)
+		}
+	}
 	s.appLog.Info("hydraroute-update", updated.Name, "was "+originalName)
 
 	dl := hrRuleToDomainList(*updated, s.currentPolicySet(ctx))
+	if iconURL != "" {
+		dl.IconURL = iconURL
+	}
 	dl.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	return &dl, nil
 }
@@ -293,4 +339,3 @@ func (s *ServiceImpl) applyPolicyInterfaces(ctx context.Context, list DomainList
 
 	return s.policyOrchestrator.EnsurePolicyInterfaces(ctx, list.HRPolicyName, ndmsNames)
 }
-

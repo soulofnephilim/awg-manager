@@ -24,7 +24,7 @@
 
 <div class="hr-card" class:broken>
 	<div class="card-main">
-		<ServiceIcon name={rule.name} size={36} />
+		<ServiceIcon name={rule.name} iconUrl={rule.iconUrl} size={36} />
 		<div class="card-info">
 			<div class="card-title">
 				<span class="led" class:led-green={!broken} class:led-red={broken}></span>

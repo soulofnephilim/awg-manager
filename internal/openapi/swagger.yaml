@@ -841,7 +841,10 @@ definitions:
   api.DnsRouteDTO:
     properties:
       backend:
-        example: ndms
+        enum:
+        - ndms
+        - hydraroute
+        example: hydraroute
         type: string
       createdAt:
         example: "2024-01-01T00:00:00Z"
@@ -855,8 +858,35 @@ definitions:
       enabled:
         example: true
         type: boolean
+      excludeSubnets:
+        example:
+        - 10.0.0.0/24
+        items:
+          type: string
+        type: array
+      excludes:
+        example:
+        - ads.example.com
+        items:
+          type: string
+        type: array
+      hrPolicyInterfaces:
+        example:
+        - Wireguard0
+        items:
+          type: string
+        type: array
+      hrPolicyName:
+        example: Streaming
+        type: string
+      hrRouteMode:
+        enum:
+        - interface
+        - policy
+        example: interface
+        type: string
       iconUrl:
-        example: https://cdn.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Telegram.png
+        example: data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...
         type: string
       id:
         example: dns_xyz789
@@ -874,6 +904,12 @@ definitions:
         items:
           $ref: '#/definitions/api.DnsRouteTargetDTO'
         type: array
+      subnets:
+        example:
+        - 10.0.0.0/8
+        items:
+          type: string
+        type: array
       subscriptions:
         items:
           $ref: '#/definitions/api.DnsRouteSubscriptionDTO'
@@ -881,6 +917,16 @@ definitions:
       updatedAt:
         example: "2024-01-15T12:00:00Z"
         type: string
+    type: object
+  api.DnsRouteDeleteBatchRequest:
+    properties:
+      ids:
+        example:
+        - dns_a
+        - dns_b
+        items:
+          type: string
+        type: array
     type: object
   api.DnsRouteResponse:
     properties:
@@ -916,6 +962,73 @@ definitions:
       tunnelId:
         example: tun_abc123
         type: string
+    type: object
+  api.DnsRouteUpsertRequest:
+    properties:
+      backend:
+        enum:
+        - ndms
+        - hydraroute
+        example: hydraroute
+        type: string
+      enabled:
+        example: true
+        type: boolean
+      excludeSubnets:
+        example:
+        - 10.0.0.0/24
+        items:
+          type: string
+        type: array
+      excludes:
+        example:
+        - ads.youtube.com
+        items:
+          type: string
+        type: array
+      hrPolicyInterfaces:
+        example:
+        - Wireguard0
+        items:
+          type: string
+        type: array
+      hrPolicyName:
+        example: Streaming
+        type: string
+      hrRouteMode:
+        enum:
+        - interface
+        - policy
+        example: interface
+        type: string
+      iconUrl:
+        example: data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...
+        type: string
+      manualDomains:
+        example:
+        - youtube.com
+        - .googlevideo.com
+        - geosite:GOOGLE
+        items:
+          type: string
+        type: array
+      name:
+        example: Youtube
+        type: string
+      routes:
+        items:
+          $ref: '#/definitions/api.DnsRouteTargetDTO'
+        type: array
+      subnets:
+        example:
+        - 142.250.0.0/15
+        items:
+          type: string
+        type: array
+      subscriptions:
+        items:
+          $ref: '#/definitions/api.DnsRouteSubscriptionDTO'
+        type: array
     type: object
   api.DnsRoutesListResponse:
     properties:
@@ -5734,6 +5847,13 @@ paths:
     post:
       consumes:
       - application/json
+      parameters:
+      - description: DNS route list payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.DnsRouteUpsertRequest'
       produces:
       - application/json
       responses:
@@ -5758,6 +5878,15 @@ paths:
     post:
       consumes:
       - application/json
+      parameters:
+      - description: DNS route list payloads
+        in: body
+        name: body
+        required: true
+        schema:
+          items:
+            $ref: '#/definitions/api.DnsRouteUpsertRequest'
+          type: array
       produces:
       - application/json
       responses:
@@ -5810,6 +5939,13 @@ paths:
     post:
       consumes:
       - application/json
+      parameters:
+      - description: IDs to delete
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.DnsRouteDeleteBatchRequest'
       produces:
       - application/json
       responses:
@@ -5917,6 +6053,12 @@ paths:
         name: id
         required: true
         type: string
+      - description: Enabled flag
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.EnabledToggleRequest'
       produces:
       - application/json
       responses:
@@ -5947,6 +6089,12 @@ paths:
         name: id
         required: true
         type: string
+      - description: DNS route list payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.DnsRouteUpsertRequest'
       produces:
       - application/json
       responses:

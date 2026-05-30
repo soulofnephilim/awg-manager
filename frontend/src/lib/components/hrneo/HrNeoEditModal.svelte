@@ -7,10 +7,11 @@
 	} from '$lib/types';
 	import { SERVICE_PRESETS, type ServicePreset } from '$lib/data/presets';
 	import { Modal, Button, IconButton, Dropdown, type DropdownOption } from '$lib/components/ui';
-	import { CatalogPresetRow, ServiceIcon } from '$lib/components/dnsroutes';
+	import { CatalogPresetRow, IconPickerModal, ServiceIcon } from '$lib/components/dnsroutes';
 	import { InterfaceList } from '$lib/components/accesspolicy';
 	import HrNeoGeoTagPicker from './HrNeoGeoTagPicker.svelte';
 	import { buildRoutingTunnelDropdownOptions } from '$lib/utils/routingTunnelOptions';
+	import { formatIconUrlHint } from '$lib/utils/custom-icon';
 
 	interface AccessPolicy {
 		name: string;
@@ -52,6 +53,8 @@
 	let usablePresets = $derived(SERVICE_PRESETS.filter((p) => (p.domains?.length ?? 0) > 0));
 
 	let name = $state('');
+	let iconUrl = $state<string | undefined>(undefined);
+	let iconPickerOpen = $state(false);
 	let domainsText = $state('');
 	let cidrText = $state('');
 	let mode = $state<'interface' | 'policy'>('interface');
@@ -71,6 +74,7 @@
 
 	// Snapshot initial state for isDirty detection
 	let initialName = $state('');
+	let initialIconUrl = $state<string | undefined>(undefined);
 	let initialDomainsText = $state('');
 	let initialCidrText = $state('');
 	let initialMode = $state<'interface' | 'policy'>('interface');
@@ -95,8 +99,10 @@
 		geositePickerOpen = false;
 		geoipPickerOpen = false;
 		presetPickerOpen = false;
+		iconPickerOpen = false;
 		if (rule) {
 			name = rule.name;
+			iconUrl = rule.iconUrl;
 			const allDomains = (rule.domains ?? []).filter((d) => !d.startsWith('geoip:'));
 			const allSubnets = rule.subnets ?? [];
 			domainsText = allDomains.join('\n');
@@ -147,6 +153,7 @@
 			}
 			// Capture snapshot for isDirty
 			initialName = rule.name;
+			initialIconUrl = rule.iconUrl;
 			initialDomainsText = domainsText;
 			initialCidrText = cidrText;
 			initialMode = mode;
@@ -157,6 +164,7 @@
 			initialNewPolicyIfaces = [...newPolicyIfaces];
 		} else {
 			name = '';
+			iconUrl = undefined;
 			domainsText = '';
 			cidrText = '';
 			if (initialTarget?.kind === 'policy') {
@@ -178,6 +186,7 @@
 			newPolicyIfaces = [];
 			// Capture snapshot for isDirty (create mode)
 			initialName = '';
+			initialIconUrl = undefined;
 			initialDomainsText = '';
 			initialCidrText = '';
 			initialMode = mode;
@@ -298,6 +307,7 @@
 		};
 		return (
 			name !== initialName ||
+			iconUrl !== initialIconUrl ||
 			domainsText !== initialDomainsText ||
 			cidrText !== initialCidrText ||
 			mode !== initialMode ||
@@ -340,6 +350,8 @@
 			name: name.trim(),
 			backend: 'hydraroute',
 			manualDomains,
+			// Keep an explicit empty string so HR backend can clear the sidecar icon.
+			iconUrl: iconUrl ?? '',
 		};
 		if (mode === 'interface') {
 			payload.hrRouteMode = 'interface';
@@ -388,6 +400,34 @@
 			{/each}
 		</div>
 	{/if}
+
+	<!-- Icon -->
+	<div class="icon-form-group">
+		<div class="field-label">Иконка</div>
+		<div class="icon-row">
+			<ServiceIcon
+				{iconUrl}
+				name={name || selectedPreset?.name || 'rule'}
+				iconSlug={selectedPreset?.id}
+				size={36}
+			/>
+			<div class="icon-meta">
+				{#if iconUrl}
+					<div class="icon-src">Пользовательская иконка</div>
+					<div class="icon-hint" title={iconUrl}>{formatIconUrlHint(iconUrl)}</div>
+				{:else if selectedPreset}
+					<div class="icon-src">Иконка из пресета</div>
+					<div class="icon-hint">Можно заменить своей иконкой</div>
+				{:else}
+					<div class="icon-src">Авто-определение по имени</div>
+					<div class="icon-hint">Введите имя или загрузите свою иконку</div>
+				{/if}
+			</div>
+			<Button variant="ghost" size="sm" onclick={() => (iconPickerOpen = true)}>
+				{iconUrl ? 'Сменить' : 'Загрузить иконку'}
+			</Button>
+		</div>
+	</div>
 
 	<!-- Name -->
 	<div class="form-group" class:field-error={attempted && !name.trim()}>
@@ -577,7 +617,54 @@
 	{/snippet}
 </Modal>
 
+<IconPickerModal
+	open={iconPickerOpen}
+	{iconUrl}
+	ruleName={name || selectedPreset?.name || 'HR rule'}
+	onclose={() => (iconPickerOpen = false)}
+	onapply={(newUrl) => {
+		iconUrl = newUrl ?? undefined;
+		iconPickerOpen = false;
+	}}
+/>
+
 <style>
+	.icon-form-group {
+		margin-bottom: 14px;
+	}
+
+	.icon-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 10px 12px;
+		background: var(--color-bg-secondary);
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+	}
+
+	.icon-meta {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.icon-src {
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--color-text-primary);
+	}
+
+	.icon-hint {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
 	.preset-bar {
 		display: flex;
 		align-items: center;

@@ -476,7 +476,19 @@ func (s *ServiceImpl) Delete(ctx context.Context, id string) error {
 		if !s.hrReady() {
 			return fmt.Errorf("HydraRoute Neo is not installed")
 		}
-		return s.hydra.DeleteRule(nameFromHRID(id))
+		name := nameFromHRID(id)
+		if err := s.hydra.DeleteRule(name); err != nil {
+			return err
+		}
+		if data := s.store.GetCached(); data != nil && data.HRRuleIcons != nil {
+			if _, ok := data.HRRuleIcons[name]; ok {
+				delete(data.HRRuleIcons, name)
+				if err := s.store.Save(data); err != nil {
+					return fmt.Errorf("save after HR icon delete: %w", err)
+				}
+			}
+		}
+		return nil
 	}
 
 	data := s.store.GetCached()

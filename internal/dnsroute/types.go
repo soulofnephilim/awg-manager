@@ -72,6 +72,9 @@ type DedupeItem struct {
 // StoreData is the top-level dns-routes.json structure.
 type StoreData struct {
 	Lists []DomainList `json:"lists"`
+	// HRRuleIcons keeps UI-only custom icons for HydraRoute Neo rules.
+	// HR rules themselves live in domain.conf/ip.list and have no icon field.
+	HRRuleIcons map[string]string `json:"hrRuleIcons,omitempty"`
 }
 
 func isHydraRoute(backend string) bool {

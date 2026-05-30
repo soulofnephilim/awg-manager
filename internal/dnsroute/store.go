@@ -46,6 +46,9 @@ func (s *Store) Load() (*StoreData, error) {
 	if data.Lists == nil {
 		data.Lists = []DomainList{}
 	}
+	if data.HRRuleIcons == nil {
+		data.HRRuleIcons = map[string]string{}
+	}
 	normalizeLists(data.Lists)
 	migrateLegacyExcludes(&data)
 
@@ -118,7 +121,8 @@ func (s *Store) GetCached() *StoreData {
 // defaultStoreData returns empty store data with initialized collections.
 func defaultStoreData() *StoreData {
 	return &StoreData{
-		Lists: []DomainList{},
+		Lists:       []DomainList{},
+		HRRuleIcons: map[string]string{},
 	}
 }
 
