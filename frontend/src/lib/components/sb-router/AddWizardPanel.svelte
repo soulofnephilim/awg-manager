@@ -37,6 +37,8 @@
   import { buildTemplateList } from './templatesData';
   import { submitWizard, ValidationError } from './addWizardActions';
   import MobileBottomBar from './MobileBottomBar.svelte';
+  import { mode } from './modeStore';
+  import { ensureTunnelDnsInfra, syncTunnelDnsRule } from './emptyStateActions';
 
   const outbounds = singboxRouterStore.outbounds;
   const presets = singboxRouterStore.presets;
@@ -98,6 +100,16 @@
         groups,
       });
       if (result.failures.length === 0) {
+        if (get(mode) === 'beginner') {
+          try {
+            const cat = get(wizardOutboundCategory);
+            const tag = get(wizardTunnelTag);
+            if (cat === 'tunnel' && tag) await ensureTunnelDnsInfra(tag);
+            await syncTunnelDnsRule();
+          } catch (e) {
+            notifications.error(`DNS: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
         notifications.success(`Создано ${result.successes.length}`);
         if (continueAfter) {
           clearSelection();
