@@ -14,7 +14,6 @@
 
   import { settingsDrawerOpen, closeSettingsDrawer } from './settingsDrawerStore';
   import { mergeAndSaveSettings, BYPASS_PRESETS } from './settingsActions';
-  import { sbDesignMode, setSbDesignMode, type SbDesignMode } from './designModeStore';
 
   const storeSettings = singboxRouterStore.settings;
 
@@ -103,10 +102,6 @@
     const v = (e.currentTarget as HTMLInputElement).value;
     void applyPatch({ refreshDailyTime: v });
   }
-
-  function setDesignMode(next: SbDesignMode) {
-    setSbDesignMode(next);
-  }
 </script>
 
 <SideDrawer
@@ -115,27 +110,6 @@
   title="Настройки движка"
 >
   <div class="sections">
-      <section class="sec">
-        <div class="sec-cap">Интерфейс</div>
-        <div class="card-grid">
-          <OutboundOption
-            label="Рабочий интерфейс"
-            sub="Стабильный интерфейс с вкладками движка, правил, DNS, прокси и соединений."
-            tone="accent"
-            selected={$sbDesignMode === 'classic'}
-            onclick={() => setDesignMode('classic')}
-          />
-          <OutboundOption
-            label="Новый дизайн"
-            sub="Alpha-preview нового интерфейса. Подходит для просмотра UX и тестирования."
-            tone="accent"
-            selected={$sbDesignMode === 'new'}
-            onclick={() => setDesignMode('new')}
-          />
-        </div>
-        <p class="hint">Выбор хранится только в этом браузере и не меняет конфигурацию роутера.</p>
-      </section>
-
       {#if $storeSettings}
       <!-- Section 1: deviceMode -->
       <section class="sec">

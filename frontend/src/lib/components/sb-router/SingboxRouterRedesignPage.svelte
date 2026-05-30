@@ -1,7 +1,8 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
-  import { DeviceProxySubTab, SingboxRoutingPage } from '$lib/components/singbox-routing';
+  import { DeviceProxySubTab } from '$lib/components/singbox-routing';
+  import SettingsDrawer from './SettingsDrawer.svelte';
   import { ConnectionsSubTab } from '$lib/components/routing/singboxRouter';
   import {
     PageShell,
@@ -59,6 +60,8 @@
     <ExpertPanel readOnly={previewReadOnly} />
   {/if}
 </PageShell>
+
+<SettingsDrawer />
 
 <style>
   .preview-banner {

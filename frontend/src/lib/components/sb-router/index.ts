@@ -135,7 +135,6 @@ export { default as MobileBottomBar } from './MobileBottomBar.svelte';
 
 // Settings Drawer
 export { default as SettingsDrawer } from './SettingsDrawer.svelte';
-export { default as SingboxRouterDesignGate } from './SingboxRouterDesignGate.svelte';
 export { default as SingboxRouterRedesignPage } from './SingboxRouterRedesignPage.svelte';
 export {
   settingsDrawerOpen,
@@ -143,12 +142,6 @@ export {
   closeSettingsDrawer,
   toggleSettingsDrawer,
 } from './settingsDrawerStore';
-export {
-  sbDesignMode,
-  setSbDesignMode,
-  readSbDesignModeOverride,
-  type SbDesignMode,
-} from './designModeStore';
 export {
   mergeAndSaveSettings,
   BYPASS_PRESETS,
