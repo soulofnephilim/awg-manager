@@ -1664,6 +1664,8 @@ let mockSBPolicyExists = false;
 let mockSBSettings = {
 	enabled: false,
 	policyName: '',
+	deviceMode: 'policy',
+	snifferEnabled: true,
 	refreshMode: 'interval',
 	refreshIntervalHours: 24,
 	wanAutoDetect: true,
@@ -3953,6 +3955,9 @@ const server = http.createServer(async (req, res) => {
 				configValid: true,
 				netfilterAvailable: true,
 				policyName: mockSBPolicyExists ? 'SBRouter' : '',
+				deviceMode: mockSBSettings.deviceMode || 'policy',
+				ruleCount: mockSingboxRules.length,
+				ruleSetCount: mockSingboxRuleSets.length,
 			},
 		});
 		return;
