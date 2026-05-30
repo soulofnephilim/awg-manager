@@ -102,6 +102,17 @@ import { isMockDevMode } from '$lib/env';
 
 export type TrafficPeriod = '5m' | '10m' | '30m' | '1h' | '3h' | '6h' | '12h' | '24h' | '48h';
 
+const DIAGNOSTICS_SANITIZE_STORAGE_KEY = 'awgm.diagnostics.sanitizeLogs';
+
+function readDiagnosticsSanitizedPreference(): boolean {
+	if (typeof localStorage === 'undefined') {
+		return true;
+	}
+	// Missing key means safe default. The diagnostics privacy store persists
+	// enabled as "1" and disabled/raw reveal as "0".
+	return localStorage.getItem(DIAGNOSTICS_SANITIZE_STORAGE_KEY) !== '0';
+}
+
 interface ApiResponse<T> {
 	success?: boolean;
 	error?: boolean;
@@ -708,7 +719,8 @@ class ApiClient {
 		if (params?.level) query.set('level', params.level);
 		if (params?.since != null && params.since > 0) query.set('since', String(params.since));
 		if (params?.limit) query.set('limit', String(params.limit));
-		if (params?.sanitize != null) query.set('sanitize', String(params.sanitize));
+		const sanitize = params?.sanitize ?? readDiagnosticsSanitizedPreference();
+		query.set('sanitize', String(sanitize));
 		if (params?.offset != null && params.offset >= 0) query.set('offset', String(params.offset));
 		const qs = query.toString();
 		return this.request(`/logs${qs ? '?' + qs : ''}`);

@@ -178,7 +178,7 @@ func queryList(q map[string][]string, key string) []string {
 // GET /api/logs?bucket=app|singbox&group=&subgroup=&level=&limit=&offset=&since=&sanitize=
 //
 //	@Summary		Get logs
-//	@Description	Returns log entries from the selected bucket. `bucket=app` (default) covers tunnel/routing/server/system events; `bucket=singbox` covers sing-box forwarder events isolated from app history. By default target/message are returned raw for the authenticated admin UI; pass `sanitize=true` for backend-masked output.
+//	@Description	Returns log entries from the selected bucket. `bucket=app` (default) covers tunnel/routing/server/system events; `bucket=singbox` covers sing-box forwarder events isolated from app history. By default target/message are backend-masked; pass `sanitize=false` only when the authenticated admin UI explicitly reveals raw logs.
 //	@Tags			logs
 //	@Produce		json
 //	@Security		CookieAuth
@@ -189,7 +189,7 @@ func queryList(q map[string][]string, key string) []string {
 //	@Param			limit		query		int		false	"Max entries to return (default 200)"
 //	@Param			offset		query		int		false	"Skip first N matching entries"
 //	@Param			since		query		int		false	"Unix seconds — return only entries strictly after this"
-//	@Param			sanitize	query		bool	false	"Return backend-sanitized target/message values instead of raw values"
+//	@Param			sanitize	query		bool	false	"Return backend-sanitized target/message values; default true, set false to reveal raw values"
 //	@Success		200	{object}	LogsResponseEnvelope
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
@@ -208,7 +208,7 @@ func (h *LoggingHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sanitize, ok := parseBoolQuery(q.Get("sanitize"), false)
+	sanitize, ok := parseBoolQuery(q.Get("sanitize"), true)
 	if !ok {
 		response.ErrorWithStatus(w, http.StatusBadRequest,
 			"invalid sanitize: must be true or false", "INVALID_SANITIZE")

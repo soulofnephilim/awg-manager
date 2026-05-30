@@ -159,8 +159,34 @@ func TestGetLogs_SanitizeQuery(t *testing.T) {
 
 	h := NewLoggingHandler(svc, svc)
 
-	t.Run("raw by default", func(t *testing.T) {
+	t.Run("sanitized by default", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/logs?bucket=singbox", nil)
+		w := httptest.NewRecorder()
+		h.GetLogs(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+		}
+
+		var body struct {
+			Data struct {
+				Sanitized bool          `json:"sanitized"`
+				Logs      []LogEntryDTO `json:"logs"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !body.Data.Sanitized || !body.Data.Logs[0].Sanitized {
+			t.Fatalf("sanitized response not marked sanitized: %+v", body.Data)
+		}
+		if strings.Contains(body.Data.Logs[0].Message, "node.example.org") || strings.Contains(body.Data.Logs[0].Message, "203.0.113.77") {
+			t.Fatalf("raw values leaked in default response: %q", body.Data.Logs[0].Message)
+		}
+	})
+
+	t.Run("raw on request", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs?bucket=singbox&sanitize=false", nil)
 		w := httptest.NewRecorder()
 		h.GetLogs(w, req)
 
@@ -202,3 +228,38 @@ func TestGetLogs_SanitizeQuery(t *testing.T) {
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode: %v", err)
+		}
+		if !body.Data.Sanitized || !body.Data.Logs[0].Sanitized {
+			t.Fatalf("sanitized response not marked sanitized: %+v", body.Data)
+		}
+		if strings.Contains(body.Data.Logs[0].Message, "node.example.org") || strings.Contains(body.Data.Logs[0].Message, "203.0.113.77") {
+			t.Fatalf("raw values leaked in sanitized response: %q", body.Data.Logs[0].Message)
+		}
+	})
+
+	t.Run("sanitized on request", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs?bucket=singbox&sanitize=true", nil)
+		w := httptest.NewRecorder()
+		h.GetLogs(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+		}
+
+		var body struct {
+			Data struct {
+				Sanitized bool          `json:"sanitized"`
+				Logs      []LogEntryDTO `json:"logs"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !body.Data.Sanitized || !body.Data.Logs[0].Sanitized {
+			t.Fatalf("sanitized response not marked sanitized: %+v", body.Data)
+		}
+		if strings.Contains(body.Data.Logs[0].Message, "node.example.org") || strings.Contains(body.Data.Logs[0].Message, "203.0.113.77") {
+			t.Fatalf("raw values leaked in sanitized response: %q", body.Data.Logs[0].Message)
+		}
+	})
+}

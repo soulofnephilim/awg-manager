@@ -6623,8 +6623,8 @@ paths:
       description: Returns log entries from the selected bucket. `bucket=app` (default)
         covers tunnel/routing/server/system events; `bucket=singbox` covers sing-box
         forwarder events isolated from app history. By default target/message are
-        returned raw for the authenticated admin UI; pass `sanitize=true` for backend-masked
-        output.
+        backend-masked; pass `sanitize=false` only when the authenticated admin UI
+        explicitly reveals raw logs.
       parameters:
       - description: Bucket selector
         enum:
@@ -6663,8 +6663,8 @@ paths:
         in: query
         name: since
         type: integer
-      - description: Return backend-sanitized target/message values instead of raw
-          values
+      - description: Return backend-sanitized target/message values; default true,
+          set false to reveal raw values
         in: query
         name: sanitize
         type: boolean

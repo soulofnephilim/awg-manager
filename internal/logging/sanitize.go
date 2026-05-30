@@ -4,7 +4,6 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 )
 
 var (

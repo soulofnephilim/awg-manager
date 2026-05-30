@@ -440,6 +440,15 @@
     saveFullTimestamp(showFullTimestamp);
   }
 
+  async function handleToggleSanitizeLogs() {
+    toggleDiagnosticsSanitized();
+    manualPause = false;
+    paused = false;
+    bufferCount = 0;
+    manualFrozenLogs = null;
+    await loadBucketFresh(bucket);
+  }
+
   function formatLine(log: LogEntry, routerOffset: number): string {
     const visible = logForPrivacy(log);
     const scope = visible.subgroup ? `${visible.group}/${visible.subgroup}` : visible.group;
@@ -652,7 +661,7 @@
       {showFullTimestamp}
       onToggleFullTimestamp={toggleFullTimestamp}
       sanitizeLogs={$diagnosticsSanitized}
-      onToggleSanitizeLogs={toggleDiagnosticsSanitized}
+      onToggleSanitizeLogs={handleToggleSanitizeLogs}
       sanitizeToggleAvailable={privacyRevealAvailable}
       sanitizeToggleHint=""
       totalEntries={$totalStore}

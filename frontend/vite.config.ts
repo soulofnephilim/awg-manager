@@ -109,16 +109,6 @@ export default defineConfig(({ mode }) => {
 		test: {
 			environment: 'jsdom',
 			include: ['src/**/*.test.ts'],
-			// Win11/PowerShell can finish all suites green and still report
-			// "[vitest-pool]: Worker forks emitted error" while concurrently
-			// tearing down jsdom fork workers. Keep the documented
-			// `npm exec -- vitest run` check deterministic by using one fork.
-			fileParallelism: false,
-			poolOptions: {
-				forks: {
-					singleFork: true,
-				},
-			},
 		},
 		resolve: {
 			alias: {
