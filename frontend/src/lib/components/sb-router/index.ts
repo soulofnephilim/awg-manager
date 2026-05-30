@@ -28,9 +28,6 @@ export { deriveDeps, deriveIssues } from './drawerData';
 
 // F4a — FlowGraph hero
 export { default as FlowGraph } from './FlowGraph.svelte';
-export { default as FlowStation } from './FlowStation.svelte';
-export type { FlowStationTone } from './FlowStation.svelte';
-export { default as FlowArrow } from './FlowArrow.svelte';
 
 // F4b — Trace Screen
 export { default as TracePanel } from './TracePanel.svelte';
