@@ -36,7 +36,6 @@
   import OutboundsCompact from './OutboundsCompact.svelte';
   import DnsServersCompact from './DnsServersCompact.svelte';
   import DeviceProxyCompact from './DeviceProxyCompact.svelte';
-  import ConnectionsCompact from './ConnectionsCompact.svelte';
 
   import RuleEditModal from '$lib/components/routing/singboxRouter/RuleEditModal.svelte';
   import RuleSetAddModal from '$lib/components/routing/singboxRouter/RuleSetAddModal.svelte';
@@ -239,9 +238,6 @@
   function navigateDeviceProxy() {
     void goto('/routing?tab=singbox&sub=deviceproxy');
   }
-  function navigateConnections() {
-    void goto('/routing?tab=singbox&sub=connections');
-  }
 </script>
 
 
@@ -337,15 +333,6 @@
         onAction={navigateDeviceProxy}
       >
         <DeviceProxyCompact bare onConfigure={navigateDeviceProxy} />
-      </SidePanel>
-
-      <SidePanel
-        title="Живые соединения"
-        count=""
-        actionLabel="Открыть →"
-        onAction={navigateConnections}
-      >
-        <ConnectionsCompact />
       </SidePanel>
     </div>
   </div>

@@ -9,6 +9,7 @@
   import { openDrawer } from './drawerStore';
   import { Badge } from '$lib/components/ui';
   import StatusDrawer from './StatusDrawer.svelte';
+  import LiveConnectionsChip from './LiveConnectionsChip.svelte';
 
   interface Props {
     /** Текущий статус движка sing-box. Влияет только на цвет pill. */
@@ -59,6 +60,8 @@
         </Badge>
       </button>
     </div>
+
+    <LiveConnectionsChip />
 
     {#if onOpenJson}
       <button type="button" class="icon-btn" onclick={onOpenJson} aria-label="JSON-конфиг" title="JSON-конфиг">
