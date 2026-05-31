@@ -45,8 +45,9 @@
       const result = await finishSetup({
         tunnelTag: selectedTunnel,
         selectedTemplates: Array.from(get(templatesSelection)),
-        customFields: { domainSuffix: '', ipCidr: '', sourceIpCidr: '', port: '', ruleSetTags: new Set<string>() },
+        customFields: { rulesList: '' },
         groups,
+        existingRuleSetTags: get(ruleSets).map((r) => r.tag),
       });
       if (result.failures.length === 0) {
         notifications.success('Готово — sing-box запущен');

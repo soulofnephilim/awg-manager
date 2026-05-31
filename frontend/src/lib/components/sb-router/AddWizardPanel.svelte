@@ -36,6 +36,7 @@
   } from './templatesStore';
   import { buildTemplateList } from './templatesData';
   import { submitWizard, ValidationError } from './addWizardActions';
+  import { isInlineRuleListEmpty } from '$lib/utils/singboxInlineRules';
   import MobileBottomBar from './MobileBottomBar.svelte';
   import { mode } from './modeStore';
   import { ensureTunnelDnsInfra, syncTunnelDnsRule } from './emptyStateActions';
@@ -70,14 +71,7 @@
   const groups = $derived(buildTemplateList($presets, $ruleSets, ''));
 
   const hasTemplates = $derived($templatesSelection.size > 0);
-  const hasCustom = $derived.by(() => {
-    const c = $wizardCustom;
-    return c.domainSuffix.trim() !== ''
-      || c.ipCidr.trim() !== ''
-      || c.sourceIpCidr.trim() !== ''
-      || c.port.trim() !== ''
-      || c.ruleSetTags.size > 0;
-  });
+  const hasCustom = $derived(!isInlineRuleListEmpty($wizardCustom.rulesList));
   const step1Ok = $derived(hasTemplates || hasCustom);
   const step2Ok = $derived.by(() => {
     if ($wizardOutboundCategory === null) return false;
@@ -98,6 +92,7 @@
         outboundCategory: get(wizardOutboundCategory)!,
         tunnelTag: get(wizardTunnelTag),
         groups,
+        existingRuleSetTags: get(ruleSets).map((r) => r.tag),
       });
       if (result.failures.length === 0) {
         if (get(mode) === 'beginner') {
@@ -110,12 +105,15 @@
             notifications.error(`DNS: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
-        notifications.success(`Создано ${result.successes.length}`);
+        const created = result.successes.length;
         if (continueAfter) {
+          notifications.success(`Создано правил: ${created}. Можно добавить ещё одно.`);
           clearSelection();
           resetWizardState();
           await singboxRouterStore.loadAll();
+          if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
         } else {
+          notifications.success(`Создано правил: ${created}`);
           clearSelection();
           closeAddWizard();
           await singboxRouterStore.loadAll();

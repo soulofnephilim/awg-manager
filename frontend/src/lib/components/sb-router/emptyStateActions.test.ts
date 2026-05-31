@@ -47,14 +47,13 @@ describe('emptyStateActions', () => {
   });
 
   it('finishSetup: правила(tunnel) → final=direct → bake defaults(all) → enable → loadAll', async () => {
-    const empty = {
-      domainSuffix: '', ipCidr: '', sourceIpCidr: '', port: '', ruleSetTags: new Set<string>(),
-    };
+    const empty = { rulesList: '' };
     const res = await finishSetup({
       tunnelTag: 'wg-nl',
       selectedTemplates: ['svc:netflix'],
       customFields: empty,
       groups: [],
+      existingRuleSetTags: [],
     });
     expect(submitWizard).toHaveBeenCalledWith(
       expect.objectContaining({ outboundCategory: 'tunnel', tunnelTag: 'wg-nl', selectedTemplates: ['svc:netflix'] }),

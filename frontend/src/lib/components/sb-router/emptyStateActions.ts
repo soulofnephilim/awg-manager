@@ -12,6 +12,7 @@ export interface FinishSetupArgs {
   selectedTemplates: string[];
   customFields: CustomMatcherFields;
   groups: TemplateGroup[];
+  existingRuleSetTags: string[];
 }
 
 export async function finishSetup(args: FinishSetupArgs): Promise<SubmitResult> {
@@ -21,6 +22,7 @@ export async function finishSetup(args: FinishSetupArgs): Promise<SubmitResult> 
     outboundCategory: 'tunnel',
     tunnelTag: args.tunnelTag,
     groups: args.groups,
+    existingRuleSetTags: args.existingRuleSetTags,
   });
   try {
     await ensureTunnelDnsInfra(args.tunnelTag);
