@@ -33,6 +33,10 @@ type Service interface {
 	// system-name from this list.
 	ListWANInterfaces(ctx context.Context) ([]WANInterfaceInfo, error)
 
+	// ListBindableInterfaces returns interfaces a user can bind a direct
+	// outbound to (all interfaces minus auto-managed AWG/WG ones).
+	ListBindableInterfaces(ctx context.Context) ([]WANInterfaceInfo, error)
+
 	SetRouteFinal(ctx context.Context, tag string) error
 
 	ListRules(ctx context.Context) ([]Rule, error)
