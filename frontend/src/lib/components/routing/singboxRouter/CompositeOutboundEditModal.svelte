@@ -42,8 +42,12 @@
 	// svelte-ignore state_referenced_locally
 	let bindInterface = $state(outbound?.bind_interface ?? '');
 	let bindables = $state<SingboxRouterWANInterface[]>([]);
+	let bindablesLoading = $state(true);
 	$effect(() => {
-		void api.singboxRouterListBindableInterfaces().then((l) => { bindables = l; }).catch(() => { bindables = []; });
+		void api.singboxRouterListBindableInterfaces()
+			.then((l) => { bindables = l; })
+			.catch(() => { bindables = []; })
+			.finally(() => { bindablesLoading = false; });
 	});
 	const bindableOptions = $derived<DropdownOption[]>(
 		bindables.map((i) => ({ value: i.name, label: `${i.label} · ${i.name}${i.up ? '' : ' (down)'}` }))
@@ -273,8 +277,8 @@
 				<Dropdown
 					bind:value={bindInterface}
 					options={bindableOptions}
-					placeholder={bindables.length === 0 ? 'Нет доступных интерфейсов' : '— выбрать интерфейс —'}
-					disabled={bindables.length === 0}
+					placeholder={bindablesLoading ? 'Загрузка интерфейсов…' : bindables.length === 0 ? 'Нет доступных интерфейсов' : '— выбрать интерфейс —'}
+					disabled={bindablesLoading || bindables.length === 0}
 					fullWidth
 				/>
 			</div>
