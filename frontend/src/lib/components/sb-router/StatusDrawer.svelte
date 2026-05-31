@@ -15,6 +15,7 @@
   import DepRow from './DepRow.svelte';
   import IssueRow from './IssueRow.svelte';
   import OutboundOption from './OutboundOption.svelte';
+  import PolicyCombobox from './PolicyCombobox.svelte';
   import { deriveDeps, deriveIssues } from './drawerData';
   import { mergeAndSaveSettings, BYPASS_PRESETS } from './settingsActions';
   import type { SingboxRouterSettings, SingboxRouterWANInterface } from '$lib/types';
@@ -39,7 +40,6 @@
   let saving = $state(false);
   let lastError = $state<string | null>(null);
   let portTimer: ReturnType<typeof setTimeout> | null = null;
-  let policyNameTimer: ReturnType<typeof setTimeout> | null = null;
 
   function versionLabel(value?: string | null): string {
     const v = (value ?? '').trim();
@@ -107,11 +107,6 @@
     }
   }
   function setDeviceMode(m: 'policy' | 'all') { void applyPatch({ deviceMode: m }); }
-  function onPolicyNameInput(e: Event) {
-    const v = (e.currentTarget as HTMLInputElement).value;
-    if (policyNameTimer) clearTimeout(policyNameTimer);
-    policyNameTimer = setTimeout(() => void applyPatch({ policyName: v }), 500);
-  }
   function toggleAutoDetect(checked: boolean) {
     if (checked) void applyPatch({ wanAutoDetect: true, wanInterface: '' });
     else void applyPatch({ wanAutoDetect: false });
@@ -178,8 +173,8 @@
         </div>
         {#if cfg.deviceMode !== 'all'}
           <div class="field">
-            <label class="lbl" for="ed-policy">Имя NDMS policy</label>
-            <input id="ed-policy" class="inp" type="text" value={cfg.policyName} oninput={onPolicyNameInput} />
+            <span class="lbl">NDMS policy</span>
+            <PolicyCombobox value={cfg.policyName} onChange={(name) => void applyPatch({ policyName: name })} />
           </div>
         {/if}
         <p class="hint">При policy обрабатывается только трафик устройств, привязанных к policy в LAN-настройках NDMS.</p>
