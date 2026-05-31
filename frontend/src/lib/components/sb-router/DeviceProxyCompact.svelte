@@ -20,11 +20,12 @@
   }
 
   interface Props {
-    onConfigure: () => void;
+    onConfigure?: () => void;
     bare?: boolean;
+    onSelect?: (in_: DeviceProxyInstance) => void;
   }
 
-  let { onConfigure, bare = false }: Props = $props();
+  let { onConfigure, bare = false, onSelect }: Props = $props();
 
   type RuntimeById = Record<string, DeviceProxyRuntime>;
 
@@ -101,23 +102,30 @@
     <div class="proxy-list">
       {#each instances as in_ (in_.id)}
         {@const outboundLabel = outboundLabelFor(in_)}
-        <div class="proxy-row">
+        <button
+          type="button"
+          class="proxy-row"
+          class:clickable={!!onSelect}
+          onclick={() => onSelect?.(in_)}
+          disabled={!onSelect}
+        >
           <span class="dot" data-tone={toneFor(in_)}></span>
           <div class="proxy-info">
             <div class="proxy-main">
+              <span class="ty">mixed</span>
               <span class="mono">{listenLabelFor(in_)}</span>
               {#if isInstanceActive(in_)}
                 <Badge variant="success" size="sm" mono>active</Badge>
               {:else}
-                <Badge variant="muted" size="sm" mono>not active</Badge>
+                <Badge variant="muted" size="sm" mono>выкл</Badge>
               {/if}
             </div>
             <div class="proxy-sub">
-              <span>через</span>
+              <span class="arrow">→</span>
               <Badge variant={outboundVariantFor(outboundLabel)} size="sm" mono>{outboundLabel}</Badge>
             </div>
           </div>
-        </div>
+        </button>
       {/each}
     </div>
   {:else if loadError}
@@ -131,7 +139,7 @@
       <div class="sub">device proxy</div>
     </div>
   {/if}
-  {#if !bare}
+  {#if !bare && onConfigure}
     <Button variant="ghost" size="sm" onclick={onConfigure} iconBefore={icon}>
       Настроить
     </Button>
@@ -154,11 +162,34 @@
     display: flex;
     flex-direction: column;
   }
-  .proxy-row {
+  button.proxy-row {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    font-family: inherit;
+    color: inherit;
+    cursor: default;
     display: grid;
     grid-template-columns: 8px minmax(0, 1fr);
     align-items: center;
     gap: 14px;
+    padding: 0;
+  }
+  button.proxy-row.clickable {
+    cursor: pointer;
+  }
+  button.proxy-row.clickable:hover {
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+  }
+  .ty {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+  .arrow {
+    color: var(--text-muted);
   }
   .proxy-row + .proxy-row {
     margin-top: 10px;
