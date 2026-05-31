@@ -33,9 +33,11 @@ type DnsRouteDTO struct {
 	Name               string                    `json:"name" example:"Work VPN"`
 	Domains            []string                  `json:"domains" example:"example.com"`
 	Excludes           []string                  `json:"excludes,omitempty" example:"ads.example.com"`
+	ExcludesText       string                    `json:"excludesText,omitempty" example:"# local bypass\n.local\n10.0.0.0/8"`
 	ExcludeSubnets     []string                  `json:"excludeSubnets,omitempty" example:"10.0.0.0/24"`
 	Subnets            []string                  `json:"subnets,omitempty" example:"10.0.0.0/8"`
 	ManualDomains      []string                  `json:"manualDomains" example:"corp.internal"`
+	ManualText         string                    `json:"manualText,omitempty" example:"# streaming\nyoutube.com\n# backup\ngooglevideo.com"`
 	Subscriptions      []DnsRouteSubscriptionDTO `json:"subscriptions,omitempty"`
 	Routes             []DnsRouteTargetDTO       `json:"routes"`
 	Enabled            bool                      `json:"enabled" example:"true"`
@@ -52,8 +54,10 @@ type DnsRouteDTO struct {
 type DnsRouteUpsertRequest struct {
 	Name               string                    `json:"name" example:"Youtube"`
 	ManualDomains      []string                  `json:"manualDomains" example:"youtube.com,.googlevideo.com,geosite:GOOGLE"`
+	ManualText         string                    `json:"manualText,omitempty" example:"# game servers\nexample.com\n203.0.113.0/24"`
 	Subscriptions      []DnsRouteSubscriptionDTO `json:"subscriptions,omitempty"`
 	Excludes           []string                  `json:"excludes,omitempty" example:"ads.youtube.com"`
+	ExcludesText       string                    `json:"excludesText,omitempty" example:"# local bypass\n.local\n10.0.0.0/8"`
 	ExcludeSubnets     []string                  `json:"excludeSubnets,omitempty" example:"10.0.0.0/24"`
 	Subnets            []string                  `json:"subnets,omitempty" example:"142.250.0.0/15"`
 	Routes             []DnsRouteTargetDTO       `json:"routes,omitempty"`

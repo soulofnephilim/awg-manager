@@ -870,6 +870,12 @@ definitions:
         items:
           type: string
         type: array
+      excludesText:
+        example: |-
+          # local bypass
+          .local
+          10.0.0.0/8
+        type: string
       hrPolicyInterfaces:
         example:
         - Wireguard0
@@ -897,6 +903,13 @@ definitions:
         items:
           type: string
         type: array
+      manualText:
+        example: |-
+          # streaming
+          youtube.com
+          # backup
+          googlevideo.com
+        type: string
       name:
         example: Work VPN
         type: string
@@ -986,6 +999,12 @@ definitions:
         items:
           type: string
         type: array
+      excludesText:
+        example: |-
+          # local bypass
+          .local
+          10.0.0.0/8
+        type: string
       hrPolicyInterfaces:
         example:
         - Wireguard0
@@ -1012,6 +1031,12 @@ definitions:
         items:
           type: string
         type: array
+      manualText:
+        example: |-
+          # game servers
+          example.com
+          203.0.113.0/24
+        type: string
       name:
         example: Youtube
         type: string

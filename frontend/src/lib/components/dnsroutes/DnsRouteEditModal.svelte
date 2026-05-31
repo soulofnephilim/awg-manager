@@ -32,6 +32,7 @@
 	let iconUrl = $state<string | undefined>(undefined);
 	let iconPickerOpen = $state(false);
 	let manualDomains = $state<string[]>([]);
+	let manualText = $state('');
 	let subscriptions = $state<DnsRouteSubscription[]>([]);
 	let routes = $state<DnsRouteTarget[]>([]);
 	let newSubUrl = $state('');
@@ -41,6 +42,7 @@
 	let hrRouteMode = $state<'interface' | 'policy'>('interface');
 	let hrPolicyName = $state('');
 	let excludesText = $state('');
+	let excludesTextareaEl = $state<HTMLTextAreaElement | null>(null);
 	let hrInterfaceId = $state('');
 
 	let showBackendSelector = $derived(isOS5 && hydrarouteInstalled);
@@ -58,6 +60,7 @@
 	// Snapshot initial state for isDirty detection
 	let initialName = $state('');
 	let initialManualDomains = $state<string[]>([]);
+	let initialManualText = $state('');
 	let initialSubscriptions = $state<DnsRouteSubscription[]>([]);
 	let initialRoutes = $state<DnsRouteTarget[]>([]);
 	let initialBackend = $state<'ndms' | 'hydraroute'>('ndms');
@@ -78,17 +81,19 @@
 				if (route) {
 					name = route.name;
 					manualDomains = [...(route.manualDomains ?? [])];
+					manualText = route.manualText ?? manualDomains.join('\n');
 					subscriptions = (route.subscriptions ?? []).map((s) => ({ ...s }));
 					routes = (route.routes ?? []).map((r) => ({ ...r }));
 					backend = route.backend || (isOS5 ? 'ndms' : hydrarouteInstalled ? 'hydraroute' : 'ndms');
 					hrRouteMode = route.hrRouteMode || 'interface';
 					hrPolicyName = route.hrPolicyName || '';
-					excludesText = (route.excludes ?? []).join('\n');
+					excludesText = route.excludesText ?? [...(route.excludes ?? []), ...(route.excludeSubnets ?? [])].join('\n');
 					hrInterfaceId = (isHR && route.routes?.[0]?.tunnelId) || tunnels[0]?.id || '';
 					iconUrl = route.iconUrl;
 					// Capture snapshot for isDirty
 					initialName = route.name;
 					initialManualDomains = [...(route.manualDomains ?? [])];
+					initialManualText = manualText;
 					initialSubscriptions = (route.subscriptions ?? []).map((s) => ({ ...s }));
 					initialRoutes = (route.routes ?? []).map((r) => ({ ...r }));
 					initialBackend = backend;
@@ -100,6 +105,7 @@
 				} else {
 					name = '';
 					manualDomains = [];
+					manualText = '';
 					subscriptions = [];
 					routes = [];
 					backend = isOS5 ? 'ndms' : (hydrarouteInstalled ? 'hydraroute' : 'ndms');
@@ -111,6 +117,7 @@
 					// Capture snapshot for isDirty (create mode defaults)
 					initialName = '';
 					initialManualDomains = [];
+					initialManualText = '';
 					initialSubscriptions = [];
 					initialRoutes = [];
 					initialBackend = backend;
@@ -165,6 +172,7 @@
 		};
 		return (
 			name !== initialName ||
+			manualText !== initialManualText ||
 			compareDomains(manualDomains, initialManualDomains) ||
 			compareSubscriptions(subscriptions, initialSubscriptions) ||
 			compareRoutes(routes, initialRoutes) ||
@@ -178,8 +186,9 @@
 	});
 
 	// Handlers
-	function handleDomainsChange(domains: string[]) {
+	function handleDomainsChange(domains: string[], nextManualText: string) {
 		manualDomains = domains;
+		manualText = nextManualText;
 	}
 
 	function addSubscription() {
@@ -266,6 +275,13 @@
 		return routes[routes.length - 1].fallback ?? '';
 	});
 
+	function parseExcludesForPayload(value: string): string[] {
+		return value
+			.split('\n')
+			.map((s) => s.trim())
+			.filter((s) => s !== '' && !s.startsWith('#'));
+	}
+
 	function handleSave() {
 		attempted = true;
 		if (!canSave) {
@@ -273,7 +289,7 @@
 			return;
 		}
 
-		const parsedExcludes = excludesText.split('\n').map(s => s.trim()).filter(s => s !== '');
+		const parsedExcludes = parseExcludesForPayload(excludesText);
 
 		// Build routes based on mode
 		let saveRoutes = routes;
@@ -284,10 +300,12 @@
 		const data: Partial<DnsRoute> = {
 			name: name.trim(),
 			manualDomains,
+			manualText,
 			subscriptions,
 			routes: saveRoutes,
 			backend,
 			excludes: isNDMS ? parsedExcludes : undefined,
+			excludesText: isNDMS ? excludesText : undefined,
 			hrRouteMode: isHR ? hrRouteMode : undefined,
 			hrPolicyName: isPolicyMode ? (hrPolicyName || `AWG_${name.trim().replace(/\s+/g, '_')}`) : undefined,
 			iconUrl: iconUrl || undefined,
@@ -299,6 +317,90 @@
 		if (e.key === 'Enter') {
 			e.preventDefault();
 			addSubscription();
+		}
+	}
+
+	function excludesLineOffset(lines: string[], lineIndex: number): number {
+		let offset = 0;
+		for (let i = 0; i < lineIndex; i++) {
+			offset += lines[i].length + 1;
+		}
+		return offset;
+	}
+
+	function selectedExcludesLineRange(el: HTMLTextAreaElement, lines: string[]) {
+		const start = el.selectionStart;
+		const end = el.selectionEnd;
+
+		let cursor = 0;
+		let startLine = 0;
+		let endLine = lines.length - 1;
+
+		for (let i = 0; i < lines.length; i++) {
+			const lineEnd = cursor + lines[i].length;
+			if (start >= cursor && start <= lineEnd) startLine = i;
+			if (end >= cursor && end <= lineEnd) {
+				endLine = i;
+				break;
+			}
+			cursor = lineEnd + 1;
+		}
+
+		return { startLine, endLine };
+	}
+
+	function toggleExcludesCommentSelection() {
+		const el = excludesTextareaEl;
+		if (!el) return;
+
+		const lines = excludesText.split('\n');
+		const { startLine, endLine } = selectedExcludesLineRange(el, lines);
+		const selected = lines.slice(startLine, endLine + 1);
+
+		const shouldComment = selected.some((line) => {
+			const trimmed = line.trim();
+			return trimmed !== '' && !trimmed.startsWith('#');
+		});
+
+		const changed = selected.map((line) => {
+			if (line.trim() === '') return line;
+
+			if (shouldComment) {
+				const indent = line.match(/^\s*/)?.[0] ?? '';
+				return `${indent}# ${line.slice(indent.length)}`;
+			}
+
+			return line.replace(/^(\s*)# ?/, '$1');
+		});
+
+		const nextLines = [
+			...lines.slice(0, startLine),
+			...changed,
+			...lines.slice(endLine + 1)
+		];
+
+		excludesText = nextLines.join('\n');
+
+		const nextStart = excludesLineOffset(nextLines, startLine);
+		const nextEnd = excludesLineOffset(nextLines, endLine) + nextLines[endLine].length;
+
+		setTimeout(() => {
+			el.focus();
+			el.setSelectionRange(nextStart, nextEnd);
+		}, 0);
+	}
+
+	function handleExcludesKeydown(e: KeyboardEvent) {
+		const isToggleComment =
+			(e.ctrlKey || e.metaKey) &&
+			(
+				e.code === 'Slash' ||
+				e.key === '/'
+			);
+
+		if (isToggleComment) {
+			e.preventDefault();
+			toggleExcludesCommentSelection();
 		}
 	}
 </script>
@@ -366,7 +468,12 @@
 		{#if isHydraRouteBackend}
 			<span class="field-hint geo-hint">Поддерживается geosite:TAG, например geosite:GOOGLE</span>
 		{/if}
-		<DnsRouteDomainEditor domains={manualDomains} onchange={handleDomainsChange} allowGeoTags={isHydraRouteBackend} />
+		<DnsRouteDomainEditor
+			domains={manualDomains}
+			textValue={manualText}
+			onchange={handleDomainsChange}
+			allowGeoTags={isHydraRouteBackend}
+		/>
 	</div>
 
 	<!-- Subscriptions -->
@@ -518,8 +625,18 @@
 	{#if isNDMS}
 		<div class="form-section">
 			<div class="section-title">Исключения</div>
-			<textarea class="field-textarea" rows="3" placeholder="Домены, которые НЕ маршрутизировать (по одному на строку)" value={excludesText} oninput={(e) => excludesText = (e.target as HTMLTextAreaElement).value}></textarea>
-			<span class="field-hint">Эти домены будут исключены из маршрутизации через туннель</span>
+			<textarea
+				bind:this={excludesTextareaEl}
+				class="field-textarea excludes-textarea"
+				rows="3"
+				placeholder={"# Домены, которые НЕ маршрутизировать\nexample.com\n.local\n\n# Подсети, которые НЕ маршрутизировать\n10.0.0.0/8\n2001:db8::/32"}
+				value={excludesText}
+				oninput={(e) => excludesText = (e.target as HTMLTextAreaElement).value}
+				onkeydown={handleExcludesKeydown}
+			></textarea>
+			<span class="field-hint excludes-hint">Эти домены будут исключены из маршрутизации через туннель.
+Комментарии начинаются с #
+Ctrl+/ или Cmd+/ комментирует выбранные строки.</span>
 		</div>
 	{/if}
 
@@ -721,6 +838,15 @@
 	}
 	.route-add :global(.field-select) {
 		flex: 1;
+	}
+
+	.excludes-textarea {
+		font-size: 0.8125rem;
+		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+	}
+
+	.excludes-hint {
+		white-space: pre-line;
 	}
 
 	.btn-move {

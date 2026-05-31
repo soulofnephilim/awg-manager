@@ -243,9 +243,13 @@ export interface DnsRoute {
 	name: string;
 	domains: string[];
 	excludes?: string[];
+	/** Raw excludes editor text. Preserves comments and blank lines; active excludes are derived from it. */
+	excludesText?: string;
 	excludeSubnets?: string[];
 	subnets?: string[];
 	manualDomains: string[];
+	/** Raw manual editor text. Preserves comments and blank lines; active entries are derived from it. */
+	manualText?: string;
 	subscriptions?: DnsRouteSubscription[];
 	routes: DnsRouteTarget[];
 	enabled: boolean;
