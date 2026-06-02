@@ -10,6 +10,8 @@
     size?: BadgeSize;
     uppercase?: boolean;
     mono?: boolean;
+    /** Fully rounded ends (like VersionBadge / AWG Kernel). */
+    pill?: boolean;
     /** Optional native tooltip; rendered as the span's title attribute. */
     title?: string;
     children: Snippet;
@@ -20,6 +22,7 @@
     size = 'sm',
     uppercase = false,
     mono = false,
+    pill = false,
     title,
     children,
   }: Props = $props();
@@ -40,6 +43,7 @@
   class:size-md={size === 'md'}
   class:is-uppercase={uppercase}
   class:is-mono={mono}
+  class:is-pill={pill}
   {title}
 >
   {@render children()}
@@ -61,6 +65,10 @@
   .size-xs { font-size: 10px; padding: 2px 6px; line-height: 1.2; border-radius: 3px; }
   .size-sm { font-size: 11px; padding: 0.0625rem 0.375rem; }
   .size-md { font-size: 12px; padding: 0.125rem 0.4375rem; }
+
+  .is-pill {
+    border-radius: var(--radius-pill);
+  }
 
   .is-uppercase { text-transform: uppercase; letter-spacing: 0.04em; }
   .is-mono { font-family: var(--font-mono); }

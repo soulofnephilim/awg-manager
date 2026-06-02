@@ -1837,7 +1837,7 @@ const mockAccessPolicies = [
 		name: 'Policy2',
 		description: 'work',
 		isStandard: true,
-		standalone: false,
+		standalone: true,
 		interfaces: [{ name: 'DE vless-tcp-reality', label: 'DE', order: 0 }],
 		deviceCount: 0,
 	},

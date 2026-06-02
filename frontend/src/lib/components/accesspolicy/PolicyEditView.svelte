@@ -220,7 +220,7 @@
 		{#if isHrPolicy}
 			<div class="hr-side">
 				<div class="hr-policy-banner">
-					<Badge variant="warning" uppercase size="xs">HydraRoute</Badge>
+					<Badge variant="warning" uppercase size="xs" pill>HydraRoute</Badge>
 					<p>
 						Это политика HydraRoute Neo. Добавлять в неё устройства не требуется — маршрутизация
 						HydraRoute распространяется только на политику по умолчанию. Интерфейсы настраиваются

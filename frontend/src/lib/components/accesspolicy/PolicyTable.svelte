@@ -38,10 +38,10 @@
 					<span class="policy-name">{policy.description || policy.name}</span>
 					<div class="routing-badges">
 						{#if isHrPolicy}
-							<Badge variant="warning" uppercase size="xs">HydraRoute</Badge>
+							<Badge variant="warning" uppercase size="xs" pill>HydraRoute</Badge>
 						{/if}
 						{#if policy.standalone}
-							<Badge variant="muted" uppercase size="xs">standalone</Badge>
+							<Badge variant="accent" uppercase size="xs" pill>standalone</Badge>
 						{/if}
 					</div>
 				</div>
