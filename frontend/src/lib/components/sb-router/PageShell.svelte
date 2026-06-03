@@ -9,6 +9,7 @@
   import { openDrawer } from './drawerStore';
   import { Badge } from '$lib/components/ui';
   import StatusDrawer from './StatusDrawer.svelte';
+  import SourceDrawer from './SourceDrawer.svelte';
   import LiveConnectionsChip from './LiveConnectionsChip.svelte';
 
   interface Props {
@@ -102,6 +103,7 @@
 </div>
 
 <StatusDrawer />
+<SourceDrawer />
 
 <style>
   .sb-shell { display: flex; flex-direction: column; gap: var(--sp-4); }

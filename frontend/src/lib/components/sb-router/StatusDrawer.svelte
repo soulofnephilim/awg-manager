@@ -14,8 +14,7 @@
   import { mode } from './modeStore';
   import DepRow from './DepRow.svelte';
   import IssueRow from './IssueRow.svelte';
-  import OutboundOption from './OutboundOption.svelte';
-  import PolicyCombobox from './PolicyCombobox.svelte';
+  import TrafficSourceSettings from './TrafficSourceSettings.svelte';
   import { deriveDeps, deriveIssues } from './drawerData';
   import { mergeAndSaveSettings, BYPASS_PRESETS } from './settingsActions';
   import { pluralize, RULE_WORDS } from '$lib/utils/pluralize';
@@ -102,7 +101,6 @@
       saving = false;
     }
   }
-  function setDeviceMode(m: 'policy' | 'all') { void applyPatch({ deviceMode: m }); }
   function toggleAutoDetect(checked: boolean) {
     if (checked) void applyPatch({ wanAutoDetect: true, wanInterface: '' });
     else void applyPatch({ wanAutoDetect: false });
@@ -158,23 +156,13 @@
     {/if}
 
     {#if isExpert && cfg}
-      <!-- Режим работы -->
-      <section class="sec">
-        <div class="sec-cap">Режим работы</div>
-        <div class="card-grid">
-          <OutboundOption label="Только устройства policy" sub="трафик из назначенной policy" tone="accent"
-            selected={cfg.deviceMode !== 'all'} onclick={() => setDeviceMode('policy')} />
-          <OutboundOption label="Весь роутер" sub="весь LAN-трафик" tone="accent"
-            selected={cfg.deviceMode === 'all'} onclick={() => setDeviceMode('all')} />
-        </div>
-        {#if cfg.deviceMode !== 'all'}
-          <div class="field">
-            <span class="lbl">NDMS policy</span>
-            <PolicyCombobox value={cfg.policyName} onChange={(name) => void applyPatch({ policyName: name })} />
-          </div>
-        {/if}
-        <p class="hint">При policy обрабатывается только трафик устройств, привязанных к policy в LAN-настройках NDMS.</p>
-      </section>
+      <TrafficSourceSettings
+        {cfg}
+        deviceCount={s?.deviceCount ?? 0}
+        policyExists={s?.policyExists !== false}
+        variant="expert"
+        onPatch={(patch) => void applyPatch(patch)}
+      />
 
       <!-- WAN-интерфейс -->
       <section class="sec">
@@ -276,8 +264,6 @@
     padding: 6px 10px; border-radius: var(--radius-sm); background: var(--bg-primary);
     border: 1px solid var(--border); color: var(--text-primary); font-size: 12.5px; font-family: inherit;
   }
-  .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  @media (max-width: 480px) { .card-grid { grid-template-columns: 1fr; } }
   .hint { margin: 0; font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
   .chips { display: flex; flex-direction: column; gap: 6px; }
   .chip {
