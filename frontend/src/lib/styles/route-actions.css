@@ -51,20 +51,23 @@
 	cursor: not-allowed;
 }
 
-/* NDMS cards: pin «→ tunnel NDMS» to the action-button row */
-.dns-card .card-main {
+/* NDMS cards: pin «→ tunnel» row to the action-button row */
+.dns-card .card-main,
+.policy-card .card-main {
 	flex: 1;
 	min-width: 0;
 	align-self: stretch;
 	align-items: stretch;
 }
 
-.dns-card .card-main > :not(.card-info) {
+.dns-card .card-main > :not(.card-info),
+.policy-card .card-main > :not(.card-info) {
 	align-self: flex-start;
 	flex-shrink: 0;
 }
 
-.dns-card .card-info {
+.dns-card .card-info,
+.policy-card .card-info {
 	flex: 1;
 	align-self: stretch;
 	min-height: 0;
@@ -84,8 +87,15 @@
 .dns-card .card-route,
 .policy-card .card-route {
 	margin-top: auto;
-	padding-top: 2px;
-	padding-bottom: 6px;
+	padding-top: 6px;
+}
+
+.dns-card .card-route {
+	padding-bottom: calc((31px - 18px) / 2);
+}
+
+.policy-card .card-route {
+	padding-bottom: 0;
 }
 
 .dns-card .card-route :global(.badge),
@@ -99,17 +109,20 @@
 	flex-shrink: 0;
 }
 
-/* Policy cards: route row aligned with bottom actions */
-.policy-card .policy-body {
-	display: flex;
-	flex-direction: column;
-	flex: 1;
-	min-height: 0;
+.policy-card .card-actions {
+	align-self: center;
 }
 
-.policy-card .policy-actions {
+.policy-card .card-actions .action-row {
+	margin-top: 0;
+}
+
+.dns-card .card-actions {
 	align-self: stretch;
-	justify-content: flex-end;
+}
+
+.dns-card .card-actions .action-row {
+	margin-top: auto;
 }
 
 /* Routing views: unified badge row (policies, device/interface lists) */
@@ -122,11 +135,6 @@
 
 .routing-badges :global(.badge) {
 	flex-shrink: 0;
-}
-
-/* NDMS cards: nudge bottom action row (offset extra padding vs card edge) */
-.dns-card .card-actions .action-row .route-action-btn {
-	/* margin-bottom: -4px; */
 }
 
 /* Ghost up/down reorder controls (expert routing table) */

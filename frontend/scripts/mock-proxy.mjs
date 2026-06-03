@@ -1852,6 +1852,20 @@ const mockAccessPolicies = [
 		],
 		deviceCount: 2,
 	},
+	// Icon gallery — one mock per distinct icon (Policy0–2 + HydraRoute cover home/kids/work/hr)
+	{ name: 'Policy3', description: 'guest', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy4', description: 'singbox', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy5', description: 'xray', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy6', description: 'smarthome', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy7', description: 'zapret', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy8', description: 'gaming', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy9', description: 'tv', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy10', description: 'direct', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy11', description: 'backup', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy12', description: 'test', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy13', description: 'family', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy14', description: 'wifi', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
+	{ name: 'Policy15', description: '', isStandard: true, standalone: false, interfaces: [], deviceCount: 0 },
 ];
 
 /** Диагностика → «Окружение»: LAN-клиент и политика (GET /dns-check/client). */
