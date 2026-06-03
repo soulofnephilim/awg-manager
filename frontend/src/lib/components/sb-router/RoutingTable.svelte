@@ -199,7 +199,8 @@
     border-radius: var(--radius);
     overflow: hidden;
   }
-  .header, .row {
+  .header,
+  .row {
     display: grid;
     grid-template-columns: 24px 64px 92px minmax(0, 1fr) minmax(72px, 160px) 88px;
     align-items: center;
@@ -217,19 +218,22 @@
   }
   .header > div:nth-child(2),
   .header > div:nth-child(3),
-  .row > div:nth-child(2),
-  .row > div:nth-child(3),
+  .row > .reorder,
+  .row > .action-badge-cell,
   .header > div:nth-child(4),
-  .header > div:nth-child(5) {
+  .header > div:nth-child(5),
+  .row > .outbound-cell {
     text-align: center;
   }
   .header > div:nth-child(5),
-  .row > div:nth-child(5) {
+  .row > .outbound-cell {
     min-width: 0;
   }
-  .row > div:nth-child(5) {
+  .row > .outbound-cell {
     justify-self: center;
-    text-align: center;
+  }
+  .row > .matchers {
+    min-width: 0;
   }
   .row {
     padding: 6px 14px;
@@ -315,41 +319,34 @@
       display: none;
     }
     .row {
-      display: grid;
-      grid-template-columns: 28px minmax(0, 1fr) auto;
-      grid-template-areas:
-        "idx match actions"
-        "idx action outbound"
-        "idx reorder reorder";
-      gap: 6px 8px;
-      padding: 8px 10px;
-      margin-bottom: 6px;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      padding: 10px 14px 10px 42px;
+      margin: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      border-bottom: 1px solid var(--border);
       min-width: 0;
+      position: relative;
     }
     .row:last-child {
-      margin-bottom: 0;
-    }
-    .row.sys .reorder {
-      display: none;
-    }
-    .row.sys {
-      grid-template-areas:
-        "idx match actions"
-        "idx action outbound";
+      border-bottom: 0;
     }
     .idx {
-      grid-area: idx;
-      align-self: start;
-      padding-top: 2px;
+      position: absolute;
+      left: 14px;
+      top: 10px;
+      width: 28px;
       font-size: 11px;
       text-align: center;
     }
     .matchers {
-      grid-area: match;
+      order: 1;
       min-width: 0;
+      padding-right: 72px;
       display: flex;
       flex-direction: column;
       gap: 2px;
@@ -357,70 +354,81 @@
       overflow-wrap: break-word;
       word-break: break-word;
       line-height: 1.35;
+      text-align: left;
     }
     .matcher-text {
       display: inline;
       font-size: 11px;
       color: var(--text-secondary);
     }
-    .action-badge-cell {
-      grid-area: action;
-      justify-self: start;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      min-width: 0;
-    }
-    .outbound-cell {
-      grid-area: outbound;
-      justify-self: end;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      min-width: 0;
-      max-width: 100%;
-    }
-    .outbound-cell :global(.badge) {
-      max-width: 100%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
     .actions-col {
-      grid-area: actions;
-      justify-self: end;
-      width: auto;
-      min-width: 0;
+      position: absolute;
+      top: 10px;
+      right: 14px;
       text-align: right;
     }
     .actions {
       display: flex;
-      flex-direction: row;
+      flex-wrap: nowrap;
       justify-content: flex-end;
       gap: 4px;
     }
+    .action-badge-cell {
+      order: 2;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      justify-content: flex-start;
+      text-align: left;
+    }
+    .outbound-cell {
+      order: 3;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      max-width: 100%;
+      justify-content: flex-start;
+      text-align: left;
+    }
+    .outbound-cell :global(.badge) {
+      max-width: 100%;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .reorder {
-      grid-area: reorder;
+      order: 4;
       justify-content: flex-start;
       gap: 4px;
-      padding-left: 0;
+      padding-top: 8px;
+      border-top: 1px dashed color-mix(in srgb, var(--border) 85%, transparent);
     }
     .reorder::before {
       content: 'Порядок';
       align-self: center;
-      margin-right: 4px;
-      font-size: 9px;
+      margin-right: 6px;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.2;
       color: var(--text-muted);
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.05em;
+    }
+    .row.sys .reorder {
+      display: none;
     }
     .mobile-label {
-      display: inline;
-      font-size: 9px;
-      line-height: 1;
+      flex-shrink: 0;
+      font-size: 10px;
+      line-height: 1.2;
       color: var(--text-muted);
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.05em;
     }
     .route-reorder-btn {
       width: 32px;

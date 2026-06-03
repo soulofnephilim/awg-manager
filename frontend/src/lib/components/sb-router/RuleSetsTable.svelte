@@ -254,9 +254,8 @@
       border: 0;
       background: transparent;
       overflow: visible;
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 0.875rem;
+      display: flex;
+      flex-direction: column;
     }
 
     .header {
@@ -266,34 +265,40 @@
     .row {
       min-width: 0;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 36px;
+      grid-template-columns: minmax(0, 1fr) auto;
       grid-template-areas:
         "tag type"
-        "source edit"
-        "detour delete";
+        "source actions"
+        "detour actions";
       align-items: center;
-      gap: 0.625rem;
-      padding: 0.875rem 1rem;
-      border-radius: 14px;
-      border: 1px solid var(--border);
-      background: var(--bg-secondary);
-      overflow: hidden;
+      gap: 0.5rem 0.625rem;
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .row:last-child {
+      border-bottom: 0;
     }
 
     .row > div:nth-child(1) { grid-area: tag; }
     .row > div:nth-child(2) { grid-area: type; justify-self: end; }
     .row > div:nth-child(3) { grid-area: source; }
     .row > div:nth-child(4) { grid-area: detour; }
-    .row > div:nth-child(5) { display: contents; }
-
-    .row > div:nth-child(5) .route-action-btn:first-child {
-      grid-area: edit;
+    .row > div:nth-child(5) {
+      grid-area: actions;
+      align-self: center;
       justify-self: end;
     }
 
-    .row > div:nth-child(5) .route-action-btn.danger {
-      grid-area: delete;
-      justify-self: end;
+    .actions {
+      display: flex;
+      flex-wrap: nowrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
     }
 
     .tag {
@@ -318,20 +323,16 @@
       text-overflow: ellipsis;
       overflow-wrap: anywhere;
       word-break: break-word;
-      padding: 0.625rem 0.75rem;
-      border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--bg-primary) 45%, transparent);
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
       justify-self: stretch;
       text-align: left;
     }
 
-    .actions {
-      display: contents;
-    }
-
     .actions-col {
-      text-align: left;
+      text-align: right;
     }
 
     .route-action-btn {
