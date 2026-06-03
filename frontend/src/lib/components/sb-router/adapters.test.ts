@@ -139,8 +139,8 @@ describe('extractMatcherChips', () => {
     const rulesets = { 'geoip-ru': 'Россия (GeoIP)' };
     const chips = extractMatcherChips({ rule_set: ['geoip-ru', 'unknown-set'] }, rulesets);
     expect(chips).toEqual([
-      { kind: 'ruleset', label: 'Россия (GeoIP)' },
-      { kind: 'ruleset', label: 'unknown-set' },
+      { kind: 'ruleset', label: 'Россия (GeoIP)', rulesetTag: 'geoip-ru' },
+      { kind: 'ruleset', label: 'unknown-set', rulesetTag: 'unknown-set' },
     ]);
   });
 

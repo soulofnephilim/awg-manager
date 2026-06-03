@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { ClientRoute } from '$lib/types';
-	import { Toggle } from '$lib/components/ui';
+	import { Toggle, Badge } from '$lib/components/ui';
 
 	interface Props {
 		route: ClientRoute;
@@ -62,10 +62,11 @@ let clientLabel = $derived(route.clientHostname || route.clientIp);
 			{#if route.clientHostname}
 				<span class="card-stat">IP: {route.clientIp}</span>
 			{/if}
-			<div class="card-route">
-				<span>&rarr;</span> <code>{tunnelName}</code>
-			</div>
 			<span class="card-stat">{route.fallback === 'drop' ? 'Fallback: блокировать' : 'Fallback: напрямую'}</span>
+			<div class="card-route">
+				<span class="route-arrow">&rarr;</span>
+				<Badge variant="muted" mono size="xs">{tunnelName}</Badge>
+			</div>
 		</div>
 	</div>
 	<div class="card-actions">
@@ -127,7 +128,6 @@ let clientLabel = $derived(route.clientHostname || route.clientIp);
 
 	.card-main {
 		display: flex;
-		align-items: flex-start;
 		gap: 10px;
 		min-width: 0;
 	}
@@ -159,20 +159,6 @@ let clientLabel = $derived(route.clientHostname || route.clientIp);
 	.card-stat {
 		font-size: 0.6875rem;
 		color: var(--text-muted);
-	}
-
-	.card-route {
-		font-size: 0.6875rem;
-		color: var(--border-hover);
-		margin-top: 3px;
-	}
-
-	.card-route code {
-		background: var(--bg-hover);
-		padding: 1px 6px;
-		border-radius: 3px;
-		font-size: 0.625rem;
-		font-family: monospace;
 	}
 
 	.card-actions {

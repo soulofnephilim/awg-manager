@@ -24,14 +24,27 @@
     label: string;
     /** Если true — значение mono шрифтом (для IP/port/cidr). Подпись слева всегда sans. */
     mono?: boolean;
+    /** Клик по чипу — открыть связанный редактор */
+    onclick?: () => void;
+    /** Подсказка для кликабельного чипа */
+    title?: string;
   }
-  let { kind, label, mono = false }: Props = $props();
+  let { kind, label, mono = false, onclick, title }: Props = $props();
+
+  const isClickable = $derived(typeof onclick === 'function');
 </script>
 
-<span class="chip">
-  <span class="chip-key">{LABELS[kind]}:</span>
-  <span class="chip-val" class:is-mono={mono}>{label}</span>
-</span>
+{#if isClickable}
+  <button type="button" class="chip is-clickable" {title} aria-label={title} {onclick}>
+    <span class="chip-key">{LABELS[kind]}:</span>
+    <span class="chip-val" class:is-mono={mono}>{label}</span>
+  </button>
+{:else}
+  <span class="chip">
+    <span class="chip-key">{LABELS[kind]}:</span>
+    <span class="chip-val" class:is-mono={mono}>{label}</span>
+  </span>
+{/if}
 
 <style>
   .chip {
@@ -46,6 +59,23 @@
     color: var(--text-secondary);
     white-space: nowrap;
     line-height: 1.4;
+  }
+  button.chip {
+    margin: 0;
+    cursor: pointer;
+    transition:
+      border-color var(--t-fast),
+      background var(--t-fast),
+      color var(--t-fast);
+  }
+  button.chip:hover {
+    border-color: var(--border-hover);
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-tertiary));
+    color: var(--text-primary);
+  }
+  button.chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
   .chip-key {
     font-size: 10px;

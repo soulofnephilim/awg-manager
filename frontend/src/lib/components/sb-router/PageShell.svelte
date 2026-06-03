@@ -1,19 +1,19 @@
 <script lang="ts" module>
   import type { Snippet } from 'svelte';
-  export type EngineStatus = 'ok' | 'down' | 'unknown' | 'warning';
 </script>
 
 <script lang="ts">
-  import { FileJson, Search } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+  import { FileJson, Search, Settings } from 'lucide-svelte';
   import { mode, setMode, type RouterMode } from './modeStore';
+  import { bindLiveConnectionsStore } from './liveConnectionsStore';
   import { openDrawer } from './drawerStore';
-  import { Badge } from '$lib/components/ui';
   import StatusDrawer from './StatusDrawer.svelte';
+  import SourceDrawer from './SourceDrawer.svelte';
   import LiveConnectionsChip from './LiveConnectionsChip.svelte';
+  import { SegmentedControl } from '$lib/components/ui';
 
   interface Props {
-    /** Текущий статус движка sing-box. Влияет только на цвет pill. */
-    engineStatus?: EngineStatus;
     /** Дополнительный subtitle под title (опционально). */
     subtitle?: string;
     /** Открыть инспектор маршрута (кнопка в шапке рендерится только если задан). */
@@ -24,22 +24,12 @@
     children: Snippet;
   }
 
-  let { engineStatus = 'unknown', subtitle, onOpenInspector, onOpenJson, children }: Props = $props();
+  let { subtitle, onOpenInspector, onOpenJson, children }: Props = $props();
   let currentMode = $derived($mode);
 
-  const STATUS_LABEL: Record<EngineStatus, string> = {
-    ok: 'Engine OK',
-    down: 'Engine не работает',
-    warning: 'Engine ошибки',
-    unknown: 'Engine —',
-  };
-
-  const STATUS_VARIANT: Record<EngineStatus, 'success' | 'error' | 'warning' | 'muted'> = {
-    ok: 'success',
-    down: 'error',
-    warning: 'warning',
-    unknown: 'muted',
-  };
+  onMount(() => {
+    bindLiveConnectionsStore();
+  });
 
   function selectMode(next: RouterMode) {
     setMode(next);
@@ -53,46 +43,38 @@
       {#if subtitle}<div class="subtitle">{subtitle}</div>{/if}
     </div>
 
-    <div class="status-slot">
-      <button type="button" class="pill-button" onclick={openDrawer} aria-label="Открыть состояние">
-        <Badge variant={STATUS_VARIANT[engineStatus]} size="md">
-          {STATUS_LABEL[engineStatus]}
-        </Badge>
+    <div class="header-tools">
+      <LiveConnectionsChip />
+
+      <button type="button" class="params-btn" onclick={openDrawer} aria-label="Параметры sing-box">
+        <Settings size={16} aria-hidden="true" />
+        <span class="params-text">Параметры sing-box</span>
       </button>
-    </div>
 
-    <LiveConnectionsChip />
+      <div class="header-actions">
+        {#if onOpenInspector}
+          <button type="button" class="icon-btn" onclick={onOpenInspector} aria-label="Инспектор маршрута" title="Инспектор маршрута">
+            <span class="action-icon"><Search size={16} /></span>
+            <span class="action-text">Инспектор</span>
+          </button>
+        {/if}
+        {#if onOpenJson}
+          <button type="button" class="icon-btn" onclick={onOpenJson} aria-label="JSON-конфиг" title="JSON-конфиг">
+            <span class="action-icon"><FileJson size={16} /></span>
+            <span class="action-text">Конфиг</span>
+          </button>
+        {/if}
+      </div>
 
-    <div class="header-actions">
-      {#if onOpenInspector}
-        <button type="button" class="icon-btn" onclick={onOpenInspector} aria-label="Инспектор маршрута" title="Инспектор маршрута">
-          <span class="action-icon"><Search size={16} /></span>
-          <span class="action-text">Инспектор</span>
-        </button>
-      {/if}
-      {#if onOpenJson}
-        <button type="button" class="icon-btn" onclick={onOpenJson} aria-label="JSON-конфиг" title="JSON-конфиг">
-          <span class="action-icon"><FileJson size={16} /></span>
-          <span class="action-text">Конфиг</span>
-        </button>
-      {/if}
-    </div>
-
-    <div class="mode-toggle" role="tablist" aria-label="Режим интерфейса">
-      <button
-        type="button"
-        role="tab"
-        aria-selected={currentMode === 'beginner'}
-        class:active={currentMode === 'beginner'}
-        onclick={() => selectMode('beginner')}
-      >Простой</button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={currentMode === 'expert'}
-        class:active={currentMode === 'expert'}
-        onclick={() => selectMode('expert')}
-      >Эксперт</button>
+      <SegmentedControl
+        value={currentMode}
+        options={[
+          { value: 'beginner', label: 'Простой' },
+          { value: 'expert', label: 'Эксперт' },
+        ] satisfies Array<{ value: RouterMode; label: string }>}
+        ariaLabel="Режим интерфейса"
+        onchange={selectMode}
+      />
     </div>
   </header>
 
@@ -102,6 +84,7 @@
 </div>
 
 <StatusDrawer />
+<SourceDrawer />
 
 <style>
   .sb-shell { display: flex; flex-direction: column; gap: var(--sp-4); }
@@ -129,21 +112,53 @@
     color: var(--text-muted);
   }
 
-  .status-slot { flex-shrink: 0; }
-  .status-slot :global(.badge) {
-    min-height: 22px;
-    padding-top: 0.1875rem;
-    padding-bottom: 0.1875rem;
+  .header-tools {
     display: inline-flex;
     align-items: center;
-    line-height: 1.1;
+    gap: 8px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .header-tools :global(.chip),
+  .params-btn,
+  .header-actions .icon-btn,
+  .header-tools :global(.segmented-control) {
+    height: 32px;
+    box-sizing: border-box;
+  }
+
+  .params-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-secondary, var(--bg-secondary));
+    border: 1px solid var(--color-border, var(--border));
+    color: var(--color-text-secondary, var(--text-secondary));
+    font-size: 12px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .params-btn:hover {
+    color: var(--color-text-primary, var(--text-primary));
+    background: var(--color-bg-hover, var(--bg-tertiary));
+    border-color: var(--border-hover, var(--accent-line));
+  }
+  .params-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .icon-btn {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text-secondary);
-    padding: 6px;
+    background: var(--color-bg-secondary, var(--bg-secondary));
+    border: 1px solid var(--color-border, var(--border));
+    color: var(--color-text-secondary, var(--text-secondary));
+    padding: 0 8px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     display: inline-flex;
@@ -153,8 +168,8 @@
   }
   .action-text { display: none; }
   .icon-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
+    color: var(--color-text-primary, var(--text-primary));
+    background: var(--color-bg-hover, var(--bg-tertiary));
   }
 
   .header-actions {
@@ -164,51 +179,7 @@
     flex-shrink: 0;
   }
 
-  .mode-toggle {
-    display: inline-flex;
-    padding: 3px;
-    gap: 2px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    flex-shrink: 0;
-  }
-  .mode-toggle button {
-    border: 0;
-    border-radius: 4px;
-    padding: 6px 14px;
-    font-size: var(--fs-md);
-    font-weight: 500;
-    font-family: inherit;
-    cursor: pointer;
-    background: transparent;
-    color: var(--text-secondary);
-    transition: all var(--t-fast);
-  }
-  .mode-toggle button.active {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-    font-weight: 600;
-    box-shadow: inset 0 0 0 1px var(--accent-line);
-  }
-
   .sb-body { width: 100%; }
-
-  .pill-button {
-    background: none;
-    border: 0;
-    padding: 0;
-    cursor: pointer;
-    font: inherit;
-    color: inherit;
-    border-radius: var(--radius-sm);
-    transition: opacity var(--t-fast);
-  }
-  .pill-button:hover { opacity: 0.85; }
-  .pill-button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
 
   @media (max-width: 768px) {
     .sb-header {
@@ -222,17 +193,25 @@
     .title {
       font-size: 18px;
     }
-    .pill-button {
+    .header-tools {
       width: 100%;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
     }
-    .mode-toggle {
+    .params-btn,
+    .header-tools :global(.chip),
+    .header-tools :global(.segmented-control) {
       width: 100%;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
+      flex: none;
+      justify-content: center;
     }
-    .mode-toggle button {
-      padding: 6px 10px;
-      font-size: 11px;
+    .header-tools :global(.segmented-control-btn) {
+      flex: 1;
+      min-width: 0;
+    }
+    .header-actions {
+      width: 100%;
     }
     .sb-body {
       padding: 0 12px;
@@ -247,32 +226,26 @@
       gap: 0.625rem;
     }
 
-    .status-slot {
+    .header-tools {
       width: 100%;
       min-width: 0;
-      align-self: stretch;
-    }
-
-    .pill-button {
-      width: 100%;
-      min-width: 0;
-      min-height: 36px;
-      display: flex;
+      flex-direction: column;
       align-items: stretch;
-      justify-content: stretch;
-      padding: 0;
+      gap: 0.5rem;
     }
 
-    .status-slot :global(.badge) {
+    .header-tools :global(.chip),
+    .params-btn,
+    .header-tools :global(.segmented-control) {
       width: 100%;
+      flex: none;
       min-width: 0;
-      min-height: 36px;
-      display: flex;
-      align-items: center;
       justify-content: center;
-      padding: 0 0.625rem;
-      line-height: 1.1;
-      border-radius: var(--radius-sm);
+    }
+
+    .header-tools :global(.segmented-control-btn) {
+      flex: 1;
+      min-width: 0;
     }
 
     .header-actions {
@@ -289,7 +262,7 @@
       width: 100%;
       min-width: 0;
       max-width: 100%;
-      min-height: 36px;
+      height: 32px;
       justify-content: center;
       white-space: nowrap;
     }

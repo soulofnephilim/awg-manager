@@ -23,6 +23,7 @@ describe('deriveRoutingSummary', () => {
     expect(s.defaultDnsLabel).toBe('77.88.8.8');
     expect(s.tunnels).toEqual(['my-selector']);
     expect(s.tunneledRuleCount).toBe(2);
+    expect(s.bypassRuleCount).toBe(0);
     expect(s.tunnelDnsLabel).toBe('9.9.9.9');
   });
 
@@ -35,6 +36,7 @@ describe('deriveRoutingSummary', () => {
     const s = deriveRoutingSummary(rules, 'direct', dnsServers, globals);
     expect(s.tunnels).toEqual(['wg-nl']);
     expect(s.tunneledRuleCount).toBe(1);
+    expect(s.bypassRuleCount).toBe(1);
   });
 
   it('>1 туннель: оба тега, общий счётчик', () => {
@@ -46,6 +48,7 @@ describe('deriveRoutingSummary', () => {
     const s = deriveRoutingSummary(rules, 'direct', dnsServers, globals);
     expect(s.tunnels).toEqual(['wg-nl', 'wg-us']);
     expect(s.tunneledRuleCount).toBe(3);
+    expect(s.bypassRuleCount).toBe(0);
   });
 
   it('final не dns-direct / нет detour-сервера → системный DNS / null', () => {

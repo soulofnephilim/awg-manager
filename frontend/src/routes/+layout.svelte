@@ -28,6 +28,7 @@
 	import { settings as settingsStore, reloadSettings, usageLevel } from '$lib/stores/settings';
 	import { loadPresetCatalog } from '$lib/stores/presets';
 	import { donateModalOpen, openDonateModal, closeDonateModal } from '$lib/stores/donateModal';
+	import DevelopFeedbackFab from '$lib/components/layout/DevelopFeedbackFab.svelte';
 	import {
 		isSectionVisible,
 		pathToSection,
@@ -61,6 +62,8 @@
 
 	let disconnectSSE: (() => void) | null = null;
 	let unsubSysInfo: (() => void) | null = null;
+
+	const isDevelopChannel = $derived($settingsStore?.updates?.channel === 'develop');
 
 	let knownInstanceId = '';
 
@@ -439,6 +442,10 @@
 			</div>
 		</div>
 	</Modal>
+
+	{#if $isAuthenticated && isDevelopChannel}
+		<DevelopFeedbackFab />
+	{/if}
 {/if}
 
 <style>

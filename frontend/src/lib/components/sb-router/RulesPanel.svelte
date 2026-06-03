@@ -16,10 +16,13 @@
   import { isSystemRule, singboxRuleToCard } from './adapters';
   import { presetCatalog } from '$lib/stores/presets';
   import RuleEditModal from '$lib/components/routing/singboxRouter/RuleEditModal.svelte';
+  import RuleSetAddModal from '$lib/components/routing/singboxRouter/RuleSetAddModal.svelte';
   import { computeRuleSetUsage } from '$lib/components/routing/singboxRouter';
+  import type { SingboxRouterRuleSet } from '$lib/types';
   import { api } from '$lib/api/client';
   import { notifications } from '$lib/stores/notifications';
   import { syncTunnelDnsRule } from './emptyStateActions';
+  import { pluralize, RULE_WORDS } from '$lib/utils/pluralize';
   import type { RuleCardData } from './types';
 
   const rules = singboxRouterStore.rules;
@@ -39,6 +42,8 @@
     }
     return labels;
   });
+
+  const knownRulesetTags = $derived(new Set($ruleSets.map((rs) => rs.tag).filter(Boolean)));
 
   let cards: RuleCardData[] = $derived.by(() =>
     $rules.map((r, i) =>
@@ -67,16 +72,16 @@
   const DRAG_THRESHOLD = 7;
 
   let count = $derived(cards.length);
-  function pluralRules(n: number): string {
-    if (n === 1) return 'правило';
-    if (n >= 2 && n <= 4) return 'правила';
-    return 'правил';
-  }
 
   let deleteIndex = $state<number | null>(null);
   let deleteTarget = $state<{ index: number; summary: string } | null>(null);
   let deleteBusy = $state(false);
   let editIndex = $state<number | null>(null);
+  let rsEditTag = $state<string | null>(null);
+
+  const rsEditTarget = $derived<SingboxRouterRuleSet | undefined>(
+    rsEditTag !== null ? $ruleSets.find((rs) => rs.tag === rsEditTag) : undefined,
+  );
 
   onMount(() => {
     void singboxRouterStore.loadAll();
@@ -113,6 +118,28 @@
     if (isSystemRule($rules[index])) return;
     cancelDrag();
     editIndex = index;
+  }
+
+  function requestRulesetEdit(tag: string) {
+    cancelDrag();
+    const rs = $ruleSets.find((r) => r.tag === tag);
+    if (!rs) {
+      notifications.error(`Набор «${tag}» не найден в конфигурации`);
+      return;
+    }
+    rsEditTag = tag;
+  }
+
+  async function handleRsEditSave(rs: SingboxRouterRuleSet) {
+    if (rsEditTag === null) return;
+    try {
+      await api.singboxRouterUpdateRuleSet(rsEditTag, rs);
+      await singboxRouterStore.loadAll();
+      notifications.success('Набор обновлён');
+      rsEditTag = null;
+    } catch (e) {
+      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async function confirmDelete() {
@@ -306,7 +333,7 @@
     event.preventDefault();
     event.stopPropagation();
     if (card.isSystem) return;
-    if (deleteBusy || editIndex !== null || deleteTarget) return;
+    if (deleteBusy || editIndex !== null || rsEditTag !== null || deleteTarget) return;
     if (event.button !== 0) return;
     const shell = rowElements.get(card.id);
     const handleEl = event.currentTarget as HTMLElement | null;
@@ -349,7 +376,7 @@
     </div>
     <div class="header-right">
       <div class="counter">
-        {count} {pluralRules(count)}
+        {pluralize(count, RULE_WORDS)}
       </div>
       <Button variant="secondary" size="sm" onclick={() => openAddWizard()}>
         + Правило
@@ -387,6 +414,8 @@
               index={i}
               dragging={draggingIndex === i}
               onEdit={() => requestEdit(i)}
+              onRulesetClick={requestRulesetEdit}
+              {knownRulesetTags}
               onDelete={() => requestDelete(i)}
               onDragHandlePointerDown={(e) => handleDragPointerDown(i, card, e)}
             />
@@ -417,6 +446,15 @@
     ruleSetUsage={editRuleSetUsage}
     onClose={() => (editIndex = null)}
     onSave={handleEditSave}
+  />
+{/if}
+
+{#if rsEditTag !== null && rsEditTarget}
+  <RuleSetAddModal
+    ruleSet={rsEditTarget}
+    outboundOptions={$options}
+    onClose={() => (rsEditTag = null)}
+    onSave={handleRsEditSave}
   />
 {/if}
 

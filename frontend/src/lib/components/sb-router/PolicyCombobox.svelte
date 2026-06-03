@@ -40,6 +40,9 @@
   let trimmed = $derived(query.trim());
   let canCreate = $derived(trimmed.length > 0 && !policies.some((p) => p.name === trimmed));
 
+  let currentPolicy = $derived(policies.find((p) => p.name === value));
+  let currentLabel = $derived((currentPolicy?.description ?? '').trim());
+
   function select(name: string) {
     onChange(name);
     query = '';
@@ -62,7 +65,14 @@
 
 <div class="combo">
   {#if value}
-    <div class="current">Текущая: <strong>{value}</strong></div>
+    <div class="current">
+      Текущая:
+      {#if currentLabel && currentLabel !== value}
+        <strong>{currentLabel}</strong> <span class="current-id">({value})</span>
+      {:else}
+        <strong>{value}</strong>
+      {/if}
+    </div>
   {/if}
   <div class="wrap">
     <input
@@ -97,7 +107,8 @@
 <style>
   .combo { display: flex; flex-direction: column; gap: 6px; }
   .current { font-size: 11.5px; color: var(--text-muted); }
-  .current strong { color: var(--text-primary); font-family: var(--font-mono); }
+  .current strong { color: var(--text-primary); }
+  .current-id { font-family: var(--font-mono); color: var(--text-secondary); font-size: 11px; }
   .wrap { position: relative; }
   .inp {
     width: 100%; box-sizing: border-box;

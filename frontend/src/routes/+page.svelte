@@ -30,7 +30,7 @@
 		StatusDot,
 		Stat,
 		StatStrip,
-		GridListToggle,
+		LayoutViewToggle,
 	} from '$lib/components/ui';
 	import { singboxDelayHistory, singboxStatus, singboxTraffic, singboxTunnels } from '$lib/stores/singbox';
 	import { SingboxInstallBanner, SingboxTunnelCard } from '$lib/components/singbox';
@@ -59,6 +59,7 @@
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode as getIsMockDevMode } from '$lib/env';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
+	import { formatRunningSub, pluralForm, SUBSCRIPTION_WORDS, TUNNEL_WORDS } from '$lib/utils/pluralize';
 
 	type TunnelTab = 'awg' | 'singbox' | 'subscriptions';
 	type AwgTunnelViewMode = 'cards' | 'compact' | 'list';
@@ -1233,62 +1234,17 @@
 			{@const totalCount = awgSummaryTotal}
 			<div class="tunnels-toolbar">
 				<div class="count-group">
-					<span class="tunnel-count">{totalCount} {totalCount === 1 ? 'туннель' : totalCount < 5 ? 'туннеля' : 'туннелей'}</span>
+					<span class="tunnel-count">{totalCount} {pluralForm(totalCount, TUNNEL_WORDS)}</span>
 					<StoreStatusBadge store={tunnels} />
 				</div>
 				<div class="toolbar-actions">
 					{#if showAwgViewModeSwitch && !isAwgMobile}
-						<div class="view-mode-switch" role="group" aria-label="Вид туннелей">
-							<button
-								type="button"
-								class="view-mode-btn"
-								class:active={awgEffectiveViewMode === 'cards'}
-								aria-pressed={awgEffectiveViewMode === 'cards'}
-								aria-label="Мелкая сетка"
-								title="Мелкая сетка"
-								onclick={() => (awgViewMode = 'cards')}
-							>
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-									<rect x="4" y="5" width="7" height="6" rx="1.5" />
-									<rect x="13" y="5" width="7" height="6" rx="1.5" />
-									<rect x="4" y="13" width="7" height="6" rx="1.5" />
-									<rect x="13" y="13" width="7" height="6" rx="1.5" />
-								</svg>
-							</button>
-							<button
-								type="button"
-								class="view-mode-btn"
-								class:active={awgEffectiveViewMode === 'compact'}
-								aria-pressed={awgEffectiveViewMode === 'compact'}
-								aria-label="Сетка"
-								title="Сетка"
-								onclick={() => (awgViewMode = 'compact')}
-							>
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-									<rect x="4" y="5" width="16" height="14" rx="2" />
-									<path d="M7 9h10" />
-									<path d="M7 13h6" />
-								</svg>
-							</button>
-							<button
-								type="button"
-								class="view-mode-btn"
-								class:active={awgViewMode === 'list'}
-								aria-pressed={awgViewMode === 'list'}
-								aria-label="Список"
-								title="Список"
-								onclick={() => (awgViewMode = 'list')}
-							>
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-									<path d="M9 7h11" />
-									<path d="M9 12h11" />
-									<path d="M9 17h11" />
-									<circle cx="5" cy="7" r="1.2" fill="currentColor" stroke="none" />
-									<circle cx="5" cy="12" r="1.2" fill="currentColor" stroke="none" />
-									<circle cx="5" cy="17" r="1.2" fill="currentColor" stroke="none" />
-								</svg>
-							</button>
-						</div>
+						<LayoutViewToggle
+							value={awgViewMode}
+							denseValue="cards"
+							ariaLabel="Вид туннелей"
+							onchange={(mode) => (awgViewMode = mode)}
+						/>
 					{/if}
 					<Button variant="secondary" size="md" onclick={handleExportAll} disabled={exporting} iconBefore={exportIcon}>
 						Экспорт
@@ -1303,7 +1259,7 @@
 					<StatStrip>
 						<Stat
 							value={`${awgSummaryActive}/${awgSummaryTotal}`}
-							label="Активные туннели"
+							label={pluralForm(awgSummaryActive, TUNNEL_WORDS)}
 							sub={`AWG ${awgList.length} · system ${visibleSystemList.length} · external ${externalList.length}`}
 						/>
 						<Stat
@@ -1806,13 +1762,14 @@
 					<div class="tunnels-toolbar">
 						<span class="tunnel-count">
 							{subscriptionsList.length}
-							{subscriptionsList.length === 1 ? 'подписка' : subscriptionsList.length < 5 ? 'подписки' : 'подписок'}
+							{pluralForm(subscriptionsList.length, SUBSCRIPTION_WORDS)}
 						</span>
 						<div class="toolbar-actions">
 							{#if subscriptionsList.length > 0 && showSingboxLayoutPicker}
-								<GridListToggle
+								<LayoutViewToggle
 									value={singboxSubscriptionsEffectiveLayout}
 									showListOption={showSingboxGridListToggle}
+									ariaLabel="Вид подписок"
 									onchange={(v) => (singboxSubscriptionsLayoutMode = v)}
 								/>
 							{/if}
@@ -1845,9 +1802,12 @@
 						<div class="awg-summary-row">
 							<StatStrip>
 								<Stat
-									value={`${singboxSubscriptionsTrafficStats.count}`}
-									label="Подписок"
-									sub={`в работе ${singboxSubscriptionsTrafficStats.activeCount} · не активные ${singboxSubscriptionsTrafficStats.inactiveCount}`}
+									value={`${singboxSubscriptionsTrafficStats.activeCount}/${singboxSubscriptionsTrafficStats.count}`}
+									label={pluralForm(singboxSubscriptionsTrafficStats.activeCount, SUBSCRIPTION_WORDS)}
+									sub={formatRunningSub(
+										singboxSubscriptionsTrafficStats.activeCount,
+										singboxSubscriptionsTrafficStats.count,
+									)}
 								/>
 								<Stat
 									value={formatBytes(
@@ -1902,7 +1862,7 @@
 							{#if subscriptionsListRows.length > 0}
 								<div class="awg-list-row awg-list-row--section">
 									<div class="awg-list-section-title">
-										Не активные · {subscriptionsListRows.length}
+										Остановлено · {subscriptionsListRows.length}
 									</div>
 								</div>
 								{#each subscriptionsListRows as sub (sub.id)}
@@ -1941,7 +1901,7 @@
 								class="external-section"
 								class:singbox-sub-inactive-section={subscriptionsActiveCards.length === 0}
 							>
-								<h2 class="section-title">Не активные</h2>
+								<h2 class="section-title">Остановлено</h2>
 								<div
 									class="tunnel-grid"
 									class:tunnel-grid--dense={singboxSubscriptionsEffectiveLayout === 'dense'}
@@ -1968,13 +1928,14 @@
 				<div class="tunnels-toolbar">
 					<span class="tunnel-count">
 						{singboxTunnelsList.length}
-						{singboxTunnelsList.length === 1 ? 'туннель' : singboxTunnelsList.length < 5 ? 'туннеля' : 'туннелей'}
+						{pluralForm(singboxTunnelsList.length, TUNNEL_WORDS)}
 					</span>
 					<div class="toolbar-actions">
 						{#if singboxTunnelsList.length > 0 && showSingboxLayoutPicker}
-							<GridListToggle
+							<LayoutViewToggle
 								value={singboxTunnelsEffectiveLayout}
 								showListOption={showSingboxGridListToggle}
+								ariaLabel="Вид туннелей"
 								onchange={(v) => (singboxTunnelsLayoutMode = v)}
 							/>
 						{/if}
@@ -2051,8 +2012,8 @@
 						<StatStrip>
 							<Stat
 								value={`${singboxTunnelListStats.running}/${singboxTunnelListStats.count}`}
-								label="Процессы"
-								sub={`${singboxTunnelListStats.running} running · ${singboxTunnelListStats.stopped} stopped`}
+								label={pluralForm(singboxTunnelListStats.running, TUNNEL_WORDS)}
+								sub={formatRunningSub(singboxTunnelListStats.running, singboxTunnelListStats.count)}
 							/>
 							<Stat
 								value={formatBytes(singboxTunnelListStats.down + singboxTunnelListStats.up)}
@@ -2323,54 +2284,6 @@
 		color: var(--color-accent);
 		border-color: var(--color-accent);
 		filter: none;
-	}
-
-	.view-mode-switch {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.25rem;
-		box-sizing: border-box;
-		height: 32px;
-		padding: 2px;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-sm);
-		background: var(--color-bg-secondary);
-		flex-shrink: 0;
-	}
-
-	.view-mode-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 26px;
-		padding: 0;
-		border: none;
-		border-radius: calc(var(--radius-sm) - 2px);
-		background: transparent;
-		color: var(--color-text-muted);
-		cursor: pointer;
-		transition: background var(--t-fast) ease, color var(--t-fast) ease;
-	}
-
-	.view-mode-btn:hover {
-		background: var(--color-bg-hover);
-		color: var(--color-text-primary);
-	}
-
-	.view-mode-btn.active {
-		background: var(--color-accent-tint);
-		color: var(--color-accent);
-	}
-
-	.view-mode-btn:focus-visible {
-		outline: 2px solid var(--color-accent);
-		outline-offset: 2px;
-	}
-
-	.view-mode-btn svg {
-		width: 1rem;
-		height: 1rem;
 	}
 
 	:global(.tunnel-grid--dense) {
@@ -3697,7 +3610,7 @@
 			width: 100%;
 		}
 
-		.toolbar-actions .view-mode-switch {
+		.toolbar-actions :global(.segmented-control) {
 			grid-column: 1 / -1;
 			width: 100%;
 			justify-content: center;
@@ -3708,7 +3621,7 @@
 			min-height: 32px;
 		}
 
-		/* When there's only "+ Добавить" (no GridListToggle), move it to the right cell. */
+		/* When there's only "+ Добавить" (no layout picker), move it to the right cell. */
 		.toolbar-actions > :global(.btn):only-child {
 			grid-column: 2 / 3;
 			justify-self: stretch;

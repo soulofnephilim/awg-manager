@@ -70,7 +70,7 @@
 				aria-label="Открыть форму GitHub issue для обратной связи"
 				title="Публичный GitHub issue: это не служба поддержки"
 			>
-				Сообщить
+				Сообщить о проблеме
 			</a>
 			{#if isExpert}
 				<span class="footer-sep">·</span>
@@ -87,7 +87,8 @@
 			<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
 				<path d="M9 6l6 6-6 6"/>
 			</svg>
-			Благодарности ({credits.length})
+			<span class="footer-collapse-full">Благодарности ({credits.length})</span>
+			<span class="footer-collapse-short">Благодарности</span>
 		</button>
 	</div>
 
@@ -113,12 +114,18 @@
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
+		gap: 0.5rem;
 		padding: 0.625rem 0.875rem;
 		background: var(--color-bg-secondary);
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius);
 		font-size: 0.8125rem;
 		color: var(--color-text-secondary);
+	}
+
+	.footer-link-group {
+		min-width: 0;
+		flex: 1 1 auto;
 	}
 
 	.footer-link-group a {
@@ -139,6 +146,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.375rem;
+		flex-shrink: 0;
 		background: none;
 		border: none;
 		color: var(--color-text-muted);
@@ -148,6 +156,32 @@
 		font-weight: 600;
 		cursor: pointer;
 		padding: 0;
+	}
+
+	.footer-collapse-short {
+		display: none;
+	}
+
+	@media (max-width: 640px) {
+		.settings-footer-bar {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.footer-collapse {
+			align-self: flex-end;
+			text-transform: none;
+			letter-spacing: normal;
+			font-weight: 500;
+		}
+
+		.footer-collapse-full {
+			display: none;
+		}
+
+		.footer-collapse-short {
+			display: inline;
+		}
 	}
 
 	.footer-collapse svg {

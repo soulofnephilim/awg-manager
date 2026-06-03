@@ -5,7 +5,7 @@
 -->
 
 <script lang="ts">
-  import type { RuleCardData } from './types';
+  import type { MatcherChip as MatcherChipData, RuleCardData } from './types';
   import ServiceTile from './ServiceTile.svelte';
   import MatcherChip from './MatcherChip.svelte';
   import OutboundTile from './OutboundTile.svelte';
@@ -18,6 +18,8 @@
     index: number;
     onDelete?: () => void;
     onEdit?: () => void;
+    onRulesetClick?: (tag: string) => void;
+    knownRulesetTags?: Set<string>;
     onDragHandlePointerDown?: (event: PointerEvent) => void;
     dragging?: boolean;
   }
@@ -26,6 +28,8 @@
     index,
     onDelete,
     onEdit,
+    onRulesetClick,
+    knownRulesetTags,
     onDragHandlePointerDown,
     dragging = false,
   }: Props = $props();
@@ -52,6 +56,26 @@
   function actionTooltip(action: 'edit' | 'delete', cardData: RuleCardData, idx: number): string {
     const prefix = action === 'edit' ? 'Редактировать' : 'Удалить';
     return `${prefix} ${ruleActionTarget(cardData, idx)}`;
+  }
+
+  function chipOnclick(chip: MatcherChipData): (() => void) | undefined {
+    if (chip.kind === 'ruleset' && chip.rulesetTag && onRulesetClick && knownRulesetTags?.has(chip.rulesetTag)) {
+      return () => onRulesetClick(chip.rulesetTag!);
+    }
+    if (chip.kind === 'domain' && onEdit) {
+      return onEdit;
+    }
+    return undefined;
+  }
+
+  function chipTitle(chip: MatcherChipData): string | undefined {
+    if (chip.kind === 'ruleset' && chip.rulesetTag && onRulesetClick && knownRulesetTags?.has(chip.rulesetTag)) {
+      return `Редактировать набор «${chip.label}»`;
+    }
+    if (chip.kind === 'domain' && onEdit) {
+      return editTip;
+    }
+    return undefined;
   }
 </script>
 
@@ -99,7 +123,13 @@
     {#if !card.isSystem && visibleChips.length > 0}
       <div class="chips">
         {#each visibleChips as chip}
-          <MatcherChip kind={chip.kind} label={chip.label} mono={chip.mono} />
+          <MatcherChip
+            kind={chip.kind}
+            label={chip.label}
+            mono={chip.mono}
+            onclick={chipOnclick(chip)}
+            title={chipTitle(chip)}
+          />
         {/each}
         {#if hiddenCount > 0}
           <span class="more">+{hiddenCount} ещё</span>

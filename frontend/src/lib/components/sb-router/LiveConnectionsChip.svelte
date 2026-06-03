@@ -3,29 +3,25 @@
   когда движок работает. Клик → полный вид (?sub=connections).
 -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
-  import type { ClashConnectionsRaw, ConnectionsSnapshot } from '$lib/types/singboxConnections';
-  import { parseSnapshot } from '$lib/utils/singboxConnections';
-  import { createClashWS, type WSStatus } from '$lib/utils/clashWebSocket';
-  import { formatBytes } from '$lib/utils/format';
+  import { pluralize, CONNECTION_WORDS } from '$lib/utils/pluralize';
+  import { liveConnectionsSnapshot, liveConnectionsWsStatus } from './liveConnectionsStore';
 
   const status = singboxRouterStore.status;
   let engineOn = $derived($status?.enabled ?? false);
+  let isActive = $derived($page.url.searchParams.get('sub') === 'connections');
 
-  const EMPTY: ConnectionsSnapshot = { connections: [], downloadTotal: 0, uploadTotal: 0, connectionsTotal: 0 };
-  const EMPTY_CLIENTS = new Map<string, string>();
-  let snapshot = $state<ConnectionsSnapshot>(EMPTY);
-  let wsStatus = $state<WSStatus>('connecting');
-  let wsClose: (() => void) | null = null;
+  let snapshot = $derived($liveConnectionsSnapshot);
+  let wsStatus = $derived($liveConnectionsWsStatus);
 
-  const totalUp = $derived(snapshot.connections.reduce((s, c) => s + c.upload, 0));
-  const totalDown = $derived(snapshot.connections.reduce((s, c) => s + c.download, 0));
   const count = $derived(snapshot.connectionsTotal);
+  const countLabel = $derived(pluralize(count, CONNECTION_WORDS));
   let visible = $derived(engineOn);
   let isStale = $derived(wsStatus !== 'open');
   let stateTitle = $derived.by(() => {
+    if (isActive) return 'Закрыть живые соединения';
     if (wsStatus === 'open') {
       return count > 0 ? 'Открыть живые соединения' : 'Живые соединения: активных подключений нет';
     }
@@ -34,53 +30,64 @@
     return 'Живые соединения недоступны';
   });
   let stateAria = $derived.by(() => {
-    if (wsStatus === 'open') return `Живые соединения: ${count}`;
+    if (isActive) return `Живые соединения открыты: ${countLabel}. Нажмите, чтобы закрыть`;
+    if (wsStatus === 'open') return `Живые соединения: ${countLabel}`;
     return 'Живые соединения недоступны';
   });
-  let trafficText = $derived.by(() => {
-    if (wsStatus !== 'open') return '—';
-    if (count === 0) return '';
-    return `↑ ${formatBytes(totalUp)} ↓ ${formatBytes(totalDown)}`;
-  });
 
-  $effect(() => {
-    if (engineOn && !wsClose) {
-      wsClose = createClashWS<ClashConnectionsRaw>(
-        '/api/singbox/clash/connections',
-        (raw) => { snapshot = parseSnapshot(raw, EMPTY_CLIENTS); },
-        (s) => { wsStatus = s; },
-      );
-    } else if (!engineOn && wsClose) {
-      wsClose();
-      wsClose = null;
-      snapshot = EMPTY;
+  function toggleConnections() {
+    const url = new URL(window.location.href);
+    if (isActive) {
+      url.searchParams.delete('sub');
+    } else {
+      url.searchParams.set('tab', 'singbox');
+      url.searchParams.set('sub', 'connections');
     }
-  });
-  onDestroy(() => { wsClose?.(); });
-
-  function openFull() {
-    void goto('/routing?tab=singbox&sub=connections');
+    void goto(`${url.pathname}${url.search}`, { keepFocus: true, noScroll: true });
   }
 </script>
 
 {#if visible}
-  <button type="button" class="chip" onclick={openFull} title={stateTitle} aria-label={stateAria}>
+  <button
+    type="button"
+    class="chip"
+    class:active={isActive}
+    aria-pressed={isActive}
+    onclick={toggleConnections}
+    title={stateTitle}
+    aria-label={stateAria}
+  >
     <span class="dot" data-stale={isStale}></span>
-    <span class="n">{count}</span> conn
-    <span class="b">{trafficText}</span>
+    <span class="label">{countLabel}</span>
   </button>
 {/if}
 
 <style>
   .chip {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 10px; border-radius: 999px;
-    background: var(--bg-primary); border: 1px solid var(--border);
-    color: var(--text-secondary); font-size: 12px; font-family: inherit; cursor: pointer; white-space: nowrap;
+    height: 32px;
+    padding: 0 10px;
+    box-sizing: border-box;
+    border-radius: 999px;
+    background: var(--color-bg-secondary, var(--bg-primary));
+    border: 1px solid var(--color-border, var(--border));
+    color: var(--color-text-secondary, var(--text-secondary));
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
   }
   .chip:hover { border-color: var(--accent); }
+  .chip.active {
+    background: color-mix(in srgb, var(--color-success, #22c55e) 12%, var(--bg-primary));
+    border-color: color-mix(in srgb, var(--color-success, #22c55e) 45%, var(--border));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-success, #22c55e) 20%, transparent);
+  }
+  .chip.active:hover {
+    border-color: var(--color-success, #22c55e);
+  }
+  .chip.active .label { color: var(--color-success, #22c55e); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-success, #22c55e); flex-shrink: 0; }
   .dot[data-stale='true'] { background: var(--color-warning, #dab856); }
-  .n { font-family: var(--font-mono); font-weight: 600; color: var(--text-primary); }
-  .b { font-family: var(--font-mono); color: var(--text-muted); margin-left: 2px; }
+  .label { color: var(--text-primary); font-weight: 500; }
 </style>

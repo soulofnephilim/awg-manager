@@ -3,14 +3,6 @@
   Полная композиция wizard'а: header + stepper + 3 шага + actions.
 -->
 
-<script lang="ts" module>
-  function pluralRules(n: number): string {
-    if (n === 1) return 'правило';
-    if (n >= 2 && n <= 4) return 'правила';
-    return 'правил';
-  }
-</script>
-
 <script lang="ts">
   import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
@@ -40,6 +32,7 @@
   import MobileBottomBar from './MobileBottomBar.svelte';
   import { mode } from './modeStore';
   import { ensureTunnelDnsInfra, syncTunnelDnsRule } from './emptyStateActions';
+  import { pluralize, RULE_WORDS, SERVICE_WORDS, SET_WORDS } from '$lib/utils/pluralize';
 
   const outbounds = singboxRouterStore.outbounds;
   const presets = singboxRouterStore.presets;
@@ -110,14 +103,14 @@
         }
         const created = result.successes.length;
         if (continueAfter) {
-          notifications.success(`Создано правил: ${created}. Можно добавить ещё одно.`);
+          notifications.success(`Создано ${pluralize(created, RULE_WORDS)}. Можно добавить ещё одно.`);
           clearSelection();
           resetWizardState();
           customResetKey++;
           await singboxRouterStore.loadAll();
           if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
         } else {
-          notifications.success(`Создано правил: ${created}`);
+          notifications.success(`Создано ${pluralize(created, RULE_WORDS)}`);
           clearSelection();
           closeAddWizard();
           await singboxRouterStore.loadAll();
@@ -162,11 +155,11 @@
     <p class="sub">Выберите сервис или опишите свой. Затем — куда его пустить.</p>
 
     <div class="stepper">
-      <StepPill n={1} label="Что направить" active={!step1Ok} done={step1Ok} />
-      <div class="connector"></div>
-      <StepPill n={2} label="Куда" active={step1Ok && !step2Ok} done={step1Ok && step2Ok} />
-      <div class="connector"></div>
-      <StepPill n={3} label="Превью" active={step1Ok && step2Ok} done={false} />
+      <StepPill n={1} label="Что направить" shortLabel="Что" active={!step1Ok} done={step1Ok} />
+      <div class="connector" aria-hidden="true"></div>
+      <StepPill n={2} label="Куда" shortLabel="Куда" active={step1Ok && !step2Ok} done={step1Ok && step2Ok} />
+      <div class="connector" aria-hidden="true"></div>
+      <StepPill n={3} label="Превью" shortLabel="Проверка" active={step1Ok && step2Ok} done={false} />
     </div>
 
     <WizardStep n={1} title="Что направить" hint="выберите шаблон или опишите вручную" active={true}>
@@ -174,7 +167,7 @@
         <div class="picker-icon"><Plus size={20} /></div>
         <div class="picker-text">
           <div class="picker-title">Выбрать из готовых шаблонов</div>
-          <div class="picker-sub">{$presets.length} сервисов · {$ruleSets.length} наборов</div>
+          <div class="picker-sub">{pluralize($presets.length, SERVICE_WORDS)} · {pluralize($ruleSets.length, SET_WORDS)}</div>
         </div>
         <div class="picker-chev">›</div>
       </button>
@@ -245,7 +238,7 @@
       <div class="preview-info">
         <Info size={14} />
         <span>
-          {$templatesSelection.size + (hasCustom ? 1 : 0)} {pluralRules($templatesSelection.size + (hasCustom ? 1 : 0))} будет создано.
+          {pluralize($templatesSelection.size + (hasCustom ? 1 : 0), RULE_WORDS)} будет создано.
         </span>
       </div>
     </WizardStep>
@@ -426,6 +419,23 @@
     gap: 6px;
   }
   @media (max-width: 768px) {
+    .wizard {
+      padding: var(--sp-2) var(--sp-2) calc(var(--sp-2) + 72px);
+      max-width: none;
+    }
+    .title {
+      font-size: 20px;
+    }
+    .stepper {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      padding: 8px;
+      margin-bottom: 16px;
+    }
+    .connector {
+      display: none;
+    }
     .actions.desktop-only {
       display: none;
     }

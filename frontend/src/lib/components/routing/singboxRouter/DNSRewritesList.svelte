@@ -62,8 +62,7 @@
 		<div>Шаблон</div>
 		<div></div>
 		<div>IP-адреса</div>
-		<div></div>
-		<div></div>
+		<div class="actions-head">Действия</div>
 	</div>
 	<div class="rows">
 		{#each rewrites as rw, i (i)}
@@ -71,24 +70,26 @@
 				<code class="pat mono" title={rw.pattern}>{rw.pattern}</code>
 				<span class="arrow">→</span>
 				<span class="ips mono" title={rw.ips.join(', ')}>{rw.ips.join(', ')}</span>
-				<button
-					type="button"
-					class="route-action-btn"
-					onclick={() => (editIndex = i)}
-					aria-label={`Редактировать DNS-перезапись ${rw.pattern}`}
-					title={`Редактировать DNS-перезапись «${rw.pattern}»`}
-				>
-					<Edit3 size={15} />
-				</button>
-				<button
-					type="button"
-					class="route-action-btn danger"
-					onclick={() => requestDelete(i)}
-					aria-label={`Удалить DNS-перезапись ${rw.pattern}`}
-					title={`Удалить DNS-перезапись «${rw.pattern}»`}
-				>
-					<Trash2 size={15} />
-				</button>
+				<div class="row-actions">
+					<button
+						type="button"
+						class="route-action-btn"
+						onclick={() => (editIndex = i)}
+						aria-label={`Редактировать DNS-перезапись ${rw.pattern}`}
+						title={`Редактировать DNS-перезапись «${rw.pattern}»`}
+					>
+						<Edit3 size={15} />
+					</button>
+					<button
+						type="button"
+						class="route-action-btn danger"
+						onclick={() => requestDelete(i)}
+						aria-label={`Удалить DNS-перезапись ${rw.pattern}`}
+						title={`Удалить DNS-перезапись «${rw.pattern}»`}
+					>
+						<Trash2 size={15} />
+					</button>
+				</div>
 			</div>
 		{/each}
 	</div>
@@ -147,13 +148,17 @@
 	}
 	.col-header {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 36px 36px;
+		grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) auto;
 		gap: 0.4rem;
 		padding: 0.25rem 0.75rem;
 		font-size: 0.65rem;
 		letter-spacing: 0.5px;
 		text-transform: uppercase;
 		color: var(--muted-text);
+	}
+	.actions-head {
+		text-align: right;
+		white-space: nowrap;
 	}
 	.rows {
 		display: grid;
@@ -162,14 +167,22 @@
 	}
 	.row {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 36px 36px;
+		grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) auto;
 		gap: 0.4rem;
 		align-items: center;
 		min-width: 0;
 		background: var(--surface-bg);
 		padding: 0.5rem 0.75rem;
 		border-radius: 4px;
-		overflow: hidden;
+	}
+
+	.row-actions {
+		display: flex;
+		flex-wrap: nowrap;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 4px;
+		flex-shrink: 0;
 	}
 
 	.mono {
@@ -196,23 +209,20 @@
 		}
 
 		.row {
-			grid-template-columns: minmax(0, 1fr) 40px;
+			grid-template-columns: minmax(0, 1fr) auto;
 			grid-template-areas:
-				'pattern edit'
-				'ips delete';
+				'pattern actions'
+				'ips actions';
 			gap: 0.5rem 0.625rem;
 			padding: 0.75rem 0.875rem;
 			border: 1px solid var(--border);
-			overflow: hidden;
 		}
 
 		.pat { grid-area: pattern; }
 		.ips { grid-area: ips; }
 		.arrow { display: none; }
-		.route-action-btn:first-of-type { grid-area: edit; }
-		.route-action-btn.danger { grid-area: delete; }
-		.route-action-btn {
-			justify-self: end;
+		.row-actions {
+			grid-area: actions;
 			align-self: center;
 		}
 	}

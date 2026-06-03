@@ -160,6 +160,7 @@
   --z-sticky-secondary: 50; /* TunnelEditHeader sub-sticky under AppHeader */
   --z-page-overlay: 60;     /* tab dropdowns, popovers, member-pickers */
   --z-sticky-header: 80;    /* AppHeader sticky bar */
+  --z-fab: 95;              /* floating action buttons (below drawers) */
   --z-drawer-backdrop: 90;  /* hamburger / drawer dimming layer */
   --z-drawer: 100;          /* hamburger panel, SideDrawer panel */
   --z-full-overlay: 150;    /* full-screen blocking screens (e.g. kernel-unavailable) */
@@ -729,6 +730,10 @@ label {
 	flex: 1 1 0;
 }
 
+.setting-row .flex.flex-col {
+	min-width: 0;
+}
+
 .setting-row:first-child {
 	padding-top: 0;
 }
@@ -752,10 +757,10 @@ label {
 }
 
 .setting-description {
-	overflow-wrap: anywhere;
+	overflow-wrap: break-word;
 	font-size: 0.8125rem;
 	color: var(--text-muted);
-	text-wrap: balance;
+	text-wrap: pretty;
 }
 
 .settings-panel {
@@ -1213,7 +1218,7 @@ label {
 /* Sing-box layout picker — hidden below 760px (see TUNNEL_MOBILE_LAYOUT_MAX_WIDTH_PX) */
 @media (max-width: 760px) {
 	.members-toolbar,
-	.tunnels-toolbar .toolbar-actions > .view-mode-switch {
+	.tunnels-toolbar .toolbar-actions > .segmented-control {
 		display: none !important;
 	}
 }

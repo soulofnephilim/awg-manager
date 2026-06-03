@@ -115,7 +115,7 @@ export function extractMatcherChips(
     chips.push({ kind: 'port', label: String(p), mono: true });
   }
   for (const rs of rule.rule_set ?? []) {
-    chips.push({ kind: 'ruleset', label: rulesetLabels[rs] ?? rs });
+    chips.push({ kind: 'ruleset', label: rulesetLabels[rs] ?? rs, rulesetTag: rs });
   }
   if (rule.protocol) {
     chips.push({ kind: 'protocol', label: rule.protocol });

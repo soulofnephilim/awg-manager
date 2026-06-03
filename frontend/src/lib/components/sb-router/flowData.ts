@@ -1,5 +1,6 @@
 import type { SingboxRouterRule, SingboxRouterDNSServer, SingboxRouterDNSGlobals } from '$lib/types';
 import type { OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
+import { isSystemRule } from './adapters';
 
 export interface RoutingSummary {
   /** Подпись выхода по умолчанию: «Напрямую» если route.final = direct, иначе тег. */
@@ -10,12 +11,19 @@ export interface RoutingSummary {
   tunnels: string[];
   /** Кол-во туннелируемых правил. */
   tunneledRuleCount: number;
+  /** Кол-во правил, идущих мимо туннеля (direct / final). */
+  bypassRuleCount: number;
   /** DNS туннельной ветки: server первого detour-сервера, иначе null. */
   tunnelDnsLabel: string | null;
 }
 
 function isTunneled(r: SingboxRouterRule): boolean {
   return !!r.outbound && r.outbound !== 'direct' && r.action !== 'reject';
+}
+
+function isBypassTunnel(r: SingboxRouterRule): boolean {
+  if (r.action === 'reject' || isSystemRule(r)) return false;
+  return !isTunneled(r);
 }
 
 function dnsLabelByTag(servers: SingboxRouterDNSServer[], tag: string): string | null {
@@ -40,6 +48,7 @@ export function deriveRoutingSummary(
   outboundOptions: OutboundGroup[] = [],
 ): RoutingSummary {
   const tunneled = rules.filter(isTunneled);
+  const bypass = rules.filter(isBypassTunnel);
   const tunnels: string[] = [];
   for (const r of tunneled) {
     const tag = r.outbound as string;
@@ -57,6 +66,7 @@ export function deriveRoutingSummary(
     defaultDnsLabel,
     tunnels: tunnels.map((tag) => outboundLabelByTag(outboundOptions, tag)),
     tunneledRuleCount: tunneled.length,
+    bypassRuleCount: bypass.length,
     tunnelDnsLabel,
   };
 }

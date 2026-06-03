@@ -3818,6 +3818,10 @@ definitions:
       inboundTag:
         example: sub-demo-in
         type: string
+      infoItems:
+        items:
+          $ref: '#/definitions/api.SubscriptionInfoItemDTO'
+        type: array
       isInline:
         example: false
         type: boolean
@@ -3860,6 +3864,10 @@ definitions:
       refreshHours:
         example: 24
         type: integer
+      rejectedMembers:
+        items:
+          $ref: '#/definitions/api.SubscriptionRejectedDTO'
+        type: array
       selectorTag:
         example: sub-demo
         type: string
@@ -3876,6 +3884,17 @@ definitions:
         type: string
       value:
         example: Happ/4.6.0
+        type: string
+    type: object
+  api.SubscriptionInfoItemDTO:
+    properties:
+      id:
+        type: string
+      label:
+        type: string
+      source:
+        type: string
+      tag:
         type: string
     type: object
   api.SubscriptionListResponse:
@@ -3913,6 +3932,21 @@ definitions:
         type: string
       transport:
         example: ws
+        type: string
+    type: object
+  api.SubscriptionRejectedDTO:
+    properties:
+      label:
+        type: string
+      port:
+        type: integer
+      protocol:
+        type: string
+      reason:
+        type: string
+      server:
+        type: string
+      tag:
         type: string
     type: object
   api.SubscriptionResponse:

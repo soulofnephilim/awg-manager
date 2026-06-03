@@ -288,6 +288,17 @@
 </Modal>
 
 <style>
+	.card {
+		container-type: inline-size;
+	}
+
+	.setting-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
+		gap: 0.75rem;
+	}
+
 	.integration-item {
 		display: flex;
 		align-items: center;
@@ -301,6 +312,14 @@
 		flex-direction: column;
 		gap: 0.125rem;
 		min-width: 0;
+	}
+
+	.integration-meta .setting-description {
+		min-width: 0;
+	}
+
+	.integration-meta .setting-description.warning {
+		white-space: pre-wrap;
 	}
 
 	.integration-sub {
@@ -346,7 +365,22 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.35rem;
-		min-width: 220px;
+		min-width: 0;
+		justify-self: stretch;
+	}
+
+	@container (max-width: 420px) {
+		.setting-row {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.setting-row > :global(.btn) {
+			justify-self: end;
+		}
+
+		.progress-widget {
+			grid-column: 1 / -1;
+		}
 	}
 	.progress-label {
 		font-size: 0.78rem;

@@ -3,11 +3,17 @@
   выход по умолчанию (Напрямую) и туннельный выход, DNS показан по каждой ветке.
 -->
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { api } from '$lib/api/client';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { singboxStatus } from '$lib/stores/singbox';
   import { systemInfo } from '$lib/stores/system';
   import { openDrawer } from './drawerStore';
+  import { openSourceDrawer } from './sourceDrawerStore';
   import { deriveRoutingSummary } from './flowData';
+  import { liveConnectionsTraffic } from './liveConnectionsStore';
+  import { pluralize, RULE_WORDS, TUNNEL_WORDS, DEVICE_WORDS } from '$lib/utils/pluralize';
+  import type { RouterPolicy } from '$lib/types';
 
   const status = singboxRouterStore.status;
   const rulesStore = singboxRouterStore.rules;
@@ -15,12 +21,26 @@
   const dnsGlobalsStore = singboxRouterStore.dnsGlobals;
   const options = singboxRouterStore.options;
 
+  let policies = $state<RouterPolicy[]>([]);
+
+  async function loadPolicies() {
+    try {
+      policies = await api.singboxRouterListPolicies();
+    } catch {
+      policies = [];
+    }
+  }
+
   let s = $derived($status);
   let engineOn = $derived(s?.enabled ?? false);
   let rulesCount = $derived(s?.ruleCount ?? 0);
   let deviceMode = $derived(s?.deviceMode);
   let routeFinal = $derived(s?.final ?? 'direct');
-  let policyName = $derived(s?.policyName || '—');
+  let policyName = $derived((s?.policyName ?? '').trim());
+
+  onMount(() => {
+    void loadPolicies();
+  });
 
   let singboxInstallStatus = $derived($singboxStatus.data);
   let singboxVersion = $derived((
@@ -31,51 +51,77 @@
     deriveRoutingSummary($rulesStore ?? [], routeFinal, $dnsServersStore ?? [], $dnsGlobalsStore, $options),
   );
 
-  let sourceTitle = $derived(deviceMode === 'all' ? 'Весь роутер' : 'Устройства');
-  let sourceSub = $derived(deviceMode === 'all' ? 'все устройства' : `policy: ${policyName}`);
+  let currentPolicy = $derived(policies.find((p) => p.name === policyName));
+
+  let sourceTitle = $derived(deviceMode === 'all' ? 'Весь роутер' : 'Устройства в политике');
+  let sourceSub = $derived.by(() => {
+    if (deviceMode === 'all') return 'весь LAN-трафик';
+    if (!policyName) return 'политика не выбрана';
+    const label = currentPolicy?.description?.trim() || policyName;
+    const devices = s?.deviceCount ?? currentPolicy?.deviceCount ?? 0;
+    return `${label} · ${pluralize(devices, DEVICE_WORDS)}`;
+  });
+
   let engineSub = $derived.by(() => {
     if (!engineOn) return 'выключен';
     const parts = ['first-match'];
     if (singboxVersion) parts.push(`v${singboxVersion}`);
     return parts.join(' · ');
   });
+
   let hasTunnel = $derived(summary.tunnels.length > 0);
   let tunnelTitle = $derived(
-    summary.tunnels.length <= 1 ? (summary.tunnels[0] ?? '—') : `${summary.tunnels.length} туннелей`,
+    summary.tunnels.length <= 1 ? (summary.tunnels[0] ?? '—') : pluralize(summary.tunnels.length, TUNNEL_WORDS),
   );
-  function pluralSvc(n: number): string {
-    if (n === 1) return 'сервис';
-    if (n >= 2 && n <= 4) return 'сервиса';
-    return 'сервисов';
-  }
+
+  let defaultRuleHint = $derived.by(() => {
+    if (summary.bypassRuleCount > 0) return pluralize(summary.bypassRuleCount, RULE_WORDS);
+    if (routeFinal === 'direct' && summary.tunneledRuleCount > 0) return 'остальной трафик';
+    return null;
+  });
+
+  let trafficText = $derived($liveConnectionsTraffic);
 </script>
 
 <div class="flow">
   <div class="row">
-    <div class="node">
+    <button type="button" class="node source" onclick={openSourceDrawer} aria-label="Настроить источник трафика">
       <div class="cap">Источник</div>
       <div class="node-title">{sourceTitle}</div>
       <div class="node-sub">{sourceSub}</div>
-    </div>
+    </button>
 
     <div class="arrow">›</div>
 
-    <button type="button" class="node engine" class:glow={engineOn} onclick={openDrawer}>
-      <div class="cap acc">sing-box</div>
+    <button type="button" class="node engine" class:glow={engineOn} class:offline={!engineOn} onclick={openDrawer} aria-label="Настройки движка sing-box">
+      <div class="cap acc">Движок sing-box</div>
       <div class="node-sub light">{engineSub}</div>
-      <div class="node-sub">{rulesCount} правил{deviceMode === 'all' ? ' · весь роутер' : ''}</div>
+      <div class="node-sub">
+        {pluralize(rulesCount, RULE_WORDS)}{deviceMode === 'all' ? ' · весь роутер' : ''}{#if trafficText}<span class="traffic"> · {trafficText}</span>{/if}
+      </div>
     </button>
 
     <div class="arrow">›</div>
 
     <div class="branch">
       <div class="out">
-        <div class="out-line"><span class="dot muted"></span><span class="mut">по умолчанию →</span> <b>{summary.defaultLabel}</b></div>
+        <div class="out-line">
+          <span class="dot muted"></span>
+          <span class="mut">по умолчанию →</span> <b>{summary.defaultLabel}</b>
+          {#if defaultRuleHint}
+            <span class="mut"> · {defaultRuleHint}</span>
+          {/if}
+        </div>
         <div class="dns">DNS: {summary.defaultDnsLabel}</div>
       </div>
       {#if hasTunnel}
         <div class="out tun">
-          <div class="out-line"><span class="dot"></span>через туннель → <span class="acc">{tunnelTitle}</span> <span class="mut">· {summary.tunneledRuleCount} {pluralSvc(summary.tunneledRuleCount)}</span></div>
+          <div class="out-line">
+            <span class="dot"></span>через туннель → <span class="acc">{tunnelTitle}</span>
+            {#if summary.tunneledRuleCount > 0}
+              <span class="mut"> · {pluralize(summary.tunneledRuleCount, RULE_WORDS)}</span>
+            {/if}
+          </div>
           <div class="dns">DNS: {summary.tunnelDnsLabel ? `через туннель · ${summary.tunnelDnsLabel}` : 'через туннель'}</div>
         </div>
       {/if}
@@ -106,13 +152,22 @@
     text-align: left;
   }
   button.node { font-family: inherit; color: inherit; cursor: pointer; width: 100%; }
+  button.node:hover { border-color: var(--border-hover, var(--accent-line)); }
+  button.node.source:hover { background: color-mix(in srgb, var(--accent) 4%, var(--bg-primary)); }
   .node.engine { border-color: var(--accent-line); }
   .node.engine.glow { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent); }
+  .node.engine.offline {
+    border-color: var(--color-error, #dc2626);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-error, #dc2626) 20%, transparent);
+  }
+  .node.engine.offline .cap.acc { color: var(--color-error, #dc2626); }
+  .node.engine.offline:hover { border-color: var(--color-error, #dc2626); }
   .cap { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
   .cap.acc { color: var(--accent); font-weight: 600; }
   .node-title { margin-top: 4px; font-weight: 600; }
   .node-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
   .node-sub.light { color: var(--text-secondary); font-size: 12px; }
+  .traffic { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
   .arrow { color: var(--text-muted); font-size: 18px; text-align: center; }
   .branch { display: flex; flex-direction: column; gap: 7px; }
   .out { padding: 9px 12px; border-radius: 8px; background: var(--bg-primary); border: 1px solid var(--border); }

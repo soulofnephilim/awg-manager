@@ -1,7 +1,7 @@
 <script lang="ts" module>
   import type { Snippet } from 'svelte';
   export type BadgeVariant = 'default' | 'accent' | 'purple' | 'success' | 'error' | 'warning' | 'info' | 'muted';
-  export type BadgeSize = 'sm' | 'md';
+  export type BadgeSize = 'xs' | 'sm' | 'md';
 </script>
 
 <script lang="ts">
@@ -10,6 +10,8 @@
     size?: BadgeSize;
     uppercase?: boolean;
     mono?: boolean;
+    /** Fully rounded ends (like VersionBadge / AWG Kernel). */
+    pill?: boolean;
     /** Optional native tooltip; rendered as the span's title attribute. */
     title?: string;
     children: Snippet;
@@ -20,6 +22,7 @@
     size = 'sm',
     uppercase = false,
     mono = false,
+    pill = false,
     title,
     children,
   }: Props = $props();
@@ -35,10 +38,12 @@
   class:variant-warning={variant === 'warning'}
   class:variant-info={variant === 'info'}
   class:variant-muted={variant === 'muted'}
+  class:size-xs={size === 'xs'}
   class:size-sm={size === 'sm'}
   class:size-md={size === 'md'}
   class:is-uppercase={uppercase}
   class:is-mono={mono}
+  class:is-pill={pill}
   {title}
 >
   {@render children()}
@@ -57,8 +62,13 @@
     white-space: nowrap;
   }
 
+  .size-xs { font-size: 10px; padding: 2px 6px; line-height: 1.2; border-radius: 3px; }
   .size-sm { font-size: 11px; padding: 0.0625rem 0.375rem; }
   .size-md { font-size: 12px; padding: 0.125rem 0.4375rem; }
+
+  .is-pill {
+    border-radius: var(--radius-pill);
+  }
 
   .is-uppercase { text-transform: uppercase; letter-spacing: 0.04em; }
   .is-mono { font-family: var(--font-mono); }

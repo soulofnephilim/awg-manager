@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Button, Toggle } from '$lib/components/ui';
+	import { Button, SegmentedControl, Toggle } from '$lib/components/ui';
 	import { compactLayout } from '$lib/stores/compactLayout';
 	import { serviceLetterIcons } from '$lib/stores/serviceLetterIcons';
 	import { usageLevel } from '$lib/stores/settings';
@@ -138,20 +138,12 @@
 			{#if $theme.supportsModeToggle}
 				<div class="detail-block">
 					<div class="detail-title">Режим {THEME_PRESETS[$theme.preset].label}</div>
-					<div class="mode-switch" role="radiogroup" aria-label={`Режим темы ${THEME_PRESETS[$theme.preset].label}`}>
-						{#each LEGACY_MODE_OPTIONS as option (option.value)}
-							<button
-								type="button"
-								role="radio"
-								aria-checked={$theme.modePreference === option.value}
-								class="mode-pill"
-								class:active={$theme.modePreference === option.value}
-								onclick={() => theme.setMode(option.value)}
-							>
-								{option.label}
-							</button>
-						{/each}
-					</div>
+					<SegmentedControl
+						value={$theme.modePreference}
+						options={LEGACY_MODE_OPTIONS}
+						ariaLabel={`Режим темы ${THEME_PRESETS[$theme.preset].label}`}
+						onchange={(mode) => theme.setMode(mode)}
+					/>
 				</div>
 			{/if}
 
@@ -513,70 +505,13 @@
 		margin-bottom: 0.6rem;
 	}
 
-	.mode-switch {
-		display: inline-flex;
-		background: var(--color-bg-primary);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-pill);
-		padding: 0.25rem;
-		gap: 0.25rem;
+	.detail-block :global(.segmented-control) {
+		width: 100%;
 	}
 
-	.mode-pill {
-		border: 0;
-		border-radius: var(--radius-pill);
-		background: transparent;
-		color: var(--color-text-muted);
-		font: inherit;
-		font-size: 0.75rem;
-		font-weight: 600;
-		padding: 0.35rem 0.8rem;
-		cursor: pointer;
-		transition:
-			background var(--t-fast) ease,
-			color var(--t-fast) ease;
-	}
-
-	.mode-pill.active {
-		background: var(--color-accent);
-		color: var(--color-accent-contrast, var(--color-bg-primary));
-	}
-
-	.mode-pill:focus-visible {
-		outline: 2px solid var(--color-accent);
-		outline-offset: 2px;
-	}
-
-	@media (max-width: 640px) {
-		.mode-switch {
-			display: grid;
-			grid-template-columns: repeat(3, minmax(0, 1fr));
-			width: 100%;
-			border-radius: var(--radius-md);
-		}
-
-		.mode-pill {
-			width: 100%;
-			min-width: 0;
-			padding-inline: 0.25rem;
-			text-align: center;
-		}
-	}
-
-	@media (min-width: 641px) {
-		.mode-switch {
-			display: grid;
-			grid-template-columns: repeat(3, minmax(0, 1fr));
-			width: 100%;
-			border-radius: var(--radius-md);
-		}
-
-		.mode-pill {
-			width: 100%;
-			min-width: 0;
-			padding-inline: 0.25rem;
-			text-align: center;
-		}
+	.detail-block :global(.segmented-control-btn) {
+		flex: 1;
+		min-width: 0;
 	}
 
 	.custom-block {

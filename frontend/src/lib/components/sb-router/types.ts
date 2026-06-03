@@ -18,6 +18,8 @@ export interface MatcherChip {
   label: string;
   /** Mono шрифт для технических значений (IP/port). domain/ruleset — sans. */
   mono?: boolean;
+  /** Тег rule_set в конфиге (только kind === 'ruleset') — для открытия редактора набора */
+  rulesetTag?: string;
 }
 
 export type OutboundKind = 'tunnel' | 'awg' | 'direct' | 'block' | 'composite' | 'unknown' | 'sniff' | 'hijack-dns';

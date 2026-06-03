@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { StaticRouteList, RoutingTunnel } from '$lib/types';
-	import { Toggle } from '$lib/components/ui';
+	import { Toggle, Badge } from '$lib/components/ui';
 	import { ServiceIcon } from '$lib/components/dnsroutes';
 	import { parseSubnetComment } from '$lib/utils/cidr';
 
@@ -107,14 +107,22 @@
 			{/if}
 			{#if routeTarget}
 				<div class="card-route">
-					<span>&rarr;</span> <code>{routeTarget}</code>
-				{#if route.fallback === 'reject'}
-					<span class="badge-killswitch">Kill Switch</span>
-				{/if}
+					<span class="route-arrow">&rarr;</span>
+					<Badge variant="muted" mono size="xs">{routeTarget}</Badge>
+					{#if route.fallback === 'reject'}
+						<Badge variant="error" uppercase size="xs">Kill Switch</Badge>
+					{/if}
 				</div>
 			{:else if isOrphan}
 				<div class="card-route">
-					<span class="badge-orphan" title="Туннель, к которому был привязан этот список, удалён. Нажмите «Изменить» и выберите новый туннель.">Без туннеля</span>
+					<Badge
+						variant="warning"
+						uppercase
+						size="xs"
+						title="Туннель, к которому был привязан этот список, удалён. Нажмите «Изменить» и выберите новый туннель."
+					>
+						Без туннеля
+					</Badge>
 				</div>
 			{/if}
 		</div>
@@ -179,7 +187,6 @@
 
 	.card-main {
 		display: flex;
-		align-items: flex-start;
 		gap: 10px;
 		min-width: 0;
 	}
@@ -211,20 +218,6 @@
 	.card-stat {
 		font-size: 0.6875rem;
 		color: var(--text-muted);
-	}
-
-	.card-route {
-		font-size: 0.6875rem;
-		color: var(--border-hover);
-		margin-top: 3px;
-	}
-
-	.card-route code {
-		background: var(--bg-hover);
-		padding: 1px 6px;
-		border-radius: 3px;
-		font-size: 0.625rem;
-		font-family: monospace;
 	}
 
 	.card-actions {
@@ -311,29 +304,4 @@
 		border: 1px dashed var(--warn, #d08770);
 	}
 
-	.badge-orphan {
-		display: inline-block;
-		font-size: 0.625rem;
-		font-weight: 600;
-		color: var(--warn, #d08770);
-		background: color-mix(in srgb, var(--warn, #d08770) 15%, transparent);
-		padding: 2px 6px;
-		border-radius: 3px;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-
-	.badge-killswitch {
-		display: inline-block;
-		font-size: 0.5625rem;
-		font-weight: 600;
-		color: var(--error);
-		background: color-mix(in srgb, var(--error) 15%, transparent);
-		padding: 1px 5px;
-		border-radius: 3px;
-		margin-left: 6px;
-		vertical-align: middle;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
 </style>

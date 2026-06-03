@@ -1,7 +1,6 @@
 <script lang="ts">
 	import type { SingboxTunnel } from '$lib/types';
 	import { goto } from '$app/navigation';
-	import { browser } from '$app/environment';
 	import { api } from '$lib/api/client';
 	import {
 		singboxTunnels,
@@ -9,7 +8,7 @@
 		singboxTraffic,
 		triggerDelayCheck,
 	} from '$lib/stores/singbox';
-	import { onMount, untrack } from 'svelte';
+	import { untrack } from 'svelte';
 	import { Modal, Button, TrafficChart, TrafficSparkline, PingButton } from '$lib/components/ui';
 	import { getTrafficRates, subscribeTraffic, loadHistory } from '$lib/stores/traffic';
 	import { singboxDelayFromHistory } from '$lib/utils/singboxDelay';
@@ -161,18 +160,6 @@
 		untrack(() => loadHistory(tag));
 	});
 
-	const CHART_KEY_PREFIX = 'sbx_chart_expanded_';
-	let chartStorageKey = $derived(`${CHART_KEY_PREFIX}${tunnel.tag}`);
-	let chartExpanded = $state(true);
-	onMount(() => {
-		chartExpanded = localStorage.getItem(chartStorageKey) !== 'false';
-	});
-	function toggleCharts() {
-		chartExpanded = !chartExpanded;
-		if (browser) {
-			localStorage.setItem(chartStorageKey, String(chartExpanded));
-		}
-	}
 </script>
 
 {#if layout === 'list'}
@@ -615,11 +602,7 @@
 	</div>
 
 	<div class="chart-section">
-		<button type="button" class="chart-header" onclick={toggleCharts}>
-			<span class="chart-label">Графики</span>
-			<span class="chart-chevron" class:expanded={chartExpanded}>▾</span>
-		</button>
-		<div class="chart-body" class:expanded={chartExpanded}>
+		<div class="chart-body">
 			<div class="chart-head">
 				<span>Delay (5 мин)</span>
 				<span class="stats">
@@ -1284,50 +1267,7 @@
 		background: var(--color-bg-secondary);
 		overflow: hidden;
 	}
-	.chart-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		width: 100%;
-		padding: 7px 12px;
-		border: none;
-		border-bottom: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
-		background: color-mix(in srgb, var(--color-bg-tertiary) 78%, transparent);
-		color: var(--color-text-secondary);
-		cursor: pointer;
-		user-select: none;
-		font: inherit;
-		transition: background var(--t-fast) ease, border-color var(--t-fast) ease;
-	}
-	.chart-header:hover {
-		background: color-mix(in srgb, var(--color-bg-hover) 82%, transparent);
-		border-bottom-color: var(--color-border-hover);
-	}
-	.chart-label {
-		font-size: var(--sbx-card-note);
-		font-weight: 600;
-		color: var(--color-text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-	}
-	.chart-chevron {
-		font-size: 14px;
-		color: var(--color-text-secondary);
-		opacity: 0.85;
-		transition: transform var(--t-fast) ease;
-		transform: rotate(-90deg);
-	}
-	.chart-chevron.expanded {
-		transform: rotate(0deg);
-	}
 	.chart-body {
-		max-height: 0;
-		overflow: hidden;
-		transition: max-height var(--t-med) ease;
-		padding: 0 12px;
-	}
-	.chart-body.expanded {
-		max-height: 300px;
 		padding: 8px 12px 8px;
 	}
 

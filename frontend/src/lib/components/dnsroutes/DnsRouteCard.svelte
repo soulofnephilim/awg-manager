@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { DnsRoute, RoutingTunnel } from '$lib/types';
-	import { Toggle } from '$lib/components/ui';
+	import { Toggle, Badge } from '$lib/components/ui';
 	import { ServiceIcon } from '$lib/components/dnsroutes';
 
 	interface Props {
@@ -14,7 +14,6 @@
 		selectable?: boolean;
 		selected?: boolean;
 		onselect?: () => void;
-		hydrarouteInstalled?: boolean;
 		onicon?: () => void;
 		downloadRouteLabel?: string;
 	}
@@ -30,23 +29,9 @@
 		selectable = false,
 		selected = false,
 		onselect,
-		hydrarouteInstalled = false,
 		onicon,
 		downloadRouteLabel = ''
 	}: Props = $props();
-
-	let backendLabel = $derived.by(() => {
-		if (route.backend === 'hydraroute') {
-			return hydrarouteInstalled ? 'HR' : 'HR \u26a0';
-		}
-		return 'NDMS';
-	});
-
-	let backendClass = $derived(
-		route.backend === 'hydraroute'
-			? (hydrarouteInstalled ? 'badge-hr' : 'badge-hr-warn')
-			: 'badge-ndms'
-	);
 
 	// Post-split data stores CIDRs in route.subnets; legacy lists created
 	// before commit a65b76f4 (2026-04-15) may still have CIDRs mixed into
@@ -147,12 +132,19 @@
 			{/if}
 			{#if routeTarget}
 				<div class="card-route">
-					<span>&rarr;</span> <code>{routeTarget}</code>
-					<span class="backend-badge {backendClass}">{backendLabel}</span>
+					<span class="route-arrow">&rarr;</span>
+					<Badge variant="muted" mono size="xs">{routeTarget}</Badge>
 				</div>
 			{:else if isOrphan}
 				<div class="card-route">
-					<span class="badge-orphan" title="Туннель, к которому был привязан этот список, удалён. Нажмите «Изменить» и выберите новый туннель.">Без туннеля</span>
+					<Badge
+						variant="warning"
+						uppercase
+						size="xs"
+						title="Туннель, к которому был привязан этот список, удалён. Нажмите «Изменить» и выберите новый туннель."
+					>
+						Без туннеля
+					</Badge>
 				</div>
 			{/if}
 		</div>
@@ -233,21 +225,8 @@
 		border: 1px dashed var(--warn, #d08770);
 	}
 
-	.badge-orphan {
-		display: inline-block;
-		font-size: 0.625rem;
-		font-weight: 600;
-		color: var(--warn, #d08770);
-		background: color-mix(in srgb, var(--warn, #d08770) 15%, transparent);
-		padding: 2px 6px;
-		border-radius: 3px;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-
 	.card-main {
 		display: flex;
-		align-items: flex-start;
 		gap: 10px;
 		min-width: 0;
 	}
@@ -287,12 +266,6 @@
 		color: var(--text-secondary);
 	}
 
-	.card-route {
-		font-size: 0.6875rem;
-		color: var(--text-secondary);
-		margin-top: 3px;
-	}
-
 	.card-download-route {
 		font-size: 0.625rem;
 		color: var(--text-muted);
@@ -300,15 +273,6 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-
-	.card-route code {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-		padding: 1px 6px;
-		border-radius: 3px;
-		font-size: 0.625rem;
-		font-family: monospace;
 	}
 
 	.card-actions {
@@ -381,37 +345,8 @@
 		outline-offset: 2px;
 	}
 
-	.backend-badge {
-		font-size: 0.5625rem;
-		font-weight: 600;
-		padding: 1px 5px;
-		border-radius: 3px;
-		vertical-align: middle;
-		margin-left: 4px;
-	}
-
-	.badge-ndms {
-		background: rgba(122, 162, 247, 0.15);
-		color: var(--accent);
-	}
-
-	.badge-hr {
-		background: rgba(16, 185, 129, 0.15);
-		color: var(--success);
-	}
-
-	.badge-hr-warn {
-		background: rgba(245, 158, 11, 0.15);
-		color: var(--warning);
-	}
-
 	:global(html[data-theme-preset='neo']) .card-source,
 	:global(html[data-theme-preset='neo']) .card-route {
 		color: var(--text-primary);
-	}
-
-	:global(html[data-theme-preset='neo']) .card-route code {
-		background: color-mix(in srgb, var(--bg-hover) 80%, var(--accent) 20%);
-		color: var(--color-accent-contrast, #0b0b0b);
 	}
 </style>

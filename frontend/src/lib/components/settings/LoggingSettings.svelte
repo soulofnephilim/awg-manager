@@ -242,19 +242,29 @@
 		opacity: 0.6;
 	}
 
+	.logging-main-row {
+		align-items: start;
+	}
+
 	.logging-buffer-row {
-		align-items: center;
+		align-items: start;
 	}
 
 	.logging-level-row {
-		align-items: center;
+		align-items: start;
+	}
+
+	.logging-main-row > :global(.flex.flex-col),
+	.logging-level-row > :global(.flex.flex-col),
+	.logging-buffer-row > :global(.flex.flex-col) {
+		min-width: 0;
 	}
 
 	@media (max-width: 900px) {
 		.logging-main-row {
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) auto;
-			align-items: center;
+			align-items: start;
 			gap: 0.75rem;
 			flex-wrap: nowrap;
 		}
@@ -280,6 +290,17 @@
 			width: 100%;
 			max-width: 100%;
 			display: block;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.logging-main-row {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.setting-controls {
+			width: 100%;
+			justify-content: space-between;
 		}
 	}
 </style>

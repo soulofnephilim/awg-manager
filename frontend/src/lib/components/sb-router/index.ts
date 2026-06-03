@@ -1,7 +1,6 @@
 export { default as ServiceTile } from './ServiceTile.svelte';
 export type { ServiceTileSize } from './ServiceTile.svelte';
 export { default as PageShell } from './PageShell.svelte';
-export type { EngineStatus } from './PageShell.svelte';
 export { mode, setMode, type RouterMode } from './modeStore';
 export { default as RuleCard } from './RuleCard.svelte';
 export { default as MatcherChip } from './MatcherChip.svelte';
@@ -26,6 +25,8 @@ export { deriveDeps, deriveIssues } from './drawerData';
 
 // F4a — FlowGraph hero
 export { default as FlowGraph } from './FlowGraph.svelte';
+export { default as SourceDrawer } from './SourceDrawer.svelte';
+export { sourceDrawerOpen, openSourceDrawer, closeSourceDrawer } from './sourceDrawerStore';
 
 // F4b — Trace Screen
 export { default as TracePanel } from './TracePanel.svelte';
