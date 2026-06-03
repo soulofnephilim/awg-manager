@@ -400,6 +400,17 @@
 	}
 
 	@media (max-width: 640px) {
+		.integration-item {
+			display: grid;
+			grid-template-columns: 8px minmax(0, 1fr);
+			align-items: start;
+			column-gap: 0.625rem;
+		}
+
+		.integration-item :global(.dot) {
+			margin-top: 0.42rem;
+		}
+
 		@container (max-width: 420px) {
 			.setting-row {
 				grid-template-columns: minmax(0, 1fr) auto;
@@ -410,17 +421,6 @@
 			.setting-row > :global(.btn) {
 				justify-self: end;
 				align-self: center;
-			}
-
-			.integration-item {
-				display: grid;
-				grid-template-columns: 8px minmax(0, 1fr);
-				align-items: start;
-				column-gap: 0.625rem;
-			}
-
-			.integration-item :global(.dot) {
-				margin-top: 0.42rem;
 			}
 
 			.progress-widget {

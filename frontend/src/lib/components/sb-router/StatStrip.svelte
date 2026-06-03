@@ -24,10 +24,8 @@
   const VIEWPORT_PAD = 8;
   const TOOLTIP_GAP = 10;
   const TOOLTIP_WIDTH = 288;
-  const TOOLTIP_HEIGHT = 192;
 
   let activeIndex = $state<number | null>(null);
-  let pinnedIndex = $state<number | null>(null);
   let tooltipWidth = $state(TOOLTIP_WIDTH);
   let tooltipX = $state(0);
   let tooltipY = $state(0);
@@ -46,8 +44,11 @@
     return Math.min(Math.max(value, min), max);
   }
 
+  function closeTooltip(): void {
+    activeIndex = null;
+  }
+
   function hideTooltip(index?: number): void {
-    if (index !== undefined && pinnedIndex === index) return;
     if (index === undefined || activeIndex === index) {
       activeIndex = null;
     }
@@ -70,79 +71,70 @@
       window.innerWidth - VIEWPORT_PAD - width / 2,
     );
 
-    const spaceAbove = rect.top - VIEWPORT_PAD - TOOLTIP_GAP;
-    const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_PAD - TOOLTIP_GAP;
-    const placeBottom = spaceAbove < TOOLTIP_HEIGHT && spaceBelow >= spaceAbove;
+    const placeBottom = rect.top < 150;
 
     tooltipPlacement = placeBottom ? 'bottom' : 'top';
     tooltipX = x;
     tooltipY = placeBottom
-      ? Math.min(rect.bottom + TOOLTIP_GAP, window.innerHeight - VIEWPORT_PAD - TOOLTIP_HEIGHT)
-      : Math.max(rect.top - TOOLTIP_GAP, VIEWPORT_PAD + TOOLTIP_HEIGHT);
+      ? rect.bottom + TOOLTIP_GAP
+      : rect.top - TOOLTIP_GAP;
 
     activeIndex = index;
   }
 
-  function toggleTooltip(index: number, event: MouseEvent): void {
-    if (pinnedIndex === index) {
-      pinnedIndex = null;
-      activeIndex = null;
-      return;
-    }
-
-    showTooltip(index, event);
-    pinnedIndex = index;
+  function handleKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') closeTooltip();
   }
-
 </script>
 
 <svelte:window
-  onscroll={() => {
-    pinnedIndex = null;
-    hideTooltip();
-  }}
-  onresize={() => {
-    pinnedIndex = null;
-    hideTooltip();
-  }}
+  onscroll={closeTooltip}
+  onresize={closeTooltip}
+  onkeydown={handleKeydown}
 />
 
 <div class="strip" style:--cols={cells.length}>
   {#each cells as cell, i (i)}
     {@const tipId = `stat-tip-${i}`}
     <div class="cell-shell">
-      <button
-        class="cell"
-        type="button"
-        aria-describedby={cell.helpText && activeIndex === i ? tipId : undefined}
-        aria-expanded={cell.helpText ? activeIndex === i : undefined}
-        aria-label={`${cell.label}: ${cell.value}`}
-        onclick={(event) => cell.helpText && toggleTooltip(i, event)}
-        onfocus={(event) => cell.helpText && showTooltip(i, event)}
-        onblur={() => hideTooltip(i)}
-      >
+      <div class="cell">
         <div class="label">{cell.label}</div>
         <div class="value" style:color={colorFor(cell.tone)}>{cell.value}</div>
-      </button>
+
+        {#if cell.helpText}
+          <button
+            type="button"
+            class="help-btn"
+            aria-label={`Подсказка: ${cell.label}`}
+            aria-describedby={activeIndex === i ? tipId : undefined}
+            onmouseenter={(event) => showTooltip(i, event)}
+            onmouseleave={() => hideTooltip(i)}
+            onfocus={(event) => showTooltip(i, event)}
+            onblur={() => hideTooltip(i)}
+          >
+            ?
+          </button>
+        {/if}
+      </div>
 
       {#if activeIndex === i && cell.helpText}
-      <div
-        id={tipId}
-        class="stat-tooltip"
-        class:bottom={tooltipPlacement === 'bottom'}
-        role="tooltip"
-        style:width={`${tooltipWidth}px`}
-        style:left={`${tooltipX}px`}
-        style:top={`${tooltipY}px`}
-      >
+        <div
+          id={tipId}
+          class="stat-tooltip"
+          class:bottom={tooltipPlacement === 'bottom'}
+          role="tooltip"
+          style:width={`${tooltipWidth}px`}
+          style:left={`${tooltipX}px`}
+          style:top={`${tooltipY}px`}
+        >
           <div class="tooltip-title">{cell.helpTitle ?? cell.label}</div>
           <p>{cell.helpText}</p>
           {#if cell.helpItems?.length}
             <ul>
               {#each cell.helpItems as item}
                 <li>{item}</li>
-              {/each}
-            </ul>
+            {/each}
+          </ul>
           {/if}
         </div>
       {/if}
@@ -175,12 +167,7 @@
     position: relative;
     overflow: visible;
     box-sizing: border-box;
-    appearance: none;
-    -webkit-appearance: none;
-    font: inherit;
-    text-align: left;
-    color: inherit;
-    cursor: help;
+    cursor: default;
     transition:
       background-color 0.15s ease,
       border-color 0.15s ease,
@@ -191,10 +178,6 @@
     min-width: 0;
     width: 100%;
     overflow: visible;
-  }
-  .cell:focus-visible {
-    outline: 2px solid var(--color-accent, var(--accent));
-    outline-offset: 2px;
   }
   .label {
     min-width: 0;
@@ -217,13 +200,37 @@
     font-family: var(--font-mono);
     white-space: nowrap;
   }
+  .help-btn {
+    position: absolute;
+    top: 0.45rem;
+    right: 0.45rem;
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, transparent);
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+  }
+  .help-btn:hover,
+  .help-btn:focus-visible {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    outline: none;
+  }
   .stat-tooltip {
     position: fixed;
     z-index: 1000;
     width: max-content;
     max-width: min(18rem, calc(100vw - 16px));
     transform: translate(-50%, -100%);
-    pointer-events: none;
+    pointer-events: auto;
     padding: 0.75rem 0.85rem;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -234,18 +241,16 @@
     line-height: 1.4;
     text-transform: none;
     letter-spacing: normal;
-    max-height: min(18rem, calc(100vh - 16px));
-    overflow: auto;
-    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
-    opacity: 1;
-    visibility: visible;
+    overflow: visible;
   }
-  .cell:hover {
+  @media (hover: hover) and (pointer: fine) {
+    .cell:hover {
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0)),
       color-mix(in srgb, var(--bg-hover) 70%, transparent);
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
     transform: translateY(-1px);
+    }
   }
   .stat-tooltip::after {
     content: '';
@@ -310,6 +315,11 @@
     }
     .stat-tooltip.bottom::after {
       left: 1.25rem;
+    }
+  }
+  @media (hover: none), (pointer: coarse) {
+    .help-btn {
+      display: none;
     }
   }
   @media (max-width: 360px) {
