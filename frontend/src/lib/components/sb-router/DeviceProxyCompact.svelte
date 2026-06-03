@@ -116,13 +116,13 @@
               <div class="proxy-main">
                 <span class="ty">mixed</span>
                 <span class="mono listen" title={listenLabelFor(in_)}>{listenLabelFor(in_)}</span>
+              </div>
+              <div class="proxy-sub">
                 {#if isInstanceActive(in_)}
                   <Badge variant="success" size="sm" mono>active</Badge>
                 {:else}
                   <Badge variant="muted" size="sm" mono>выкл</Badge>
                 {/if}
-              </div>
-              <div class="proxy-sub">
                 <span class="arrow">→</span>
                 <span class="outbound-wrap">
                   <Badge variant={outboundVariantFor(outboundLabel)} size="sm" mono>{outboundLabel}</Badge>
@@ -174,15 +174,22 @@
   }
   .proxy-list {
     flex: 1;
+    width: 100%;
     min-width: 0;
     display: flex;
     flex-direction: column;
   }
   .proxy-row {
+    transition: background-color 0.15s ease;
     display: grid;
     grid-template-columns: 8px minmax(0, 1fr) auto;
     align-items: center;
     gap: 10px;
+    width: 100%;
+    min-width: 0;
+    padding: 10px 14px;
+    box-sizing: border-box;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   }
   .proxy-click {
     min-width: 0;
@@ -213,10 +220,13 @@
   .arrow {
     color: var(--text-muted);
   }
-  .proxy-row + .proxy-row {
-    margin-top: 10px;
-    padding-top: 10px;
-    border-top: 1px solid var(--border);
+  @media (hover: hover) and (pointer: fine) {
+    .proxy-row:hover {
+      background: color-mix(in srgb, var(--bg-hover) 70%, transparent);
+    }
+  }
+  .proxy-row:last-child {
+    border-bottom: 0;
   }
   .dot {
     width: 8px;
@@ -235,6 +245,10 @@
     flex: 1;
     min-width: 0;
   }
+  .proxy-info {
+    display: grid;
+    gap: 0.25rem;
+  }
   .title {
     font-weight: 600;
     font-size: 13px;
@@ -250,18 +264,19 @@
   }
   .proxy-main {
     min-width: 0;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    display: flex;
     align-items: center;
     gap: 6px;
+    overflow: hidden;
   }
   .proxy-sub {
     min-width: 0;
     margin-top: 4px;
-    display: grid;
-    grid-template-columns: 14px minmax(0, 1fr);
+    display: flex;
     align-items: center;
     gap: 6px;
+    flex-wrap: wrap;
+    overflow: hidden;
   }
   .listen {
     min-width: 0;
@@ -271,6 +286,7 @@
   }
   .outbound-wrap {
     min-width: 0;
+    display: inline-flex;
     max-width: 100%;
     overflow: hidden;
   }
@@ -278,6 +294,13 @@
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .proxy-row > .route-action-btn {
+    justify-self: end;
+    flex-shrink: 0;
+  }
+  .proxy-row > .proxy-click {
+    min-width: 0;
   }
   .sub.error {
     color: var(--color-error, #dc2626);
@@ -309,6 +332,7 @@
     background: transparent;
     border: 0;
     border-radius: 0;
-    padding: 12px 14px;
+    padding: 0;
+    display: block;
   }
 </style>

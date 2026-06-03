@@ -20,7 +20,6 @@
   import { notifications } from '$lib/stores/notifications';
   import { api } from '$lib/api/client';
   import { computeRuleSetUsage } from '$lib/components/routing/singboxRouter';
-  import { pluralForm, REWRITE_WORDS, RULE_WORDS } from '$lib/utils/pluralize';
   import type { OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
   import type {
     SingboxRouterRule,
@@ -261,13 +260,76 @@
       label: 'Движок',
       value: engineStat.value,
       tone: engineStat.tone,
+      helpTitle: 'Движок sing-box',
+      helpText: $storeStatus?.enabled
+        ? 'Маршрутизатор sing-box активен: правила, DNS и outbound-логика применяются к runtime.'
+        : 'Движок выключен: конфигурация может быть сохранена, но runtime её не применяет.',
+      helpItems: [
+        'ON — sing-box router работает.',
+        'OFF — проверь установку, запуск и настройки sing-box.',
+      ],
     },
-    { label: pluralForm($storeRules.length, RULE_WORDS), value: String($storeRules.length) },
-    { label: 'Rule-sets', value: String($storeRuleSets.length) },
-    { label: 'Outbounds', value: String($storeOutbounds.length) },
-    { label: `DNS ${pluralForm($storeDnsRules.length, RULE_WORDS)}`, value: String($storeDnsRules.length) },
-    { label: pluralForm($storeDnsRewrites.length, REWRITE_WORDS), value: String($storeDnsRewrites.length) },
-    { label: 'Прокси', value: activeProxyCount === null ? '—' : String(activeProxyCount) },
+    {
+      label: 'Правил',
+      value: String($storeRules.length),
+      helpTitle: 'Правила маршрутизации',
+      helpText: 'Количество route rules. Они проверяются сверху вниз: первое совпадение выбирает outbound.',
+      helpItems: [
+        'Порядок важен.',
+        'Если ничего не подошло — используется default outbound в панели правил.',
+      ],
+    },
+    {
+      label: 'Rule-sets',
+      value: String($storeRuleSets.length),
+      helpTitle: 'Наборы правил',
+      helpText: 'Списки доменов и IP, на которые ссылаются route rules и DNS rules.',
+      helpItems: [
+        'Remote — скачивается и обновляется.',
+        'Local — файл на роутере.',
+        'Inline — правила хранятся прямо в конфиге.',
+      ],
+    },
+    {
+      label: 'Out',
+      value: String($storeOutbounds.length),
+      helpTitle: 'Outbounds',
+      helpText: 'Доступные направления трафика: direct, reject, VPN/selector/composite и подписочные группы.',
+      helpItems: [
+        'Route rule выбирает outbound.',
+        'DNS server тоже может ходить через outbound.',
+      ],
+    },
+    {
+      label: 'DNS',
+      value: String($storeDnsRules.length),
+      helpTitle: 'DNS-правила',
+      helpText: 'Правила выбора DNS-сервера по доменам, rule-set, типам запросов и другим условиям.',
+      helpItems: [
+        'Работают отдельно от route rules.',
+        'Могут направлять конкретные домены на нужный DNS-сервер.',
+      ],
+    },
+    {
+      label: 'Rewrite',
+      value: String($storeDnsRewrites.length),
+      helpTitle: 'DNS-перезаписи',
+      helpText: 'Статические DNS-ответы: домен или шаблон получает заданный IP.',
+      helpItems: [
+        'Полезно для локальных override.',
+        'Срабатывает до обычного DNS-резолва.',
+      ],
+    },
+    {
+      label: 'Прокси',
+      value: activeProxyCount === null ? '—' : String(activeProxyCount),
+      helpTitle: 'Device Proxy / Inbounds',
+      helpText: 'Количество активных локальных inbound-прокси для устройств.',
+      helpItems: [
+        'active — inbound запущен и принимает подключения.',
+        'выкл — запись есть, но runtime не активен.',
+      ],
+    },
   ]);
 
   // Rule handlers
@@ -417,8 +479,11 @@
         onAction={() => (ruleAddOpen = true)}
       >
         <div class="globals-bar">
-          <span class="gb-label">first-match-wins · если ничего не подошло →</span>
-          <Dropdown bind:value={draftRouteFinal} options={routeFinalOptions} />
+          <span class="gb-label gb-label-full">first-match-wins · если ничего не подошло →</span>
+          <span class="gb-label gb-label-mobile">если не подошло →</span>
+          <div class="route-final-select">
+            <Dropdown bind:value={draftRouteFinal} options={routeFinalOptions} fullWidth />
+          </div>
           {#if routeFinalDirty}
             <button class="gb-save" onclick={saveRouteFinal} disabled={routeFinalBusy} type="button">
               Сохранить
@@ -680,10 +745,10 @@
   }
   /* Globals-бар route-final (шапка панели «Правила») */
   .globals-bar {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
-    flex-wrap: wrap;
     padding: 8px 14px;
     background: var(--bg-tertiary);
     border-bottom: 1px solid var(--border);
@@ -693,6 +758,13 @@
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  .gb-label-mobile {
+    display: none;
+  }
+  .route-final-select {
+    min-width: 0;
+    width: 100%;
   }
   /* Globals-секция DNS (шапка панели «DNS-серверы») */
   .globals-col {
@@ -758,6 +830,29 @@
     }
   }
   @media (max-width: 768px) {
+    .globals-bar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.45rem;
+      padding: 0.625rem 0.875rem;
+    }
+    .gb-label-full {
+      display: none;
+    }
+    .gb-label-mobile {
+      display: block;
+      min-width: 0;
+      font-size: 10px;
+      line-height: 1.2;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .route-final-select {
+      width: 100%;
+      min-width: 0;
+    }
     .wrap {
       padding: var(--sp-2);
     }

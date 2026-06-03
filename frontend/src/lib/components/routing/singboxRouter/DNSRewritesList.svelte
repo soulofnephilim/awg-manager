@@ -166,6 +166,7 @@
 		min-width: 0;
 	}
 	.row {
+		transition: background-color 0.15s ease;
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) auto;
 		gap: 0.4rem;
@@ -192,9 +193,12 @@
 	.pat {
 		color: var(--text);
 		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		white-space: normal;
+		overflow: visible;
+		text-overflow: initial;
+		overflow-wrap: anywhere;
+		word-break: normal;
+		line-height: 1.35;
 	}
 	.ips {
 		color: var(--success, #22c55e);
@@ -203,6 +207,13 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.row:hover {
+			background: color-mix(in srgb, var(--bg-hover) 70%, transparent);
+		}
+	}
+
 	@media (max-width: 720px) {
 		.col-header {
 			display: none;
@@ -220,6 +231,13 @@
 
 		.pat { grid-area: pattern; }
 		.ips { grid-area: ips; }
+		.pat {
+			white-space: normal;
+			overflow: visible;
+			text-overflow: initial;
+			overflow-wrap: anywhere;
+			word-break: normal;
+		}
 		.arrow { display: none; }
 		.row-actions {
 			grid-area: actions;

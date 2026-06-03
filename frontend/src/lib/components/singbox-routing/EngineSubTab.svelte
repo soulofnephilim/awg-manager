@@ -344,8 +344,8 @@
 	const visibleIssues = $derived(status?.issues ?? []);
 
 	const outboundsCount = $derived(status?.outboundCompositeCount ?? 0);
-
 	const issuesCount = $derived(visibleIssues.length);
+
 	const rulesCount = $derived(status?.ruleCount ?? rules.length);
 	const ruleSetsCount = $derived(status?.ruleSetCount ?? ruleSets.length);
 
@@ -953,5 +953,73 @@
 		display: flex;
 		justify-content: flex-end;
 		margin-top: 0.25rem;
+	}
+
+	@media (max-width: 640px) {
+		.policy-row,
+		.policy-link-row,
+		.wan-row,
+		.sniffer-row,
+		.policy-missing-row {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.policy-row > :global(.btn),
+		.policy-link-row > :global(.btn),
+		.wan-row > :global(.btn) {
+			width: 100%;
+		}
+
+		.policy-dropdown,
+		.wan-dropdown,
+		.advanced-actions,
+		.extra-ports-input {
+			width: 100%;
+		}
+
+		.device-mode-block :global(.segmented-control) {
+			width: 100%;
+		}
+
+		.device-mode-block :global(.segmented-control-btn) {
+			min-width: 0;
+			padding-inline: 0.35rem;
+			white-space: nowrap;
+			font-size: 11px;
+		}
+
+		.advanced-toggle {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			align-items: start;
+			gap: 0.25rem 0.5rem;
+		}
+
+		.advanced-hint {
+			grid-column: 1 / 2;
+			margin-left: 0;
+			line-height: 1.35;
+		}
+
+		.advanced-chevron {
+			grid-column: 2 / 3;
+			align-self: center;
+		}
+
+		.advanced-body {
+			align-items: stretch;
+		}
+
+		.advanced-body :global(.btn),
+		.advanced-body input,
+		.advanced-body .extra-ports-input {
+			width: 100%;
+		}
+
+		.preset-row {
+			align-items: center;
+		}
+
 	}
 </style>
