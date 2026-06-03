@@ -1,7 +1,6 @@
 <script lang="ts">
-    import { onMount, untrack } from 'svelte';
+    import { untrack } from 'svelte';
     import { goto } from '$app/navigation';
-    import { browser } from '$app/environment';
     import { api } from '$lib/api/client';
     import { Badge, Button, Modal, TrafficChart, TrafficSparkline, PingButton } from '$lib/components/ui';
     import { singboxDelayFromHistory } from '$lib/utils/singboxDelay';
@@ -97,18 +96,6 @@
         const tag = trafficMemberTag;
         untrack(() => loadHistory(tag));
     });
-    const CHART_KEY_PREFIX = 'sub_chart_expanded_';
-    let chartStorageKey = $derived(`${CHART_KEY_PREFIX}${subscription.id}`);
-    let chartExpanded = $state(true);
-    onMount(() => {
-        chartExpanded = localStorage.getItem(chartStorageKey) !== 'false';
-    });
-    function toggleCharts() {
-        chartExpanded = !chartExpanded;
-        if (browser) {
-            localStorage.setItem(chartStorageKey, String(chartExpanded));
-        }
-    }
     const endpointText = $derived(`${activeMember.server}:${activeMember.port}`);
     /** List row: title above IP — prefer remark, else outbound tag. */
     const listActiveServerName = $derived(
@@ -759,11 +746,7 @@
     </div>
 
     <div class="chart-section">
-        <button type="button" class="chart-header" onclick={toggleCharts}>
-            <span class="chart-label">Графики</span>
-            <span class="chart-chevron" class:expanded={chartExpanded}>▾</span>
-        </button>
-        <div class="chart-body" class:expanded={chartExpanded}>
+        <div class="chart-body">
             <div class="chart-head">
                 <span>Delay (5 мин)</span>
                 <span class="stats">
@@ -1443,50 +1426,7 @@
         background: var(--color-bg-secondary);
         overflow: hidden;
     }
-    .chart-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        width: 100%;
-        padding: 7px 12px;
-        border: none;
-        border-bottom: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
-        background: color-mix(in srgb, var(--color-bg-tertiary) 78%, transparent);
-        color: var(--color-text-secondary);
-        cursor: pointer;
-        user-select: none;
-        font: inherit;
-        transition: background var(--t-fast) ease, border-color var(--t-fast) ease;
-    }
-    .chart-header:hover {
-        background: color-mix(in srgb, var(--color-bg-hover) 82%, transparent);
-        border-bottom-color: var(--color-border-hover);
-    }
-    .chart-label {
-        font-size: var(--sbx-card-note);
-        font-weight: 600;
-        color: var(--color-text-secondary);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-    }
-    .chart-chevron {
-        font-size: 14px;
-        color: var(--color-text-secondary);
-        opacity: 0.85;
-        transition: transform var(--t-fast) ease;
-        transform: rotate(-90deg);
-    }
-    .chart-chevron.expanded {
-        transform: rotate(0deg);
-    }
     .chart-body {
-        max-height: 0;
-        overflow: hidden;
-        transition: max-height var(--t-med) ease;
-        padding: 0 12px;
-    }
-    .chart-body.expanded {
-        max-height: 300px;
         padding: 8px 12px 10px;
     }
     .traffic-head { margin-top: 8px; }
