@@ -1847,7 +1847,7 @@ definitions:
   api.MonitoringTargetDTO:
     properties:
       host:
-        example: 8.8.8.8
+        example: https://www.google.com
         type: string
       id:
         example: target_google
@@ -2014,7 +2014,7 @@ definitions:
         example: http
         type: string
       target:
-        example: https://www.google.com
+        example: 8.8.8.8
         type: string
     type: object
   api.PingCheckSettingsDTO:
