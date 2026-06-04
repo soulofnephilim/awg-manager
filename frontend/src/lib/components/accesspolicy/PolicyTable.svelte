@@ -34,13 +34,11 @@
 				</div>
 			{/if}
 			<div class="card-main">
-				<span class="policy-card-icon" aria-hidden="true">
-					<PolicyIcon
-						label={policy.description}
-						policyName={policy.name}
-						isHydraRoute={isHrPolicy}
-					/>
-				</span>
+				<PolicyIcon
+					label={policy.description}
+					policyName={policy.name}
+					isHydraRoute={isHrPolicy}
+				/>
 				<div class="card-info">
 					<div class="card-title">
 						<h3 title={policyLabel}>{policyLabel}</h3>
@@ -124,16 +122,7 @@
 		display: flex;
 		gap: 10px;
 		min-width: 0;
-	}
-
-	.policy-card-icon {
-		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 36px;
-		height: 36px;
-		color: var(--text-muted);
+		align-items: flex-start;
 	}
 
 	.policy-card .card-info {

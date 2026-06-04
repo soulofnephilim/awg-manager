@@ -45,3 +45,4 @@ export { default as SegmentedControl } from './SegmentedControl.svelte';
 export type { SegmentedOption } from './segmentedControl';
 export type { ViewLayoutIconName } from './segmentedControl';
 export { default as SectionLabel } from './SectionLabel.svelte';
+export { default as NdmsIconTile } from './NdmsIconTile.svelte';

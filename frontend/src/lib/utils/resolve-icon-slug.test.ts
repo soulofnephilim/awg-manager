@@ -71,6 +71,11 @@ describe('resolveIconSlug token match', () => {
 		it('Работа → lucide briefcase', () => {
 			expect(resolveIconSlug('Работа')).toBe('lucide-briefcase-business');
 		});
+
+		it('Alice / Alisa → yandex inline', () => {
+			expect(resolveIconSlug('Alice')).toBe('yandex');
+			expect(resolveIconSlug('Alisa')).toBe('yandex');
+		});
 	});
 
 describe('resolveIconSlug IP checker variants', () => {
