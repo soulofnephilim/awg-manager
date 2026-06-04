@@ -57,7 +57,7 @@ func TestDefaultsCatalogInvariants(t *testing.T) {
 		}
 	}
 	// singbox-only presets (except rkn) get DNS from vernette/rulesets/raw where lists exist.
-	for _, id := range []string{"unavailable-in-russia", "meta", "category-games", "category-media", "google-play"} {
+	for _, id := range []string{"unavailable-in-russia", "google-play"} {
 		var found *Preset
 		for i := range ps {
 			if ps[i].ID == id {
@@ -123,6 +123,48 @@ func TestDefaultsCatalogCovers(t *testing.T) {
 		}
 		if len(found.Covers) != n {
 			t.Errorf("preset %q covers: got %d want %d (%v)", id, len(found.Covers), n, found.Covers)
+		}
+	}
+}
+
+func TestDefaultsCatalogCoversNoDuplicateDns(t *testing.T) {
+	ps, err := LoadBuiltins()
+	if err != nil {
+		t.Fatalf("LoadBuiltins: %v", err)
+	}
+	byID := map[string]Preset{}
+	for _, p := range ps {
+		byID[p.ID] = p
+	}
+	for _, p := range ps {
+		if len(p.Covers) == 0 || p.Engines.DNS == nil {
+			continue
+		}
+		covered := map[string]bool{}
+		for _, childID := range p.Covers {
+			child, ok := byID[childID]
+			if !ok {
+				continue
+			}
+			if child.Engines.DNS == nil {
+				continue
+			}
+			for _, d := range child.Engines.DNS.Domains {
+				covered[d] = true
+			}
+			for _, s := range child.Engines.DNS.Subnets {
+				covered[s] = true
+			}
+		}
+		for _, d := range p.Engines.DNS.Domains {
+			if covered[d] {
+				t.Errorf("preset %q dns domain %q is duplicated from a covered preset", p.ID, d)
+			}
+		}
+		for _, s := range p.Engines.DNS.Subnets {
+			if covered[s] {
+				t.Errorf("preset %q dns subnet %q is duplicated from a covered preset", p.ID, s)
+			}
 		}
 	}
 }

@@ -24,6 +24,8 @@
     import RoutingTabBodySkeleton from './RoutingTabBodySkeleton.svelte';
     import RoutingRuleAddMenu from '$lib/components/routing/RoutingRuleAddMenu.svelte';
     import { ERROR_WORDS, pluralForm, pluralize, RULE_WORDS } from '$lib/utils/pluralize';
+    import { presetCatalog } from '$lib/stores/presets';
+    import { resolvePresetManualDomains } from '$lib/utils/catalog-preset';
 
     interface Props {
         dnsRoutes: DnsRoute[];
@@ -297,19 +299,26 @@
 
     async function handlePresetCreate(presets: CatalogPreset[], tunnelId: string, presetBackend: 'ndms' | 'hydraroute' = 'ndms') {
         try {
-            const lists = presets.map(preset => {
+            const catalog = $presetCatalog;
+            const lists = presets.flatMap((preset) => {
                 const dns = preset.engines.dns;
-                return {
+                const manualDomains = resolvePresetManualDomains(preset, catalog);
+                if (manualDomains.length === 0 && !dns?.subscriptionUrl) return [];
+                return [{
                     name: preset.name,
-                    manualDomains: [...(dns?.domains ?? []), ...(dns?.subnets ?? [])],
+                    manualDomains,
                     subscriptions: dns?.subscriptionUrl
                         ? [{ url: dns.subscriptionUrl, name: preset.name }]
                         : undefined,
                     enabled: true,
                     routes: [{ tunnelId, interface: tunnelId, fallback: 'auto' as const }],
                     backend: presetBackend,
-                };
+                }];
             });
+            if (lists.length === 0) {
+                notifications.error('У выбранных пресетов нет DNS-записей');
+                return;
+            }
             const result = await api.createDnsRouteBatch(lists);
             if (result.created > 0) {
                 notifications.success(`Создано ${pluralize(result.created, RULE_WORDS)} из каталога`);

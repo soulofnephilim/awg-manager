@@ -5,10 +5,13 @@ import {
 	DNS_LARGE_LIST_NOTICE,
 	applyPresetToggle,
 	catalogPresetCardNotice,
+	dnsRouteCatalogPresetFilter,
 	findCoveringPreset,
 	hrNeoCatalogPresetFilter,
 	normalizeCatalogSelection,
 	presetDnsLargeListRisk,
+	resolvePresetDnsEntries,
+	resolvePresetManualDomains,
 	singboxRouterCatalogPresetFilter,
 	splitPresetDnsEntries,
 } from './catalog-preset';
@@ -47,6 +50,67 @@ describe('hrNeoCatalogPresetFilter', () => {
 			engines: { dns: { subnets: ['10.0.0.0/8'] } },
 		};
 		expect(hrNeoCatalogPresetFilter(p)).toBe(true);
+	});
+
+	it('accepts composite parent with empty own DNS via covers', () => {
+		const catalog: CatalogPreset[] = [
+			{
+				...base,
+				id: 'meta',
+				covers: ['instagram'],
+				engines: { singbox: { action: 'tunnel', ruleSets: [] } },
+			},
+			{
+				...base,
+				id: 'instagram',
+				engines: { dns: { domains: ['instagram.com'] } },
+			},
+		];
+		expect(hrNeoCatalogPresetFilter(catalog[0], catalog)).toBe(true);
+		expect(dnsRouteCatalogPresetFilter(catalog[0], catalog)).toBe(true);
+	});
+});
+
+describe('resolvePresetDnsEntries', () => {
+	const catalog: CatalogPreset[] = [
+		{
+			...base,
+			id: 'meta',
+			covers: ['instagram', 'whatsapp'],
+			engines: {},
+		},
+		{
+			...base,
+			id: 'instagram',
+			engines: { dns: { domains: ['instagram.com', 'cdninstagram.com'] } },
+		},
+		{
+			...base,
+			id: 'whatsapp',
+			engines: { dns: { domains: ['whatsapp.com'], subnets: ['91.108.0.0/16'] } },
+		},
+	];
+
+	it('expands empty parent to union of covered children', () => {
+		expect(resolvePresetDnsEntries(catalog[0], catalog)).toEqual({
+			domainLines: ['cdninstagram.com', 'instagram.com', 'whatsapp.com'],
+			cidrLines: ['91.108.0.0/16'],
+		});
+	});
+
+	it('merges own domains with covered children', () => {
+		const parent: CatalogPreset = {
+			...base,
+			id: 'bundle',
+			covers: ['instagram'],
+			engines: { dns: { domains: ['meta.com'] } },
+		};
+		const cat = [...catalog.slice(1), parent];
+		expect(resolvePresetManualDomains(parent, cat)).toEqual([
+			'cdninstagram.com',
+			'instagram.com',
+			'meta.com',
+		]);
 	});
 });
 

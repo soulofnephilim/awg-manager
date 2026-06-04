@@ -8,7 +8,11 @@
 	import type { CatalogPreset } from '$lib/types';
 	import { Modal, Button, Dropdown, type DropdownOption } from '$lib/components/ui';
 	import { IconPickerModal, ServiceIcon } from '$lib/components/dnsroutes';
-	import { presetDnsEntryCount, splitPresetDnsEntries } from '$lib/utils/catalog-preset';
+	import { presetCatalog } from '$lib/stores/presets';
+	import {
+		resolvedPresetDnsEntryCount,
+		resolvePresetDnsEntries,
+	} from '$lib/utils/catalog-preset';
 	import { InterfaceList } from '$lib/components/accesspolicy';
 	import HrNeoGeoTagPicker from './HrNeoGeoTagPicker.svelte';
 	import { buildRoutingTunnelDropdownOptions } from '$lib/utils/routingTunnelOptions';
@@ -215,7 +219,7 @@
 
 	function applyPresetFields(p: CatalogPreset) {
 		selectedPreset = p;
-		const { domainLines, cidrLines } = splitPresetDnsEntries(p);
+		const { domainLines, cidrLines } = resolvePresetDnsEntries(p, $presetCatalog);
 		domainsText = domainLines.join('\n');
 		cidrText = cidrLines.join('\n');
 		if (!name.trim()) name = p.name;
@@ -391,7 +395,7 @@
 					<div class="catalog-entry-info">
 						<div class="catalog-entry-name">{selectedPreset.name}</div>
 						<div class="catalog-entry-meta">
-							{presetDnsEntryCount(selectedPreset)} записей из каталога
+							{resolvedPresetDnsEntryCount(selectedPreset, $presetCatalog)} записей из каталога
 						</div>
 					</div>
 					<span class="catalog-change">Сменить</span>

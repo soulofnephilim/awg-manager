@@ -21,8 +21,8 @@
     interface Props {
         open: boolean;
         title?: string;
-        /** Preset filter; default: any DNS-capable preset. */
-        presetFilter?: (p: CatalogPreset) => boolean;
+        /** Preset filter; default: any DNS-capable preset (incl. composites via covers). */
+        presetFilter?: (p: CatalogPreset, catalog: CatalogPreset[]) => boolean;
         /** Dim/disable tiles already present in the list (NDMS). */
         markExisting?: boolean;
         existingNames?: string[];
@@ -96,7 +96,10 @@
     );
     let existingLower = $derived(existingNames.map((n) => n.toLowerCase()));
 
-    const catalogPresets = $derived($presetCatalog.filter(presetFilter));
+    const catalogPresets = $derived.by(() => {
+        const all = $presetCatalog;
+        return all.filter((p) => presetFilter(p, all));
+    });
 
     const sortedPresets = $derived(
         [...catalogPresets].sort((a, b) => a.name.localeCompare(b.name, 'ru')),
@@ -143,16 +146,16 @@
         sortedPresets.filter(
             (p) =>
                 selected.has(p.id) &&
-                (p.notice || (warnLargeDnsLists && presetDnsLargeListRisk(p))),
+                (p.notice || (warnLargeDnsLists && presetDnsLargeListRisk(p, sortedPresets))),
         ),
     );
 
     function noticeText(preset: CatalogPreset): string {
-        return catalogPresetCardNotice(preset, warnLargeDnsLists) ?? '';
+        return catalogPresetCardNotice(preset, warnLargeDnsLists, sortedPresets) ?? '';
     }
 
     function noticeIsLargeList(preset: CatalogPreset): boolean {
-        return warnLargeDnsLists && presetDnsLargeListRisk(preset);
+        return warnLargeDnsLists && presetDnsLargeListRisk(preset, sortedPresets);
     }
 
     const primaryLabel = $derived.by(() => {

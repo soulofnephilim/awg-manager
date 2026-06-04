@@ -15,18 +15,110 @@ export function presetDnsEntryCount(p: CatalogPreset): number {
 	return (dns?.domains?.length ?? 0) + (dns?.subnets?.length ?? 0);
 }
 
+function catalogById(catalog: CatalogPreset[]): Map<string, CatalogPreset> {
+	return new Map(catalog.map((p) => [p.id, p]));
+}
+
+/** Own inline DNS only (no `covers` expansion). */
+export function splitPresetDnsEntries(p: CatalogPreset): {
+	domainLines: string[];
+	cidrLines: string[];
+} {
+	const dns = p.engines.dns;
+	const domainLines: string[] = [];
+	const cidrLines: string[] = [];
+
+	for (const e of dns?.domains ?? []) {
+		if (e.startsWith('geoip:') || /^[\d.:a-fA-F]+\/\d+$/.test(e)) cidrLines.push(e);
+		else domainLines.push(e);
+	}
+	for (const e of dns?.subnets ?? []) {
+		cidrLines.push(e);
+	}
+
+	return { domainLines, cidrLines };
+}
+
+/**
+ * Effective DNS for apply: own entries plus all covered children (recursive).
+ * Parent with empty inline DNS but `covers` resolves to the union of children.
+ */
+export function resolvePresetDnsEntries(
+	preset: CatalogPreset,
+	catalog: CatalogPreset[],
+	stack: Set<string> = new Set(),
+): { domainLines: string[]; cidrLines: string[] } {
+	if (stack.has(preset.id)) {
+		return { domainLines: [], cidrLines: [] };
+	}
+	const nextStack = new Set(stack);
+	nextStack.add(preset.id);
+
+	const domainSet = new Set<string>();
+	const cidrSet = new Set<string>();
+
+	const own = splitPresetDnsEntries(preset);
+	for (const d of own.domainLines) domainSet.add(d);
+	for (const c of own.cidrLines) cidrSet.add(c);
+
+	if (preset.covers?.length) {
+		const byId = catalogById(catalog);
+		for (const childId of preset.covers) {
+			const child = byId.get(childId);
+			if (!child) continue;
+			const childDns = resolvePresetDnsEntries(child, catalog, nextStack);
+			for (const d of childDns.domainLines) domainSet.add(d);
+			for (const c of childDns.cidrLines) cidrSet.add(c);
+		}
+	}
+
+	return {
+		domainLines: [...domainSet].sort(),
+		cidrLines: [...cidrSet].sort(),
+	};
+}
+
+export function resolvePresetManualDomains(
+	preset: CatalogPreset,
+	catalog: CatalogPreset[],
+): string[] {
+	const { domainLines, cidrLines } = resolvePresetDnsEntries(preset, catalog);
+	return [...domainLines, ...cidrLines];
+}
+
+export function resolvedPresetDnsEntryCount(
+	preset: CatalogPreset,
+	catalog: CatalogPreset[],
+): number {
+	const { domainLines, cidrLines } = resolvePresetDnsEntries(preset, catalog);
+	return domainLines.length + cidrLines.length;
+}
+
+/** NDMS / HR: inline or subscription DNS, or non-empty resolved list via `covers`. */
+export function isDnsApplicablePreset(p: CatalogPreset, catalog: CatalogPreset[]): boolean {
+	if (p.engines.dns?.subscriptionUrl) return true;
+	return resolvedPresetDnsEntryCount(p, catalog) > 0;
+}
+
 /** Large DNS list risk for NDMS/HR: >300 inline domain/CIDR entries (not subscription-only). */
-export function presetDnsLargeListRisk(p: CatalogPreset): boolean {
-	return presetDnsEntryCount(p) > DNS_LARGE_LIST_THRESHOLD;
+export function presetDnsLargeListRisk(
+	p: CatalogPreset,
+	catalog: CatalogPreset[] = [],
+): boolean {
+	if (p.engines.dns?.subscriptionUrl) return false;
+	const count =
+		catalog.length > 0 ? resolvedPresetDnsEntryCount(p, catalog) : presetDnsEntryCount(p);
+	return count > DNS_LARGE_LIST_THRESHOLD;
 }
 
 /** Tooltip / footer text for a catalog card (builtin notice + optional large-list warn). */
 export function catalogPresetCardNotice(
 	p: CatalogPreset,
 	warnLargeDnsLists: boolean,
+	catalog: CatalogPreset[] = [],
 ): string | undefined {
 	const parts: string[] = [];
-	if (warnLargeDnsLists && presetDnsLargeListRisk(p)) {
+	if (warnLargeDnsLists && presetDnsLargeListRisk(p, catalog)) {
 		parts.push(DNS_LARGE_LIST_NOTICE);
 	}
 	if (p.notice?.trim()) parts.push(p.notice.trim());
@@ -79,35 +171,25 @@ export function applyPresetToggle(
 	return next;
 }
 
-/** HR Neo: only presets with inline domain/CIDR lists (no subscription-only lists). */
-export function hrNeoCatalogPresetFilter(p: CatalogPreset): boolean {
-	return presetDnsEntryCount(p) > 0;
+/** HR Neo: resolved inline domain/CIDR (no subscription-only lists). */
+export function hrNeoCatalogPresetFilter(
+	p: CatalogPreset,
+	catalog: CatalogPreset[] = [],
+): boolean {
+	if (p.engines.dns?.subscriptionUrl) return false;
+	if (catalog.length === 0) return presetDnsEntryCount(p) > 0;
+	return resolvedPresetDnsEntryCount(p, catalog) > 0;
 }
 
-export function dnsRouteCatalogPresetFilter(p: CatalogPreset): boolean {
-	return !!p.engines.dns;
+export function dnsRouteCatalogPresetFilter(
+	p: CatalogPreset,
+	catalog: CatalogPreset[] = [],
+): boolean {
+	if (catalog.length === 0) return !!p.engines.dns;
+	return isDnsApplicablePreset(p, catalog);
 }
 
 /** sing-box router: presets with a singbox engine (same set as ListPresets). */
 export function singboxRouterCatalogPresetFilter(p: CatalogPreset): boolean {
 	return !!p.engines.singbox;
-}
-
-export function splitPresetDnsEntries(p: CatalogPreset): {
-	domainLines: string[];
-	cidrLines: string[];
-} {
-	const dns = p.engines.dns;
-	const domainLines: string[] = [];
-	const cidrLines: string[] = [];
-
-	for (const e of dns?.domains ?? []) {
-		if (e.startsWith('geoip:') || /^[\d.:a-fA-F]+\/\d+$/.test(e)) cidrLines.push(e);
-		else domainLines.push(e);
-	}
-	for (const e of dns?.subnets ?? []) {
-		cidrLines.push(e);
-	}
-
-	return { domainLines, cidrLines };
 }

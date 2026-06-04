@@ -1,6 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { api } from '$lib/api/client';
 import type { CatalogPreset } from '$lib/types';
+import { isDnsApplicablePreset } from '$lib/utils/catalog-preset';
 
 /** Unified preset catalog, loaded once from GET /api/presets. */
 export const presetCatalog = writable<CatalogPreset[]>([]);
@@ -40,4 +41,6 @@ export async function loadPresetCatalog(force = false): Promise<void> {
 }
 
 /** DNS-capable presets, for the DNS-route / HrNeo pickers. */
-export const dnsPresets = derived(presetCatalog, ($c) => $c.filter((p) => p.engines.dns));
+export const dnsPresets = derived(presetCatalog, ($c) =>
+	$c.filter((p) => isDnsApplicablePreset(p, $c)),
+);

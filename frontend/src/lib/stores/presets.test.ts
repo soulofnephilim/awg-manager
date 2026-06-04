@@ -8,14 +8,23 @@ import { api } from '$lib/api/client';
 import type { CatalogPreset } from '$lib/types';
 
 describe('dnsPresets', () => {
-	it('filters to presets with a dns engine', () => {
+	it('filters to presets with a dns engine or resolvable covers', () => {
 		const sample: CatalogPreset[] = [
 			{ id: 'a', name: 'A', iconSlug: 'a', category: 'x', origin: 'builtin', engines: { dns: { domains: ['a.com'] } } },
 			{ id: 'b', name: 'B', iconSlug: 'b', category: 'x', origin: 'builtin', engines: { singbox: { action: 'tunnel' } } },
+			{
+				id: 'meta',
+				name: 'Meta',
+				iconSlug: 'meta',
+				category: 'x',
+				origin: 'builtin',
+				covers: ['a'],
+				engines: { singbox: { action: 'tunnel' } },
+			},
 		];
 		presetCatalog.set(sample);
 		const out = get(dnsPresets);
-		expect(out.map((p) => p.id)).toEqual(['a']);
+		expect(out.map((p) => p.id).sort()).toEqual(['a', 'meta']);
 	});
 });
 

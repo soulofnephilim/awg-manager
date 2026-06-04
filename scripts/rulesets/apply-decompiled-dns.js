@@ -3,7 +3,12 @@
  * Merge short domain/CIDR lists from internal/presets/decompiled/*.json
  * into defaults.json DNS engines (cap: 500 domains per preset).
  *
- * Usage: node scripts/rulesets/apply-decompiled-dns.js [--dry-run]
+ * Presets with `covers` keep only domains/subnets not already listed in
+ * covered child presets — composite parents must not duplicate children.
+ *
+ * Usage:
+ *   node scripts/rulesets/apply-decompiled-dns.js [--dry-run]
+ *   node scripts/rulesets/apply-decompiled-dns.js --trim-only [--dry-run]
  */
 
 import fs from 'fs';
@@ -16,42 +21,10 @@ const DECOMPILED = path.join(ROOT, 'internal/presets/decompiled');
 const DEFAULTS_PATH = path.join(ROOT, 'internal/presets/defaults.json');
 const MAX_DOMAINS = 500;
 const DRY = process.argv.includes('--dry-run');
+const TRIM_ONLY = process.argv.includes('--trim-only');
 
 /** Presets that keep subscriptionUrl only (lists too long inline). */
 const SKIP_IDS = new Set(['unavailable-in-russia', 'rkn', 'all-blocked', 'russian-services']);
-
-/** Composite DNS from several decompiled service rule-sets. */
-const COMPOSITE = {
-	'category-games': {
-		files: [
-			'sagernet/geosite-steam.json',
-			'sagernet/geosite-epicgames.json',
-			'sagernet/geosite-playstation.json',
-			'sagernet/geosite-xbox.json',
-			'sagernet/geosite-blizzard.json',
-			'sagernet/geosite-ea.json',
-			'sagernet/geosite-oculus.json',
-			'roblox.json',
-			'nintendo.json',
-		],
-	},
-	'category-media': {
-		files: [
-			'netflix.json',
-			'sagernet/geosite-spotify.json',
-			'sagernet/geosite-deezer.json',
-			'sagernet/geosite-disney.json',
-			'sagernet/geosite-hbo.json',
-			'sagernet/geosite-hulu.json',
-			'sagernet/geosite-primevideo.json',
-			'sagernet/geosite-tidal.json',
-			'sagernet/geosite-twitch.json',
-			'sagernet/geosite-soundcloud.json',
-			'sagernet/geosite-vimeo.json',
-			'sagernet/geosite-bbc.json',
-		],
-	},
-};
 
 function extractFromRules(rules) {
 	const domains = new Set();
@@ -87,26 +60,38 @@ function loadExtract(relPath) {
 	return extractFromRules(data.rules || []);
 }
 
-function mergeExtracts(files) {
+function indexPresets(presets) {
+	const byId = new Map();
+	for (const p of presets) byId.set(p.id, p);
+	return byId;
+}
+
+/** Union of inline DNS entries from all presets listed in `covers`. */
+function coveredDnsUnion(preset, byId) {
 	const domains = new Set();
 	const subnets = new Set();
-	for (const f of files) {
-		const e = loadExtract(f);
-		if (!e) continue;
-		e.domains.forEach((d) => domains.add(d));
-		e.subnets.forEach((s) => subnets.add(s));
+	for (const id of preset.covers ?? []) {
+		const child = byId.get(id);
+		if (!child) {
+			console.error(`warn: preset ${preset.id} covers unknown id ${id}`);
+			continue;
+		}
+		for (const d of child.engines?.dns?.domains ?? []) domains.add(d.toLowerCase());
+		for (const s of child.engines?.dns?.subnets ?? []) subnets.add(s);
 	}
-	return {
-		domains: [...domains].sort(),
-		subnets: [...subnets].sort(),
-	};
+	return { domains, subnets };
+}
+
+function stripCoveredLists(domains, subnets, covered) {
+	const nextDomains = (domains ?? [])
+		.filter((d) => !covered.domains.has(String(d).toLowerCase()))
+		.sort();
+	const nextSubnets = (subnets ?? []).filter((s) => !covered.subnets.has(s)).sort();
+	return { domains: nextDomains, subnets: nextSubnets };
 }
 
 function findDecompiledForPreset(preset) {
 	const tries = new Set();
-	const composite = COMPOSITE[preset.id];
-	if (composite) return mergeExtracts(composite.files);
-
 	const sb = preset.engines?.singbox;
 	if (!sb?.ruleSets) return null;
 
@@ -130,8 +115,8 @@ function findDecompiledForPreset(preset) {
 
 function buildDns(existing, extracted) {
 	if (!extracted) return existing;
-	const domains = new Set(existing?.domains || []);
-	const subnets = new Set(existing?.subnets || []);
+	const domains = new Set((existing?.domains ?? []).map((d) => d.toLowerCase()));
+	const subnets = new Set(existing?.subnets ?? []);
 	for (const d of extracted.domains) domains.add(d);
 	for (const s of extracted.subnets) subnets.add(s);
 
@@ -143,43 +128,96 @@ function buildDns(existing, extracted) {
 	return out;
 }
 
+function finalizeDns(dns) {
+	if (!dns) return undefined;
+	const hasDomains = (dns.domains?.length ?? 0) > 0;
+	const hasSubnets = (dns.subnets?.length ?? 0) > 0;
+	const hasSub = !!dns.subscriptionUrl;
+	if (!hasDomains && !hasSubnets && !hasSub) return undefined;
+	if (!hasDomains) delete dns.domains;
+	if (!hasSubnets) delete dns.subnets;
+	return dns;
+}
+
+function applyStrip(preset, byId) {
+	if (!preset.covers?.length || !preset.engines?.dns) return null;
+	const covered = coveredDnsUnion(preset, byId);
+	const beforeD = preset.engines.dns.domains?.length ?? 0;
+	const beforeS = preset.engines.dns.subnets?.length ?? 0;
+	const stripped = stripCoveredLists(
+		preset.engines.dns.domains,
+		preset.engines.dns.subnets,
+		covered,
+	);
+	const next = finalizeDns({
+		...preset.engines.dns,
+		domains: stripped.domains,
+		subnets: stripped.subnets,
+	});
+	const afterD = next?.domains?.length ?? 0;
+	const afterS = next?.subnets?.length ?? 0;
+	if (beforeD === afterD && beforeS === afterS) return null;
+	if (next) preset.engines.dns = next;
+	else delete preset.engines.dns;
+	return {
+		id: preset.id,
+		action: 'strip-covered',
+		domains: `${beforeD} -> ${afterD}`,
+		subnets: `${beforeS} -> ${afterS}`,
+		removedDomains: beforeD - afterD,
+	};
+}
+
 const presets = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
+const byId = indexPresets(presets);
 const changes = [];
 
+// Pass 1: strip covered duplicates from every composite preset (existing inline DNS).
 for (const preset of presets) {
-	if (!preset.engines?.singbox) continue;
-	if (SKIP_IDS.has(preset.id)) continue;
+	const ch = applyStrip(preset, byId);
+	if (ch) changes.push(ch);
+}
 
-	const existing = preset.engines.dns;
-	if (existing?.subscriptionUrl && !COMPOSITE[preset.id]) continue;
+if (!TRIM_ONLY) {
+	// Pass 2: merge decompiled parent rulesets, then strip covered children again.
+	for (const preset of presets) {
+		if (!preset.engines?.singbox) continue;
+		if (SKIP_IDS.has(preset.id)) continue;
 
-	const extracted = findDecompiledForPreset(preset);
-	if (!extracted || (!extracted.domains.length && !extracted.subnets.length)) continue;
+		const existing = preset.engines.dns;
+		if (existing?.subscriptionUrl) continue;
 
-	const next = buildDns(existing, extracted);
-	if (next.domains.length > MAX_DOMAINS) {
-		changes.push({ id: preset.id, skip: `domains ${next.domains.length} > ${MAX_DOMAINS}` });
-		continue;
+		const extracted = findDecompiledForPreset(preset);
+		if (!extracted || (!extracted.domains.length && !extracted.subnets.length)) continue;
+
+		let next = buildDns(existing, extracted);
+		if (preset.covers?.length) {
+			const covered = coveredDnsUnion(preset, byId);
+			const stripped = stripCoveredLists(next.domains, next.subnets, covered);
+			next = finalizeDns({ ...next, ...stripped });
+		}
+
+		if ((next?.domains?.length ?? 0) > MAX_DOMAINS) {
+			changes.push({ id: preset.id, skip: `domains ${next.domains.length} > ${MAX_DOMAINS}` });
+			continue;
+		}
+
+		const beforeD = existing?.domains?.length ?? 0;
+		const beforeS = existing?.subnets?.length ?? 0;
+		const afterD = next?.domains?.length ?? 0;
+		const afterS = next?.subnets?.length ?? 0;
+		if (next && beforeD === afterD && beforeS === afterS && existing) continue;
+
+		if (next) preset.engines.dns = next;
+		else delete preset.engines.dns;
+
+		changes.push({
+			id: preset.id,
+			action: 'decompile',
+			domains: `${beforeD} -> ${afterD}`,
+			subnets: `${beforeS} -> ${afterS}`,
+		});
 	}
-
-	const beforeD = existing?.domains?.length ?? 0;
-	const beforeS = existing?.subnets?.length ?? 0;
-	if (
-		next.domains.length === beforeD &&
-		next.subnets.length === beforeS &&
-		(existing || next.domains.length === 0)
-	) {
-		continue;
-	}
-
-	preset.engines.dns = next.domains.length || next.subnets.length || next.subscriptionUrl ? next : undefined;
-	if (!preset.engines.dns) delete preset.engines.dns;
-
-	changes.push({
-		id: preset.id,
-		domains: `${beforeD} -> ${next.domains.length}`,
-		subnets: `${beforeS} -> ${next.subnets.length}`,
-	});
 }
 
 console.log(JSON.stringify(changes, null, 2));
