@@ -3268,17 +3268,22 @@
 	.awg-list-cell-actions {
 		display: flex;
 		justify-content: flex-end;
+		align-items: center;
 		flex-wrap: nowrap;
-		gap: 0.375rem;
+		gap: 0.25rem;
+		white-space: nowrap;
 	}
 
 	.awg-action-btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		gap: 4px;
-		padding: 0.375rem;
-		border-radius: 6px;
+		width: 28px;
+		height: 28px;
+		flex: 0 0 28px;
+		gap: 0;
+		padding: 0;
+		border-radius: var(--radius-sm);
 		border: none;
 		background: transparent;
 		color: var(--color-text-muted);
@@ -3894,7 +3899,7 @@
 	:global(.singbox-sub-table col.col-active) { width: 210px; }
 	:global(.singbox-sub-table col.col-traffic) { width: auto; }
 	:global(.singbox-sub-table col.col-ping) { width: 92px; }
-	:global(.singbox-sub-table col.col-actions) { width: 96px; }
+	:global(.singbox-sub-table col.col-actions) { width: 116px; }
 
 	:global(.tunnel-data-table th) {
 		text-align: center;
@@ -4097,6 +4102,16 @@
 		margin-inline: auto;
 	}
 
+	:global(.singbox-sub-table th.col-actions),
+	:global(.singbox-sub-table td.col-actions) {
+		padding-left: 0.25rem;
+		padding-right: 1rem;
+	}
+
+	:global(.singbox-sub-table th.col-actions) {
+		text-align: right;
+	}
+
 	:global(.singbox-sub-table .lc-actions) {
 		text-align: right;
 		white-space: nowrap;
@@ -4105,10 +4120,16 @@
 
 	:global(.singbox-sub-table .lc-actions .action-btn) {
 		display: inline-flex;
+		justify-content: center;
 		vertical-align: middle;
 		width: 28px;
 		height: 28px;
+		gap: 0;
 		padding: 0;
+	}
+
+	:global(.singbox-sub-table .lc-actions .action-btn + .action-btn) {
+		margin-left: 0.25rem;
 	}
 
 	:global(.singbox-sub-table tr.err td) {
