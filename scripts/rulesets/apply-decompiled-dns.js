@@ -5,6 +5,7 @@
  *
  * Presets with `covers` keep only domains/subnets not already listed in
  * covered child presets — composite parents must not duplicate children.
+ * Domain lists are dehydrated after each update (drop subdomains when apex exists).
  *
  * Usage:
  *   node scripts/rulesets/apply-decompiled-dns.js [--dry-run]
@@ -14,6 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { dehydrateDomainList } from './dns-dehydrate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '../..');
@@ -129,14 +131,37 @@ function buildDns(existing, extracted) {
 }
 
 function finalizeDns(dns) {
-	if (!dns) return undefined;
+	if (!dns) return { dns: undefined, dehydrated: 0 };
+
+	let dehydrated = 0;
+	if (dns.domains?.length) {
+		const { domains, removed } = dehydrateDomainList(dns.domains);
+		dehydrated = removed.length;
+		dns = { ...dns, domains };
+	}
+
 	const hasDomains = (dns.domains?.length ?? 0) > 0;
 	const hasSubnets = (dns.subnets?.length ?? 0) > 0;
 	const hasSub = !!dns.subscriptionUrl;
-	if (!hasDomains && !hasSubnets && !hasSub) return undefined;
+	if (!hasDomains && !hasSubnets && !hasSub) return { dns: undefined, dehydrated };
 	if (!hasDomains) delete dns.domains;
 	if (!hasSubnets) delete dns.subnets;
-	return dns;
+	return { dns, dehydrated };
+}
+
+function applyDehydrate(preset) {
+	if (!preset.engines?.dns?.domains?.length) return null;
+	const before = preset.engines.dns.domains.length;
+	const { dns, dehydrated } = finalizeDns({ ...preset.engines.dns });
+	if (dehydrated === 0) return null;
+	if (dns) preset.engines.dns = dns;
+	else delete preset.engines.dns;
+	return {
+		id: preset.id,
+		action: 'dehydrate',
+		domains: `${before} -> ${dns?.domains?.length ?? 0}`,
+		removedDomains: dehydrated,
+	};
 }
 
 function applyStrip(preset, byId) {
@@ -149,14 +174,14 @@ function applyStrip(preset, byId) {
 		preset.engines.dns.subnets,
 		covered,
 	);
-	const next = finalizeDns({
+	const { dns: next, dehydrated } = finalizeDns({
 		...preset.engines.dns,
 		domains: stripped.domains,
 		subnets: stripped.subnets,
 	});
 	const afterD = next?.domains?.length ?? 0;
 	const afterS = next?.subnets?.length ?? 0;
-	if (beforeD === afterD && beforeS === afterS) return null;
+	if (beforeD === afterD && beforeS === afterS && dehydrated === 0) return null;
 	if (next) preset.engines.dns = next;
 	else delete preset.engines.dns;
 	return {
@@ -165,6 +190,7 @@ function applyStrip(preset, byId) {
 		domains: `${beforeD} -> ${afterD}`,
 		subnets: `${beforeS} -> ${afterS}`,
 		removedDomains: beforeD - afterD,
+		dehydrated,
 	};
 }
 
@@ -194,19 +220,22 @@ if (!TRIM_ONLY) {
 		if (preset.covers?.length) {
 			const covered = coveredDnsUnion(preset, byId);
 			const stripped = stripCoveredLists(next.domains, next.subnets, covered);
-			next = finalizeDns({ ...next, ...stripped });
+			next = { ...next, ...stripped };
 		}
+
+		const beforeD = existing?.domains?.length ?? 0;
+		const beforeS = existing?.subnets?.length ?? 0;
+		const { dns: polished, dehydrated } = finalizeDns(next);
+		next = polished;
 
 		if ((next?.domains?.length ?? 0) > MAX_DOMAINS) {
 			changes.push({ id: preset.id, skip: `domains ${next.domains.length} > ${MAX_DOMAINS}` });
 			continue;
 		}
 
-		const beforeD = existing?.domains?.length ?? 0;
-		const beforeS = existing?.subnets?.length ?? 0;
 		const afterD = next?.domains?.length ?? 0;
 		const afterS = next?.subnets?.length ?? 0;
-		if (next && beforeD === afterD && beforeS === afterS && existing) continue;
+		if (next && beforeD === afterD && beforeS === afterS && dehydrated === 0 && existing) continue;
 
 		if (next) preset.engines.dns = next;
 		else delete preset.engines.dns;
@@ -216,8 +245,15 @@ if (!TRIM_ONLY) {
 			action: 'decompile',
 			domains: `${beforeD} -> ${afterD}`,
 			subnets: `${beforeS} -> ${afterS}`,
+			dehydrated,
 		});
 	}
+}
+
+// Pass 3: dehydrate any preset lists not touched above (idempotent cleanup).
+for (const preset of presets) {
+	const ch = applyDehydrate(preset);
+	if (ch) changes.push(ch);
 }
 
 console.log(JSON.stringify(changes, null, 2));

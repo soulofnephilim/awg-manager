@@ -101,6 +101,8 @@
 	const HR_TOGGLE_DEBOUNCE_MS = 600;
 	let optimisticEnabled = $state<Record<string, boolean>>({});
 	let pendingToggleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	/** Per-rule generation — stale API responses are ignored after a newer toggle. */
+	let toggleGeneration = new Map<string, number>();
 	let hrToggleLoadingId = $state<string | null>(null);
 
 	function ruleForCard(rule: DnsRoute): DnsRoute {
@@ -112,32 +114,42 @@
 
 	function scheduleHrRuleToggle(rule: DnsRoute, enabled: boolean) {
 		optimisticEnabled = { ...optimisticEnabled, [rule.id]: enabled };
+		const gen = (toggleGeneration.get(rule.id) ?? 0) + 1;
+		toggleGeneration.set(rule.id, gen);
 		const prev = pendingToggleTimers.get(rule.id);
 		if (prev) clearTimeout(prev);
 		pendingToggleTimers.set(
 			rule.id,
 			setTimeout(() => {
 				pendingToggleTimers.delete(rule.id);
-				void flushHrRuleToggle(rule.id, enabled);
+				void flushHrRuleToggle(rule.id, gen);
 			}, HR_TOGGLE_DEBOUNCE_MS),
 		);
 	}
 
-	async function flushHrRuleToggle(id: string, enabled: boolean) {
+	async function flushHrRuleToggle(id: string, gen: number) {
+		if (toggleGeneration.get(id) !== gen) return;
+		const enabled = optimisticEnabled[id];
+		if (enabled === undefined) return;
+
 		hrToggleLoadingId = id;
 		try {
 			const fresh = await api.setDnsRouteEnabled(id, enabled);
+			if (toggleGeneration.get(id) !== gen) return;
 			dnsRoutesStore.applyMutationResponse(fresh);
 			const next = { ...optimisticEnabled };
 			delete next[id];
 			optimisticEnabled = next;
 		} catch (e: unknown) {
+			if (toggleGeneration.get(id) !== gen) return;
 			const next = { ...optimisticEnabled };
 			delete next[id];
 			optimisticEnabled = next;
 			notifications.error(e instanceof Error ? e.message : String(e));
 		} finally {
-			hrToggleLoadingId = null;
+			if (toggleGeneration.get(id) === gen) {
+				hrToggleLoadingId = null;
+			}
 		}
 	}
 

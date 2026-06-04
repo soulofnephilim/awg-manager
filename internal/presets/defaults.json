@@ -7,7 +7,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["anthropic.com", "claude.ai", "claude.com"]
+        "domains": [
+          "anthropic.com",
+          "claude.ai",
+          "claude.com"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -175,7 +179,14 @@
         "action": "tunnel"
       }
     },
-    "covers": ["anthropic", "copilot", "gemini", "grok", "openai", "perplexity"]
+    "covers": [
+      "anthropic",
+      "copilot",
+      "gemini",
+      "grok",
+      "openai",
+      "perplexity"
+    ]
   },
   {
     "id": "copilot",
@@ -185,7 +196,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["api.github.com", "api.individual.githubcopilot.com"]
+        "domains": [
+          "api.github.com",
+          "api.individual.githubcopilot.com"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -234,7 +248,12 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["api.x.com", "grok.x.com", "grok.com", "x.ai"]
+        "domains": [
+          "api.x.com",
+          "grok.x.com",
+          "grok.com",
+          "x.ai"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -382,7 +401,6 @@
       "dns": {
         "domains": [
           "gosuslugi.ru",
-          "esia.gosuslugi.ru",
           "nalog.ru",
           "nalog.gov.ru",
           "cbr.ru",
@@ -395,7 +413,6 @@
           "sber.ru",
           "sberbank.com",
           "sbrf.ru",
-          "online.sberbank.ru",
           "sberprime.ru",
           "sberbankinsurance.ru",
           "sberdevices.ru",
@@ -435,7 +452,6 @@
           "wbstatic.net",
           "wb.ru",
           "aliexpress.ru",
-          "market.yandex.ru",
           "megamarket.ru",
           "yandex.ru",
           "yandex.net",
@@ -445,20 +461,9 @@
           "yandex-team.ru",
           "kinopoisk.ru",
           "kinopoisk.tv",
-          "plus.yandex.ru",
-          "music.yandex.ru",
-          "disk.yandex.ru",
-          "mail.yandex.ru",
-          "cloud.yandex.ru",
-          "taxi.yandex.ru",
           "go.yandex",
           "eda.yandex",
-          "delivery.yandex.ru",
-          "travel.yandex.ru",
-          "realty.yandex.ru",
-          "services.yandex.ru",
           "dzen.ru",
-          "zen.yandex.ru",
           "vk.com",
           "vk.ru",
           "vk.me",
@@ -469,7 +474,6 @@
           "vkuservideo.net",
           "vkplay.ru",
           "mail.ru",
-          "my.mail.ru",
           "ok.ru",
           "odnoklassniki.ru",
           "my.games",
@@ -810,6 +814,7 @@
     "name": "Cloudflare",
     "iconSlug": "cloudflare",
     "category": "cloud",
+    "notice": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
     "origin": "",
     "engines": {
       "dns": {
@@ -963,7 +968,6 @@
     "engines": {
       "dns": {
         "domains": [
-          "cn.download.nvidia.com",
           "nvidia.custhelp.com",
           "nvidia.tt.omtrdc.net",
           "geforce.cn",
@@ -1404,7 +1408,6 @@
           "adobetechcommcallback.com",
           "adobetechcommdemo.com",
           "adobexdplatform.com",
-          "advertising.adobe.com",
           "assetsadobe.com",
           "authorxml.com",
           "behance.net",
@@ -1596,7 +1599,11 @@
         ]
       }
     },
-    "covers": ["docker", "github", "npm"]
+    "covers": [
+      "docker",
+      "github",
+      "npm"
+    ]
   },
   {
     "id": "docker",
@@ -1634,7 +1641,9 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["figma.com"]
+        "domains": [
+          "figma.com"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -1656,8 +1665,6 @@
     "engines": {
       "dns": {
         "domains": [
-          "copilot-telemetry-service.githubusercontent.com",
-          "copilot-telemetry.githubusercontent.com",
           "copilotprodattachments.blob.core.windows.net",
           "github-api.arkoselabs.com",
           "github-cloud.s3.amazonaws.com",
@@ -1687,7 +1694,6 @@
           "productionresultssa8.blob.core.windows.net",
           "productionresultssa9.blob.core.windows.net",
           "atom.io",
-          "collector.github.com",
           "dependabot.com",
           "gh.io",
           "ghcr.io",
@@ -1789,15 +1795,10 @@
           "ipcheck.ing",
           "ip-api.com",
           "ipify.org",
-          "api.ipify.org",
           "ident.me",
-          "v4.ident.me",
-          "v6.ident.me",
           "ifconfig.me",
           "ifconfig.co",
           "icanhazip.com",
-          "ipv4.icanhazip.com",
-          "ipv6.icanhazip.com",
           "ipecho.net",
           "wtfismyip.com",
           "iplocation.net",
@@ -1825,7 +1826,6 @@
           "ipaddress.my",
           "check-host.net",
           "examineip.com",
-          "bot.whatismyipaddress.com",
           "mullvad.net",
           "surfshark.com",
           "nordvpn.com",
@@ -1896,7 +1896,6 @@
     "engines": {
       "dns": {
         "domains": [
-          "cdn.jetbrains.com",
           "datalore.io",
           "download-cdn.jetbrains.com.cn",
           "intellij.com",
@@ -1931,7 +1930,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["licdn.com", "linkedin.com"]
+        "domains": [
+          "licdn.com",
+          "linkedin.com"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -1980,7 +1982,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["npm.community", "npmjs.com", "npmjs.org"]
+        "domains": [
+          "npm.community",
+          "npmjs.com",
+          "npmjs.org"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -2083,7 +2089,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["zoom.com", "zoom.com.cn", "zoom.us"]
+        "domains": [
+          "zoom.com",
+          "zoom.com.cn",
+          "zoom.us"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -2507,7 +2517,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["rbxcdn.com", "roblox.com"],
+        "domains": [
+          "rbxcdn.com",
+          "roblox.com"
+        ],
         "subnets": [
           "2.16.16.0/22",
           "2.16.102.0/23",
@@ -2648,7 +2661,6 @@
       "dns": {
         "domains": [
           "a4e8s8k3.map2.ssl.hwcdn.net",
-          "alibaba.cdn.steampipe.steamcontent.com",
           "f3b7q2p3.ssl.hwcdn.net",
           "lv.queniujq.cn",
           "steambroadcast.akamaized.net",
@@ -2730,8 +2742,7 @@
           "ubisoft-uplay-savegames.s3.amazonaws.com",
           "ubisoft-orbit-savegames.s3.amazonaws.com",
           "ubistatic1-a.akamaihd.net",
-          "ubisoft.siteintercept.qualtrics.com",
-          "uplaypc-s-ubisoft.cdn.ubi.com"
+          "ubisoft.siteintercept.qualtrics.com"
         ],
         "subnets": [
           "52.202.184.0/24",
@@ -2870,9 +2881,6 @@
     "notice": "Композитный список стриминговых сервисов",
     "origin": "",
     "engines": {
-      "dns": {
-        "domains": []
-      },
       "singbox": {
         "ruleSets": [
           {
@@ -2906,7 +2914,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["deezer.com", "dzcdn.net"]
+        "domains": [
+          "deezer.com",
+          "dzcdn.net"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -3332,7 +3343,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["sndcdn.com", "soundcloud.cloud", "soundcloud.com"]
+        "domains": [
+          "sndcdn.com",
+          "soundcloud.cloud",
+          "soundcloud.com"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -3355,11 +3370,8 @@
       "dns": {
         "domains": [
           "spotify.com",
-          "adeventtracker.spotify.com",
-          "adstudio-assets.scdn.co",
           "audio-ak-spotify-com.akamaized.net",
           "audio4-ak-spotify-com.akamaized.net",
-          "bloodhound.spotify.com",
           "cdn-spotify-experiments.conductrics.com",
           "heads-ak-spotify-com.akamaized.net",
           "heads4-ak-spotify-com.akamaized.net",
@@ -3402,7 +3414,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["tidal.com", "tidalhifi.com", "wimpmusic.com"]
+        "domains": [
+          "tidal.com",
+          "tidalhifi.com",
+          "wimpmusic.com"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -3423,7 +3439,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["themoviedb.org", "tmdb.org", "tmdb-image-prod.b-cdn.net"]
+        "domains": [
+          "themoviedb.org",
+          "tmdb.org",
+          "tmdb-image-prod.b-cdn.net"
+        ]
       }
     }
   },
@@ -3610,7 +3630,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["bsky.app", "bsky.network", "bsky.social"]
+        "domains": [
+          "bsky.app",
+          "bsky.network",
+          "bsky.social"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -3746,7 +3770,6 @@
           "acebooik.com",
           "acebook.com",
           "advancediddetection.com",
-          "analytics.facebook.com",
           "askfacebook.net",
           "askfacebook.org",
           "atdmt2.com",
@@ -4113,7 +4136,6 @@
           "nextstop.com",
           "online-deals.net",
           "opencreate.org",
-          "pixel.facebook.com",
           "reachtheworldonfacebook.com",
           "redkix.com",
           "rocksdb.org",
@@ -4167,7 +4189,10 @@
         "action": "tunnel"
       }
     },
-    "covers": ["google-play", "youtube"]
+    "covers": [
+      "google-play",
+      "youtube"
+    ]
   },
   {
     "id": "google-play",
@@ -4184,7 +4209,6 @@
           "play-lh.googleusercontent.com",
           "play.google.com",
           "play.googleapis.com",
-          "redirector.c.play.google.com",
           "xn--ngstr-lra8j.com"
         ]
       },
@@ -4207,7 +4231,11 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["cdninstagram.com", "fbcdn.net", "instagram.com"]
+        "domains": [
+          "cdninstagram.com",
+          "fbcdn.net",
+          "instagram.com"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -4228,7 +4256,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["medium.com", "medium.systems"]
+        "domains": [
+          "medium.com",
+          "medium.systems"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -4259,7 +4290,12 @@
         "action": "tunnel"
       }
     },
-    "covers": ["facebook", "instagram", "threads", "whatsapp"]
+    "covers": [
+      "facebook",
+      "instagram",
+      "threads",
+      "whatsapp"
+    ]
   },
   {
     "id": "patreon",
@@ -4433,7 +4469,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["t.me", "telegram.org"],
+        "domains": [
+          "t.me",
+          "telegram.org"
+        ],
         "subnets": [
           "91.105.192.0/23",
           "91.108.4.0/22",
@@ -4463,7 +4502,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["threads.com", "threads.net"]
+        "domains": [
+          "threads.com",
+          "threads.net"
+        ]
       },
       "singbox": {
         "ruleSets": [
@@ -4519,7 +4561,10 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["whatsapp.com", "whatsapp.net"],
+        "domains": [
+          "whatsapp.com",
+          "whatsapp.net"
+        ],
         "subnets": [
           "31.13.24.0/21",
           "31.13.64.0/18",
@@ -4564,7 +4609,12 @@
     "origin": "",
     "engines": {
       "dns": {
-        "domains": ["t.co", "twimg.com", "twitter.com", "x.com"]
+        "domains": [
+          "t.co",
+          "twimg.com",
+          "twitter.com",
+          "x.com"
+        ]
       },
       "singbox": {
         "ruleSets": [

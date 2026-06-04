@@ -35,7 +35,7 @@ func TestDefaultsCatalogInvariants(t *testing.T) {
 			t.Errorf("preset %q singbox has empty action", p.ID)
 		}
 		if dns := p.Engines.DNS; dns != nil {
-			if len(dns.Domains) == 0 && len(dns.Subnets) == 0 && dns.SubscriptionURL == "" {
+			if len(dns.Domains) == 0 && len(dns.Subnets) == 0 && dns.SubscriptionURL == "" && len(p.Covers) == 0 {
 				t.Errorf("preset %q dns engine is empty", p.ID)
 			}
 			if len(dns.Domains) > 500 {
