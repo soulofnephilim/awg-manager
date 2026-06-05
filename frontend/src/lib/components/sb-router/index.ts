@@ -47,6 +47,7 @@ export {
 
 // F5a — Templates Modal
 export { default as TemplatesModal } from './TemplatesModal.svelte';
+export { default as SbRouterServiceCatalogModal } from './SbRouterServiceCatalogModal.svelte';
 export { default as TemplatesFilterChip } from './TemplatesFilterChip.svelte';
 export { default as TemplatesGroup } from './TemplatesGroup.svelte';
 export { default as TemplateServiceTile } from './TemplateServiceTile.svelte';
@@ -91,7 +92,11 @@ export {
   ValidationError,
   type SubmitWizardArgs,
 } from './addWizardActions';
-export { dismissTemplatesModal } from './templatesStore';
+export {
+  dismissTemplatesModal,
+  catalogIdsFromTemplatesSelection,
+  setServiceTemplateSelection,
+} from './templatesStore';
 
 // F5c — EmptyState
 export { default as EmptyState } from './EmptyState.svelte';

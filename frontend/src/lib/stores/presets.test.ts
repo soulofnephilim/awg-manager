@@ -8,14 +8,23 @@ import { api } from '$lib/api/client';
 import type { CatalogPreset } from '$lib/types';
 
 describe('dnsPresets', () => {
-	it('filters to presets with a dns engine', () => {
+	it('filters to presets with a dns engine or resolvable covers', () => {
 		const sample: CatalogPreset[] = [
 			{ id: 'a', name: 'A', iconSlug: 'a', category: 'x', origin: 'builtin', engines: { dns: { domains: ['a.com'] } } },
 			{ id: 'b', name: 'B', iconSlug: 'b', category: 'x', origin: 'builtin', engines: { singbox: { action: 'tunnel' } } },
+			{
+				id: 'meta',
+				name: 'Meta',
+				iconSlug: 'meta',
+				category: 'x',
+				origin: 'builtin',
+				covers: ['a'],
+				engines: { singbox: { action: 'tunnel' } },
+			},
 		];
 		presetCatalog.set(sample);
 		const out = get(dnsPresets);
-		expect(out.map((p) => p.id)).toEqual(['a']);
+		expect(out.map((p) => p.id).sort()).toEqual(['a', 'meta']);
 	});
 });
 
@@ -36,11 +45,11 @@ describe('loadPresetCatalog', () => {
 		expect(get(presetCatalogLoaded)).toBe(true);
 	});
 
-	it('swallows errors (non-fatal) but still marks loaded', async () => {
+	it('swallows errors (non-fatal) and leaves catalog not loaded for retry', async () => {
 		vi.mocked(api.listPresets).mockRejectedValueOnce(new Error('boom'));
 		await loadPresetCatalog(true);
 		expect(get(presetCatalog)).toEqual([]);
-		expect(get(presetCatalogLoaded)).toBe(true);
+		expect(get(presetCatalogLoaded)).toBe(false);
 	});
 
 	it('treats an undefined payload as an empty catalog', async () => {

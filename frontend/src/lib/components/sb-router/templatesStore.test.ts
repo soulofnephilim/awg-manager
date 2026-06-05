@@ -4,6 +4,7 @@ import {
   templatesOpen, templatesSelection, templatesFilter, templatesQuery, templatesOutbound,
   openTemplatesModal, closeTemplatesModal, toggleTemplate, clearSelection,
   setFilter, setQuery, setOutbound,
+  catalogIdsFromTemplatesSelection, setServiceTemplateSelection,
 } from './templatesStore';
 
 describe('templatesStore', () => {
@@ -87,5 +88,22 @@ describe('templatesStore', () => {
     expect(get(templatesOutbound)).toBe('warp');
     setOutbound(null);
     expect(get(templatesOutbound)).toBe(null);
+  });
+
+  it('catalogIdsFromTemplatesSelection extracts svc ids', () => {
+    toggleTemplate('svc:netflix');
+    toggleTemplate('rs:geoip-ru');
+    expect(catalogIdsFromTemplatesSelection(get(templatesSelection))).toEqual(['netflix']);
+  });
+
+  it('setServiceTemplateSelection replaces svc keys and keeps rs', () => {
+    toggleTemplate('rs:geoip-ru');
+    toggleTemplate('svc:old');
+    setServiceTemplateSelection(['netflix', 'youtube']);
+    const sel = get(templatesSelection);
+    expect(sel.has('rs:geoip-ru')).toBe(true);
+    expect(sel.has('svc:old')).toBe(false);
+    expect(sel.has('svc:netflix')).toBe(true);
+    expect(sel.has('svc:youtube')).toBe(true);
   });
 });

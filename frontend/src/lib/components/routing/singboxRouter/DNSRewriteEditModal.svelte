@@ -38,56 +38,33 @@
 	onClose={onClose}
 	title={rewrite ? 'Редактировать перезапись' : 'Новая перезапись'}
 	width={520}
+	footer={drawerFooter}
 >
-	<div class="drawer-card">
-		<div class="drawer-card-body">
-			<div class="form">
-				<label class="field">
-					<div class="lbl">Шаблон домена</div>
-					<input class="mono" bind:value={pattern} placeholder="nas.lan · *.discord.media · finland10*.discord.media" />
-					<div class="hint">
-						Без <code>*</code> — точный домен. <code>*.suffix</code> — все поддомены.
-						<code>prefix*.suffix</code> — wildcard внутри первой метки (нужен доменный хвост после <code>*</code>).
-					</div>
-				</label>
-				<label class="field">
-					<div class="lbl">IP-адреса (через запятую)</div>
-					<input class="mono" bind:value={ipsStr} placeholder="104.25.158.178, fd00::5" />
-				</label>
-				{#if error}<div class="error">{error}</div>{/if}
+	<div class="form">
+		<label class="field">
+			<div class="lbl">Шаблон домена</div>
+			<input class="mono" bind:value={pattern} placeholder="nas.lan · *.discord.media · finland10*.discord.media" />
+			<div class="hint">
+				Без <code>*</code> — точный домен. <code>*.suffix</code> — все поддомены.
+				<code>prefix*.suffix</code> — wildcard внутри первой метки (нужен доменный хвост после <code>*</code>).
 			</div>
-		</div>
-		<footer class="drawer-card-footer">
-			<Button variant="ghost" size="md" onclick={onClose} type="button">Отмена</Button>
-			<Button variant="primary" size="md" onclick={save} disabled={busy} loading={busy} type="button">
-				Сохранить
-			</Button>
-		</footer>
+		</label>
+		<label class="field">
+			<div class="lbl">IP-адреса (через запятую)</div>
+			<input class="mono" bind:value={ipsStr} placeholder="104.25.158.178, fd00::5" />
+		</label>
+		{#if error}<div class="error">{error}</div>{/if}
 	</div>
 </SideDrawer>
 
+{#snippet drawerFooter()}
+	<Button variant="ghost" size="md" onclick={onClose} type="button">Отмена</Button>
+	<Button variant="primary" size="md" onclick={save} disabled={busy} loading={busy} type="button">
+		Сохранить
+	</Button>
+{/snippet}
+
 <style>
-	.drawer-card {
-		min-width: 0;
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
-			var(--bg-secondary, var(--color-bg-secondary));
-		overflow: hidden;
-	}
-	.drawer-card-body {
-		padding: 1rem;
-		min-width: 0;
-	}
-	.drawer-card-footer {
-		display: flex;
-		justify-content: flex-end;
-		gap: 0.5rem;
-		padding: 0.875rem 1rem;
-		border-top: 1px solid var(--border);
-		background: var(--bg-secondary, var(--color-bg-secondary));
-	}
 	.form {
 		display: grid;
 		gap: 0.875rem;
@@ -98,7 +75,13 @@
 		gap: 0.35rem;
 		min-width: 0;
 	}
-	.lbl { font-size: 0.75rem; color: var(--muted-text); }
+	.lbl {
+		font-size: 0.75rem;
+		color: var(--muted-text);
+	}
+	.mono {
+		font-family: ui-monospace, monospace;
+	}
 	.field input {
 		background: var(--bg);
 		border: 1px solid var(--border);
@@ -108,35 +91,14 @@
 		font-size: 0.85rem;
 		box-sizing: border-box;
 		width: 100%;
-		min-width: 0;
-		min-height: 2.25rem;
 	}
-	.mono { font-family: ui-monospace, monospace; }
 	.hint {
 		font-size: 0.75rem;
-		color: var(--muted-text);
-		line-height: 1.4;
-		overflow-wrap: anywhere;
+		color: var(--text-muted);
+		line-height: 1.35;
 	}
-	.hint code { background: var(--bg); padding: 0.05rem 0.25rem; border-radius: 2px; font-family: ui-monospace, monospace; }
-	.error { color: var(--danger, #dc2626); font-size: 0.85rem; }
-	@media (max-width: 640px) {
-		.drawer-card {
-			border-radius: 12px;
-		}
-		.drawer-card-body {
-			padding: 0.875rem;
-		}
-		.drawer-card-footer {
-			display: grid;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-			gap: 0.5rem;
-			padding: 0.75rem 0.875rem;
-			align-items: stretch;
-		}
-		.drawer-card-footer :global(.btn) {
-			width: 100%;
-			min-width: 0;
-		}
+	.error {
+		color: var(--danger, #dc2626);
+		font-size: 0.85rem;
 	}
 </style>

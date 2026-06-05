@@ -24,6 +24,7 @@ type Preset struct {
 	RuleSets  []RuleRef  `json:"ruleSets"`
 	Rules     []RuleLink `json:"rules"`
 	Notice    string     `json:"notice,omitempty"`
+	Covers    []string   `json:"covers,omitempty"`
 	Featured  bool       `json:"featured,omitempty"`
 	Sensitive bool       `json:"sensitive,omitempty"`
 }
@@ -37,7 +38,7 @@ func presetFromUnified(p presets.Preset) (Preset, bool) {
 	}
 	out := Preset{
 		ID: p.ID, Name: p.Name, Category: p.Category, IconSlug: p.IconSlug,
-		Notice: p.Notice, Featured: p.Featured, Sensitive: p.Sensitive,
+		Notice: p.Notice, Covers: p.Covers, Featured: p.Featured, Sensitive: p.Sensitive,
 	}
 	for _, rs := range sb.RuleSets {
 		out.RuleSets = append(out.RuleSets, RuleRef{Tag: rs.Tag, URL: rs.URL})
@@ -103,9 +104,11 @@ func ApplyPresetToConfig(cfg *RouterConfig, p Preset, outboundTag string) error 
 		}
 		if pr.ActionTarget == "tunnel" {
 			if outboundTag == "" {
-				return fmt.Errorf("preset %q: outbound required for tunnel target", p.ID)
+				// Empty outbound is the UI "block" signal — override tunnel to reject.
+				rule.Action = "reject"
+			} else {
+				rule.Outbound = outboundTag
 			}
-			rule.Outbound = outboundTag
 		} else if pr.ActionTarget == "direct" {
 			rule.Outbound = "direct"
 		}

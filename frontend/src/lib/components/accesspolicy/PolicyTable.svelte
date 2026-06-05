@@ -2,6 +2,7 @@
 	import type { AccessPolicy } from '$lib/types';
 	import { pluralize, DEVICE_WORDS } from '$lib/utils/pluralize';
 	import { Badge } from '$lib/components/ui';
+	import RoutingTargetBadges from '$lib/components/routing/RoutingTargetBadges.svelte';
 	import PolicyIcon from './PolicyIcon.svelte';
 	import { isHydraRouteAccessPolicy } from '$lib/utils/accessPolicy';
 
@@ -34,13 +35,11 @@
 				</div>
 			{/if}
 			<div class="card-main">
-				<span class="policy-card-icon" aria-hidden="true">
-					<PolicyIcon
-						label={policy.description}
-						policyName={policy.name}
-						isHydraRoute={isHrPolicy}
-					/>
-				</span>
+				<PolicyIcon
+					label={policy.description}
+					policyName={policy.name}
+					isHydraRoute={isHrPolicy}
+				/>
 				<div class="card-info">
 					<div class="card-title">
 						<h3 title={policyLabel}>{policyLabel}</h3>
@@ -55,11 +54,13 @@
 					</div>
 					<span class="card-stat">{pluralize(policy.deviceCount, DEVICE_WORDS)}</span>
 					{#if policy.interfaces?.length}
+						{@const sortedIfaces = [...policy.interfaces].sort((a, b) => a.order - b.order)}
 						<div class="card-route">
-							<span class="route-arrow">&rarr;</span>
-							{#each [...policy.interfaces].sort((a, b) => a.order - b.order) as iface}
-								<Badge variant="muted" mono size="xs" title={iface.name}>{iface.label || iface.name}</Badge>
-							{/each}
+							<RoutingTargetBadges
+								labels={sortedIfaces.map((iface) => iface.label || iface.name)}
+								titles={sortedIfaces.map((iface) => iface.name)}
+								overflowNoun="интерфейсов"
+							/>
 						</div>
 					{/if}
 				</div>
@@ -124,16 +125,7 @@
 		display: flex;
 		gap: 10px;
 		min-width: 0;
-	}
-
-	.policy-card-icon {
-		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 36px;
-		height: 36px;
-		color: var(--text-muted);
+		align-items: flex-start;
 	}
 
 	.policy-card .card-info {

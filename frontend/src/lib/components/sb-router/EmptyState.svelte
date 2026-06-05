@@ -13,7 +13,7 @@
   import StepPill from './StepPill.svelte';
   import WizardStep from './WizardStep.svelte';
   import SelectedTemplatesRow from './SelectedTemplatesRow.svelte';
-  import TemplatesModal from './TemplatesModal.svelte';
+  import SbRouterServiceCatalogModal from './SbRouterServiceCatalogModal.svelte';
   import { templatesSelection, openTemplatesModal, clearSelection } from './templatesStore';
   import { buildTemplateList } from './templatesData';
   import { finishSetup } from './emptyStateActions';
@@ -125,7 +125,7 @@
     </Button>
   </WizardStep>
 
-  <TemplatesModal mode="collect" servicesOnly />
+  <SbRouterServiceCatalogModal />
 </div>
 
 <style>

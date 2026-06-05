@@ -40,23 +40,25 @@ export async function submitTemplates(
   outboundOrBlock: string,
   groups: TemplateGroup[],
 ): Promise<SubmitResult> {
-  const tasks = selection.map(async (id) => {
+  // Последовательно: каждый ApplyPreset — read/modify/write конфига без блокировки.
+  // Параллельные вызовы гоняются и в конфиге остаётся только последний пресет.
+  const successes: string[] = [];
+  const failures: Array<{ id: string; error: string }> = [];
+
+  for (const id of selection) {
     const item = findItem(groups, id);
     if (!item) {
-      return { id, ok: false as const, error: 'template not found' };
+      failures.push({ id, error: 'template not found' });
+      continue;
     }
     try {
       await applyOne(item, outboundOrBlock);
-      return { id, ok: true as const };
+      successes.push(id);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      return { id, ok: false as const, error: msg };
+      failures.push({ id, error: msg });
     }
-  });
+  }
 
-  const results = await Promise.all(tasks);
-  return {
-    successes: results.filter((r) => r.ok).map((r) => r.id),
-    failures: results.filter((r) => !r.ok).map((r) => ({ id: r.id, error: (r as { error: string }).error })),
-  };
+  return { successes, failures };
 }

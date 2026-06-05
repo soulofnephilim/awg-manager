@@ -55,5 +55,25 @@ describe('resolvePolicyIcon', () => {
 
 	it('uses hydraroute fallback when HR flag set and no label', () => {
 		expect(resolvePolicyIcon('', { isHydraRoute: true })).toBe('hydraroute');
+		expect(resolvePolicyIcon('', { policyName: 'Policy0', isHydraRoute: true })).toBe('hydraroute');
+	});
+
+	it('maps feedback policy name keywords', () => {
+		expect(resolvePolicyIcon('XKeen')).toBe('route');
+		expect(resolvePolicyIcon('ProxyRU')).toBe('shield');
+		expect(resolvePolicyIcon('sing-box')).toBe('route');
+		expect(resolvePolicyIcon('HRUS')).toBe('hydraroute');
+		expect(resolvePolicyIcon('IoT_VPN')).toBe('iot');
+		expect(resolvePolicyIcon('IoT_Xyandex')).toBe('iot');
+		expect(resolvePolicyIcon('AWG-Manager-VPN')).toBe('shield');
+		expect(resolvePolicyIcon('Only_MakeItGreatAgain')).toBe('direct');
+		expect(resolvePolicyIcon('No_INet')).toBe('direct');
+		expect(resolvePolicyIcon('dom.ru')).toBe('direct');
+		expect(resolvePolicyIcon('beeline')).toBe('direct');
+		expect(resolvePolicyIcon('splitrouting')).toBe('route');
+		expect(resolvePolicyIcon('Docker')).toBe('server');
+		expect(resolvePolicyIcon('homelab')).toBe('server');
+		expect(resolvePolicyIcon('Alice')).toBe('iot');
+		expect(resolvePolicyIcon('North_Korea')).toBe('north_korea');
 	});
 });

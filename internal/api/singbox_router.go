@@ -185,6 +185,7 @@ type SingboxRouterPresetDTO struct {
 	RuleSets  []SingboxRouterPresetRuleRefDTO  `json:"ruleSets"`
 	Rules     []SingboxRouterPresetRuleLinkDTO `json:"rules"`
 	Notice    string                           `json:"notice,omitempty" example:"Routes mainland China traffic via the direct outbound."`
+	Covers    []string                         `json:"covers,omitempty" example:"instagram,whatsapp"`
 	Featured  bool                             `json:"featured,omitempty" example:"true"`
 	Sensitive bool                             `json:"sensitive,omitempty" example:"false"`
 }

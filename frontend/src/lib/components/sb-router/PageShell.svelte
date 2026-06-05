@@ -1,17 +1,17 @@
 <script lang="ts" module>
-  import type { Snippet } from 'svelte';
+  import type { Snippet } from "svelte";
 </script>
 
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { FileJson, Search, Settings } from 'lucide-svelte';
-  import { mode, setMode, type RouterMode } from './modeStore';
-  import { bindLiveConnectionsStore } from './liveConnectionsStore';
-  import { openDrawer } from './drawerStore';
-  import StatusDrawer from './StatusDrawer.svelte';
-  import SourceDrawer from './SourceDrawer.svelte';
-  import LiveConnectionsChip from './LiveConnectionsChip.svelte';
-  import { SegmentedControl } from '$lib/components/ui';
+  import { onMount } from "svelte";
+  import { FileJson, Search, Settings } from "lucide-svelte";
+  import { mode, setMode, type RouterMode } from "./modeStore";
+  import { bindLiveConnectionsStore } from "./liveConnectionsStore";
+  import { openDrawer } from "./drawerStore";
+  import StatusDrawer from "./StatusDrawer.svelte";
+  import SourceDrawer from "./SourceDrawer.svelte";
+  import LiveConnectionsChip from "./LiveConnectionsChip.svelte";
+  import { SegmentedControl } from "$lib/components/ui";
 
   interface Props {
     /** Дополнительный subtitle под title (опционально). */
@@ -46,20 +46,37 @@
     <div class="header-tools">
       <LiveConnectionsChip />
 
-      <button type="button" class="params-btn" onclick={openDrawer} aria-label="Параметры sing-box">
+      <button
+        type="button"
+        class="params-btn"
+        onclick={openDrawer}
+        aria-label="Параметры sing-box"
+      >
         <Settings size={16} aria-hidden="true" />
         <span class="params-text">Параметры sing-box</span>
       </button>
 
       <div class="header-actions">
         {#if onOpenInspector}
-          <button type="button" class="icon-btn" onclick={onOpenInspector} aria-label="Инспектор маршрута" title="Инспектор маршрута">
+          <button
+            type="button"
+            class="icon-btn"
+            onclick={onOpenInspector}
+            aria-label="Инспектор маршрута"
+            title="Инспектор маршрута"
+          >
             <span class="action-icon"><Search size={16} /></span>
             <span class="action-text">Инспектор</span>
           </button>
         {/if}
         {#if onOpenJson}
-          <button type="button" class="icon-btn" onclick={onOpenJson} aria-label="JSON-конфиг" title="JSON-конфиг">
+          <button
+            type="button"
+            class="icon-btn"
+            onclick={onOpenJson}
+            aria-label="JSON-конфиг"
+            title="JSON-конфиг"
+          >
             <span class="action-icon"><FileJson size={16} /></span>
             <span class="action-text">Конфиг</span>
           </button>
@@ -69,8 +86,8 @@
       <SegmentedControl
         value={currentMode}
         options={[
-          { value: 'beginner', label: 'Простой' },
-          { value: 'expert', label: 'Эксперт' },
+          { value: "beginner", label: "Простой" },
+          { value: "expert", label: "Эксперт" },
         ] satisfies Array<{ value: RouterMode; label: string }>}
         ariaLabel="Режим интерфейса"
         onchange={selectMode}
@@ -87,14 +104,18 @@
 <SourceDrawer />
 
 <style>
-  .sb-shell { display: flex; flex-direction: column; gap: var(--sp-4); }
+  .sb-shell {
+    display: flex;
+    flex-direction: column;
+  }
 
   .sb-header {
     display: flex;
     align-items: center;
     gap: var(--sp-4);
-    padding: var(--sp-3) 0;
+    padding-bottom: var(--sp-3);
     border-bottom: 1px solid var(--border);
+    margin-bottom: var(--sp-3);
     flex-wrap: wrap;
   }
 
@@ -169,7 +190,9 @@
     justify-content: center;
     flex-shrink: 0;
   }
-  .action-text { display: none; }
+  .action-text {
+    display: none;
+  }
   .icon-btn:hover {
     color: var(--color-text-primary, var(--text-primary));
     background: var(--color-bg-hover, var(--bg-tertiary));
@@ -182,7 +205,9 @@
     flex-shrink: 0;
   }
 
-  .sb-body { width: 100%; }
+  .sb-body {
+    width: 100%;
+  }
 
   @media (max-width: 768px) {
     .sb-header {
@@ -216,10 +241,28 @@
       min-width: 0;
     }
     .header-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      align-items: stretch;
+      gap: 0.5rem;
       width: 100%;
+      min-width: 0;
     }
-    .sb-body {
-      padding: 0 12px;
+
+    .header-actions .icon-btn {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      justify-content: center;
+      gap: 0.375rem;
+      padding-inline: 0.625rem;
+      white-space: nowrap;
+    }
+
+    .header-actions .action-text {
+      display: inline;
+      font-size: var(--fs-sm);
+      font-weight: 500;
     }
   }
 
@@ -251,36 +294,6 @@
     .header-tools :global(.segmented-control-btn) {
       flex: 1;
       min-width: 0;
-    }
-
-    .header-actions {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      align-items: stretch;
-      gap: 0.5rem;
-      width: 100%;
-      min-width: 0;
-    }
-
-    .header-actions .icon-btn,
-    .header-actions :global(button) {
-      width: 100%;
-      min-width: 0;
-      max-width: 100%;
-      height: 32px;
-      justify-content: center;
-      white-space: nowrap;
-    }
-
-    .header-actions .icon-btn {
-      gap: 0.375rem;
-      padding-inline: 0.625rem;
-    }
-
-    .header-actions .action-text {
-      display: inline;
-      font-size: var(--fs-sm);
-      font-weight: 500;
     }
   }
 </style>

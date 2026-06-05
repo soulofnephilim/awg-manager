@@ -81,6 +81,15 @@ describe('templatesActions.submitTemplates', () => {
     expect(r.failures).toEqual([]);
   });
 
+  it('applies presets sequentially (config read-modify-write)', async () => {
+    const order: string[] = [];
+    (api.singboxRouterApplyPreset as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => {
+      order.push(id);
+    });
+    await submitTemplates(['svc:netflix', 'svc:youtube'], 'warp', groups);
+    expect(order).toEqual(['netflix', 'youtube']);
+  });
+
   it('partial failure: one rejected → recorded in failures with message', async () => {
     (api.singboxRouterApplyPreset as ReturnType<typeof vi.fn>)
       .mockImplementation((id: string) => id === 'netflix'

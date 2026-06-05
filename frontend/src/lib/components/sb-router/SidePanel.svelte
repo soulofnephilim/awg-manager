@@ -99,4 +99,9 @@
     cursor: not-allowed;
     opacity: 0.55;
   }
+  .body {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
 </style>

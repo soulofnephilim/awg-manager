@@ -3,7 +3,7 @@ export interface ServiceIconConfig {
 	background: string;
 	viewBox?: string;
 	scale?: number;
-	/** Served from frontend/static (e.g. /brand-icons/yandex.png). */
+	/** Served from frontend/static (e.g. custom PNG assets). */
 	assetSrc?: string;
 	assetFit?: 'contain' | 'cover';
 	/** CSS filter when the asset is a dark logo on a colored tile. */
@@ -19,16 +19,7 @@ const ICONS: { keywords: string[]; config: ServiceIconConfig }[] = [
 		},
 	},
 	{
-		keywords: ['disney', 'disney+'],
-		config: {
-			assetSrc: '/brand-icons/disney.png',
-			background: '#113CCF',
-			assetFilter: 'brightness(0) invert(1)',
-			scale: 0.82,
-		},
-	},
-	{
-		keywords: ['yandex', 'яндекс'],
+		keywords: ['yandex', 'яндекс', 'alice', 'alisa', 'алиса'],
 		config: {
 			svg: '<path d="M2.04 12c0-5.523 4.476-10 10-10 5.522 0 10 4.477 10 10s-4.478 10-10 10c-5.524 0-10-4.477-10-10z" fill="#FC3F1D"/><path d="M13.32 7.666h-.924c-1.694 0-2.585.858-2.585 2.123 0 1.43.616 2.1 1.881 2.959l1.045.704-3.003 4.487H7.49l2.695-4.014c-1.55-1.111-2.42-2.19-2.42-4.015 0-2.288 1.595-3.85 4.62-3.85h3.003v11.868H13.32V7.666z" fill="#fff"/>',
 			background: '#FC3F1D',
@@ -82,6 +73,15 @@ const ICONS: { keywords: string[]; config: ServiceIconConfig }[] = [
 		},
 	},
 	{
+		keywords: ['googleplay', 'google play', 'google-play'],
+		config: {
+			svg:
+				'<path fill="white" d="M22.018 13.298l-3.919 2.218-3.515-3.493 3.543-3.521 3.891 2.202a1.49 1.49 0 0 1 0 2.594zM1.337.924a1.486 1.486 0 0 0-.112.568v21.017c0 .217.045.419.124.6l11.155-11.087L1.337.924zm12.207 10.065l3.258-3.238L3.45.195a1.466 1.466 0 0 0-.946-.179l11.04 10.973zm0 2.067l-11 10.933c.298.036.612-.016.906-.183l13.324-7.54-3.23-3.21z"/>',
+			background: '#34A853',
+			scale: 0.62,
+		},
+	},
+	{
 		keywords: ['tmdb', 'themoviedb'],
 		config: {
 			svg: '<rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="white" stroke-width="1.8"/><rect x="5.5" y="7.5" width="5" height="4" rx="0.5" fill="white" opacity="0.9"/><rect x="13.5" y="7.5" width="5" height="4" rx="0.5" fill="white" opacity="0.9"/><rect x="5.5" y="13.5" width="5" height="3.5" rx="0.5" fill="white" opacity="0.5"/><rect x="13.5" y="13.5" width="5" height="3.5" rx="0.5" fill="white" opacity="0.5"/>',
@@ -96,7 +96,7 @@ const DEFAULT_ICON: ServiceIconConfig = {
 };
 
 /** Preset ids with custom inline art in ICONS (not brandIcons). */
-const PRESET_INLINE_SLUGS = new Set(['rkn', 'torrent', 'torrents', 'yandex', 'disney']);
+const PRESET_INLINE_SLUGS = new Set(['rkn', 'torrent', 'torrents', 'yandex', 'googleplay']);
 
 export function isPresetInlineSlug(slug: string): boolean {
 	return PRESET_INLINE_SLUGS.has(slug);

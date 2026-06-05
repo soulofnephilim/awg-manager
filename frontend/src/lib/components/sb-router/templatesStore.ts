@@ -56,3 +56,17 @@ export function dismissTemplatesModal(): void {
   // вызывающий код (например, AddRuleWizard) владеет selection'ом
   // и переиспользует его после закрытия.
 }
+
+/** Preset ids from svc:… template keys (for ServiceCatalogModal). */
+export function catalogIdsFromTemplatesSelection(sel: Set<string>): string[] {
+  return [...sel].filter((id) => id.startsWith('svc:')).map((id) => id.slice(4));
+}
+
+/** Replace service template picks; keeps rs:… selections (expert wizard). */
+export function setServiceTemplateSelection(presetIds: string[]): void {
+  selectionW.update((current) => {
+    const next = new Set([...current].filter((id) => !id.startsWith('svc:')));
+    for (const id of presetIds) next.add(`svc:${id}`);
+    return next;
+  });
+}

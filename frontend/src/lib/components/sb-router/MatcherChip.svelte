@@ -59,6 +59,9 @@
     color: var(--text-secondary);
     white-space: nowrap;
     line-height: 1.4;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
   }
   button.chip {
     margin: 0;
@@ -81,10 +84,14 @@
     font-size: 10px;
     color: var(--text-muted);
     font-family: var(--font-sans);
+    flex-shrink: 0;
   }
   .chip-val {
     color: var(--text-primary);
     font-family: var(--font-sans);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .chip-val.is-mono {
     font-family: var(--font-mono);

@@ -18,6 +18,7 @@
   import SelectedTemplatesRow from './SelectedTemplatesRow.svelte';
   import CustomMatcherForm from './CustomMatcherForm.svelte';
   import TemplatesModal from './TemplatesModal.svelte';
+  import SbRouterServiceCatalogModal from './SbRouterServiceCatalogModal.svelte';
   import {
     addWizardOpen,
     wizardOutboundCategory, wizardTunnelTag, wizardCustom,
@@ -167,7 +168,13 @@
         <div class="picker-icon"><Plus size={20} /></div>
         <div class="picker-text">
           <div class="picker-title">Выбрать из готовых шаблонов</div>
-          <div class="picker-sub">{pluralize($presets.length, SERVICE_WORDS)} · {pluralize($ruleSets.length, SET_WORDS)}</div>
+          <div class="picker-sub">
+            {#if $mode === 'beginner'}
+              {pluralize($presets.length, SERVICE_WORDS)}
+            {:else}
+              {pluralize($presets.length, SERVICE_WORDS)} · {pluralize($ruleSets.length, SET_WORDS)}
+            {/if}
+          </div>
         </div>
         <div class="picker-chev">›</div>
       </button>
@@ -263,7 +270,11 @@
       </Button>
     </MobileBottomBar>
 
-    <TemplatesModal mode="collect" servicesOnly={$mode === 'beginner'} />
+    {#if $mode === 'beginner'}
+      <SbRouterServiceCatalogModal />
+    {:else}
+      <TemplatesModal mode="collect" servicesOnly={false} />
+    {/if}
   </div>
 {/if}
 

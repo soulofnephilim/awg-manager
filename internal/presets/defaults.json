@@ -34,59 +34,35 @@
     "engines": {
       "dns": {
         "domains": [
-          "ai.google.dev",
-          "alkalicore-pa.clients6.google.com",
-          "alkalimakersuite-pa.clients6.google.com",
-          "antigravity-pa.googleapis.com",
-          "antigravity.googleapis.com",
-          "browser-intake-datadoghq.com",
-          "cloudaicompanion.googleapis.com",
-          "cloudcode-pa.googleapis.com",
-          "copilot-proxy.githubusercontent.com",
-          "copilot-telemetry-service.githubusercontent.com",
-          "copilot-telemetry.githubusercontent.com",
-          "copilot-workspace.githubnext.com",
-          "copilotprodattachments.blob.core.windows.net",
-          "daily-cloudcode-pa.googleapis.com",
-          "notebooklm-pa.googleapis.com",
-          "notebooklm.googleapis.com",
-          "o33249.ingest.sentry.io",
-          "openaiapi-site.azureedge.net",
-          "openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net",
-          "openaicom.imgix.net",
-          "openaicomproductionae4b.blob.core.windows.net",
-          "ppl-ai-file-upload.s3.amazonaws.com",
-          "pplx-res.cloudinary.com",
-          "production-openaicom-storage.azureedge.net",
-          "servd-anthropic-website.b-cdn.net",
-          "webchannel-alkalimakersuite-pa.clients6.google.com",
           "agentclientprotocol.com",
+          "ai.google.dev",
           "ai.studio",
           "aicode.googleapis.com",
           "aida.googleapis.com",
           "aisandbox-pa.googleapis.com",
-          "aistudio.google.com",
-          "anthropic.com",
+          "alkalicore-pa.clients6.google.com",
+          "antigravity-pa.googleapis.com",
           "antigravity-unleash.goog",
           "antigravity.google",
+          "antigravity.googleapis.com",
           "anythingllm.com",
           "arena.ai",
           "bard.google.com",
+          "browser-intake-datadoghq.com",
           "cerebras.ai",
           "chat.com",
-          "chatgpt.com",
           "chatgpt.livekit.cloud",
           "chutes.ai",
           "cici.com",
           "ciciai.com",
           "ciciaicdn.com",
           "clau.de",
-          "claude.ai",
-          "claude.com",
           "claudemcpclient.com",
           "claudeusercontent.com",
           "clawhub.ai",
           "clipdrop.co",
+          "cloudaicompanion.googleapis.com",
+          "cloudcode-pa.googleapis.com",
           "codeium.com",
           "codeiumdata.com",
           "coderabbit.ai",
@@ -96,7 +72,12 @@
           "comfy.org",
           "comfyci.org",
           "comfyregistry.org",
+          "copilot-proxy.githubusercontent.com",
+          "copilot-telemetry-service.githubusercontent.com",
+          "copilot-telemetry.githubusercontent.com",
+          "copilot-workspace.githubnext.com",
           "copilot.microsoft.com",
+          "copilotprodattachments.blob.core.windows.net",
           "coze.com",
           "crewai.com",
           "crixet.com",
@@ -104,6 +85,7 @@
           "cursor.com",
           "cursor.sh",
           "cursorapi.com",
+          "daily-cloudcode-pa.googleapis.com",
           "deepmind.com",
           "deepmind.google",
           "devin.ai",
@@ -120,13 +102,9 @@
           "gateway.ai.cloudflare.com",
           "geller-pa.googleapis.com",
           "gemini.google",
-          "gemini.google.com",
           "gemini.gstatic.com",
           "generativeai.google",
-          "generativelanguage.googleapis.com",
           "githubcopilot.com",
-          "grok.com",
-          "grok.x.com",
           "groq.com",
           "h2o.ai",
           "hf.co",
@@ -153,28 +131,29 @@
           "minimax.io",
           "mistral.ai",
           "mozilla.ai",
+          "notebooklm-pa.googleapis.com",
           "notebooklm.google",
           "notebooklm.google.com",
-          "oaistatic.com",
-          "oaiusercontent.com",
+          "notebooklm.googleapis.com",
+          "o33249.ingest.sentry.io",
           "ollama.com",
           "opal.google",
           "opal.google.com",
-          "openai.com",
           "openai.com.cdn.cloudflare.net",
+          "openaiapi-site.azureedge.net",
+          "openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net",
+          "openaicom.imgix.net",
+          "openaicomproductionae4b.blob.core.windows.net",
           "openart.ai",
           "openclaw.ai",
           "openrouter.ai",
           "openspec.dev",
           "oystermercury.top",
-          "perplexity.ai",
-          "perplexity.com",
           "plannotator.ai",
           "poe.com",
           "poecdn.net",
-          "pplx.ai",
-          "proactivebackend-pa.googleapis.com",
-          "robinfrontend-pa.googleapis.com",
+          "production-openaicom-storage.azureedge.net",
+          "servd-anthropic-website.b-cdn.net",
           "sora.com",
           "spicywriter.com",
           "stitch.withgoogle.com",
@@ -182,9 +161,9 @@
           "themeforest.net",
           "trae.ai",
           "turn.livekit.cloud",
+          "webchannel-alkalimakersuite-pa.clients6.google.com",
           "windsurf.build",
           "windsurf.com",
-          "x.ai",
           "youmind.ai",
           "youmind.com",
           "youmind.site"
@@ -199,7 +178,15 @@
         ],
         "action": "tunnel"
       }
-    }
+    },
+    "covers": [
+      "anthropic",
+      "copilot",
+      "gemini",
+      "grok",
+      "openai",
+      "perplexity"
+    ]
   },
   {
     "id": "copilot",
@@ -353,9 +340,10 @@
   },
   {
     "id": "all-blocked",
-    "name": "Всё заблокированное",
+    "name": "Заблокировано в РФ (itdoginfo/allow-domains)",
     "iconSlug": "lucide-globe-lock",
     "category": "block",
+    "notice": "Каталог заблокированных доменов из itdoginfo/allow-domains, может содержать домены из других стран",
     "origin": "",
     "engines": {
       "dns": {
@@ -387,6 +375,7 @@
     "id": "rkn",
     "name": "Заблокировано в РФ",
     "iconSlug": "rkn",
+    "notice": "Содержит более 90 000 доменов, заблокированных в РФ",
     "category": "block",
     "origin": "",
     "engines": {
@@ -412,7 +401,6 @@
       "dns": {
         "domains": [
           "gosuslugi.ru",
-          "esia.gosuslugi.ru",
           "nalog.ru",
           "nalog.gov.ru",
           "cbr.ru",
@@ -425,7 +413,6 @@
           "sber.ru",
           "sberbank.com",
           "sbrf.ru",
-          "online.sberbank.ru",
           "sberprime.ru",
           "sberbankinsurance.ru",
           "sberdevices.ru",
@@ -465,7 +452,6 @@
           "wbstatic.net",
           "wb.ru",
           "aliexpress.ru",
-          "market.yandex.ru",
           "megamarket.ru",
           "yandex.ru",
           "yandex.net",
@@ -475,20 +461,9 @@
           "yandex-team.ru",
           "kinopoisk.ru",
           "kinopoisk.tv",
-          "plus.yandex.ru",
-          "music.yandex.ru",
-          "disk.yandex.ru",
-          "mail.yandex.ru",
-          "cloud.yandex.ru",
-          "taxi.yandex.ru",
           "go.yandex",
           "eda.yandex",
-          "delivery.yandex.ru",
-          "travel.yandex.ru",
-          "realty.yandex.ru",
-          "services.yandex.ru",
           "dzen.ru",
-          "zen.yandex.ru",
           "vk.com",
           "vk.ru",
           "vk.me",
@@ -499,7 +474,6 @@
           "vkuservideo.net",
           "vkplay.ru",
           "mail.ru",
-          "my.mail.ru",
           "ok.ru",
           "odnoklassniki.ru",
           "my.games",
@@ -539,11 +513,14 @@
   },
   {
     "id": "unavailable-in-russia",
-    "name": "Недоступно из РФ",
+    "name": "Недоступно из РФ (vernette/rulesets)",
     "iconSlug": "lucide-globe-lock",
     "category": "block",
     "origin": "",
     "engines": {
+      "dns": {
+        "subscriptionUrl": "https://github.com/vernette/rulesets/raw/master/raw/unavailable-in-russia.txt"
+      },
       "singbox": {
         "ruleSets": [
           {
@@ -837,6 +814,7 @@
     "name": "Cloudflare",
     "iconSlug": "cloudflare",
     "category": "cloud",
+    "notice": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
     "origin": "",
     "engines": {
       "dns": {
@@ -990,7 +968,6 @@
     "engines": {
       "dns": {
         "domains": [
-          "cn.download.nvidia.com",
           "nvidia.custhelp.com",
           "nvidia.tt.omtrdc.net",
           "geforce.cn",
@@ -1431,7 +1408,6 @@
           "adobetechcommcallback.com",
           "adobetechcommdemo.com",
           "adobexdplatform.com",
-          "advertising.adobe.com",
           "assetsadobe.com",
           "authorxml.com",
           "behance.net",
@@ -1583,57 +1559,51 @@
       "dns": {
         "domains": [
           "applicationinsights.io",
+          "awg.go",
+          "bootstrap.pypa.io",
+          "bun.sh",
+          "cdn.jsdelivr.net",
           "context7.com",
+          "coolors.co",
+          "crates.io",
           "cursor-cdn.com",
           "cursor.com",
           "cursor.sh",
           "cursorapi.com",
-          "exp-tas.com",
-          "github.com",
-          "githubcopilot.com",
-          "githubusercontent.com",
-          "wakatime.com",
-          "awg.go",
-          "bootstrap.pypa.io",
-          "bun.sh",
-          "crates.io",
           "deno.land",
+          "exp-tas.com",
+          "gcr.io",
           "golang.org",
           "gradle.org",
+          "hashicorp.com",
+          "helm.sh",
+          "k8s.io",
+          "kubernetes.io",
           "maven.org",
-          "npm.community",
-          "npmjs.com",
-          "npmjs.org",
+          "mcr.microsoft.com",
+          "mui.com",
           "nuget.org",
           "packagist.org",
           "pkg.go.dev",
           "pypi.org",
           "pythonhosted.org",
+          "quay.io",
           "react.com",
+          "registry.terraform.io",
           "rubygems.global.ssl.fastly.net",
           "rubygems.org",
-          "yarnpkg.com",
-          "compose-spec.io",
-          "docker.com",
-          "docker.io",
-          "dockerstatic.com",
-          "gcr.io",
-          "ghcr.io",
-          "hashicorp.com",
-          "helm.sh",
-          "k8s.io",
-          "kubernetes.io",
-          "mcr.microsoft.com",
-          "quay.io",
-          "registry.terraform.io",
           "storage.googleapis.com",
-          "cdn.jsdelivr.net",
-          "coolors.co",
-          "mui.com",
-          "suno.com"
+          "suno.com",
+          "wakatime.com",
+          "yarnpkg.com"
         ]
       }
-    }
+    },
+    "covers": [
+      "docker",
+      "github",
+      "npm"
+    ]
   },
   {
     "id": "docker",
@@ -1695,8 +1665,6 @@
     "engines": {
       "dns": {
         "domains": [
-          "copilot-telemetry-service.githubusercontent.com",
-          "copilot-telemetry.githubusercontent.com",
           "copilotprodattachments.blob.core.windows.net",
           "github-api.arkoselabs.com",
           "github-cloud.s3.amazonaws.com",
@@ -1726,7 +1694,6 @@
           "productionresultssa8.blob.core.windows.net",
           "productionresultssa9.blob.core.windows.net",
           "atom.io",
-          "collector.github.com",
           "dependabot.com",
           "gh.io",
           "ghcr.io",
@@ -1828,15 +1795,10 @@
           "ipcheck.ing",
           "ip-api.com",
           "ipify.org",
-          "api.ipify.org",
           "ident.me",
-          "v4.ident.me",
-          "v6.ident.me",
           "ifconfig.me",
           "ifconfig.co",
           "icanhazip.com",
-          "ipv4.icanhazip.com",
-          "ipv6.icanhazip.com",
           "ipecho.net",
           "wtfismyip.com",
           "iplocation.net",
@@ -1864,7 +1826,6 @@
           "ipaddress.my",
           "check-host.net",
           "examineip.com",
-          "bot.whatismyipaddress.com",
           "mullvad.net",
           "surfshark.com",
           "nordvpn.com",
@@ -1935,7 +1896,6 @@
     "engines": {
       "dns": {
         "domains": [
-          "cdn.jetbrains.com",
           "datalore.io",
           "download-cdn.jetbrains.com.cn",
           "intellij.com",
@@ -2208,7 +2168,19 @@
         ],
         "action": "tunnel"
       }
-    }
+    },
+    "covers": [
+      "blizzard",
+      "ea",
+      "epicgames",
+      "nintendo",
+      "oculus",
+      "playstation",
+      "roblox",
+      "steam",
+      "ubisoft",
+      "xbox"
+    ]
   },
   {
     "id": "ea",
@@ -2689,7 +2661,6 @@
       "dns": {
         "domains": [
           "a4e8s8k3.map2.ssl.hwcdn.net",
-          "alibaba.cdn.steampipe.steamcontent.com",
           "f3b7q2p3.ssl.hwcdn.net",
           "lv.queniujq.cn",
           "steambroadcast.akamaized.net",
@@ -2771,8 +2742,7 @@
           "ubisoft-uplay-savegames.s3.amazonaws.com",
           "ubisoft-orbit-savegames.s3.amazonaws.com",
           "ubistatic1-a.akamaihd.net",
-          "ubisoft.siteintercept.qualtrics.com",
-          "uplaypc-s-ubisoft.cdn.ubi.com"
+          "ubisoft.siteintercept.qualtrics.com"
         ],
         "subnets": [
           "52.202.184.0/24",
@@ -2920,7 +2890,21 @@
         ],
         "action": "tunnel"
       }
-    }
+    },
+    "covers": [
+      "bbc",
+      "deezer",
+      "disney",
+      "hbo",
+      "hulu",
+      "netflix",
+      "primevideo",
+      "soundcloud",
+      "spotify",
+      "tidal",
+      "twitch",
+      "vimeo"
+    ]
   },
   {
     "id": "deezer",
@@ -3385,11 +3369,9 @@
     "engines": {
       "dns": {
         "domains": [
-          "adeventtracker.spotify.com",
-          "adstudio-assets.scdn.co",
+          "spotify.com",
           "audio-ak-spotify-com.akamaized.net",
           "audio4-ak-spotify-com.akamaized.net",
-          "bloodhound.spotify.com",
           "cdn-spotify-experiments.conductrics.com",
           "heads-ak-spotify-com.akamaized.net",
           "heads4-ak-spotify-com.akamaized.net",
@@ -3788,7 +3770,6 @@
           "acebooik.com",
           "acebook.com",
           "advancediddetection.com",
-          "analytics.facebook.com",
           "askfacebook.net",
           "askfacebook.org",
           "atdmt2.com",
@@ -4155,7 +4136,6 @@
           "nextstop.com",
           "online-deals.net",
           "opencreate.org",
-          "pixel.facebook.com",
           "reachtheworldonfacebook.com",
           "redkix.com",
           "rocksdb.org",
@@ -4204,6 +4184,39 @@
           {
             "tag": "geosite-google",
             "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    },
+    "covers": [
+      "google-play",
+      "youtube"
+    ]
+  },
+  {
+    "id": "google-play",
+    "name": "Google Play",
+    "iconSlug": "googleplay",
+    "category": "cloud",
+    "origin": "",
+    "engines": {
+      "dns": {
+        "domains": [
+          "googleplay.com",
+          "play-fe.googleapis.com",
+          "play-games.googleusercontent.com",
+          "play-lh.googleusercontent.com",
+          "play.google.com",
+          "play.googleapis.com",
+          "xn--ngstr-lra8j.com"
+        ]
+      },
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-google-play",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google-play.srs"
           }
         ],
         "action": "tunnel"
@@ -4264,6 +4277,7 @@
     "name": "Meta (все сервисы)",
     "iconSlug": "meta",
     "category": "social",
+    "notice": "Facebook, Instagram, Threads, WhatsApp — sing-box: geosite-meta.",
     "origin": "",
     "engines": {
       "singbox": {
@@ -4275,7 +4289,13 @@
         ],
         "action": "tunnel"
       }
-    }
+    },
+    "covers": [
+      "facebook",
+      "instagram",
+      "threads",
+      "whatsapp"
+    ]
   },
   {
     "id": "patreon",

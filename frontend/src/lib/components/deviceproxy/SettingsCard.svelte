@@ -13,6 +13,7 @@
 		onSaveConfig?: (cfg: DeviceProxyConfig) => Promise<DeviceProxyConfig>;
 		title?: string;
 		description?: string;
+		embedded?: boolean;
 	}
 
 	let {
@@ -23,7 +24,8 @@
 		onCancel,
 		onSaveConfig = api.saveDeviceProxyConfig.bind(api),
 		title = '',
-		description = ''
+		description = '',
+		embedded = false,
 	}: Props = $props();
 
 	// Draft is a one-time snapshot of the prop. Edits survive store
@@ -125,7 +127,7 @@
 	]);
 </script>
 
-<section class="card">
+<section class="card" class:embedded>
 	{#if title || description}
 		<header class="card-head">
 			{#if title}<h2 class="section-title">{title}</h2>{/if}
@@ -233,10 +235,23 @@
 		min-width: 0;
 		border: 1px solid var(--border);
 		border-radius: 12px;
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
-			var(--bg-secondary, var(--color-bg-secondary));
+		background: var(--bg-secondary, var(--color-bg-secondary));
 		overflow: hidden;
+	}
+	.card.embedded {
+		border: 0;
+		border-radius: 0;
+		background: transparent;
+		overflow: visible;
+	}
+	.card.embedded .card-body {
+		padding: 0;
+	}
+	.card.embedded .card-footer {
+		border-top: 0;
+		padding: 0;
+		margin-top: 0.75rem;
+		background: transparent;
 	}
 	.card-head {
 		padding: 1rem 1rem 0.875rem;

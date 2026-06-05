@@ -58,21 +58,28 @@
 	</div>
 
 	{#snippet actions()}
-		<Button
-			variant="secondary"
-			size="md"
-			href={suggestionIssueUrl}
-			target="_blank"
-			rel="noopener noreferrer"
-			onclick={closeModal}
-		>
-			<span class="label-long">Сообщение / предложение</span>
-			<span class="label-short">Сообщ.</span>
-		</Button>
-		<Button variant="outline-danger" size="md" onclick={handleIncident}>
-			<span class="label-long">Инцидент / ошибка</span>
-			<span class="label-short">Баг</span>
-		</Button>
+		<div class="feedback-actions">
+			<Button
+				variant="secondary"
+				size="md"
+				fullWidth
+				href={suggestionIssueUrl}
+				target="_blank"
+				rel="noopener noreferrer"
+				onclick={closeModal}
+			>
+				<span class="split-label">
+					<span>Сообщение /</span>
+					<span class="split-second">предложение</span>
+				</span>
+			</Button>
+			<Button variant="outline-danger" size="md" fullWidth onclick={handleIncident}>
+				<span class="split-label">
+					<span>Инцидент /</span>
+					<span class="split-second">ошибка</span>
+				</span>
+			</Button>
+		</div>
 	{/snippet}
 </Modal>
 
@@ -130,17 +137,47 @@
 		text-decoration: underline;
 	}
 
-	.label-short {
-		display: none;
+	.feedback-actions {
+		display: flex;
+		flex: 1 1 100%;
+		width: 100%;
+		min-width: 0;
+		gap: 0.5rem;
+		justify-content: flex-end;
+		container-type: inline-size;
 	}
 
-	@media (max-width: 640px) {
-		.label-long {
-			display: none;
-		}
+	.feedback-actions :global(.btn) {
+		flex: 1 1 0;
+		min-width: 0;
+		max-width: 100%;
+		height: auto;
+		min-height: 2rem;
+		max-height: none;
+		padding-block: 0.375rem;
+		white-space: normal;
+	}
 
-		.label-short {
-			display: inline;
+	.feedback-actions :global(.btn .label) {
+		display: block;
+		line-height: 1.25;
+		text-align: center;
+		white-space: normal;
+	}
+
+	.split-label {
+		display: inline-block;
+		text-align: center;
+	}
+
+	.split-second {
+		display: inline;
+	}
+
+	/* Узкие кнопки в футере (мобилка и md-модалка): вторая часть под «/» */
+	@container (max-width: 22rem) {
+		.split-second {
+			display: block;
 		}
 	}
 </style>

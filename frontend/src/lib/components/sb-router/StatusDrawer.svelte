@@ -4,7 +4,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SideDrawer, Toggle, Button, Badge } from '$lib/components/ui';
+  import { SideDrawer, Toggle, Button, Badge, StatusDot } from '$lib/components/ui';
   import { api } from '$lib/api/client';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { singboxStatus } from '$lib/stores/singbox';
@@ -61,6 +61,18 @@
     const n = s?.ruleCount ?? 0;
     return `Трафик идёт через ${pluralize(n, RULE_WORDS)}`;
   });
+
+  let engineState = $derived.by<'off' | 'warn' | 'on'>(() => {
+    if (!engineEnabled) return 'off';
+    if (!engineActive) return 'warn';
+    return 'on';
+  });
+
+  let engineDotVariant = $derived(
+    engineState === 'on' ? 'success' as const :
+    engineState === 'warn' ? 'warning' as const :
+    'muted' as const,
+  );
 
   onMount(async () => {
     void singboxRouterStore.loadAll();
@@ -128,13 +140,21 @@
     <!-- Состояние -->
     <section class="sec">
       <div class="sec-cap">Состояние</div>
-      <div class="big-toggle" class:is-on={engineEnabled}>
-        <Toggle checked={engineEnabled} onchange={toggleEngine} />
-        <div class="big-text">
-          <div class="big-title">{bigTitle}</div>
-          <div class="big-sub">{bigSubtitle}</div>
+      <div class="engine-status" class:state-off={engineState === 'off'} class:state-warn={engineState === 'warn'} class:state-on={engineState === 'on'}>
+        <div class="engine-main">
+          <Toggle checked={engineEnabled} onchange={toggleEngine} />
+          <div class="engine-text">
+            <div class="engine-head">
+              <StatusDot variant={engineDotVariant} size="sm" />
+              <div class="engine-title">{bigTitle}</div>
+            </div>
+            <div class="engine-sub">{bigSubtitle}</div>
+          </div>
         </div>
-        <span class="big-version">{sbVersionLabel}</span>
+        <div class="engine-meta">
+          <span>Версия sing-box</span>
+          <span class="engine-version">{sbVersionLabel}</span>
+        </div>
       </div>
     </section>
 
@@ -219,10 +239,12 @@
 
   {#snippet footer()}
     <div class="footer-actions">
-      <Button variant={engineEnabled ? 'danger' : 'primary'} size="sm" fullWidth onclick={handleToggleClick}>
-        {engineEnabled ? 'Выключить' : 'Включить'}
-      </Button>
-      <Button variant="ghost" size="sm" onclick={restartEngine}>Перезапустить</Button>
+      <div class="footer-btns">
+        <Button variant={engineEnabled ? 'danger' : 'primary'} size="sm" fullWidth onclick={handleToggleClick}>
+          {engineEnabled ? 'Выключить' : 'Включить'}
+        </Button>
+        <Button variant="ghost" size="sm" fullWidth onclick={restartEngine}>Перезапустить</Button>
+      </div>
       {#if isExpert}
         <span class="save-status" class:err={lastError}>
           {saving ? 'Сохраняем…' : lastError ? `Ошибка` : '✓ Сохранено'}
@@ -245,18 +267,67 @@
     color: var(--text-muted); display: flex; align-items: center; gap: 8px;
   }
 
-  .big-toggle {
-    display: flex; align-items: center; gap: 14px; padding: 14px; border-radius: var(--radius);
-    background: color-mix(in srgb, var(--text-muted) 5%, var(--bg-tertiary)); border: 1px solid var(--border);
+  .engine-status {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
   }
-  .big-toggle.is-on {
-    background: color-mix(in srgb, var(--success) 8%, var(--bg-tertiary));
-    border-color: color-mix(in srgb, var(--success) 25%, var(--border));
+  .engine-status.state-on {
+    border-left: 3px solid var(--color-success, #22c55e);
   }
-  .big-text { flex: 1; min-width: 0; }
-  .big-title { font-weight: 600; font-size: 14px; color: var(--text-primary); }
-  .big-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
-  .big-version { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+  .engine-status.state-warn {
+    border-left: 3px solid var(--color-warning, #dab856);
+  }
+  .engine-status.state-off {
+    border-left: 3px solid color-mix(in srgb, var(--text-muted) 55%, var(--border));
+  }
+  .engine-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .engine-text {
+    flex: 1;
+    min-width: 0;
+    padding-top: 2px;
+  }
+  .engine-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .engine-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+    line-height: 1.25;
+  }
+  .engine-sub {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    line-height: 1.4;
+  }
+  .engine-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .engine-version {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
 
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
@@ -276,7 +347,13 @@
   .chip-label { font-size: 12.5px; font-weight: 600; }
   .chip-desc { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
 
-  .footer-actions { display: flex; gap: 6px; width: 100%; align-items: center; }
-  .save-status { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+  .footer-actions { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+  .footer-btns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    width: 100%;
+  }
+  .save-status { align-self: flex-end; font-size: 11px; color: var(--text-muted); }
   .save-status.err { color: var(--color-error, #dc2626); }
 </style>

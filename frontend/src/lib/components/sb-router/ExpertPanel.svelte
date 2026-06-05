@@ -294,14 +294,6 @@
       label: 'Движок',
       value: engineStat.value,
       tone: engineStat.tone,
-      helpTitle: 'Движок sing-box',
-      helpText: $storeStatus?.enabled
-        ? 'Маршрутизатор sing-box активен: правила, DNS и outbound-логика применяются к runtime.'
-        : 'Движок выключен: конфигурация может быть сохранена, но runtime её не применяет.',
-      helpItems: [
-        'ON — sing-box router работает.',
-        'OFF — проверь установку, запуск и настройки sing-box.',
-      ],
     },
     {
       label: 'Правил',
@@ -759,44 +751,44 @@
     onClose={closeDnsGlobalsDrawer}
     title="DNS по умолчанию"
     width={520}
+    footer={dnsGlobalsFooter}
   >
-    <div class="drawer-card dns-globals-card">
-      <div class="drawer-card-body dns-globals-drawer">
-        <label class="gb-field">
-          <span class="gb-flabel">Final-сервер</span>
-          <Dropdown
-            bind:value={draftDnsFinal}
-            options={dnsFinalOptions}
-            disabled={$storeDnsServers.length === 0}
-            fullWidth
-          />
-          <span class="gb-hint">Сервер по умолчанию для запросов, не попавших ни под одно правило.</span>
-        </label>
+    <div class="dns-globals-drawer">
+      <label class="gb-field">
+        <span class="gb-flabel">Final-сервер</span>
+        <Dropdown
+          bind:value={draftDnsFinal}
+          options={dnsFinalOptions}
+          disabled={$storeDnsServers.length === 0}
+          fullWidth
+        />
+        <span class="gb-hint">Сервер по умолчанию для запросов, не попавших ни под одно правило.</span>
+      </label>
 
-          <label class="gb-field">
-            <span class="gb-flabel">Стратегия</span>
-            <Dropdown bind:value={draftDnsStrategy} options={STRATEGY_OPTIONS} fullWidth />
-            <span class="gb-hint">Для роутера без IPv6 обычно prefer_ipv4 или ipv4_only.</span>
-          </label>
-      </div>
-      <footer class="drawer-card-footer">
-        <Button variant="ghost" size="md" onclick={closeDnsGlobalsDrawer} type="button">
-          Отмена
-        </Button>
-        <Button
-          variant="primary"
-          size="md"
-          onclick={saveDnsGlobalsAndClose}
-          disabled={dnsGlobalsBusy || !dnsGlobalsDirty}
-          loading={dnsGlobalsBusy}
-          type="button"
-        >
-          Сохранить
-        </Button>
-      </footer>
+      <label class="gb-field">
+        <span class="gb-flabel">Стратегия</span>
+        <Dropdown bind:value={draftDnsStrategy} options={STRATEGY_OPTIONS} fullWidth />
+        <span class="gb-hint">Для роутера без IPv6 обычно prefer_ipv4 или ipv4_only.</span>
+      </label>
     </div>
   </SideDrawer>
 {/if}
+
+{#snippet dnsGlobalsFooter()}
+  <Button variant="ghost" size="md" onclick={closeDnsGlobalsDrawer} type="button">
+    Отмена
+  </Button>
+  <Button
+    variant="primary"
+    size="md"
+    onclick={saveDnsGlobalsAndClose}
+    disabled={dnsGlobalsBusy || !dnsGlobalsDirty}
+    loading={dnsGlobalsBusy}
+    type="button"
+  >
+    Сохранить
+  </Button>
+{/snippet}
 
 {#if inboundDrawerInstance}
   <InboundSettingsDrawer
@@ -820,7 +812,6 @@
   .wrap {
     max-width: none;
     margin: 0 auto;
-    padding: var(--sp-4);
   }
   /* Caption внутри SidePanel body — sub-title строкой над контентом */
   .panel-cap {
@@ -901,26 +892,11 @@
     gap: 0.875rem;
     min-width: 0;
   }
-  .drawer-card {
-    min-width: 0;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
-      var(--bg-secondary, var(--color-bg-secondary));
-    overflow: hidden;
-  }
-  .drawer-card-body {
-    padding: 1rem;
-    min-width: 0;
-  }
-  .drawer-card-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    padding: 0.875rem 1rem;
-    border-top: 1px solid var(--border);
-    background: var(--bg-secondary, var(--color-bg-secondary));
+  .dns-globals-drawer .gb-field {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+    align-items: start;
   }
   .gb-hint {
     font-size: 0.75rem;
@@ -973,24 +949,8 @@
       width: 100%;
       min-width: 0;
     }
-    .wrap {
-      padding: var(--sp-2);
-    }
     .globals-summary {
       align-items: flex-start;
-    }
-    .drawer-card {
-      border-radius: 12px;
-    }
-    .drawer-card-body {
-      padding: 0.875rem;
-    }
-    .drawer-card-footer {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.5rem;
-      padding: 0.75rem 0.875rem;
-      align-items: stretch;
     }
     .globals-summary-values {
       display: grid;
@@ -998,14 +958,6 @@
     }
     .globals-summary-action {
       padding-top: 0.1rem;
-    }
-    .dns-globals-drawer .gb-field {
-      display: grid;
-      gap: 0.35rem;
-    }
-    .drawer-card-footer :global(.btn) {
-      width: 100%;
-      min-width: 0;
     }
   }
 </style>

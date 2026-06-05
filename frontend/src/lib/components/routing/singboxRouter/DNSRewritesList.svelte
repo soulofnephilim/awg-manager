@@ -195,7 +195,6 @@
 		display: grid;
 		gap: 0.2rem;
 		min-width: 0;
-		padding-top: 0.25rem;
 	}
 	.row {
 		transition: background-color 0.15s ease;
@@ -266,6 +265,10 @@
 			display: none;
 		}
 
+		.rows {
+			gap: 0;
+		}
+
 		.row {
 			grid-template-columns: minmax(0, 1fr) auto;
 			grid-template-areas:
@@ -273,7 +276,14 @@
 				'ips actions';
 			gap: 0.5rem 0.625rem;
 			padding: 0.75rem 0.875rem;
-			border: 1px solid var(--border);
+			border: 0;
+			border-radius: 0;
+			border-bottom: 1px solid var(--border);
+			background: transparent;
+		}
+
+		.row:last-child {
+			border-bottom: 0;
 		}
 
 		.pat { grid-area: pattern; }

@@ -31,7 +31,7 @@
   </div>
 {:else if outbound.kind === 'sniff' || outbound.kind === 'hijack-dns'}
   <div class="tile tile-system">
-    <span class="label-mono">{outbound.label}</span>
+    <span class="label-mono" title={outbound.label}>{outbound.label}</span>
   </div>
 {:else if outbound.kind === 'tunnel' || outbound.kind === 'awg' || outbound.kind === 'composite'}
   <div class="tile" class:tile-tunnel={outbound.kind === 'tunnel' || outbound.kind === 'composite'} class:tile-awg={outbound.kind === 'awg'}>
@@ -40,7 +40,7 @@
       <path d="M8 22V12a4 4 0 1 1 8 0v10" />
       <line x1="2" y1="22" x2="22" y2="22" />
     </svg>
-    <span class="label-mono">{outbound.label}</span>
+    <span class="label-mono" title={outbound.label}>{outbound.label}</span>
   </div>
 {:else}
   <div class="tile tile-unknown" title="Outbound не найден в конфиге">
@@ -49,7 +49,7 @@
       <line x1="12" y1="9" x2="12" y2="13" />
       <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
-    <span class="label-mono">{outbound.label}</span>
+    <span class="label-mono" title={outbound.label}>{outbound.label}</span>
   </div>
 {/if}
 

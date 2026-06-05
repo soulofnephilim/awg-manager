@@ -71,7 +71,7 @@
       {#each [{ k: 'all', l: 'Все' }, { k: 'remote', l: 'Remote' }, { k: 'local', l: 'Local' }, { k: 'inline', l: 'Inline' }, { k: 'dat', l: 'Dat' }] as opt (opt.k)}
         <button
           type="button"
-          class="chip"
+          class="seg-tab"
           class:active={filter === opt.k}
           onclick={() => (filter = opt.k as RsFilter)}
         >
@@ -147,7 +147,10 @@
     border: 0;
     border-radius: 0;
   }
-  .chip {
+  .seg-tab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     padding: 8px 12px;
     border-radius: 0;
     border: 0;
@@ -158,15 +161,17 @@
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
   }
-  .chip:last-child {
+  .seg-tab:last-child {
     border-right: 0;
   }
-  .chip:hover {
+  .seg-tab:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
   }
-  .chip.active {
+  .seg-tab.active {
     background: var(--accent-soft);
     color: var(--text-primary);
     box-shadow: inset 0 -2px 0 var(--accent);
@@ -256,14 +261,14 @@
     text-align: center;
     font-size: 12px;
   }
-  @media (max-width: 720px) {
+  @media (max-width: 768px) {
     .wrap {
-      gap: 0.625rem;
+      gap: 0;
     }
 
     .segment-row {
-      border-bottom: 0;
-      background: transparent;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-tertiary);
     }
 
     .seg {
@@ -271,20 +276,19 @@
       grid-template-columns: repeat(5, minmax(0, 1fr));
       width: 100%;
       min-width: 0;
-      border: 1px solid var(--border);
-      border-radius: 0.375rem;
+      border: 0;
+      border-radius: 0;
       overflow: hidden;
-      background: var(--bg-tertiary);
+      background: transparent;
     }
 
-    .chip {
-      justify-content: center;
+    .seg-tab {
       padding-inline: 0.35rem;
       min-width: 0;
       border-radius: 0;
     }
 
-    .chip.active {
+    .seg-tab.active {
       border-radius: 0;
     }
 

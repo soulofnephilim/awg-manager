@@ -45,6 +45,7 @@
 
 <SideDrawer {open} onClose={onClose} title="Настройки inbound">
   <SettingsCard
+    embedded
     {config}
     {outbounds}
     {bridgeInterfaces}

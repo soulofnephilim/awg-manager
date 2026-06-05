@@ -1,8 +1,7 @@
 <script lang="ts">
 	import type { DnsRoute } from '$lib/types';
-	import { Button } from '$lib/components/ui';
 	import HrNeoRuleCard from './HrNeoRuleCard.svelte';
-	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
+	import RoutingRuleAddMenu from '$lib/components/routing/RoutingRuleAddMenu.svelte';
 	import { pluralize, RULE_WORDS } from '$lib/utils/pluralize';
 
 	interface Props {
@@ -10,10 +9,14 @@
 		targetKind: 'policy' | 'interface';
 		rules: DnsRoute[];
 		brokenRuleIds?: Set<string>;
-		onaddrule: () => void;
+		oncatalog: () => void;
+		onmanual: () => void;
 		oneditrule: (rule: DnsRoute) => void;
 		ondeleterule: (rule: DnsRoute) => void;
 		oniconrule?: (rule: DnsRoute) => void;
+		ontogglerule?: (rule: DnsRoute, enabled: boolean) => void;
+		toggleLoadingId?: string | null;
+		displayRule?: (rule: DnsRoute) => DnsRoute;
 	}
 
 	let {
@@ -21,18 +24,18 @@
 		targetKind,
 		rules,
 		brokenRuleIds = new Set(),
-		onaddrule,
+		oncatalog,
+		onmanual,
 		oneditrule,
 		ondeleterule,
 		oniconrule,
+		ontogglerule,
+		toggleLoadingId = null,
+		displayRule,
 	}: Props = $props();
 
 	let sortedRules = $derived([...rules].sort((a, b) => a.name.localeCompare(b.name)));
 </script>
-
-{#snippet createIcon()}
-	<CreateIcon />
-{/snippet}
 
 <div class="hr-list">
 	<header class="list-header">
@@ -41,9 +44,7 @@
 			<span class="kind-badge kind-{targetKind}">{targetKind}</span>
 			<span class="count">{pluralize(rules.length, RULE_WORDS)}</span>
 		</div>
-		<Button variant="primary" size="sm" onclick={onaddrule} iconBefore={createIcon}>
-			Добавить правило
-		</Button>
+		<RoutingRuleAddMenu label="Добавить правило" oncatalog={oncatalog} onmanual={onmanual} />
 	</header>
 
 	{#if sortedRules.length === 0}
@@ -51,9 +52,12 @@
 	{:else}
 		<div class="route-grid">
 			{#each sortedRules as rule (rule.id)}
+				{@const cardRule = displayRule ? displayRule(rule) : rule}
 				<HrNeoRuleCard
-					{rule}
+					rule={cardRule}
 					broken={brokenRuleIds.has(rule.id)}
+					toggleLoading={toggleLoadingId === rule.id}
+					ontoggle={ontogglerule ? (enabled) => ontogglerule(rule, enabled) : undefined}
 					onedit={() => oneditrule(rule)}
 					ondelete={() => ondeleterule(rule)}
 					onicon={oniconrule ? () => oniconrule(rule) : undefined}
@@ -132,14 +136,19 @@
 	}
 
 	.route-grid {
+		/* Up to 3 columns; min width fits «константинопольские» in the title area. */
+		--hr-rule-col-min: 20rem;
 		display: grid;
-		grid-template-columns: 1fr;
 		gap: 12px;
+		grid-template-columns: repeat(
+			auto-fill,
+			minmax(max(var(--hr-rule-col-min), calc((100% - 2 * 12px) / 3)), 1fr)
+		);
 	}
 
-	@media (min-width: 760px) {
+	@media (max-width: 639px) {
 		.route-grid {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+			grid-template-columns: minmax(0, 1fr);
 		}
 	}
 
@@ -150,8 +159,11 @@
 		.list-title {
 			flex: 1 1 100%;
 		}
-		.list-header :global(.btn) {
+		.list-header :global(.dropdown-wrapper) {
 			flex: 1 1 100%;
+		}
+		.list-header :global(.dropdown-wrapper .btn) {
+			width: 100%;
 		}
 	}
 </style>

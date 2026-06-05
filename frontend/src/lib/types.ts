@@ -1503,6 +1503,7 @@ export interface SingboxRouterPreset {
 	ruleSets: Array<{ tag: string; url: string }>;
 	rules: SingboxRouterPresetLink[];
 	notice?: string;
+	covers?: string[];
 	featured?: boolean;
 	sensitive?: boolean;
 }
@@ -1903,6 +1904,7 @@ export interface CatalogPreset {
 	iconSlug: string;
 	category: string;
 	notice?: string;
+	covers?: string[];
 	featured?: boolean;
 	sensitive?: boolean;
 	origin: 'builtin' | 'user';

@@ -188,10 +188,9 @@
 	onClose={onClose}
 	title={rule ? 'Редактировать DNS правило' : 'Новое DNS правило'}
 	width={620}
+	footer={drawerFooter}
 >
-	<div class="drawer-card">
-		<div class="drawer-card-body">
-			<div class="form">
+	<div class="form">
 		<div class="section-label">Matchers (минимум один)</div>
 
 		<label class="field">
@@ -251,39 +250,17 @@
 		</div>
 
 		{#if error}<div class="error">{error}</div>{/if}
-			</div>
-		</div>
-		<footer class="drawer-card-footer">
-			<Button variant="ghost" size="md" onclick={onClose} type="button">Отмена</Button>
-			<Button variant="primary" size="md" onclick={save} disabled={busy} loading={busy} type="button">
-				Сохранить
-			</Button>
-		</footer>
 	</div>
 </SideDrawer>
 
+{#snippet drawerFooter()}
+	<Button variant="ghost" size="md" onclick={onClose} type="button">Отмена</Button>
+	<Button variant="primary" size="md" onclick={save} disabled={busy} loading={busy} type="button">
+		Сохранить
+	</Button>
+{/snippet}
+
 <style>
-	.drawer-card {
-		min-width: 0;
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
-			var(--bg-secondary, var(--color-bg-secondary));
-		overflow: hidden;
-	}
-	.drawer-card-body {
-		padding: 1rem;
-		min-width: 0;
-	}
-	.drawer-card-footer {
-		display: flex;
-		justify-content: flex-end;
-		gap: 0.5rem;
-		padding: 0.875rem 1rem;
-		border-top: 1px solid var(--border);
-		background: var(--bg-secondary, var(--color-bg-secondary));
-	}
 	.form {
 		display: grid;
 		gap: 0.6rem;
@@ -348,19 +325,6 @@
 		font-weight: 600;
 	}
 	@media (max-width: 640px) {
-		.drawer-card {
-			border-radius: 12px;
-		}
-		.drawer-card-body {
-			padding: 0.875rem;
-		}
-		.drawer-card-footer {
-			display: grid;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-			gap: 0.5rem;
-			padding: 0.75rem 0.875rem;
-			align-items: stretch;
-		}
 		.action-section .segment {
 			display: grid;
 			grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -380,11 +344,6 @@
 
 		.action-section .segment button + button {
 			border-left: 1px solid var(--border);
-		}
-
-		.drawer-card-footer :global(.btn) {
-			width: 100%;
-			min-width: 0;
 		}
 	}
 	.error {

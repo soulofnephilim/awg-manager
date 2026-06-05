@@ -16,10 +16,11 @@ type Preset struct {
 	Name      string  `json:"name"`
 	IconSlug  string  `json:"iconSlug"`
 	Category  string  `json:"category"` // social|media|ai|developer|cloud|gaming|block (free string)
-	Notice    string  `json:"notice,omitempty"`
-	Featured  bool    `json:"featured,omitempty"`
-	Sensitive bool    `json:"sensitive,omitempty"`
-	Origin    Origin  `json:"origin"`
+	Notice    string   `json:"notice,omitempty"`
+	Covers    []string `json:"covers,omitempty"` // preset ids included in this composite list
+	Featured  bool     `json:"featured,omitempty"`
+	Sensitive bool     `json:"sensitive,omitempty"`
+	Origin    Origin   `json:"origin"`
 	Engines   Engines `json:"engines"`
 }
 

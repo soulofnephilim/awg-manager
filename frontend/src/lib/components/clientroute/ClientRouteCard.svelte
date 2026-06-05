@@ -1,6 +1,13 @@
 <script lang="ts">
 	import type { ClientRoute } from '$lib/types';
-	import { Toggle, Badge } from '$lib/components/ui';
+	import { Toggle } from '$lib/components/ui';
+	import RoutingTargetBadges from '$lib/components/routing/RoutingTargetBadges.svelte';
+	import NdmsIconTile from '$lib/components/ui/NdmsIconTile.svelte';
+	import { DEFAULT_ICON_TILE_BG } from '$lib/utils/icon-tile-background';
+	import {
+		ndmsIconTileInnerSize,
+		NDMS_ICON_TILE_SIZE,
+	} from '$lib/utils/ndms-icon-tile';
 
 	interface Props {
 		route: ClientRoute;
@@ -14,7 +21,7 @@
 		onselect?: () => void;
 	}
 
-let {
+	let {
 		route,
 		tunnelName,
 		ontoggle,
@@ -23,10 +30,11 @@ let {
 		toggleLoading = false,
 		selectable = false,
 		selected = false,
-	onselect
-}: Props = $props();
+		onselect,
+	}: Props = $props();
 
-let clientLabel = $derived(route.clientHostname || route.clientIp);
+	let clientLabel = $derived(route.clientHostname || route.clientIp);
+	let iconSize = $derived(ndmsIconTileInnerSize(NDMS_ICON_TILE_SIZE));
 </script>
 
 <div
@@ -43,13 +51,26 @@ let clientLabel = $derived(route.clientHostname || route.clientIp);
 				onchange={() => onselect?.()}
 			/>
 		{/if}
-		<svg class="device-icon" width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-			<rect x="6" y="10" width="24" height="18" rx="3" />
-			<line x1="18" y1="10" x2="18" y2="4" />
-			<circle cx="18" cy="3" r="1.5" fill="currentColor" stroke="none" />
-			<circle cx="13" cy="19" r="1.5" />
-			<circle cx="23" cy="19" r="1.5" />
-		</svg>
+		<NdmsIconTile background={DEFAULT_ICON_TILE_BG} size={NDMS_ICON_TILE_SIZE}>
+			<svg
+				class="device-icon"
+				width={iconSize}
+				height={iconSize}
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.75"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<rect x="5" y="7" width="14" height="12" rx="2" />
+				<line x1="12" y1="7" x2="12" y2="3" />
+				<circle cx="12" cy="2" r="1" fill="currentColor" stroke="none" />
+				<circle cx="9" cy="13" r="1" fill="currentColor" stroke="none" />
+				<circle cx="15" cy="13" r="1" fill="currentColor" stroke="none" />
+			</svg>
+		</NdmsIconTile>
 		<div class="card-info">
 			<div class="card-title">
 				<span
@@ -64,8 +85,7 @@ let clientLabel = $derived(route.clientHostname || route.clientIp);
 			{/if}
 			<span class="card-stat">{route.fallback === 'drop' ? 'Fallback: блокировать' : 'Fallback: напрямую'}</span>
 			<div class="card-route">
-				<span class="route-arrow">&rarr;</span>
-				<Badge variant="muted" mono size="xs">{tunnelName}</Badge>
+				<RoutingTargetBadges labels={[tunnelName]} overflowNoun="туннелей" />
 			</div>
 		</div>
 	</div>
@@ -133,8 +153,7 @@ let clientLabel = $derived(route.clientHostname || route.clientIp);
 	}
 
 	.device-icon {
-		flex-shrink: 0;
-		color: var(--text-muted);
+		display: block;
 	}
 
 	.card-info {
