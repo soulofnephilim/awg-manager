@@ -572,12 +572,6 @@
 		min-width: 0;
 	}
 
-	.card.view-dense .title-row-dense .dot {
-		width: var(--sbx-status-dot-dense);
-		height: var(--sbx-status-dot-dense);
-		flex: 0 0 auto;
-	}
-
 	.title-dense {
 		margin: 0;
 		padding: 0;
@@ -758,8 +752,7 @@
 		border-color: var(--color-border-hover);
 	}
 
-	.traffic-inline:focus-visible,
-	.card.view-dense .delay-inline .tunnel-delay-spark:focus-visible {
+	.traffic-inline:focus-visible {
 		outline: 2px solid var(--color-accent);
 		outline-offset: 2px;
 	}
@@ -816,17 +809,8 @@
 		white-space: nowrap;
 	}
 
-	.chart-inline-stats .err {
-		color: var(--color-error);
-	}
-
 	.charts-dense .chart-inline-head {
 		gap: 4px;
-	}
-
-	.charts-dense .chart-inline-stats {
-		overflow: hidden;
-		text-overflow: ellipsis;
 	}
 
 	.card.view-dense .chart-inline.delay-inline {
@@ -844,10 +828,6 @@
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
-	}
-
-	.title-row .dot {
-		flex-shrink: 0;
 	}
 
 	.title-row :global(.ping-btn) {
@@ -980,27 +960,6 @@
 		font-size: 0.6875rem;
 	}
 	.traffic-head { margin-top: 8px; }
-	.chart-head .err { color: #ef4444; }
-
-	.spark {
-		height: 26px;
-		display: flex;
-		align-items: flex-end;
-		gap: 2px;
-		padding: 2px 0;
-	}
-	.spark .bar {
-		flex: 1;
-		background: linear-gradient(to top, rgba(59, 130, 246, 0.6), rgba(96, 165, 250, 0.9));
-		border-radius: 1px;
-		min-height: 2px;
-	}
-	.spark.fail .bar { background: var(--latency-bar-fail); height: 100% !important; }
-	.spark.unknown .bar,
-	.spark .bar.empty {
-		background: var(--border);
-		height: 30% !important;
-	}
 
 	.list-cell-ping-mini {
 		justify-content: flex-start;
@@ -1122,12 +1081,6 @@
 		min-width: 0;
 		max-width: 100%;
 	}
-	.sbx-tunnel-list-row .list-title-row .dot {
-		flex: 0 0 auto;
-	}
-	.sbx-tunnel-list-row .list-title-row .name-btn {
-		min-width: 0;
-	}
 	.sbx-tunnel-list-row .name-btn {
 		font: inherit;
 		font-size: var(--sbx-card-title);
@@ -1239,9 +1192,5 @@
 		justify-content: center;
 		align-items: center;
 		white-space: nowrap;
-	}
-	.list-actions .action-btn {
-		justify-content: center;
-		padding: 0.375rem;
 	}
 </style>

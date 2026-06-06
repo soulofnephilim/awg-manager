@@ -599,6 +599,9 @@
 	let awgEffectiveViewMode = $derived<AwgTunnelViewMode>(
 		isAwgMobile || !showAwgViewModeSwitch ? 'compact' : awgViewMode
 	);
+	let awgCardViewMode = $derived<'cards' | 'compact'>(
+		awgEffectiveViewMode === 'cards' ? 'cards' : 'compact',
+	);
 
 	function isAwgTunnelViewMode(value: string | null): value is AwgTunnelViewMode {
 		return value === 'cards' || value === 'compact' || value === 'list';
@@ -2048,7 +2051,7 @@
 					{#each awgList as tunnel, i (tunnel.id)}
 						<TunnelCard
 							{tunnel}
-							view={awgEffectiveViewMode}
+							view={awgCardViewMode}
 							toggleLoading={toggleLoading[tunnel.id] ?? false}
 							deleteLoading={deleteLoading[tunnel.id] ?? false}
 							autoConnectivityNonce={awgAutoConnectivityNonce}
@@ -2061,7 +2064,7 @@
 					{#each visibleSystemList as tunnel (tunnel.id)}
 						<SystemTunnelCard
 							{tunnel}
-							view={awgEffectiveViewMode}
+							view={awgCardViewMode}
 							onMarkServer={markAsServer}
 							ondetail={(id) => openDetail(id)}
 							ontest={(id, name) => openAwgDiagnostics(id, name, 'system')}
@@ -2080,7 +2083,7 @@
 							{#each externalList as extTunnel (extTunnel.interfaceName)}
 								<ExternalTunnelCard
 									tunnel={extTunnel}
-									view={awgEffectiveViewMode}
+									view={awgCardViewMode}
 									onadopt={(name) => handleAdoptClick(name)}
 								/>
 							{/each}

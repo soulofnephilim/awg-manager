@@ -517,10 +517,6 @@
 		cursor: pointer;
 		transition: border-color var(--t-fast) ease;
 	}
-	.card.ok { border-color: var(--color-success-border); }
-	.card.slow { border-color: var(--color-warning-border); }
-	.card.fail { border-color: var(--color-error-border); }
-	.card.unknown { border-color: var(--color-border); }
 	.card.off { border-color: var(--color-muted-border); opacity: 0.72; }
 	.card.panel {
 		gap: 0;
@@ -584,33 +580,6 @@
 		flex-shrink: 0;
 		font-size: 9px;
 		padding: 1px 5px;
-	}
-
-	.name-title-row {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		min-width: 0;
-		max-width: 100%;
-	}
-
-	.name-title-row .t1 {
-		flex: 0 1 auto;
-		min-width: 0;
-		overflow: hidden;
-		display: -webkit-box;
-		-webkit-box-orient: vertical;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		white-space: normal;
-		overflow-wrap: anywhere;
-	}
-
-	.title-meta-inline {
-		font-size: var(--sbx-card-meta);
-		font-weight: 500;
-		color: var(--color-text-muted);
-		white-space: nowrap;
 	}
 
 	.card.view-dense .divider {
@@ -792,12 +761,6 @@
 		color: var(--color-error);
 		background: var(--color-error-tint);
 	}
-	.sub-list-group {
-		border-bottom: 1px solid var(--color-border);
-	}
-	.sub-list-group:last-child {
-		border-bottom: none;
-	}
 	.sbx-sub-active-row {
 		cursor: pointer;
 	}
@@ -813,12 +776,6 @@
 		color: var(--color-text-secondary);
 		vertical-align: middle;
 	}
-	.lc-updated {
-		white-space: nowrap;
-		justify-content: center;
-		color: var(--color-text-muted);
-		font-size: var(--sbx-card-value);
-	}
 	.lc-delay {
 		gap: 0.35rem;
 		min-width: 0;
@@ -827,15 +784,6 @@
 		flex-direction: column;
 		align-items: flex-start;
 		gap: 0.15rem;
-	}
-	.t1 {
-		font-weight: 600;
-		font-size: var(--sbx-card-title);
-		color: var(--color-text-primary);
-	}
-	.t2 {
-		font-size: var(--sbx-card-meta);
-		color: var(--color-text-muted);
 	}
 	.mono {
 		font-family: var(--font-mono, ui-monospace, monospace);
@@ -865,16 +813,6 @@
 		letter-spacing: 0.04em;
 		color: var(--color-text-muted);
 	}
-	.dot {
-		width: var(--sbx-status-dot);
-		height: var(--sbx-status-dot);
-		border-radius: 50%;
-		flex-shrink: 0;
-	}
-	.dot.ok { background: #3fb950; }
-	.dot.slow { background: #d29922; }
-	.dot.fail { background: #f85149; }
-	.dot.unknown { background: var(--color-text-muted); }
 	.lc-actions {
 		flex-wrap: nowrap;
 		gap: 0.375rem;
@@ -897,10 +835,6 @@
 		text-decoration: none;
 		font-family: inherit;
 		transition: background var(--t-fast) ease, color var(--t-fast) ease;
-	}
-	.lc-actions .action-btn {
-		justify-content: center;
-		padding: 0.375rem;
 	}
 	.action-btn:hover:not(:disabled) {
 		background: var(--color-bg-hover);
@@ -931,33 +865,4 @@
 		font-size: var(--sbx-card-value);
 		color: var(--color-text-muted);
 	}
-	.traffic-row-list {
-		display: flex;
-		min-width: 0;
-		width: 100%;
-	}
-	.traffic-row-list--stack {
-		flex-direction: column;
-		align-items: stretch;
-		gap: 0.05rem;
-		border-radius: 4px;
-		cursor: pointer;
-		font-size: var(--sbx-card-note);
-		line-height: 1.1;
-		transition: background var(--t-fast) ease;
-	}
-	.traffic-row-list--stack :global(svg.responsive) {
-		width: 100%;
-		min-width: 0;
-		max-width: 100%;
-		flex: 1 1 auto;
-	}
-	.traffic-row-list--stack:hover {
-		background: rgba(96, 165, 250, 0.06);
-	}
-	.traffic-row-list--stack:focus-visible {
-		outline: 1px solid var(--color-accent, #58a6ff);
-		outline-offset: 1px;
-	}
-	.mono { font-family: var(--font-mono, ui-monospace, monospace); }
 </style>

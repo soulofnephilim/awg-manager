@@ -9,7 +9,7 @@
 
 	interface Props {
 		tunnel: SystemTunnel;
-		view?: 'cards' | 'compact' | 'list';
+		view?: 'cards' | 'compact';
 		onMarkServer?: (id: string) => void;
 		ondetail?: (id: string) => void;
 		ontest: (id: string, name: string) => void;
@@ -103,8 +103,6 @@
 	let inlineRxRate = $derived(rxRates.length > 0 ? rxRates[rxRates.length - 1] : 0);
 	let inlineTxRate = $derived(txRates.length > 0 ? txRates[txRates.length - 1] : 0);
 
-	let listStatusText = $derived(tunnel.status === 'up' ? (tunnel.peer?.online ? 'Активен' : 'Без handshake') : 'Выключен');
-
 	let isDenseCard = $derived(view === 'cards');
 	let isCompactCard = $derived(view === 'compact');
 
@@ -128,121 +126,6 @@
 	}
 </script>
 
-{#if view === 'list'}
-	<div class="card list-card" class:status-up={tunnel.status === 'up'} class:status-down={tunnel.status !== 'up'}>
-		<div class="list-cell list-cell-primary">
-			<h3 class="tunnel-name" title={tunnel.description || tunnel.id}>{tunnel.description || tunnel.id}</h3>
-			<div class="flex items-center gap-2 flex-wrap">
-				<span class="iface-name">{tunnel.interfaceName}</span>
-				<span class="version-badge badge-system">Системный</span>
-			</div>
-			<div class="list-note">{tunnel.address || '—'}{#if tunnel.peer?.via}<span class="list-note-sep">·</span>{tunnel.peer.via}{/if}</div>
-		</div>
-
-		<div class="list-cell list-cell-status">
-			<span class="list-label">Статус</span>
-			<div class="list-status-main">
-				<span class="led {ledClass}"></span>
-				<span class="list-status-text">{listStatusText}</span>
-			</div>
-			{#if showConnectivityRow}
-				<div class="connectivity-row">
-					{#if showPingButton}
-						<PingButton
-							connectivity={connState}
-							{latencyMs}
-							checking={checking}
-							onclick={checkConnectivity}
-						/>
-					{/if}
-					<button
-						class="connectivity-gear"
-						class:gear-disabled={checkDisabled}
-						onclick={toggleCheckDisabled}
-						title={checkDisabled ? 'Проверка связности выключена. Нажмите для включения' : 'Выключить проверку связности'}
-					>
-						<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-							<path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" />
-						</svg>
-					</button>
-				</div>
-			{/if}
-		</div>
-
-		<div class="list-cell list-cell-endpoint">
-			<span class="list-label">Endpoint</span>
-			<div class="flex items-center gap-1 min-w-0">
-				<span class="detail-value truncate" title={showEndpoint ? tunnel.peer?.endpoint : ''}>{showEndpoint ? (tunnel.peer?.endpoint || '—') : '•••••••••'}</span>
-				{#if tunnel.peer?.endpoint}
-					<button
-						class="eye-btn"
-						onclick={() => showEndpoint = !showEndpoint}
-						title={showEndpoint ? 'Скрыть' : 'Показать'}
-					>
-						{#if showEndpoint}
-							<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-						{:else}
-							<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-						{/if}
-					</button>
-				{/if}
-			</div>
-			<div class="list-note">MTU {tunnel.mtu}</div>
-		</div>
-
-		<div class="list-cell list-cell-traffic">
-			<span class="list-label">Трафик</span>
-			{#if tunnel.status === 'up'}
-				<div class="list-traffic-chart">
-					<TrafficChart
-						{rxRates}
-						{txRates}
-						rxTotal={tunnel.peer?.rxBytes ?? 0}
-						txTotal={tunnel.peer?.txBytes ?? 0}
-						height={36}
-						onclick={() => ondetail?.(tunnel.id)}
-					/>
-				</div>
-			{:else}
-				<div class="list-traffic-empty">Нет данных</div>
-			{/if}
-			<div class="list-note">↓ {formatBytes(tunnel.peer?.rxBytes ?? 0)} · ↑ {formatBytes(tunnel.peer?.txBytes ?? 0)}</div>
-		</div>
-
-		<div class="list-cell list-cell-stats">
-			<span class="list-label">Активность</span>
-			<div class="list-stat-row">
-				<span>Handshake</span>
-				<strong>{tunnel.peer?.lastHandshake ? formatRelativeTime(tunnel.peer.lastHandshake) : '—'}</strong>
-			</div>
-			<div class="list-stat-row">
-				<span>Uptime</span>
-				<strong>{tunnel.uptime ? formatDuration(tunnel.uptime) : '—'}</strong>
-			</div>
-		</div>
-
-		<div class="list-cell list-cell-actions">
-			<div class="actions-row list-actions-row">
-				<Button variant="ghost" size="sm" href="/system-tunnels/{tunnel.id}">Изменить</Button>
-
-				<span class="system-action-test">
-					<Button variant="ghost" size="sm" onclick={openTest}>
-						{#snippet iconBefore()}
-							<TunnelTestIcon size={14} />
-						{/snippet}
-						Тест
-					</Button>
-				</span>
-
-				{#if onMarkServer}
-					<span class="system-action-primary">
-						<Button variant="ghost" size="sm" onclick={() => onMarkServer?.(tunnel.id)}>В серверы</Button>
-					</span>
-				{/if}
-			</div>
-		</div>
-	</div>
-{:else}
 	<div
 		class="card flex flex-col transition-[border-color] duration-200"
 		class:status-up={tunnel.status === 'up'}
@@ -556,7 +439,6 @@
 			{/if}
 		{/if}
 	</div>
-{/if}
 
 <style>
 	/* Match TunnelCard border states */
@@ -568,82 +450,17 @@
 		border-color: var(--text-muted, #6b7280);
 	}
 
-	.list-card {
-		display: grid;
-		grid-template-columns: minmax(220px, 1.3fr) minmax(170px, 0.9fr) minmax(220px, 1.1fr) minmax(180px, 1fr) minmax(150px, 0.9fr) auto;
-		gap: 14px;
-		align-items: center;
-		padding: 12px 14px;
-	}
 
-	.list-cell {
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
 
-	.list-label {
-		font-size: 10px;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--text-muted);
-	}
 
-	.list-note {
-		font-size: 11px;
-		color: var(--text-muted);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
 
-	.list-note-sep {
-		padding: 0 4px;
-	}
 
-	.list-status-main {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
 
-	.list-status-text {
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--text-primary);
-	}
 
-	.list-traffic-chart {
-		min-height: 36px;
-		padding: 2px 0;
-	}
 
-	.list-traffic-empty {
-		font-size: 12px;
-		color: var(--text-muted);
-		padding: 8px 0;
-	}
 
-	.list-stat-row {
-		display: flex;
-		justify-content: space-between;
-		gap: 10px;
-		font-size: 11px;
-		color: var(--text-muted);
-	}
 
-	.list-stat-row strong {
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--text-secondary);
-		white-space: nowrap;
-	}
 
-	.list-actions-row {
-		flex-direction: column;
-		align-items: stretch;
-	}
 
 	.card.flex {
 		gap: 1rem;
@@ -1198,37 +1015,7 @@
 		background: var(--color-accent-tint);
 	}
 
-	.list-actions-row .system-action-test,
-	.list-actions-row .system-action-primary {
-		display: flex;
-		align-self: stretch;
-	}
 
-	.list-actions-row .system-action-test :global(.btn),
-	.list-actions-row .system-action-primary :global(.btn) {
-		width: 100%;
-	}
 
-	@media (max-width: 1080px) {
-		.list-card {
-			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-		}
 
-		.list-cell-actions {
-			grid-column: 1 / -1;
-		}
-
-		.list-actions-row {
-			flex-direction: row;
-			flex-wrap: wrap;
-			justify-content: flex-end;
-		}
-
-	}
-
-	@media (max-width: 720px) {
-		.list-card {
-			grid-template-columns: minmax(0, 1fr);
-		}
-	}
 </style>
