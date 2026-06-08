@@ -272,6 +272,7 @@
 	// the select is interactive.
 	let selectedPolicy = $state('');
 	let ascParams = $state<ASCParams | null>(null);
+	let ascLoadedFor = $state('');
 
 	$effect(() => {
 		selectedPolicy = server.policy;
@@ -279,15 +280,27 @@
 
 	$effect(() => {
 		const id = server.interfaceName;
+		if (ascLoadedFor === id) return;
+
+		if (ascLoadedFor && ascLoadedFor !== id) {
+			ascParams = null;
+			ascLoadedFor = '';
+		}
+
 		let cancelled = false;
-		ascParams = null;
 
 		void (async () => {
 			try {
 				const params = await api.getManagedServerASC(id);
-				if (!cancelled) ascParams = params;
+				if (!cancelled) {
+					ascParams = params;
+					ascLoadedFor = id;
+				}
 			} catch {
-				if (!cancelled) ascParams = null;
+				if (!cancelled) {
+					ascParams = null;
+					ascLoadedFor = '';
+				}
 			}
 		})();
 
