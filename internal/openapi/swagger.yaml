@@ -2497,6 +2497,15 @@ definitions:
       state:
         type: string
     type: object
+  api.ServerAddPeerRequestDTO:
+    properties:
+      description:
+        example: My Phone
+        type: string
+      tunnelIP:
+        example: 10.0.14.2/32
+        type: string
+    type: object
   api.ServerSettingsDTO:
     properties:
       interface:
@@ -2505,6 +2514,15 @@ definitions:
       port:
         example: 8080
         type: integer
+    type: object
+  api.ServerUpdatePeerRequestDTO:
+    properties:
+      description:
+        example: My Phone
+        type: string
+      tunnelIP:
+        example: 10.0.14.2/32
+        type: string
     type: object
   api.ServersAllData:
     properties:
@@ -4786,6 +4804,9 @@ definitions:
       address:
         example: 10.0.1.1
         type: string
+      builtIn:
+        example: true
+        type: boolean
       connected:
         example: true
         type: boolean
@@ -4798,6 +4819,9 @@ definitions:
       interfaceName:
         example: Wireguard0
         type: string
+      keenDnsDomain:
+        example: home.keenetic.pro
+        type: string
       listenPort:
         example: 51820
         type: integer
@@ -4807,10 +4831,30 @@ definitions:
       mtu:
         example: 1420
         type: integer
+      natEnabled:
+        example: true
+        type: boolean
+      natMode:
+        example: full
+        type: string
+      natModeKnown:
+        description: |-
+          NATModeKnown/PolicyKnown are false when the corresponding NDMS read
+          failed (e.g. transient router error). The frontend must render an
+          "unknown" state instead of trusting the zero-valued NATMode/Policy,
+          which would otherwise read as a fabricated "none".
+        example: true
+        type: boolean
       peers:
         items:
           $ref: '#/definitions/api.WireguardServerPeerDTO'
         type: array
+      policy:
+        example: Policy0
+        type: string
+      policyKnown:
+        example: true
+        type: boolean
       publicKey:
         example: EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=
         type: string
@@ -4826,6 +4870,9 @@ definitions:
         items:
           type: string
         type: array
+      confAvailable:
+        example: true
+        type: boolean
       description:
         example: Phone
         type: string
@@ -8581,6 +8628,281 @@ paths:
       summary: Routing tunnel catalog
       tags:
       - routing
+  /servers/{name}/nat:
+    post:
+      consumes:
+      - application/json
+      description: Sets the NAT mode (full / internet-only / none) on the named WireGuard
+        server via NDMS. Returns the fresh servers snapshot.
+      parameters:
+      - description: Interface name (e.g. Wireguard0)
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: NAT mode
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SetNATModeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServersAllResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Set server NAT mode
+      tags:
+      - servers
+  /servers/{name}/peers:
+    post:
+      consumes:
+      - application/json
+      description: Generates a keypair and registers a new peer on the named WireGuard
+        server. Returns the fresh servers snapshot.
+      parameters:
+      - description: Interface name (e.g. Wireguard0)
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Peer description and tunnel IP
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.ServerAddPeerRequestDTO'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServersAllResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Add server peer
+      tags:
+      - servers
+  /servers/{name}/peers/{pubkey}:
+    delete:
+      description: Removes the peer with the given public key from the named WireGuard
+        server. Returns the fresh servers snapshot.
+      parameters:
+      - description: Interface name (e.g. Wireguard0)
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Peer public key
+        in: path
+        name: pubkey
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServersAllResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Delete server peer
+      tags:
+      - servers
+    put:
+      consumes:
+      - application/json
+      description: Changes a peer's allowed-IP and/or description on the named WireGuard
+        server. Returns the fresh servers snapshot.
+      parameters:
+      - description: Interface name (e.g. Wireguard0)
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Peer public key
+        in: path
+        name: pubkey
+        required: true
+        type: string
+      - description: New description and tunnel IP
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.ServerUpdatePeerRequestDTO'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServersAllResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Update server peer
+      tags:
+      - servers
+  /servers/{name}/peers/{pubkey}/conf:
+    get:
+      description: Generates the WireGuard client .conf for the peer. Only available
+        when the peer's private key was created via AWG Manager and is stored locally.
+      parameters:
+      - description: Interface name (e.g. Wireguard0)
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Peer public key
+        in: path
+        name: pubkey
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Get server peer config
+      tags:
+      - servers
+  /servers/{name}/peers/{pubkey}/toggle:
+    post:
+      consumes:
+      - application/json
+      description: Enables or disables (connect on/off) the peer on the named WireGuard
+        server. Returns the fresh servers snapshot.
+      parameters:
+      - description: Interface name (e.g. Wireguard0)
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Peer public key
+        in: path
+        name: pubkey
+        required: true
+        type: string
+      - description: Enabled flag
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.EnabledToggleRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServersAllResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Toggle server peer
+      tags:
+      - servers
+  /servers/{name}/policy:
+    post:
+      consumes:
+      - application/json
+      description: Binds the named WireGuard server interface to an NDMS hotspot access
+        policy (or "none"). Returns the fresh servers snapshot.
+      parameters:
+      - description: Interface name (e.g. Wireguard0)
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Policy id (router-side) or 'none'
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SetServerPolicyRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServersAllResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Set server access policy
+      tags:
+      - servers
   /servers/all:
     get:
       description: 'Returns the composite servers snapshot: WireGuard servers list,

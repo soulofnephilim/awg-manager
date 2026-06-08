@@ -74,6 +74,19 @@ func (h *ServersHandler) invalidateSystemServerCaches(iface string) {
 
 // SetNAT sets the NAT mode on a built-in/marked WireGuard server.
 // POST /api/servers/{name}/nat
+//
+//	@Summary		Set server NAT mode
+//	@Description	Sets the NAT mode (full / internet-only / none) on the named WireGuard server via NDMS. Returns the fresh servers snapshot.
+//	@Tags			servers
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	path		string				true	"Interface name (e.g. Wireguard0)"
+//	@Param			body	body		SetNATModeRequest	true	"NAT mode"
+//	@Success		200		{object}	ServersAllResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/servers/{name}/nat [post]
 func (h *ServersHandler) SetNAT(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodPost {
 		response.MethodNotAllowed(w)
@@ -136,6 +149,19 @@ func (h *ServersHandler) SetNAT(w http.ResponseWriter, r *http.Request, name str
 
 // SetPolicy sets the ip hotspot policy on a built-in/marked WireGuard server.
 // POST /api/servers/{name}/policy
+//
+//	@Summary		Set server access policy
+//	@Description	Binds the named WireGuard server interface to an NDMS hotspot access policy (or "none"). Returns the fresh servers snapshot.
+//	@Tags			servers
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	path		string					true	"Interface name (e.g. Wireguard0)"
+//	@Param			body	body		SetServerPolicyRequest	true	"Policy id (router-side) or 'none'"
+//	@Success		200		{object}	ServersAllResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/servers/{name}/policy [post]
 func (h *ServersHandler) SetPolicy(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodPost {
 		response.MethodNotAllowed(w)

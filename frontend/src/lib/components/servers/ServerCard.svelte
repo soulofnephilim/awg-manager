@@ -65,6 +65,11 @@
 	let togglingPeerKeys = $state(new Set<string>());
 
 	let natMode = $derived<NatMode>(resolveNatMode(server.natMode, server.natEnabled));
+	// When the backend couldn't read NAT/policy from NDMS, natMode/policy are a
+	// fabricated 'none' — surface "unknown" and block edits instead of letting
+	// the user act on it. Absent flags (legacy/managed) are treated as known.
+	let natModeKnown = $derived(server.natModeKnown ?? true);
+	let policyKnown = $derived(server.policyKnown ?? true);
 
 	const natModeOptions: DropdownOption<NatMode>[] = [
 		{ value: 'full', label: 'Полный NAT' },
@@ -378,14 +383,16 @@
 			<div class="setting-row">
 				<div class="setting-copy">
 					<span class="setting-title">NAT</span>
-					{#if natMode === 'full'}
+					{#if !natModeKnown}
+						<span class="setting-description setting-description-warning">Не удалось прочитать состояние NAT с роутера — обновите страницу.</span>
+					{:else if natMode === 'full'}
 						<span class="setting-description">Для доступа клиентов в интернет через NAT роутера.</span>
 					{:else if natMode === 'internet-only'}
 						<span class="setting-description">NAT только для интернет-трафика; в LAN клиент виден со своим VPN-адресом.</span>
 					{:else}
 						<span class="setting-description">Без NAT — клиенты не выходят в интернет напрямую.</span>
 					{/if}
-					{#if ingressEnabled && natMode === 'full'}
+					{#if natModeKnown && ingressEnabled && natMode === 'full'}
 						<span class="setting-description setting-description-warning">Интернет-трафик идёт через sing-box - NAT влияет только на видимость в LAN.</span>
 					{/if}
 				</div>
@@ -393,7 +400,7 @@
 					<Dropdown
 						value={natMode}
 						options={natModeOptions}
-						disabled={togglingNAT}
+						disabled={togglingNAT || !natModeKnown}
 						onchange={handleSetNATMode}
 						fullWidth
 					/>
@@ -417,9 +424,12 @@
 
 			<ServerAccessPolicyDropdown
 				policy={server.policy ?? 'none'}
-				disabled={policyChanging}
+				disabled={policyChanging || !policyKnown}
 				onchange={handlePolicyChange}
 			/>
+			{#if !policyKnown}
+				<span class="setting-description setting-description-warning">Не удалось прочитать политику доступа с роутера — обновите страницу.</span>
+			{/if}
 		</div>
 	{/if}
 

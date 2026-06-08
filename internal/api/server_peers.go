@@ -124,6 +124,21 @@ func (h *ServersHandler) requireWGCommands(w http.ResponseWriter) bool {
 	return true
 }
 
+// AddServerPeer adds a peer to a built-in/marked WireGuard server.
+// POST /api/servers/{name}/peers
+//
+//	@Summary		Add server peer
+//	@Description	Generates a keypair and registers a new peer on the named WireGuard server. Returns the fresh servers snapshot.
+//	@Tags			servers
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	path		string						true	"Interface name (e.g. Wireguard0)"
+//	@Param			body	body		ServerAddPeerRequestDTO	true	"Peer description and tunnel IP"
+//	@Success		200		{object}	ServersAllResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/servers/{name}/peers [post]
 func (h *ServersHandler) AddServerPeer(w http.ResponseWriter, r *http.Request, name string) {
 	req, ok := parseJSON[ServerAddPeerRequestDTO](w, r, http.MethodPost)
 	if !ok {
@@ -140,13 +155,9 @@ func (h *ServersHandler) AddServerPeer(w http.ResponseWriter, r *http.Request, n
 		response.Error(w, err.Error(), "INVALID_TUNNEL_IP")
 		return
 	}
-	for _, p := range server.Peers {
-		for _, allowed := range p.AllowedIPs {
-			if strings.HasPrefix(allowed, strings.TrimSuffix(req.TunnelIP, "/32")) {
-				response.Error(w, "tunnel IP already in use", "TUNNEL_IP_IN_USE")
-				return
-			}
-		}
+	if peerTunnelIPInUse(server, req.TunnelIP) {
+		response.Error(w, "tunnel IP already in use", "TUNNEL_IP_IN_USE")
+		return
 	}
 
 	privKey, pubKey, err := managed.GenerateKeyPair(r.Context())
@@ -165,10 +176,12 @@ func (h *ServersHandler) AddServerPeer(w http.ResponseWriter, r *http.Request, n
 		return
 	}
 
-	if err := h.commands.Wireguard.AddPeer(r.Context(), name, pubKey, psk, strings.TrimSpace(req.Description), ip.String(), true); err != nil {
-		response.Error(w, err.Error(), "ADD_PEER_FAILED")
-		return
-	}
+	// Persist the secret BEFORE the router add. If the order were reversed and
+	// the save failed, the peer would exist on the router with its private key
+	// lost forever — .conf could never be regenerated and the IP would stay
+	// occupied. A stranded secret (save ok, router add fails) is harmless: it
+	// is keyed by a pubkey that never reaches the router peer list, and we roll
+	// it back below anyway.
 	if err := h.settings.SetServerPeerSecret(name, pubKey, storage.ServerPeerSecret{
 		PrivateKey:   privKey,
 		PresharedKey: psk,
@@ -178,10 +191,32 @@ func (h *ServersHandler) AddServerPeer(w http.ResponseWriter, r *http.Request, n
 		response.Error(w, err.Error(), "SAVE_FAILED")
 		return
 	}
+	if err := h.commands.Wireguard.AddPeer(r.Context(), name, pubKey, psk, strings.TrimSpace(req.Description), ip.String(), true); err != nil {
+		_ = h.settings.DeleteServerPeerSecret(name, pubKey)
+		response.Error(w, err.Error(), "ADD_PEER_FAILED")
+		return
+	}
 	publishInvalidated(h.bus, ResourceServers, "server-peer-added")
 	h.writeAll(w, r)
 }
 
+// UpdateServerPeer updates a peer's tunnel IP and/or description.
+// PUT /api/servers/{name}/peers/{pubkey}
+//
+//	@Summary		Update server peer
+//	@Description	Changes a peer's allowed-IP and/or description on the named WireGuard server. Returns the fresh servers snapshot.
+//	@Tags			servers
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	path		string							true	"Interface name (e.g. Wireguard0)"
+//	@Param			pubkey	path		string							true	"Peer public key"
+//	@Param			body	body		ServerUpdatePeerRequestDTO	true	"New description and tunnel IP"
+//	@Success		200		{object}	ServersAllResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/servers/{name}/peers/{pubkey} [put]
 func (h *ServersHandler) UpdateServerPeer(w http.ResponseWriter, r *http.Request, name, pubkey string) {
 	req, ok := parseJSON[ServerUpdatePeerRequestDTO](w, r, http.MethodPut)
 	if !ok {
@@ -216,25 +251,53 @@ func (h *ServersHandler) UpdateServerPeer(w http.ResponseWriter, r *http.Request
 			response.Error(w, err.Error(), "UPDATE_PEER_FAILED")
 			return
 		}
-		if sec, ok := h.settings.GetServerPeerSecret(name, pubkey); ok {
-			sec.TunnelIP = req.TunnelIP
-			_ = h.settings.SetServerPeerSecret(name, pubkey, sec)
-		}
 	}
 	if req.Description != peer.Description {
 		if err := h.commands.Wireguard.SetPeerComment(r.Context(), name, pubkey, strings.TrimSpace(req.Description)); err != nil {
 			response.Error(w, err.Error(), "UPDATE_PEER_FAILED")
 			return
 		}
-		if sec, ok := h.settings.GetServerPeerSecret(name, pubkey); ok {
+	}
+	// Keep the stored secret (source of truth for .conf regen) in sync with
+	// the router change. Runs unconditionally so a retry after a prior save
+	// failure still reconciles even when the router side is now a no-op. The
+	// error is surfaced, not swallowed: a stale stored IP would hand out a
+	// wrong .conf after reboot.
+	if sec, ok := h.settings.GetServerPeerSecret(name, pubkey); ok {
+		changed := false
+		if req.TunnelIP != "" && sec.TunnelIP != req.TunnelIP {
+			sec.TunnelIP = req.TunnelIP
+			changed = true
+		}
+		if sec.Description != req.Description {
 			sec.Description = req.Description
-			_ = h.settings.SetServerPeerSecret(name, pubkey, sec)
+			changed = true
+		}
+		if changed {
+			if err := h.settings.SetServerPeerSecret(name, pubkey, sec); err != nil {
+				response.Error(w, err.Error(), "SAVE_FAILED")
+				return
+			}
 		}
 	}
 	publishInvalidated(h.bus, ResourceServers, "server-peer-updated")
 	h.writeAll(w, r)
 }
 
+// DeleteServerPeer removes a peer from a WireGuard server.
+// DELETE /api/servers/{name}/peers/{pubkey}
+//
+//	@Summary		Delete server peer
+//	@Description	Removes the peer with the given public key from the named WireGuard server. Returns the fresh servers snapshot.
+//	@Tags			servers
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	path		string	true	"Interface name (e.g. Wireguard0)"
+//	@Param			pubkey	path		string	true	"Peer public key"
+//	@Success		200		{object}	ServersAllResponse
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/servers/{name}/peers/{pubkey} [delete]
 func (h *ServersHandler) DeleteServerPeer(w http.ResponseWriter, r *http.Request, name, pubkey string) {
 	if !h.requireWGCommands(w) {
 		return
@@ -256,6 +319,22 @@ func (h *ServersHandler) DeleteServerPeer(w http.ResponseWriter, r *http.Request
 	h.writeAll(w, r)
 }
 
+// ToggleServerPeer enables or disables a peer.
+// POST /api/servers/{name}/peers/{pubkey}/toggle
+//
+//	@Summary		Toggle server peer
+//	@Description	Enables or disables (connect on/off) the peer on the named WireGuard server. Returns the fresh servers snapshot.
+//	@Tags			servers
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	path		string					true	"Interface name (e.g. Wireguard0)"
+//	@Param			pubkey	path		string					true	"Peer public key"
+//	@Param			body	body		EnabledToggleRequest	true	"Enabled flag"
+//	@Success		200		{object}	ServersAllResponse
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/servers/{name}/peers/{pubkey}/toggle [post]
 func (h *ServersHandler) ToggleServerPeer(w http.ResponseWriter, r *http.Request, name, pubkey string) {
 	req, ok := parseJSON[EnabledToggleRequest](w, r, http.MethodPost)
 	if !ok {
@@ -280,6 +359,20 @@ func (h *ServersHandler) ToggleServerPeer(w http.ResponseWriter, r *http.Request
 	h.writeAll(w, r)
 }
 
+// ServerPeerConf returns the downloadable WireGuard .conf for a peer.
+// GET /api/servers/{name}/peers/{pubkey}/conf
+//
+//	@Summary		Get server peer config
+//	@Description	Generates the WireGuard client .conf for the peer. Only available when the peer's private key was created via AWG Manager and is stored locally.
+//	@Tags			servers
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	path		string	true	"Interface name (e.g. Wireguard0)"
+//	@Param			pubkey	path		string	true	"Peer public key"
+//	@Success		200		{object}	map[string]string
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/servers/{name}/peers/{pubkey}/conf [get]
 func (h *ServersHandler) ServerPeerConf(w http.ResponseWriter, r *http.Request, name, pubkey string) {
 	if r.Method != http.MethodGet {
 		response.MethodNotAllowed(w)
@@ -408,6 +501,24 @@ func peerTunnelHostIP(peer *ndms.WireguardServerPeer) string {
 	return ""
 }
 
+// peerTunnelIPInUse reports whether tunnelIP's host address is already
+// assigned to an existing peer. Compares parsed host IPs for equality —
+// a string prefix check (e.g. "10.0.0.2" vs "10.0.0.20") gives false
+// positives and must not be used here.
+func peerTunnelIPInUse(server *ndms.WireguardServer, tunnelIP string) bool {
+	host, _, err := net.ParseCIDR(tunnelIP)
+	if err != nil {
+		return false
+	}
+	for i := range server.Peers {
+		existing := peerTunnelHostIP(&server.Peers[i])
+		if existing != "" && net.ParseIP(existing).Equal(host) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *ServersHandler) validateServerPeerTunnelIP(server *ndms.WireguardServer, tunnelIP string) error {
 	ip, ipNet, err := net.ParseCIDR(tunnelIP)
 	if err != nil {
@@ -450,9 +561,11 @@ func (h *ServersHandler) enrichServerDTO(ctx context.Context, srv ndms.Wireguard
 	if _, mode, err := h.readSystemServerNATMode(ctx, srv.ID); err == nil {
 		dto.NATEnabled = mode == "full"
 		dto.NATMode = mode
+		dto.NATModeKnown = true
 	}
 	if policy, err := h.readSystemServerPolicy(ctx, srv.ID); err == nil {
 		dto.Policy = policy
+		dto.PolicyKnown = true
 	}
 	if h.queries != nil && h.queries.KeenDNS != nil {
 		if info, err := h.queries.KeenDNS.Get(ctx); err == nil && info != nil {

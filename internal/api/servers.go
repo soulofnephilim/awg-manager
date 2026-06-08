@@ -56,6 +56,12 @@ type WireguardServerDTO struct {
 	Policy        string                   `json:"policy,omitempty" example:"Policy0"`
 	KeenDNSDomain string                   `json:"keenDnsDomain,omitempty" example:"home.keenetic.pro"`
 	BuiltIn       bool                     `json:"builtIn,omitempty" example:"true"`
+	// NATModeKnown/PolicyKnown are false when the corresponding NDMS read
+	// failed (e.g. transient router error). The frontend must render an
+	// "unknown" state instead of trusting the zero-valued NATMode/Policy,
+	// which would otherwise read as a fabricated "none".
+	NATModeKnown bool `json:"natModeKnown" example:"true"`
+	PolicyKnown  bool `json:"policyKnown" example:"true"`
 }
 
 // ManagedPeerStatsDTO mirrors frontend ManagedPeerStats.

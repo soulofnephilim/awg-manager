@@ -320,6 +320,14 @@ export interface WireguardServer {
 	policy?: string;
 	keenDnsDomain?: string;
 	builtIn?: boolean;
+	/**
+	 * False when the backend failed to read NAT mode / policy from NDMS
+	 * (e.g. transient router error). When false, natMode/policy are NOT
+	 * trustworthy and the UI must show an "unknown" state rather than the
+	 * zero-valued 'none'. Absent (legacy/managed) is treated as known.
+	 */
+	natModeKnown?: boolean;
+	policyKnown?: boolean;
 }
 
 export interface WireguardServerPeer {

@@ -157,7 +157,7 @@ func (c *WireguardCommands) AddPeer(ctx context.Context, ifaceName, pubKey, psk,
 			},
 		},
 	}
-	return postMutation(ctx, c.poster, c.save, payload, "add peer "+ifaceName,
+	return postMutationChecked(ctx, c.poster, c.save, payload, "add peer "+ifaceName,
 		func() { c.invalidateServer(ifaceName) })
 }
 
@@ -174,7 +174,7 @@ func (c *WireguardCommands) RemovePeer(ctx context.Context, ifaceName, pubKey st
 			},
 		},
 	}
-	return postMutation(ctx, c.poster, c.save, payload, "remove peer "+ifaceName,
+	return postMutationChecked(ctx, c.poster, c.save, payload, "remove peer "+ifaceName,
 		func() { c.invalidateServer(ifaceName) })
 }
 
@@ -191,7 +191,7 @@ func (c *WireguardCommands) SetPeerConnect(ctx context.Context, ifaceName, pubKe
 			},
 		},
 	}
-	return postMutation(ctx, c.poster, c.save, payload, "toggle peer "+ifaceName,
+	return postMutationChecked(ctx, c.poster, c.save, payload, "toggle peer "+ifaceName,
 		func() { c.invalidateServer(ifaceName) })
 }
 
@@ -208,7 +208,7 @@ func (c *WireguardCommands) SetPeerComment(ctx context.Context, ifaceName, pubKe
 			},
 		},
 	}
-	return postMutation(ctx, c.poster, c.save, payload, "rename peer "+ifaceName,
+	return postMutationChecked(ctx, c.poster, c.save, payload, "rename peer "+ifaceName,
 		func() { c.invalidateServer(ifaceName) })
 }
 
@@ -231,7 +231,7 @@ func (c *WireguardCommands) UpdatePeerAllowIPs(ctx context.Context, ifaceName, p
 				},
 			},
 		}
-		if err := postMutation(ctx, c.poster, c.save, payload, "remove peer allow-ips "+ifaceName,
+		if err := postMutationChecked(ctx, c.poster, c.save, payload, "remove peer allow-ips "+ifaceName,
 			func() { c.invalidateServer(ifaceName) }); err != nil {
 			return fmt.Errorf("remove old allow-ips: %w", err)
 		}
@@ -252,6 +252,6 @@ func (c *WireguardCommands) UpdatePeerAllowIPs(ctx context.Context, ifaceName, p
 			},
 		},
 	}
-	return postMutation(ctx, c.poster, c.save, payload, "set peer allow-ips "+ifaceName,
+	return postMutationChecked(ctx, c.poster, c.save, payload, "set peer allow-ips "+ifaceName,
 		func() { c.invalidateServer(ifaceName) })
 }
