@@ -35,6 +35,7 @@ type WireguardServerPeerDTO struct {
 	LastHandshake string   `json:"lastHandshake" example:"2024-01-15T10:30:00Z"`
 	Online        bool     `json:"online" example:"true"`
 	Enabled       bool     `json:"enabled" example:"true"`
+	ConfAvailable bool     `json:"confAvailable,omitempty" example:"true"`
 }
 
 // WireguardServerDTO mirrors frontend WireguardServer.
@@ -50,6 +51,17 @@ type WireguardServerDTO struct {
 	PublicKey     string                   `json:"publicKey" example:"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE="`
 	ListenPort    int                      `json:"listenPort" example:"51820"`
 	Peers         []WireguardServerPeerDTO `json:"peers"`
+	NATEnabled    bool                     `json:"natEnabled,omitempty" example:"true"`
+	NATMode       string                   `json:"natMode,omitempty" example:"full"`
+	Policy        string                   `json:"policy,omitempty" example:"Policy0"`
+	KeenDNSDomain string                   `json:"keenDnsDomain,omitempty" example:"home.keenetic.pro"`
+	BuiltIn       bool                     `json:"builtIn,omitempty" example:"true"`
+	// NATModeKnown/PolicyKnown are false when the corresponding NDMS read
+	// failed (e.g. transient router error). The frontend must render an
+	// "unknown" state instead of trusting the zero-valued NATMode/Policy,
+	// which would otherwise read as a fabricated "none".
+	NATModeKnown bool `json:"natModeKnown" example:"true"`
+	PolicyKnown  bool `json:"policyKnown" example:"true"`
 }
 
 // ManagedPeerStatsDTO mirrors frontend ManagedPeerStats.
@@ -127,12 +139,13 @@ func isValidWireguardName(name string) bool {
 // resource:invalidated hints on mark/unmark and poller metrics ticks so
 // subscribers refetch immediately instead of waiting for the next poll.
 type ServersHandler struct {
-	queries  *query.Queries
-	commands *ndmscommand.Commands
-	settings *storage.SettingsStore
-	awgStore *storage.AWGTunnelStore
-	bus      *events.Bus
-	managed  *ManagedServerHandler
+	queries     *query.Queries
+	commands    *ndmscommand.Commands
+	settings    *storage.SettingsStore
+	awgStore    *storage.AWGTunnelStore
+	bus         *events.Bus
+	managed     *ManagedServerHandler
+	managedSvc  *managed.Service
 }
 
 // SetEventBus sets the event bus used for SSE publishing.
@@ -142,6 +155,9 @@ func (h *ServersHandler) SetEventBus(bus *events.Bus) {
 
 // SetManagedHandler sets the managed server handler for shared publishing.
 func (h *ServersHandler) SetManagedHandler(m *ManagedServerHandler) { h.managed = m }
+
+// SetManagedService wires managed.Service for system-server NAT/policy RCI.
+func (h *ServersHandler) SetManagedService(svc *managed.Service) { h.managedSvc = svc }
 
 // SetCommands wires NDMS interface commands used by server up/down/restart
 // controls. Kept as a setter so tests using NewServersHandler do not need to
@@ -281,6 +297,10 @@ func (h *ServersHandler) writeAll(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, err.Error(), "LIST_FAILED")
 		return
 	}
+	enriched := make([]WireguardServerDTO, len(list))
+	for i, srv := range list {
+		enriched[i] = h.enrichServerDTO(ctx, srv)
+	}
 	managedList := []*managedServerResponse{}
 	managedStats := map[string]*managed.ManagedServerStats{}
 	if h.managed != nil {
@@ -288,7 +308,7 @@ func (h *ServersHandler) writeAll(w http.ResponseWriter, r *http.Request) {
 		managedStats = h.managed.getManagedStatsMap(ctx)
 	}
 	payload := map[string]any{
-		"servers":      list,
+		"servers":      enriched,
 		"managed":      managedList,
 		"managedStats": managedStats,
 	}

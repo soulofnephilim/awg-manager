@@ -723,6 +723,83 @@ func (s *SettingsStore) IsServerInterface(id string) bool {
 	return contains(settings.ServerInterfaces, id)
 }
 
+// GetServerInterfaceMeta returns AWG Manager metadata for a system server.
+func (s *SettingsStore) GetServerInterfaceMeta(serverID string) (ServerInterfaceMeta, bool) {
+	settings, err := s.Get()
+	if err != nil || settings.ServerInterfaceMeta == nil {
+		return ServerInterfaceMeta{}, false
+	}
+	meta, ok := settings.ServerInterfaceMeta[serverID]
+	return meta, ok
+}
+
+// UpdateServerInterfaceMeta updates metadata for a system server.
+func (s *SettingsStore) UpdateServerInterfaceMeta(serverID string, fn func(*ServerInterfaceMeta) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settings == nil {
+		return fmt.Errorf("settings not loaded")
+	}
+	if s.settings.ServerInterfaceMeta == nil {
+		s.settings.ServerInterfaceMeta = map[string]ServerInterfaceMeta{}
+	}
+	meta := s.settings.ServerInterfaceMeta[serverID]
+	if err := fn(&meta); err != nil {
+		return err
+	}
+	s.settings.ServerInterfaceMeta[serverID] = meta
+	return s.saveUnlocked(s.settings)
+}
+
+// GetServerPeerSecret returns stored key material for a system-server peer.
+func (s *SettingsStore) GetServerPeerSecret(serverID, pubkey string) (ServerPeerSecret, bool) {
+	settings, err := s.Get()
+	if err != nil || settings.ServerPeerSecrets == nil {
+		return ServerPeerSecret{}, false
+	}
+	peers, ok := settings.ServerPeerSecrets[serverID]
+	if !ok {
+		return ServerPeerSecret{}, false
+	}
+	sec, ok := peers[pubkey]
+	return sec, ok
+}
+
+// SetServerPeerSecret stores key material for a system-server peer.
+func (s *SettingsStore) SetServerPeerSecret(serverID, pubkey string, sec ServerPeerSecret) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settings == nil {
+		return fmt.Errorf("settings not loaded")
+	}
+	if s.settings.ServerPeerSecrets == nil {
+		s.settings.ServerPeerSecrets = map[string]map[string]ServerPeerSecret{}
+	}
+	if s.settings.ServerPeerSecrets[serverID] == nil {
+		s.settings.ServerPeerSecrets[serverID] = map[string]ServerPeerSecret{}
+	}
+	s.settings.ServerPeerSecrets[serverID][pubkey] = sec
+	return s.saveUnlocked(s.settings)
+}
+
+// DeleteServerPeerSecret removes stored key material for a system-server peer.
+func (s *SettingsStore) DeleteServerPeerSecret(serverID, pubkey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settings == nil {
+		return fmt.Errorf("settings not loaded")
+	}
+	peers, ok := s.settings.ServerPeerSecrets[serverID]
+	if !ok {
+		return nil
+	}
+	delete(peers, pubkey)
+	if len(peers) == 0 {
+		delete(s.settings.ServerPeerSecrets, serverID)
+	}
+	return s.saveUnlocked(s.settings)
+}
+
 // migratePortFile reads port from old port file and removes it.
 func (s *SettingsStore) migratePortFile(settings *Settings) {
 	portFile := filepath.Join(filepath.Dir(s.path), "port")

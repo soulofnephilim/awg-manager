@@ -861,6 +861,74 @@ class ApiClient {
 		});
 	}
 
+	async setWireguardServerNATMode(
+		name: string,
+		mode: 'full' | 'internet-only' | 'none'
+	): Promise<import('$lib/stores/servers').ServersSnapshot> {
+		return this.request(`/servers/${encodeURIComponent(name)}/nat`, {
+			method: 'POST',
+			body: JSON.stringify({ mode })
+		});
+	}
+
+	async setWireguardServerPolicy(
+		name: string,
+		policy: string
+	): Promise<import('$lib/stores/servers').ServersSnapshot> {
+		return this.request(`/servers/${encodeURIComponent(name)}/policy`, {
+			method: 'POST',
+			body: JSON.stringify({ policy })
+		});
+	}
+
+	async addSystemServerPeer(
+		serverId: string,
+		data: { description: string; tunnelIP: string }
+	): Promise<import('$lib/stores/servers').ServersSnapshot> {
+		return this.request(`/servers/${encodeURIComponent(serverId)}/peers`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async updateSystemServerPeer(
+		serverId: string,
+		pubkey: string,
+		data: { description: string; tunnelIP: string }
+	): Promise<import('$lib/stores/servers').ServersSnapshot> {
+		return this.request(`/servers/${encodeURIComponent(serverId)}/peers/${encodeURIComponent(pubkey)}`, {
+			method: 'PUT',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async deleteSystemServerPeer(
+		serverId: string,
+		pubkey: string
+	): Promise<import('$lib/stores/servers').ServersSnapshot> {
+		return this.request(`/servers/${encodeURIComponent(serverId)}/peers/${encodeURIComponent(pubkey)}`, {
+			method: 'DELETE'
+		});
+	}
+
+	async toggleSystemServerPeer(
+		serverId: string,
+		publicKey: string,
+		enabled: boolean
+	): Promise<import('$lib/stores/servers').ServersSnapshot> {
+		return this.request(`/servers/${encodeURIComponent(serverId)}/peers/${encodeURIComponent(publicKey)}/toggle`, {
+			method: 'POST',
+			body: JSON.stringify({ enabled })
+		});
+	}
+
+	async getSystemServerPeerConf(serverId: string, pubkey: string): Promise<string> {
+		const res = await this.request<{ conf: string }>(
+			`/servers/${encodeURIComponent(serverId)}/peers/${encodeURIComponent(pubkey)}/conf`
+		);
+		return res.conf;
+	}
+
 	// #endregion
 
 	// ─────────────────────────────────────────────

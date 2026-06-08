@@ -22,6 +22,9 @@ type Queries struct {
 	RunningConfig    *RunningConfigStore
 	SystemInfo       *SystemInfoStore
 	WGServers        *WGServerStore
+	NAT              *NATStore
+	StaticNAT        *StaticNATStore
+	KeenDNS          *KeenDNSStore
 }
 
 // Deps groups the non-Store dependencies NewQueries needs.
@@ -79,5 +82,8 @@ func NewQueries(d Deps) *Queries {
 		RunningConfig:    NewRunningConfigStore(d.Getter, d.Logger),
 		SystemInfo:       NewSystemInfoStore(d.Getter, d.Logger),
 		WGServers:        NewWGServerStore(d.Getter, d.Logger, ifaces),
+		NAT:              NewNATStore(d.Getter, d.Logger),
+		StaticNAT:        NewStaticNATStore(d.Getter, d.Logger),
+		KeenDNS:          NewKeenDNSStore(d.Getter, d.Logger),
 	}
 }

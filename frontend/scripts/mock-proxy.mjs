@@ -2736,6 +2736,21 @@ function buildMockServersAllData() {
 	};
 }
 
+/** @type {Record<string, { natMode: 'full' | 'internet-only' | 'none', policy: string }>} */
+const mockSystemServerSettings = {
+	Wireguard0: { natMode: 'full', policy: 'none' },
+	Wireguard9: { natMode: 'none', policy: 'Policy0' },
+};
+
+/** @type {Map<string, { privateKey: string, presharedKey: string, description: string, tunnelIP: string }>} */
+const mockSystemPeerSecrets = new Map();
+mockSystemPeerSecrets.set(mockPubkey(50), {
+	privateKey: mockPubkey(150),
+	presharedKey: mockPubkey(250),
+	description: 'Phone',
+	tunnelIP: '10.0.14.2/32',
+});
+
 function mockSystemServerPeers() {
 	const now = Date.now();
 	return SYSTEM_SERVER_PEERS_FIXTURE.map((p, i) => {
@@ -2755,11 +2770,18 @@ function mockSystemServerPeers() {
 }
 
 function mockSystemServers() {
+	const builtinPeers = mockSystemServerPeers().map((p, i) => ({
+		...p,
+		confAvailable: i === 0 || mockSystemPeerSecrets.has(p.publicKey),
+	}));
+	const wg0 = mockSystemServerSettings.Wireguard0 ?? { natMode: 'full', policy: 'none' };
+	const wg9 = mockSystemServerSettings.Wireguard9 ?? { natMode: 'none', policy: 'none' };
 	return [
 		{
 			id: 'Wireguard0',
-			interfaceName: 'Wireguard0',
+			interfaceName: 'nwg0',
 			description: 'Wireguard VPN Server',
+			builtIn: true,
 			status: 'up',
 			connected: true,
 			mtu: 1420,
@@ -2767,11 +2789,15 @@ function mockSystemServers() {
 			mask: '255.255.255.0',
 			publicKey: mockPubkey(41),
 			listenPort: 8443,
-			peers: mockSystemServerPeers(),
+			natEnabled: wg0.natMode === 'full',
+			natMode: wg0.natMode,
+			policy: wg0.policy,
+			keenDnsDomain: 'demo.keenetic.pro',
+			peers: builtinPeers,
 		},
 		{
 			id: 'Wireguard9',
-			interfaceName: 'Wireguard9',
+			interfaceName: 'nwg9',
 			description: 'Branch Office WG',
 			status: 'down',
 			connected: false,
@@ -2780,6 +2806,9 @@ function mockSystemServers() {
 			mask: '255.255.255.0',
 			publicKey: mockPubkey(42),
 			listenPort: 53199,
+			natEnabled: wg9.natMode === 'full',
+			natMode: wg9.natMode,
+			policy: wg9.policy,
 			peers: [
 				{
 					publicKey: mockPubkey(60),
@@ -2791,6 +2820,7 @@ function mockSystemServers() {
 					lastHandshake: '',
 					online: false,
 					enabled: true,
+					confAvailable: false,
 				},
 			],
 		},
@@ -5090,6 +5120,111 @@ const server = http.createServer(async (req, res) => {
 	// IPs are intentionally not in monotonic order so that "По IP" can be
 	// visually distinguished from "in storage order" and from a naive
 	// lexicographic sort (which would put 10.0.0.10 before 10.0.0.2).
+	const serverNatMatch = path.match(/^\/servers\/([^/]+)\/nat$/);
+	if (serverNatMatch && req.method === 'POST') {
+		const serverId = decodeURIComponent(serverNatMatch[1]);
+		let raw = '';
+		req.on('data', (c) => (raw += c));
+		req.on('end', () => {
+			try {
+				const body = JSON.parse(raw || '{}');
+				const mode = body.mode ?? (body.enabled ? 'full' : 'none');
+				if (!['full', 'internet-only', 'none'].includes(mode)) {
+					sendInvalidRequest(res, 'invalid NAT mode');
+					return;
+				}
+				if (!mockSystemServerSettings[serverId]) {
+					mockSystemServerSettings[serverId] = { natMode: 'none', policy: 'none' };
+				}
+				mockSystemServerSettings[serverId].natMode = mode;
+				sendData(res, buildMockServersAllData());
+			} catch (e) {
+				sendInvalidRequest(res, String(e));
+			}
+		});
+		return;
+	}
+
+	const serverPolicyMatch = path.match(/^\/servers\/([^/]+)\/policy$/);
+	if (serverPolicyMatch && req.method === 'POST') {
+		const serverId = decodeURIComponent(serverPolicyMatch[1]);
+		let raw = '';
+		req.on('data', (c) => (raw += c));
+		req.on('end', () => {
+			try {
+				const body = JSON.parse(raw || '{}');
+				const policy = body.policy ?? 'none';
+				if (!mockSystemServerSettings[serverId]) {
+					mockSystemServerSettings[serverId] = { natMode: 'none', policy: 'none' };
+				}
+				mockSystemServerSettings[serverId].policy = policy;
+				sendData(res, buildMockServersAllData());
+			} catch (e) {
+				sendInvalidRequest(res, String(e));
+			}
+		});
+		return;
+	}
+
+	const serverPeerMatch = path.match(/^\/servers\/([^/]+)\/peers(?:\/([^/]+)(?:\/(toggle|conf))?)?$/);
+	if (serverPeerMatch) {
+		const serverId = decodeURIComponent(serverPeerMatch[1]);
+		const pubkey = serverPeerMatch[2] ? decodeURIComponent(serverPeerMatch[2]) : '';
+		const leaf = serverPeerMatch[3] ?? '';
+		const servers = mockSystemServers();
+		const server = servers.find((s) => s.id === serverId);
+		if (!server) {
+			send(res, 404, { success: false, error: { code: 'NOT_FOUND', message: 'server not found' } });
+			return;
+		}
+
+		if (req.method === 'POST' && !pubkey) {
+			let raw = '';
+			req.on('data', (c) => (raw += c));
+			req.on('end', () => {
+				try {
+					const body = JSON.parse(raw || '{}');
+					const newKey = mockPubkey(90 + server.peers.length);
+					mockSystemPeerSecrets.set(newKey, {
+						privateKey: mockPubkey(190 + server.peers.length),
+						presharedKey: mockPubkey(290 + server.peers.length),
+						description: body.description || 'New peer',
+						tunnelIP: body.tunnelIP || '10.0.0.99/32',
+					});
+					sendData(res, buildMockServersAllData());
+				} catch (e) {
+					sendInvalidRequest(res, String(e));
+				}
+			});
+			return;
+		}
+
+		if (pubkey && leaf === 'toggle' && req.method === 'POST') {
+			sendData(res, buildMockServersAllData());
+			return;
+		}
+
+		if (pubkey && leaf === 'conf' && req.method === 'GET') {
+			if (!mockSystemPeerSecrets.has(pubkey)) {
+				send(res, 400, { success: false, error: { code: 'CONF_UNAVAILABLE', message: 'ключ недоступен' } });
+				return;
+			}
+			sendData(res, { conf: '[Interface]\nPrivateKey = MOCK\n\n[Peer]\nPublicKey = MOCK\n' });
+			return;
+		}
+
+		if (pubkey && !leaf && req.method === 'DELETE') {
+			mockSystemPeerSecrets.delete(pubkey);
+			sendData(res, buildMockServersAllData());
+			return;
+		}
+
+		if (pubkey && !leaf && req.method === 'PUT') {
+			sendData(res, buildMockServersAllData());
+			return;
+		}
+	}
+
 	if (req.method === 'GET' && path === '/servers/all') {
 		fetchJSON('/servers/all').then(({ status, body }) => {
 			if (body && typeof body === 'object' && body.data && typeof body.data === 'object') {
@@ -5097,6 +5232,11 @@ const server = http.createServer(async (req, res) => {
 			}
 			send(res, status, body);
 		});
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/servers/marked') {
+		sendData(res, ['Wireguard9']);
 		return;
 	}
 

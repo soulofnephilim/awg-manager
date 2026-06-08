@@ -89,6 +89,7 @@ type rciWireguardDetail struct {
 type rciWireguardPeer struct {
 	PublicKey             string `json:"public-key"`
 	Description           string `json:"description"`
+	Comment               string `json:"comment"`
 	RemoteEndpointAddress string `json:"remote-endpoint-address"`
 	RemotePort            int    `json:"remote-port"`
 	Via                   string `json:"via"`
@@ -328,13 +329,13 @@ func (s *WGServerStore) fetchAll(ctx context.Context) ([]ndms.WireguardServer, e
 	}
 	sort.Slice(servers, func(i, j int) bool { return servers[i].ID < servers[j].ID })
 
-	// Enrich peers with AllowedIPs from RC in parallel. Transport-layer
-	// semaphore bounds concurrency; we only coordinate completion.
+	// Enrich peers with RC fields (allowed-ips, comment) in parallel.
+	// Transport-layer semaphore bounds concurrency; we only coordinate completion.
 	if len(servers) > 0 {
 		var wg sync.WaitGroup
 		type enrichResult struct {
 			idx int
-			m   map[string][]string
+			m   map[string]peerRCFields
 			err error
 		}
 		results := make(chan enrichResult, len(servers))
@@ -342,7 +343,7 @@ func (s *WGServerStore) fetchAll(ctx context.Context) ([]ndms.WireguardServer, e
 			wg.Add(1)
 			go func(idx int, name string) {
 				defer wg.Done()
-				allowedByKey, err := s.fetchPeerAllowedIPsByKey(ctx, name)
+				allowedByKey, err := s.fetchPeerRCByKey(ctx, name)
 				results <- enrichResult{idx: idx, m: allowedByKey, err: err}
 			}(i, servers[i].ID)
 		}
@@ -352,8 +353,8 @@ func (s *WGServerStore) fetchAll(ctx context.Context) ([]ndms.WireguardServer, e
 				continue
 			}
 			for j := range servers[r.idx].Peers {
-				if ips, ok := r.m[servers[r.idx].Peers[j].PublicKey]; ok {
-					servers[r.idx].Peers[j].AllowedIPs = ips
+				if rc, ok := r.m[servers[r.idx].Peers[j].PublicKey]; ok {
+					applyPeerRCFields(&servers[r.idx].Peers[j], rc)
 				}
 			}
 		}
@@ -369,22 +370,36 @@ func (s *WGServerStore) fetchItem(ctx context.Context, name string) (*ndms.Wireg
 	srv := rciToWireguardServer(detail)
 	srv.ID = name
 	srv.InterfaceName = s.resolveSystemName(ctx, name)
-	if allowedByKey, err := s.fetchPeerAllowedIPsByKey(ctx, name); err == nil {
+	if rcByKey, err := s.fetchPeerRCByKey(ctx, name); err == nil {
 		for j := range srv.Peers {
-			if ips, ok := allowedByKey[srv.Peers[j].PublicKey]; ok {
-				srv.Peers[j].AllowedIPs = ips
+			if rc, ok := rcByKey[srv.Peers[j].PublicKey]; ok {
+				applyPeerRCFields(&srv.Peers[j], rc)
 			}
 		}
 	}
 	return &srv, nil
 }
 
-func (s *WGServerStore) fetchPeerAllowedIPsByKey(ctx context.Context, name string) (map[string][]string, error) {
+type peerRCFields struct {
+	allowedIPs []string
+	comment    string
+}
+
+func applyPeerRCFields(peer *ndms.WireguardServerPeer, rc peerRCFields) {
+	if len(rc.allowedIPs) > 0 {
+		peer.AllowedIPs = rc.allowedIPs
+	}
+	if peer.Description == "" && rc.comment != "" {
+		peer.Description = rc.comment
+	}
+}
+
+func (s *WGServerStore) fetchPeerRCByKey(ctx context.Context, name string) (map[string]peerRCFields, error) {
 	var rc rciRCInterface
 	if err := s.getter.Get(ctx, "/show/rc/interface/"+name, &rc); err != nil {
 		return nil, err
 	}
-	out := make(map[string][]string)
+	out := make(map[string]peerRCFields)
 	if rc.Wireguard == nil {
 		return out, nil
 	}
@@ -398,7 +413,7 @@ func (s *WGServerStore) fetchPeerAllowedIPsByKey(ctx context.Context, name strin
 			}
 			ips = append(ips, fmt.Sprintf("%s/%d", a.Address, ones))
 		}
-		out[rp.Key] = ips
+		out[rp.Key] = peerRCFields{allowedIPs: ips, comment: rp.Comment}
 	}
 	return out, nil
 }
@@ -492,6 +507,13 @@ func (s *WGServerStore) resolveSystemName(ctx context.Context, ndmsID string) st
 // callers can detect empty decodes without reaching into the embedded struct.
 func (d rciWireguardDetail) ID() string { return d.InterfaceName }
 
+func peerRuntimeDescription(p rciWireguardPeer) string {
+	if p.Description != "" {
+		return p.Description
+	}
+	return p.Comment
+}
+
 func formatPeerEndpoint(p rciWireguardPeer) string {
 	if p.RemoteEndpointAddress == "" && p.RemotePort == 0 {
 		return ""
@@ -550,7 +572,7 @@ func rciToWireguardServer(iface rciWireguardDetail) ndms.WireguardServer {
 		for _, p := range iface.Wireguard.Peer {
 			server.Peers = append(server.Peers, ndms.WireguardServerPeer{
 				PublicKey:     p.PublicKey,
-				Description:   p.Description,
+				Description:   peerRuntimeDescription(p),
 				Endpoint:      formatPeerEndpoint(p),
 				RxBytes:       p.RxBytes,
 				TxBytes:       p.TxBytes,

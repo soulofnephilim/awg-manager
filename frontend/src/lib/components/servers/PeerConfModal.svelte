@@ -10,10 +10,11 @@
 		serverId: string;
 		pubkey: string;
 		peerName: string;
+		kind?: 'managed' | 'system';
 		onclose: () => void;
 	}
 
-	let { open = $bindable(false), serverId, pubkey, peerName, onclose }: Props = $props();
+	let { open = $bindable(false), serverId, pubkey, peerName, kind = 'managed', onclose }: Props = $props();
 
 	let conf = $state('');
 	let loading = $state(false);
@@ -32,7 +33,9 @@
 	async function loadConf() {
 		loading = true;
 		try {
-			conf = await api.getManagedPeerConf(serverId, pubkey);
+			conf = kind === 'system'
+				? await api.getSystemServerPeerConf(serverId, pubkey)
+				: await api.getManagedPeerConf(serverId, pubkey);
 		} catch (e) {
 			notifications.error(e instanceof Error ? e.message : 'Ошибка загрузки');
 			conf = '';

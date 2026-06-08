@@ -2,7 +2,9 @@ package command
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // postMutation is the common post-then-invalidate pattern shared by most
@@ -32,4 +34,78 @@ func postMutation(
 		inv()
 	}
 	return nil
+}
+
+// postMutationChecked is postMutation plus a nested-status check. Some NDMS
+// mutations (notably interface.<name>.wireguard.peer ops) answer HTTP 200 with
+// a benign top-level envelope while reporting the real failure inside a nested
+// status[] array — which the transport-level error check does not inspect, so
+// postMutation would treat the call as success. This variant scans the
+// response for any explicit status:"error" entry and fails closed when found,
+// without requesting a save or invalidating caches.
+//
+// It is deliberately additive: a normal success response contains no
+// status:"error" entry, so behaviour is unchanged for those. NOTE: the exact
+// nested shape for peer ops is modelled on the import path and should be
+// confirmed against a live router (e.g. a deliberately-invalid peer add)
+// before relying on it as the sole guard.
+func postMutationChecked(
+	ctx context.Context,
+	poster Poster,
+	save *SaveCoordinator,
+	payload any,
+	opDesc string,
+	invalidators ...func(),
+) error {
+	resp, err := poster.Post(ctx, payload)
+	if err != nil {
+		return fmt.Errorf("%s: %w", opDesc, err)
+	}
+	if msgs := ndmsStatusErrors(resp); len(msgs) > 0 {
+		return fmt.Errorf("%s: router reported error: %s", opDesc, strings.Join(msgs, "; "))
+	}
+	save.Request()
+	for _, inv := range invalidators {
+		inv()
+	}
+	return nil
+}
+
+// ndmsStatusErrors recursively walks a decoded NDMS response and returns the
+// messages of every object carrying status:"error" (case-insensitive),
+// regardless of where it sits — scalar `"status":"error"` or a nested
+// `"status":[{"status":"error",...}]` array. Returns nil on unparseable input
+// (the transport layer already validated the top-level envelope).
+func ndmsStatusErrors(resp []byte) []string {
+	var root any
+	if err := json.Unmarshal(resp, &root); err != nil {
+		return nil
+	}
+	return walkNDMSStatusErrors(root)
+}
+
+func walkNDMSStatusErrors(v any) []string {
+	switch t := v.(type) {
+	case map[string]any:
+		var msgs []string
+		if s, ok := t["status"].(string); ok && strings.EqualFold(s, "error") {
+			if m, ok := t["message"].(string); ok && m != "" {
+				msgs = append(msgs, m)
+			} else {
+				msgs = append(msgs, "error")
+			}
+		}
+		for _, val := range t {
+			msgs = append(msgs, walkNDMSStatusErrors(val)...)
+		}
+		return msgs
+	case []any:
+		var msgs []string
+		for _, val := range t {
+			msgs = append(msgs, walkNDMSStatusErrors(val)...)
+		}
+		return msgs
+	default:
+		return nil
+	}
 }

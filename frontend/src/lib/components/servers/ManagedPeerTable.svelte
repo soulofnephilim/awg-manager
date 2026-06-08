@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { ManagedPeer, ManagedPeerStats } from '$lib/types';
 	import { Trash2 } from 'lucide-svelte';
-	import { Toggle } from '$lib/components/ui';
+	import { ConfirmModal, Toggle } from '$lib/components/ui';
 	import { formatBytes, formatRelativeTime } from '$lib/utils/format';
 	import { notifications } from '$lib/stores/notifications';
 	import { copyToClipboard } from '$lib/utils/clipboard';
@@ -12,22 +12,48 @@
 	interface Props {
 		peers: ManagedPeer[];
 		getPeerStats: (publicKey: string) => ManagedPeerStats | undefined;
-		confirmDeletePeerKey: string | null;
+		showPeerActions?: boolean;
+		showPeerDownload?: boolean;
+		showPeerToggle?: boolean;
 		onTogglePeer: (peer: ManagedPeer) => void;
 		onOpenConf: (peer: ManagedPeer) => void;
 		onOpenEditPeer: (peer: ManagedPeer) => void;
-		onDeletePeerClick: (peer: ManagedPeer) => void;
+		onDeletePeer: (peer: ManagedPeer) => void | Promise<void>;
+		isPeerToggling?: (publicKey: string) => boolean;
 	}
 
 	let {
 		peers,
 		getPeerStats,
-		confirmDeletePeerKey,
+		showPeerActions = true,
+		showPeerDownload = true,
+		showPeerToggle = true,
 		onTogglePeer,
 		onOpenConf,
 		onOpenEditPeer,
-		onDeletePeerClick,
+		onDeletePeer,
+		isPeerToggling = () => false,
 	}: Props = $props();
+
+	let deletePeerTarget = $state<ManagedPeer | null>(null);
+	let deletingPeer = $state(false);
+
+	function requestDeletePeer(peer: ManagedPeer) {
+		deletePeerTarget = peer;
+	}
+
+	async function confirmDeletePeer() {
+		if (!deletePeerTarget || deletingPeer) return;
+		deletingPeer = true;
+		try {
+			await onDeletePeer(deletePeerTarget);
+			deletePeerTarget = null;
+		} catch {
+			// keep modal open on error
+		} finally {
+			deletingPeer = false;
+		}
+	}
 
 	function peerName(peer: ManagedPeer): string {
 		return peer.description || `${peer.publicKey.slice(0, 8)}...`;
@@ -98,7 +124,9 @@
 					<th class="col-handshake" aria-sort={peerAriaSort($peerSort, 'handshake')}>
 						<PeerTableSortHeader label="Handshake" sortKey="handshake" />
 					</th>
-					<th class="col-actions">Действия</th>
+					{#if showPeerDownload || showPeerActions}
+						<th class="col-actions">Действия</th>
+					{/if}
 				</tr>
 			</thead>
 			<tbody>
@@ -111,25 +139,42 @@
 					<tr class:peer-disabled={!peer.enabled}>
 						<td
 							class="peer-name-cell"
-							role="button"
-							tabindex="0"
-							title={peer.enabled ? `Отключить «${peerName(peer)}»` : `Включить «${peerName(peer)}»`}
-							onclick={(e) => {
-								if (isInsideInlineToggle(e)) return;
-								onTogglePeer(peer);
-							}}
-							onkeydown={(e) => {
-								if (isInsideInlineToggle(e)) return;
-								if (e.key === 'Enter' || e.key === ' ') {
-									e.preventDefault();
-									onTogglePeer(peer);
-								}
-							}}
+							class:peer-name-cell-readonly={!showPeerToggle}
+							role={showPeerToggle ? 'button' : undefined}
+							tabindex={showPeerToggle ? 0 : undefined}
+							title={showPeerToggle
+								? peer.enabled
+									? `Отключить «${peerName(peer)}»`
+									: `Включить «${peerName(peer)}»`
+								: undefined}
+							onclick={showPeerToggle
+								? (e) => {
+										if (isInsideInlineToggle(e) || isPeerToggling(peer.publicKey)) return;
+										onTogglePeer(peer);
+									}
+								: undefined}
+							onkeydown={showPeerToggle
+								? (e) => {
+										if (isInsideInlineToggle(e) || isPeerToggling(peer.publicKey)) return;
+										if (e.key === 'Enter' || e.key === ' ') {
+											e.preventDefault();
+											onTogglePeer(peer);
+										}
+									}
+								: undefined}
 						>
 							<div class="peer-name-row">
-								<span class="peer-inline-toggle">
-									<Toggle checked={peer.enabled} onchange={() => onTogglePeer(peer)} size="sm" />
-								</span>
+								{#if showPeerToggle}
+									<span class="peer-inline-toggle">
+										<Toggle
+											checked={peer.enabled}
+											onchange={() => onTogglePeer(peer)}
+											disabled={isPeerToggling(peer.publicKey)}
+											loading={isPeerToggling(peer.publicKey)}
+											size="sm"
+										/>
+									</span>
+								{/if}
 								<div class="peer-name-block">
 									<span class="peer-name">{peerName(peer)}</span>
 									<div class="peer-status-sub">
@@ -183,33 +228,36 @@
 								-
 							{/if}
 						</td>
-						<td class="col-actions">
-							<div class="peer-actions">
-								<button class="peer-action-btn" onclick={() => onOpenConf(peer)} title={`Скачать .conf для «${peerName(peer)}»`}>
-									<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-										<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-										<polyline points="7 10 12 15 17 10" />
-										<line x1="12" y1="15" x2="12" y2="3" />
-									</svg>
-								</button>
-								<button class="peer-action-btn" onclick={() => onOpenEditPeer(peer)} title={`Редактировать «${peerName(peer)}»`}>
-									<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-										<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-										<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-									</svg>
-								</button>
-								<button
-									class="peer-action-btn peer-action-btn-danger"
-									class:peer-action-btn-confirm={confirmDeletePeerKey === peer.publicKey}
-									onclick={() => onDeletePeerClick(peer)}
-									title={confirmDeletePeerKey === peer.publicKey
-										? `Нажмите ещё раз, чтобы удалить «${peerName(peer)}»`
-										: `Удалить «${peerName(peer)}»`}
-								>
-									<Trash2 size={18} strokeWidth={2} aria-hidden="true" />
-								</button>
-							</div>
-						</td>
+						{#if showPeerDownload || showPeerActions}
+							<td class="col-actions">
+								<div class="peer-actions">
+									{#if showPeerDownload}
+										<button class="peer-action-btn" onclick={() => onOpenConf(peer)} title={`Скачать .conf для «${peerName(peer)}»`}>
+											<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+												<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+												<polyline points="7 10 12 15 17 10" />
+												<line x1="12" y1="15" x2="12" y2="3" />
+											</svg>
+										</button>
+									{/if}
+									{#if showPeerActions}
+									<button class="peer-action-btn" onclick={() => onOpenEditPeer(peer)} title={`Редактировать «${peerName(peer)}»`}>
+										<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+											<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+											<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+										</svg>
+									</button>
+									<button
+										class="peer-action-btn peer-action-btn-danger"
+										onclick={() => requestDeletePeer(peer)}
+										title={`Удалить «${peerName(peer)}»`}
+									>
+										<Trash2 size={18} strokeWidth={2} aria-hidden="true" />
+									</button>
+									{/if}
+								</div>
+							</td>
+						{/if}
 					</tr>
 				{/each}
 			</tbody>
@@ -223,12 +271,20 @@
 		{@const status = peerStatus(peer, peerStats)}
 		{@const endpointValue = peerStats?.endpoint || '-'}
 		{@const hs = peerStats?.lastHandshake ? splitHandshakeLabel(formatRelativeTime(peerStats.lastHandshake)) : null}
-		<article class="mobile-peer-card" class:peer-disabled={!peer.enabled} class:has-actions={true}>
+		<article class="mobile-peer-card" class:peer-disabled={!peer.enabled} class:has-actions={showPeerDownload || showPeerActions}>
 			<div class="mobile-peer-card-top">
 				<div class="mobile-peer-title-row">
-					<span class="peer-inline-toggle">
-						<Toggle checked={peer.enabled} onchange={() => onTogglePeer(peer)} size="sm" />
-					</span>
+					{#if showPeerToggle}
+						<span class="peer-inline-toggle">
+							<Toggle
+								checked={peer.enabled}
+								onchange={() => onTogglePeer(peer)}
+								disabled={isPeerToggling(peer.publicKey)}
+								loading={isPeerToggling(peer.publicKey)}
+								size="sm"
+							/>
+						</span>
+					{/if}
 					<div class="peer-name-block">
 						<span class="mobile-peer-name">{peerName(peer)}</span>
 						<div class="peer-status-sub">
@@ -243,31 +299,34 @@
 					</div>
 				</div>
 
-				<div class="mobile-peer-actions">
-					<button class="peer-action-btn" onclick={() => onOpenConf(peer)} title={`Скачать .conf для «${peerName(peer)}»`}>
-						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-							<polyline points="7 10 12 15 17 10" />
-							<line x1="12" y1="15" x2="12" y2="3" />
-						</svg>
-					</button>
-					<button class="peer-action-btn" onclick={() => onOpenEditPeer(peer)} title={`Редактировать «${peerName(peer)}»`}>
-						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-							<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-						</svg>
-					</button>
-					<button
-						class="peer-action-btn peer-action-btn-danger"
-						class:peer-action-btn-confirm={confirmDeletePeerKey === peer.publicKey}
-						onclick={() => onDeletePeerClick(peer)}
-						title={confirmDeletePeerKey === peer.publicKey
-							? `Нажмите ещё раз, чтобы удалить «${peerName(peer)}»`
-							: `Удалить «${peerName(peer)}»`}
-					>
-						<Trash2 size={18} strokeWidth={2} aria-hidden="true" />
-					</button>
-				</div>
+				{#if showPeerDownload || showPeerActions}
+					<div class="mobile-peer-actions">
+						{#if showPeerDownload}
+							<button class="peer-action-btn" onclick={() => onOpenConf(peer)} title={`Скачать .conf для «${peerName(peer)}»`}>
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+									<polyline points="7 10 12 15 17 10" />
+									<line x1="12" y1="15" x2="12" y2="3" />
+								</svg>
+							</button>
+						{/if}
+						{#if showPeerActions}
+						<button class="peer-action-btn" onclick={() => onOpenEditPeer(peer)} title={`Редактировать «${peerName(peer)}»`}>
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+								<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+							</svg>
+						</button>
+						<button
+							class="peer-action-btn peer-action-btn-danger"
+							onclick={() => requestDeletePeer(peer)}
+							title={`Удалить «${peerName(peer)}»`}
+						>
+							<Trash2 size={18} strokeWidth={2} aria-hidden="true" />
+						</button>
+						{/if}
+					</div>
+				{/if}
 			</div>
 
 			<div class="mobile-peer-card-middle">
@@ -312,6 +371,21 @@
 		</article>
 	{/each}
 </div>
+
+{#if deletePeerTarget}
+	<ConfirmModal
+		open={true}
+		title="Удаление клиента"
+		message={`Удалить клиента «${peerName(deletePeerTarget)}»?`}
+		secondary={`Туннельный IP: ${deletePeerTarget.tunnelIP}. Конфигурация и ключи будут удалены без возможности восстановления.`}
+		confirmLabel="Удалить"
+		busy={deletingPeer}
+		onConfirm={confirmDeletePeer}
+		onClose={() => {
+			if (!deletingPeer) deletePeerTarget = null;
+		}}
+	/>
+{/if}
 
 <style>
 	.table-wrap {
@@ -367,6 +441,10 @@
 		min-width: 140px;
 		text-align: left;
 		cursor: pointer;
+	}
+
+	td.peer-name-cell-readonly {
+		cursor: default;
 	}
 
 	.peer-name {
@@ -475,6 +553,7 @@
 	.traffic-cell {
 		display: flex;
 		flex-direction: column;
+		align-items: center;
 		gap: 0;
 		line-height: 1.05;
 		white-space: nowrap;
@@ -553,13 +632,14 @@
 	}
 
 	td.col-actions {
-		text-align: right;
+		text-align: center;
+		vertical-align: middle;
 	}
 
 	.peer-actions {
 		display: inline-flex;
 		align-items: center;
-		justify-content: flex-end;
+		justify-content: center;
 		width: 100%;
 		gap: 0.375rem;
 	}
@@ -584,17 +664,6 @@
 
 	.peer-action-btn-danger:hover {
 		color: var(--error, #ef4444);
-	}
-
-	.peer-action-btn-confirm {
-		background: var(--error, #ef4444);
-		color: white;
-	}
-
-	.peer-action-btn-confirm:hover {
-		background: var(--error, #ef4444);
-		color: white;
-		filter: brightness(1.1);
 	}
 
 	.cell-copy {

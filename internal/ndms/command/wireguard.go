@@ -119,3 +119,139 @@ func (c *WireguardCommands) ImportWireguardConfig(ctx context.Context, confData 
 	}
 	return ImportResult{Created: imp.Created, Intersects: imp.Intersects, Messages: msgs}, nil
 }
+
+func (c *WireguardCommands) invalidateServer(name string) {
+	if c.queries == nil {
+		return
+	}
+	if c.queries.Interfaces != nil {
+		c.queries.Interfaces.Invalidate(name)
+	}
+	if c.queries.WGServers != nil {
+		c.queries.WGServers.Invalidate(name)
+	}
+	if c.queries.RunningConfig != nil {
+		c.queries.RunningConfig.InvalidateAll()
+	}
+}
+
+// AddPeer adds a peer to a WireGuard server interface.
+func (c *WireguardCommands) AddPeer(ctx context.Context, ifaceName, pubKey, psk, comment, peerIP string, enabled bool) error {
+	peer := map[string]any{
+		"key":           pubKey,
+		"preshared-key": psk,
+		"connect":       enabled,
+		"allow-ips": []map[string]any{
+			{"address": peerIP, "mask": "255.255.255.255"},
+		},
+	}
+	if comment != "" {
+		peer["comment"] = comment
+	}
+	payload := map[string]any{
+		"interface": map[string]any{
+			ifaceName: map[string]any{
+				"wireguard": map[string]any{
+					"peer": []map[string]any{peer},
+				},
+			},
+		},
+	}
+	return postMutationChecked(ctx, c.poster, c.save, payload, "add peer "+ifaceName,
+		func() { c.invalidateServer(ifaceName) })
+}
+
+// RemovePeer removes a peer by public key.
+func (c *WireguardCommands) RemovePeer(ctx context.Context, ifaceName, pubKey string) error {
+	payload := map[string]any{
+		"interface": map[string]any{
+			ifaceName: map[string]any{
+				"wireguard": map[string]any{
+					"peer": []map[string]any{
+						{"no": true, "key": pubKey},
+					},
+				},
+			},
+		},
+	}
+	return postMutationChecked(ctx, c.poster, c.save, payload, "remove peer "+ifaceName,
+		func() { c.invalidateServer(ifaceName) })
+}
+
+// SetPeerConnect enables or disables a peer.
+func (c *WireguardCommands) SetPeerConnect(ctx context.Context, ifaceName, pubKey string, connect bool) error {
+	payload := map[string]any{
+		"interface": map[string]any{
+			ifaceName: map[string]any{
+				"wireguard": map[string]any{
+					"peer": []map[string]any{
+						{"key": pubKey, "connect": connect},
+					},
+				},
+			},
+		},
+	}
+	return postMutationChecked(ctx, c.poster, c.save, payload, "toggle peer "+ifaceName,
+		func() { c.invalidateServer(ifaceName) })
+}
+
+// SetPeerComment sets the description/comment for a peer.
+func (c *WireguardCommands) SetPeerComment(ctx context.Context, ifaceName, pubKey, comment string) error {
+	payload := map[string]any{
+		"interface": map[string]any{
+			ifaceName: map[string]any{
+				"wireguard": map[string]any{
+					"peer": []map[string]any{
+						{"key": pubKey, "comment": comment},
+					},
+				},
+			},
+		},
+	}
+	return postMutationChecked(ctx, c.poster, c.save, payload, "rename peer "+ifaceName,
+		func() { c.invalidateServer(ifaceName) })
+}
+
+// UpdatePeerAllowIPs removes old /32 and sets a new one.
+func (c *WireguardCommands) UpdatePeerAllowIPs(ctx context.Context, ifaceName, pubKey, oldIP, newIP string) error {
+	if oldIP != "" {
+		payload := map[string]any{
+			"interface": map[string]any{
+				ifaceName: map[string]any{
+					"wireguard": map[string]any{
+						"peer": []map[string]any{
+							{
+								"key": pubKey,
+								"allow-ips": []map[string]any{
+									{"no": true, "address": oldIP, "mask": "255.255.255.255"},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		if err := postMutationChecked(ctx, c.poster, c.save, payload, "remove peer allow-ips "+ifaceName,
+			func() { c.invalidateServer(ifaceName) }); err != nil {
+			return fmt.Errorf("remove old allow-ips: %w", err)
+		}
+	}
+	payload := map[string]any{
+		"interface": map[string]any{
+			ifaceName: map[string]any{
+				"wireguard": map[string]any{
+					"peer": []map[string]any{
+						{
+							"key": pubKey,
+							"allow-ips": []map[string]any{
+								{"address": newIP, "mask": "255.255.255.255"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return postMutationChecked(ctx, c.poster, c.save, payload, "set peer allow-ips "+ifaceName,
+		func() { c.invalidateServer(ifaceName) })
+}

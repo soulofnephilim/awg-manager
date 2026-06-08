@@ -125,7 +125,11 @@
 	}
 
 	@media (max-width: 640px) {
-		.peer-sort-controls {
+		.peer-sort-controls.hide-sort-on-desktop {
+			display: contents;
+		}
+
+		.peer-sort-controls:not(.hide-sort-on-desktop) {
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) auto;
 			gap: 0.375rem;
@@ -133,7 +137,8 @@
 		}
 
 		.peer-search {
-			grid-column: 1 / -1;
+			grid-column: 1;
+			grid-row: 1;
 			width: 100%;
 			min-width: 0;
 		}
@@ -152,7 +157,12 @@
 		.peer-sort-controls.hide-sort-on-desktop .peer-sort-ui {
 			display: inline-flex;
 			grid-column: 1 / -1;
+			grid-row: 2;
 			width: 100%;
+		}
+
+		.peer-sort-controls:not(.hide-sort-on-desktop) .peer-search {
+			grid-column: 1 / -1;
 		}
 	}
 </style>

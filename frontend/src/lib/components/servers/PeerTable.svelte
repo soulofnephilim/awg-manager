@@ -392,7 +392,7 @@
 	.traffic-cell {
 		display: flex;
 		flex-direction: column;
-		align-items: flex-start;
+		align-items: center;
 		gap: 0;
 		line-height: 1.05;
 		white-space: nowrap;

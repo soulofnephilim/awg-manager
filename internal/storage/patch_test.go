@@ -320,10 +320,38 @@ func containsSubstr(s, sub string) bool {
 	return false
 }
 
+// nonPatchableSettings are Settings fields intentionally kept OUT of the
+// SettingsPatch wire surface. They are server-internal bookkeeping written
+// only through dedicated atomic store methods (UpdateServerInterfaceMeta,
+// SetServerPeerSecret), never through /settings/update. serverPeerSecrets in
+// particular holds client WireGuard private keys, so exposing it on the
+// generic PATCH would let an authenticated caller overwrite or wipe key
+// material — see TestSettingsPatch_ExcludesServerSecrets.
+var nonPatchableSettings = map[string]struct{}{
+	"serverInterfaceMeta": {},
+	"serverPeerSecrets":   {},
+}
+
+// TestSettingsPatch_ExcludesServerSecrets pins the intentional exclusion: a
+// future change that "mirrors" these fields into SettingsPatch (the obvious
+// way to green the mirror test) would be a security regression, so assert
+// they are absent from the patch DTO.
+func TestSettingsPatch_ExcludesServerSecrets(t *testing.T) {
+	patchT := reflect.TypeOf(SettingsPatch{})
+	for tag := range nonPatchableSettings {
+		for i := 0; i < patchT.NumField(); i++ {
+			if strings.Split(patchT.Field(i).Tag.Get("json"), ",")[0] == tag {
+				t.Errorf("SettingsPatch must not expose %q (server-internal secret/bookkeeping)", tag)
+			}
+		}
+	}
+}
+
 // TestSettingsPatchMirrorsSettings enforces that every exported field in
 // Settings has a matching pointer field in SettingsPatch with the same
-// json tag. Catches drift at test time when a new Settings field lands
-// without a corresponding SettingsPatch entry.
+// json tag (except deliberately nonPatchableSettings). Catches drift at test
+// time when a new Settings field lands without a corresponding SettingsPatch
+// entry.
 func TestSettingsPatchMirrorsSettings(t *testing.T) {
 	settingsT := reflect.TypeOf(Settings{})
 	patchT := reflect.TypeOf(SettingsPatch{})
@@ -345,6 +373,11 @@ func TestSettingsPatchMirrorsSettings(t *testing.T) {
 		}
 		tag := strings.Split(f.Tag.Get("json"), ",")[0]
 		if tag == "" || tag == "-" {
+			continue
+		}
+		if _, skip := nonPatchableSettings[tag]; skip {
+			// Deliberately excluded from the wire PATCH surface — see
+			// nonPatchableSettings and TestSettingsPatch_ExcludesServerSecrets.
 			continue
 		}
 		patchF, ok := patchByTag[tag]

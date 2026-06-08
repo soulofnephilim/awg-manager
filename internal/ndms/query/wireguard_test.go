@@ -226,6 +226,51 @@ func TestWGServerStore_GetAll_ParsesRuntime(t *testing.T) {
 	}
 }
 
+func TestWGServerStore_PeerDescription_FromRCCommentWhenRuntimeEmpty(t *testing.T) {
+	fg := newFakeGetter()
+	const ifaceList = `{
+		"Wireguard1": {
+			"id": "Wireguard1",
+			"interface-name": "nwg1",
+			"type": "Wireguard",
+			"description": "ourserver",
+			"state": "up",
+			"connected": "yes",
+			"address": "10.0.1.1",
+			"mask": "255.255.255.0",
+			"mtu": 1420,
+			"wireguard": {
+				"public-key": "SRVKEY1=",
+				"listen-port": 51821,
+				"peer": [
+					{
+						"public-key": "PEERB=",
+						"remote-endpoint-address": "5.6.7.8",
+						"remote-port": 51820,
+						"enabled": false
+					}
+				]
+			}
+		}
+	}`
+	fg.SetJSON("/show/interface/", ifaceList)
+	fg.SetPostInterface("Wireguard1", wrapShowInterface(sampleWGSingleInterfaceJSON))
+	fg.SetJSON("/show/rc/interface/Wireguard1", sampleWGRCInterfaceJSON)
+	fg.SetJSON("/show/interface/system-name?name=Wireguard1", `"nwg1"`)
+
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+	servers, err := s.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(servers) != 1 || len(servers[0].Peers) != 1 {
+		t.Fatalf("unexpected servers: %+v", servers)
+	}
+	if got := servers[0].Peers[0].Description; got != "bob" {
+		t.Fatalf("Description = %q, want bob from RC comment", got)
+	}
+}
+
 func TestWGServerStore_GetAll_CacheHitSkipsFetch(t *testing.T) {
 	fg := newFakeGetter()
 	primeWGFakeGetter(fg)

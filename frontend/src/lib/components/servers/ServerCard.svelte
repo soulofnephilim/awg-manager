@@ -1,93 +1,182 @@
 <script lang="ts">
-	import type { WireguardServer, WireguardServerConfig, ASCParams, WireguardServerPeer } from '$lib/types';
+	import type {
+		ASCParams,
+		WireguardServer,
+		WireguardServerConfig,
+		WireguardServerPeer,
+		ManagedPeer,
+		ManagedPeerStats,
+	} from '$lib/types';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
 	import { servers } from '$lib/stores/servers';
 	import { formatBytes } from '$lib/utils/format';
 	import { comparePeerFieldsDirected } from '$lib/utils/peerSort';
 	import { peerSort } from '$lib/stores/peerSort';
-	import { PeerTable, ConfGeneratorModal, PeerSortControls } from '$lib/components/servers';
-	import { Button, IconButton } from '$lib/components/ui';
-
-	function peerIP(p: WireguardServerPeer): string {
-		return p.allowedIPs?.find(ip => ip.includes('/32'))
-			?? p.allowedIPs?.[0]
-			?? '';
-	}
+	import { maskToPrefix, resolveNatMode, type NatMode } from '$lib/utils/network';
+	import { countActiveSystemPeers } from '$lib/utils/serverPeerActivity';
+	import {
+		PeerSortControls,
+		ManagedPeerTable,
+		AddSystemPeerModal,
+		EditSystemPeerModal,
+		PeerConfModal,
+		ConfGeneratorModal,
+		ServerAccessPolicyDropdown,
+	} from '$lib/components/servers';
+	import { Toggle, Button, Dropdown, Stat, StatStrip, type DropdownOption } from '$lib/components/ui';
+	import { Plus, RefreshCw, ExternalLink } from 'lucide-svelte';
 
 	interface Props {
 		server: WireguardServer;
-		isBuiltIn: boolean;
+		isMarked?: boolean;
 		onUnmark?: (id: string) => void;
+		ingressEnabled?: boolean;
+		onToggleIngress?: (interfaceName: string, enabled: boolean) => Promise<void>;
 	}
 
-	let { server, isBuiltIn, onUnmark }: Props = $props();
+	let {
+		server,
+		isMarked = false,
+		onUnmark,
+		ingressEnabled = false,
+		onToggleIngress = async () => {},
+	}: Props = $props();
 
+	let isBuiltIn = $derived(server.builtIn ?? server.description === 'Wireguard VPN Server');
+
+	let addPeerOpen = $state(false);
+	let editPeerOpen = $state(false);
 	let confModalOpen = $state(false);
+	let confGeneratorOpen = $state(false);
+	let selectedPeer = $state<WireguardServerPeer | null>(null);
+	let confPubkey = $state('');
+	let confPeerName = $state('');
 	let confPeerKey = $state('');
 	let serverConfig = $state<WireguardServerConfig | null>(null);
 	let ascParams = $state<ASCParams | null>(null);
-	let loadingConfig = $state(false);
 	let wanIP = $state('');
-
 	let searchQuery = $state('');
+	let togglingEnabled = $state(false);
+	let restartingServer = $state(false);
+	let togglingIngress = $state(false);
+	let togglingNAT = $state(false);
+	let policyChanging = $state(false);
+	let togglingPeerKeys = $state(new Set<string>());
 
-	// Computed stats
-	let onlineCount = $derived((server.peers ?? []).filter(p => p.online && p.enabled).length);
+	let natMode = $derived<NatMode>(resolveNatMode(server.natMode, server.natEnabled));
+	// When the backend couldn't read NAT/policy from NDMS, natMode/policy are a
+	// fabricated 'none' — surface "unknown" and block edits instead of letting
+	// the user act on it. Absent flags (legacy/managed) are treated as known.
+	let natModeKnown = $derived(server.natModeKnown ?? true);
+	let policyKnown = $derived(server.policyKnown ?? true);
+
+	const natModeOptions: DropdownOption<NatMode>[] = [
+		{ value: 'full', label: 'Полный NAT' },
+		{ value: 'internet-only', label: 'NAT только для интернета' },
+		{ value: 'none', label: 'Без NAT' },
+	];
+
+	let serverName = $derived(server.description || server.id);
+	let isUp = $derived(server.status === 'up' || server.connected);
+	let onlineCount = $derived(countActiveSystemPeers(server.peers));
 	let totalPeers = $derived((server.peers ?? []).length);
 	let totalRx = $derived((server.peers ?? []).reduce((sum, p) => sum + p.rxBytes, 0));
 	let totalTx = $derived((server.peers ?? []).reduce((sum, p) => sum + p.txBytes, 0));
-	let serverName = $derived(server.description || server.id);
-	let isUp = $derived(server.status === 'up' || server.connected);
 
-	let restartingServer = $state(false);
+	function peerTunnelIP(p: WireguardServerPeer): string {
+		const raw = p.allowedIPs?.find((ip) => ip.includes('/32')) || p.allowedIPs?.[0] || '';
+		if (!raw) return '';
+		return raw.includes('/') ? raw : `${raw}/32`;
+	}
+
+	function toManagedPeer(p: WireguardServerPeer): ManagedPeer {
+		return {
+			publicKey: p.publicKey,
+			privateKey: '',
+			presharedKey: '',
+			description: p.description,
+			tunnelIP: peerTunnelIP(p),
+			enabled: p.enabled,
+		};
+	}
+
+	function getPeerStats(publicKey: string): ManagedPeerStats | undefined {
+		const p = (server.peers ?? []).find((peer) => peer.publicKey === publicKey);
+		if (!p) return undefined;
+		return {
+			publicKey: p.publicKey,
+			endpoint: p.endpoint || '-',
+			rxBytes: p.rxBytes,
+			txBytes: p.txBytes,
+			lastHandshake: p.lastHandshake,
+			online: p.online,
+		};
+	}
 
 	let sortedPeers = $derived.by(() => {
-		let peers: WireguardServerPeer[] = server.peers ?? [];
-
-		if (searchQuery && peers.length >= 5) {
+		let peers = server.peers ?? [];
+		if (searchQuery) {
 			const q = searchQuery.toLowerCase();
-			peers = peers.filter(p =>
-				(p.description || '').toLowerCase().includes(q) ||
-				peerIP(p).toLowerCase().includes(q)
+			peers = peers.filter(
+				(p) =>
+					(p.description || '').toLowerCase().includes(q) ||
+					peerTunnelIP(p).toLowerCase().includes(q)
 			);
 		}
-
 		const sortBy = $peerSort.sortBy;
-		if (sortBy === null) return peers;
-
-		const sorted = [...peers].sort((a, b) => {
-			return comparePeerFieldsDirected(
-				{
-					name: a.description || a.publicKey,
-					ip: peerIP(a),
-					endpoint: a.endpoint || '-',
-					rxBytes: a.rxBytes,
-					txBytes: a.txBytes,
-					online: a.online,
-					lastHandshake: a.lastHandshake || null,
-				},
-				{
-					name: b.description || b.publicKey,
-					ip: peerIP(b),
-					endpoint: b.endpoint || '-',
-					rxBytes: b.rxBytes,
-					txBytes: b.txBytes,
-					online: b.online,
-					lastHandshake: b.lastHandshake || null,
-				},
-				sortBy,
-				$peerSort.sortAsc,
-			);
-		});
-
-		return sorted;
+		if (sortBy === null) return peers.map(toManagedPeer);
+		return [...peers]
+			.sort((a, b) => {
+				const sa = getPeerStats(a.publicKey);
+				const sb = getPeerStats(b.publicKey);
+				return comparePeerFieldsDirected(
+					{
+						name: a.description || a.publicKey,
+						ip: peerTunnelIP(a),
+						endpoint: sa?.endpoint || '-',
+						rxBytes: sa?.rxBytes ?? null,
+						txBytes: sa?.txBytes ?? null,
+						online: sa?.online ?? null,
+						lastHandshake: sa?.lastHandshake ?? null,
+					},
+					{
+						name: b.description || b.publicKey,
+						ip: peerTunnelIP(b),
+						endpoint: sb?.endpoint || '-',
+						rxBytes: sb?.rxBytes ?? null,
+						txBytes: sb?.txBytes ?? null,
+						online: sb?.online ?? null,
+						lastHandshake: sb?.lastHandshake ?? null,
+					},
+					sortBy,
+					$peerSort.sortAsc
+				);
+			})
+			.map(toManagedPeer);
 	});
+
+	let managedPeerMap = $derived.by(() => {
+		const map = new Map<string, WireguardServerPeer>();
+		for (const p of server.peers ?? []) map.set(p.publicKey, p);
+		return map;
+	});
+
+	async function handleToggleEnabled() {
+		togglingEnabled = true;
+		try {
+			const fresh = await api.setWireguardServerEnabled(server.id, !isUp);
+			servers.applyMutationResponse(fresh);
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : 'Ошибка переключения');
+		} finally {
+			togglingEnabled = false;
+		}
+	}
 
 	async function handleRestartOrStart() {
 		if (restartingServer) return;
 		restartingServer = true;
-
 		try {
 			await api.restartWireguardServer(server.id);
 			notifications.success(isUp ? 'Команда рестарта отправлена' : 'Команда запуска отправлена');
@@ -99,9 +188,98 @@
 		}
 	}
 
-	async function openConfModal(publicKey: string) {
+	async function handleToggleIngress() {
+		togglingIngress = true;
+		try {
+			await onToggleIngress(server.interfaceName, !ingressEnabled);
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : 'Ошибка переключения egress в sing-box');
+		} finally {
+			togglingIngress = false;
+		}
+	}
+
+	async function handleSetNATMode(mode: NatMode) {
+		if (mode === natMode) return;
+		togglingNAT = true;
+		try {
+			const fresh = await api.setWireguardServerNATMode(server.id, mode);
+			servers.applyMutationResponse(fresh);
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : 'Ошибка изменения NAT');
+		} finally {
+			togglingNAT = false;
+		}
+	}
+
+	async function handlePolicyChange(newPolicy: string) {
+		if (newPolicy === (server.policy ?? 'none')) return;
+		policyChanging = true;
+		try {
+			const fresh = await api.setWireguardServerPolicy(server.id, newPolicy);
+			servers.applyMutationResponse(fresh);
+			notifications.success('Политика обновлена');
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : 'Ошибка изменения политики');
+		} finally {
+			policyChanging = false;
+		}
+	}
+
+	function isPeerToggling(publicKey: string): boolean {
+		return togglingPeerKeys.has(publicKey);
+	}
+
+	async function handleTogglePeer(peer: ManagedPeer) {
+		if (togglingPeerKeys.has(peer.publicKey)) return;
+		togglingPeerKeys = new Set(togglingPeerKeys).add(peer.publicKey);
+		try {
+			const fresh = await api.toggleSystemServerPeer(server.id, peer.publicKey, !peer.enabled);
+			servers.applyMutationResponse(fresh);
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : 'Ошибка');
+		} finally {
+			const next = new Set(togglingPeerKeys);
+			next.delete(peer.publicKey);
+			togglingPeerKeys = next;
+		}
+	}
+
+	async function doDeletePeer(peer: ManagedPeer) {
+		try {
+			const fresh = await api.deleteSystemServerPeer(server.id, peer.publicKey);
+			servers.applyMutationResponse(fresh);
+			notifications.success('Клиент удалён');
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : 'Ошибка удаления');
+			throw e;
+		}
+	}
+
+	function openEditPeer(peer: ManagedPeer) {
+		const raw = managedPeerMap.get(peer.publicKey);
+		if (!raw) return;
+		selectedPeer = raw;
+		editPeerOpen = true;
+	}
+
+	function openConf(peer: ManagedPeer) {
+		if (isMarked) {
+			void openConfGenerator(peer.publicKey);
+			return;
+		}
+		const raw = managedPeerMap.get(peer.publicKey);
+		if (!raw?.confAvailable) {
+			notifications.warning('Конфиг недоступен — клиент создан вне AWG Manager или через KeenDNS');
+			return;
+		}
+		confPubkey = peer.publicKey;
+		confPeerName = peer.description || 'peer';
+		confModalOpen = true;
+	}
+
+	async function openConfGenerator(publicKey: string) {
 		confPeerKey = publicKey;
-		loadingConfig = true;
 		try {
 			const [config, asc, ip] = await Promise.all([
 				api.getServerConfig(server.id),
@@ -111,96 +289,185 @@
 			serverConfig = config;
 			ascParams = asc;
 			wanIP = ip;
-			confModalOpen = true;
-		} catch (e) {
+			confGeneratorOpen = true;
+		} catch {
 			notifications.error('Не удалось загрузить конфигурацию');
-		} finally {
-			loadingConfig = false;
 		}
 	}
 
-	let confPeer = $derived(
-		serverConfig?.peers.find(p => p.publicKey === confPeerKey) ?? null
+	let confGeneratorPeer = $derived(
+		serverConfig?.peers.find((p) => p.publicKey === confPeerKey) ?? null
+	);
+
+	let keenDnsHref = $derived(
+		server.keenDnsDomain ? `https://${server.keenDnsDomain}` : ''
 	);
 </script>
 
-<div class="card server-card" class:status-up={isUp} class:status-down={!isUp}>
-	<!-- Header -->
-	<div class="server-header">
-		<div class="server-info">
-			<div class="flex items-center gap-2">
-				<h3 class="server-name">{server.description || server.id}</h3>
-				{#if isBuiltIn}
-					<span class="badge badge-builtin">Встроенный</span>
-				{/if}
+<div class="card server-detail-card server-card" class:status-up={isUp}>
+	<div class="card-header">
+		<div class="header-info">
+			<div class="title-row">
+				<div class="title-main">
+					<Toggle
+						checked={isUp}
+						onchange={handleToggleEnabled}
+						disabled={togglingEnabled || restartingServer}
+						loading={togglingEnabled}
+						label="Сервер включён"
+						size="sm"
+					/>
+					<h3 class="card-title">{serverName}</h3>
+				</div>
+				<div class="title-badges">
+					{#if isBuiltIn}
+						<span class="badge badge-builtin">Встроенный</span>
+					{:else if isMarked}
+						<span class="badge badge-system">Системный</span>
+					{/if}
+				</div>
 			</div>
 			<div class="server-meta">
-				<span class="meta-item mono">{server.interfaceName}</span>
-				<span class="meta-item mono">{server.address}/{server.mask === '255.255.255.0' ? '24' : server.mask}</span>
-				<span class="meta-item mono">:{server.listenPort}</span>
+				<span class="meta mono">{server.interfaceName}</span>
+				<span class="meta mono">{server.address}/{maskToPrefix(server.mask)}</span>
+				<span class="meta mono">:{server.listenPort}</span>
+				{#if server.mtu}
+					<span class="meta mono">MTU {server.mtu}</span>
+				{/if}
+				{#if isBuiltIn && (totalRx > 0 || totalTx > 0)}
+					<span class="meta mono">↓{formatBytes(totalRx)} ↑{formatBytes(totalTx)}</span>
+				{/if}
 			</div>
+			{#if server.keenDnsDomain}
+				<div class="keendns-row">
+					<a class="keendns-link" href={keenDnsHref} target="_blank" rel="noopener noreferrer">
+						<ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+						<span>{server.keenDnsDomain}</span>
+					</a>
+				</div>
+			{/if}
 		</div>
-		<div class="server-header-right">
-			<div class="server-status">
-				<span class="led" class:led-up={isUp} class:led-down={!isUp}></span>
-				<span class="peer-count">{onlineCount}/{totalPeers}</span>
-			</div>
-
-			<div class="server-header-actions">
-				<IconButton
-					ariaLabel={isUp
-						? `Перезапустить сервер ${serverName}`
-						: `Запустить сервер ${serverName}`}
-					title={isUp
-						? `Перезапустить сервер «${serverName}»`
-						: `Запустить сервер «${serverName}»`}
+		<div class="header-right">
+			<div class="header-actions">
+				<Button
+					variant="secondary"
+					size="sm"
 					onclick={handleRestartOrStart}
-					disabled={restartingServer}
+					disabled={restartingServer || togglingEnabled}
+					loading={restartingServer}
+					iconBefore={restartIcon}
 				>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M21 12a9 9 0 1 1-2.64-6.36" />
-						<path d="M21 3v6h-6" />
-					</svg>
-				</IconButton>
+					{isUp ? 'Рестарт' : 'Запуск'}
+				</Button>
 			</div>
 		</div>
 	</div>
 
-	<!-- Stats -->
-	<div class="server-stats">
-		<div class="stat">
-			<span class="stat-label">RX</span>
-			<span class="stat-value">{formatBytes(totalRx)}</span>
-		</div>
-		<div class="stat">
-			<span class="stat-label">TX</span>
-			<span class="stat-value">{formatBytes(totalTx)}</span>
-		</div>
-		<div class="stat">
-			<span class="stat-label">Пиры</span>
-			<span class="stat-value">{onlineCount} онлайн</span>
-		</div>
-	</div>
-
-	<!-- Peer table -->
-	{#if (server.peers ?? []).length > 0}
-		<div class="peers-section">
-			<div class="peers-header">
-				<span class="peers-title">Клиенты ({onlineCount}/{totalPeers} онлайн)</span>
-				<PeerSortControls
-					bind:searchQuery
-					showSearch={(server.peers ?? []).length >= 5}
-					hideSortOnDesktop
+	{#if isMarked}
+		<div class="kpi-rows">
+			<StatStrip>
+				<Stat value={formatBytes(totalRx)} label="принято" sub="суммарно по клиентам" />
+				<Stat value={formatBytes(totalTx)} label="отправлено" sub="суммарно по клиентам" />
+				<Stat
+					value={`${onlineCount}/${totalPeers}`}
+					label="Клиенты"
+					sub={onlineCount > 0 ? `${onlineCount} онлайн` : 'нет активных'}
 				/>
-			</div>
-			<PeerTable
-				peers={sortedPeers}
-				onDownloadConf={isBuiltIn ? undefined : openConfModal}
-			/>
+				
+			</StatStrip>
 		</div>
 	{/if}
 
-	<!-- Actions -->
+	{#if isBuiltIn}
+		<div class="server-settings">
+			<div class="setting-row">
+				<div class="setting-copy">
+					<span class="setting-title">NAT</span>
+					{#if !natModeKnown}
+						<span class="setting-description setting-description-warning">Не удалось прочитать состояние NAT с роутера — обновите страницу.</span>
+					{:else if natMode === 'full'}
+						<span class="setting-description">Для доступа клиентов в интернет через NAT роутера.</span>
+					{:else if natMode === 'internet-only'}
+						<span class="setting-description">NAT только для интернет-трафика; в LAN клиент виден со своим VPN-адресом.</span>
+					{:else}
+						<span class="setting-description">Без NAT — клиенты не выходят в интернет напрямую.</span>
+					{/if}
+					{#if natModeKnown && ingressEnabled && natMode === 'full'}
+						<span class="setting-description setting-description-warning">Интернет-трафик идёт через sing-box - NAT влияет только на видимость в LAN.</span>
+					{/if}
+				</div>
+				<div class="setting-control">
+					<Dropdown
+						value={natMode}
+						options={natModeOptions}
+						disabled={togglingNAT || !natModeKnown}
+						onchange={handleSetNATMode}
+						fullWidth
+					/>
+				</div>
+			</div>
+
+			<div class="setting-row setting-row-toggle">
+				<div class="setting-copy">
+					<span class="setting-title">Маршрутизация через sing-box</span>
+					<span class="setting-description">Заворачивать интернет-трафик клиентов данного сервера в sing-box.</span>
+				</div>
+				<div class="setting-control setting-control-toggle">
+					<Toggle
+						checked={ingressEnabled}
+						onchange={handleToggleIngress}
+						disabled={togglingIngress}
+						spinner="before"
+					/>
+				</div>
+			</div>
+
+			<ServerAccessPolicyDropdown
+				policy={server.policy ?? 'none'}
+				disabled={policyChanging || !policyKnown}
+				onchange={handlePolicyChange}
+			/>
+			{#if !policyKnown}
+				<span class="setting-description setting-description-warning">Не удалось прочитать политику доступа с роутера — обновите страницу.</span>
+			{/if}
+		</div>
+	{/if}
+
+	<div class="peers-section">
+		<div class="peers-header">
+			<span class="peers-title">Клиенты ({onlineCount}/{totalPeers} онлайн)</span>
+			<div class="peers-controls">
+				<PeerSortControls
+					bind:searchQuery
+					showSearch={(server.peers ?? []).length > 0}
+					hideSortOnDesktop
+				/>
+				{#if isBuiltIn}
+					<Button variant="secondary" size="sm" onclick={() => (addPeerOpen = true)} iconBefore={addPeerIcon}>
+						Добавить клиента
+					</Button>
+				{/if}
+			</div>
+		</div>
+
+		{#if (server.peers ?? []).length === 0}
+			<div class="empty-peers">Нет клиентов. Добавьте первого.</div>
+		{:else}
+			<ManagedPeerTable
+				peers={sortedPeers}
+				{getPeerStats}
+				showPeerDownload={isBuiltIn || isMarked}
+				showPeerActions={isBuiltIn}
+				showPeerToggle={isBuiltIn}
+				onTogglePeer={handleTogglePeer}
+				{isPeerToggling}
+				onOpenConf={openConf}
+				onOpenEditPeer={openEditPeer}
+				onDeletePeer={doDeletePeer}
+			/>
+		{/if}
+	</div>
+
 	{#if !isBuiltIn && onUnmark}
 		<div class="server-actions">
 			<Button variant="ghost" size="sm" onclick={() => onUnmark?.(server.id)} {iconBefore}>
@@ -208,81 +475,70 @@
 			</Button>
 		</div>
 	{/if}
-
-	{#snippet iconBefore()}
-		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-			<polyline points="15,3 21,3 21,9"/>
-			<polyline points="9,21 3,21 3,15"/>
-			<line x1="21" y1="3" x2="14" y2="10"/>
-			<line x1="3" y1="21" x2="10" y2="14"/>
-		</svg>
-	{/snippet}
-
 </div>
 
-{#if confModalOpen && serverConfig && confPeer}
-	<ConfGeneratorModal
-		bind:open={confModalOpen}
-		{serverConfig}
-		peer={confPeer}
-		{ascParams}
-		{wanIP}
-		onclose={() => { confModalOpen = false; }}
+<AddSystemPeerModal
+	bind:open={addPeerOpen}
+	serverId={server.id}
+	{server}
+	onclose={() => (addPeerOpen = false)}
+	onAdded={() => servers.invalidate()}
+/>
+
+{#if selectedPeer}
+	<EditSystemPeerModal
+		bind:open={editPeerOpen}
+		serverId={server.id}
+		peer={selectedPeer}
+		onclose={() => { editPeerOpen = false; selectedPeer = null; }}
+		onUpdated={() => servers.invalidate()}
 	/>
 {/if}
 
+<PeerConfModal
+	bind:open={confModalOpen}
+	serverId={server.id}
+	pubkey={confPubkey}
+	peerName={confPeerName}
+	kind="system"
+	onclose={() => (confModalOpen = false)}
+/>
+
+{#if confGeneratorOpen && serverConfig && confGeneratorPeer}
+	<ConfGeneratorModal
+		bind:open={confGeneratorOpen}
+		{serverConfig}
+		peer={confGeneratorPeer}
+		{ascParams}
+		{wanIP}
+		onclose={() => {
+			confGeneratorOpen = false;
+		}}
+	/>
+{/if}
+
+{#snippet iconBefore()}
+	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+		<polyline points="15,3 21,3 21,9"/>
+		<polyline points="9,21 3,21 3,15"/>
+		<line x1="21" y1="3" x2="14" y2="10"/>
+		<line x1="3" y1="21" x2="10" y2="14"/>
+	</svg>
+{/snippet}
+
+{#snippet addPeerIcon()}
+	<Plus size={14} strokeWidth={2} aria-hidden="true" />
+{/snippet}
+
+{#snippet restartIcon()}
+	<RefreshCw size={14} strokeWidth={2} aria-hidden="true" />
+{/snippet}
+
 <style>
+	@import './serverCardShared.css';
+
 	.server-card {
-		display: flex;
-		flex-direction: column;
-		gap: 0.625rem;
 		transition: border-color 0.2s;
-	}
-
-	.status-up {
-		border-color: var(--success);
-	}
-
-	.status-down {
-		border-color: var(--text-muted, #6b7280);
-	}
-
-	.server-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1rem;
-	}
-
-	.server-info {
-		display: flex;
-		flex-direction: column;
-		gap: 0.375rem;
-		min-width: 0;
-	}
-
-	.server-name {
-		font-size: 1.125rem;
-		font-weight: 600;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.server-meta {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-	}
-
-	.meta-item {
-		font-size: 0.75rem;
-		color: var(--text-muted);
-	}
-
-	.mono {
-		font-family: var(--font-mono, monospace);
 	}
 
 	.badge {
@@ -299,80 +555,32 @@
 		color: var(--accent);
 	}
 
-	.server-header-right {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		flex-shrink: 0;
-	}
-
-	.server-header-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.server-status {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		flex-shrink: 0;
-	}
-
-	.led {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		transition: background 0.3s ease, box-shadow 0.3s ease;
-	}
-
-	.led-up {
-		background: var(--success, #10b981);
-		box-shadow: 0 0 6px var(--success, #10b981);
-	}
-
-	.led-down {
-		background: var(--text-muted, #6b7280);
-	}
-
-	.peer-count {
-		font-size: 0.875rem;
-		font-weight: 500;
-		font-variant-numeric: tabular-nums;
+	.badge-system {
+		background: rgba(107, 114, 128, 0.15);
 		color: var(--text-secondary);
 	}
 
-	.server-stats {
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 0.5rem;
-		padding: 0.625rem 0;
-		border-top: 1px dashed var(--border);
-		border-bottom: 1px solid var(--border);
+	.keendns-row {
+		margin-top: 0.125rem;
 	}
 
-	.stat {
-		min-width: 0;
+	.keendns-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-size: 0.8125rem;
+		color: var(--accent);
+		text-decoration: none;
+	}
+
+	.keendns-link:hover {
+		text-decoration: underline;
+	}
+
+	.kpi-rows {
 		display: flex;
 		flex-direction: column;
-		gap: 0.125rem;
-		padding: 0.5rem;
-		border: 1px solid var(--border);
-		border-radius: var(--radius-sm);
-		background: var(--bg-primary);
-	}
-
-	.stat-label {
-		font-size: 0.6875rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--text-muted);
-	}
-
-	.stat-value {
-		font-size: 0.8125rem;
-		font-family: var(--font-mono, monospace);
-		color: var(--text-secondary);
+		gap: 0.625rem;
 	}
 
 	.server-actions {
@@ -380,44 +588,19 @@
 		gap: 0.5rem;
 	}
 
-	.peers-section {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.peers-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-	}
-
-	.peers-title {
-		font-size: 0.875rem;
-		font-weight: 600;
-		color: var(--text-secondary);
-	}
-
 	@media (max-width: 640px) {
-		.server-header {
-			flex-direction: column;
-		}
-
-		.server-header-right {
+		.header-actions {
+			align-self: stretch;
+			display: grid;
+			grid-template-columns: 1fr;
+			gap: 0.5rem;
 			width: 100%;
-			justify-content: space-between;
 		}
 
-		.peers-header {
-			flex-direction: column;
-			align-items: stretch;
-		}
-
-		.peers-header :global(.peer-sort-controls) {
+		.header-actions :global(.btn) {
 			width: 100%;
+			min-width: 0;
+			justify-content: center;
 		}
 	}
-
 </style>

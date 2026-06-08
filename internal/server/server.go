@@ -881,6 +881,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/servers/enabled", guarded(serverHandler.SetEnabled))
 	mux.HandleFunc("/api/servers/restart", guarded(serverHandler.Restart))
 	mux.HandleFunc("/api/servers/wan-ip", guarded(serverHandler.WANIP))
+	mux.HandleFunc("/api/servers/", guarded(serverHandler.Subtree))
 
 	// Managed WireGuard Servers (protected + boot guarded). The new
 	// route table is id-keyed: see ManagedServerHandler.Subtree for the
@@ -888,6 +889,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	managedHandler := api.NewManagedServerHandler(s.managedService)
 	managedHandler.SetServersHandler(serverHandler)
 	serverHandler.SetManagedHandler(managedHandler)
+	if s.managedServiceImpl != nil {
+		serverHandler.SetManagedService(s.managedServiceImpl)
+	}
 	mux.HandleFunc("/api/managed-servers", guarded(managedHandler.Collection))
 	mux.HandleFunc("/api/managed-servers/", guarded(managedHandler.Subtree))
 
@@ -1006,6 +1010,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Cross-wire servers <-> managed for unified server:updated event
 	serverHandler.SetManagedHandler(managedHandler)
 	managedHandler.SetServersHandler(serverHandler)
+	if s.managedServiceImpl != nil {
+		serverHandler.SetManagedService(s.managedServiceImpl)
+	}
 
 	// Plug MetricsPoller into the handler now that ServersHandler is fully
 	// wired (bus + managed). The poller re-broadcasts the full server snapshot

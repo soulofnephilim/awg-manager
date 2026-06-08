@@ -21,6 +21,13 @@ type Settings struct {
 	ConnectivityCheckURL string            `json:"connectivityCheckUrl"`
 	UsageLevel           string            `json:"usageLevel"`
 	ServerInterfaces     []string          `json:"serverInterfaces,omitempty"`
+	// ServerInterfaceMeta stores AWG Manager bookkeeping for built-in/marked
+	// servers (NAT static-WAN for internet-only teardown). map[serverID].
+	ServerInterfaceMeta map[string]ServerInterfaceMeta `json:"serverInterfaceMeta,omitempty"`
+	// ServerPeerSecrets stores private keys for peers created via AWG Manager
+	// on built-in/marked NDMS servers (NDMS itself does not retain client keys).
+	// map[serverID]map[publicKey]ServerPeerSecret
+	ServerPeerSecrets  map[string]map[string]ServerPeerSecret `json:"serverPeerSecrets,omitempty"`
 	ManagedServers       []ManagedServer   `json:"managedServers,omitempty"`
 	// ManagedServer is retained for one release as the migration source.
 	// migrateManagedServers() moves it into ManagedServers[0] on first read
@@ -133,6 +140,20 @@ type ManagedServer struct {
 	// params (jc/jmin/jmax/s1/s2/s3/s4/h1/h2/h3/h4). Not persisted in
 	// settings.json — NDMS remains source-of-truth for these fields.
 	ASC json.RawMessage `json:"-"`
+}
+
+// ServerInterfaceMeta tracks NAT teardown metadata for system servers.
+type ServerInterfaceMeta struct {
+	NATMode      string `json:"natMode,omitempty"`      // full | internet-only | none
+	NATStaticWAN string `json:"natStaticWan,omitempty"` // WAN iface used by ip static
+}
+
+// ServerPeerSecret holds key material for a peer on a built-in/marked server.
+type ServerPeerSecret struct {
+	PrivateKey   string `json:"privateKey"`
+	PresharedKey string `json:"presharedKey,omitempty"`
+	Description  string `json:"description,omitempty"`
+	TunnelIP     string `json:"tunnelIP,omitempty"`
 }
 
 // ManagedPeer represents a client peer on the managed server.
