@@ -211,7 +211,8 @@ func (s *WGServerStore) FindFreeIndex(ctx context.Context) (int, error) {
 			}
 		}
 	}
-	for i := 1; i < 100; i++ {
+	// Scan from 0: on a fresh device the first server must be Wireguard0 (#308).
+	for i := 0; i < 100; i++ {
 		if !used[i] {
 			return i, nil
 		}

@@ -448,6 +448,37 @@ func TestWGServerStore_FindFreeIndex(t *testing.T) {
 	}
 }
 
+// FindFreeIndex must start the scan at 0 — on a fresh device (no Wireguard
+// interfaces) the first server has to be Wireguard0, not Wireguard1 (#308).
+// The case above pre-occupies both 0 and 1, so it cannot catch a start-at-1
+// off-by-one; these cases do.
+func TestWGServerStore_FindFreeIndex_StartsAtZero(t *testing.T) {
+	cases := map[string]struct {
+		list string
+		want int
+	}{
+		"fresh device (no wireguard)": {`{"GigabitEthernet1":{"id":"GigabitEthernet1","type":"GigabitEthernet"}}`, 0},
+		"only Wireguard1 used":        {`{"Wireguard1":{"id":"Wireguard1","type":"Wireguard"}}`, 0},
+		"Wireguard0 used":             {`{"Wireguard0":{"id":"Wireguard0","type":"Wireguard"}}`, 1},
+		// Reuse a freed/gap index: 0 and 2 taken → the freed 1 is reused.
+		"gap at 1 reused": {`{"Wireguard0":{"id":"Wireguard0","type":"Wireguard"},"Wireguard2":{"id":"Wireguard2","type":"Wireguard"}}`, 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fg := newFakeGetter()
+			fg.SetJSON("/show/interface/", tc.list)
+			s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+			idx, err := s.FindFreeIndex(context.Background())
+			if err != nil {
+				t.Fatalf("FindFreeIndex: %v", err)
+			}
+			if idx != tc.want {
+				t.Errorf("FindFreeIndex = %d, want %d", idx, tc.want)
+			}
+		})
+	}
+}
+
 func TestWGServerStore_GetASCParams(t *testing.T) {
 	fg := newFakeGetter()
 	fg.SetJSON("/show/rc/interface/Wireguard1/wireguard/asc", `{
