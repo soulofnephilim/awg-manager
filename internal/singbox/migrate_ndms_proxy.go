@@ -112,11 +112,20 @@ func (m *Migrator) MigrateOn(ctx context.Context) error {
 	}
 
 	// Recreate subscription composite proxies symmetrically (SyncProxies only
-	// covers Tunnels()). EnsureProxy is idempotent.
-	for _, sp := range m.op.subscriptionProxies() {
-		if eerr := m.op.proxyMgr.EnsureProxy(ctx, sp.Index, sp.Port, sp.Label); eerr != nil {
-			m.log.Warn("MigrateOn: EnsureProxy (subscription) failed",
-				"label", sp.Label, "idx", sp.Index, "err", eerr)
+	// covers Tunnels()). When the subscription reconciler is wired it also
+	// allocates fresh ProxyN for subscriptions created while the toggle was
+	// off (ProxyIndex=-1) — which subscriptionProxies() (filtered to >=0)
+	// cannot see. Fall back to the enumerator-only path when not wired.
+	if m.op.subProxySync != nil {
+		if serr := m.op.subProxySync(ctx); serr != nil {
+			m.log.Warn("MigrateOn: subscription proxy sync failed", "err", serr)
+		}
+	} else {
+		for _, sp := range m.op.subscriptionProxies() {
+			if eerr := m.op.proxyMgr.EnsureProxy(ctx, sp.Index, sp.Port, sp.Label); eerr != nil {
+				m.log.Warn("MigrateOn: EnsureProxy (subscription) failed",
+					"label", sp.Label, "idx", sp.Index, "err", eerr)
+			}
 		}
 	}
 

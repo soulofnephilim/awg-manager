@@ -145,6 +145,13 @@ type Operator struct {
 	// removed/recreated symmetrically with tunnel proxies. nil-safe.
 	subProxies SubscriptionProxySet
 
+	// subProxySync, when wired, (re)creates subscription composite proxies on
+	// MigrateOn — including allocating fresh ProxyN for subscriptions created
+	// while the toggle was off (which subProxies, filtered to ProxyIndex>=0,
+	// cannot enumerate). nil-safe: when nil, MigrateOn falls back to the
+	// subProxies enumerator only.
+	subProxySync func(context.Context) error
+
 	// processLogger forwards sing-box stdout/stderr lines into the app
 	// log under singbox/process so users can see daemon output at
 	// /diagnostics?tab=logs without ssh'ing in. nil-safe (ScopedLogger
@@ -451,6 +458,11 @@ func (o *Operator) SetOrch(orch *orchestrator.Orchestrator) { o.orch = orch }
 // proxies, so NDMS-proxy enable/disable and orphan cleanup manage them
 // alongside tunnel proxies. nil-safe.
 func (o *Operator) SetSubscriptionProxySet(s SubscriptionProxySet) { o.subProxies = s }
+
+// SetSubscriptionProxySync wires the subscription-service proxy reconciler
+// invoked by MigrateOn to (re)create subscription proxies, including those
+// for subscriptions created while the toggle was off. nil-safe.
+func (o *Operator) SetSubscriptionProxySync(fn func(context.Context) error) { o.subProxySync = fn }
 
 // subscriptionProxies returns the current subscription composite proxies, or
 // nil when no enumerator is wired.

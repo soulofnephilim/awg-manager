@@ -778,10 +778,18 @@ func main() {
 	}
 	subSvc := subscription.NewService(subStore, subAdapter)
 	subSvc.SetAppLogger(loggingService)
+	// Gate subscription ProxyN creation on the global toggle (same flag the
+	// Operator uses for tunnels) so disabling it stops subscriptions from
+	// creating NDMS Proxy interfaces too.
+	subSvc.SetNDMSProxyEnabled(settingsStore.IsSingboxNDMSProxyEnabled)
 
 	// Let NDMS-proxy enable/disable + orphan cleanup manage subscription
 	// composite proxies (a set separate from Tunnels()).
 	singboxOp.SetSubscriptionProxySet(subProxySet{store: subStore})
+	// On MigrateOn, reconcile subscription proxies through the service so
+	// subscriptions created while the toggle was off get a freshly allocated
+	// ProxyN (not just the already-indexed ones).
+	singboxOp.SetSubscriptionProxySync(subSvc.SyncProxies)
 
 	// Wire orchestrator into Operator so ApplyConfig writes 10-tunnels.json
 	// through SlotTunnels rather than an in-place write that bypasses
