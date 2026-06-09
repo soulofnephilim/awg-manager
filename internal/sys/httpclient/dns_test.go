@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"context"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -30,7 +31,7 @@ func TestEncodeDNSQuery(t *testing.T) {
 
 func TestParseDNSARecord_directA(t *testing.T) {
 	pkt := buildDNSResponse(1, net.IPv4(1, 2, 3, 4).To4())
-	ip, err := parseDNSARecord(t.Context(), pkt, "1.1.1.1", "", 0)
+	ip, err := parseDNSARecord(context.Background(), pkt, "1.1.1.1", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
