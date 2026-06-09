@@ -30,6 +30,7 @@
 	import { loadPresetCatalog } from '$lib/stores/presets';
 	import { donateModalOpen, openDonateModal, closeDonateModal } from '$lib/stores/donateModal';
 	import DevelopFeedbackFab from '$lib/components/layout/DevelopFeedbackFab.svelte';
+	import UiElementHider from '$lib/components/layout/UiElementHider.svelte';
 	import {
 		isSectionVisible,
 		pathToSection,
@@ -353,7 +354,7 @@
 </script>
 
 {#if backendOffline}
-	<div class="offline-screen">
+	<div class="offline-screen" data-awg-ui-protected>
 		<svg class="offline-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 			<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
 			<line x1="12" y1="9" x2="12" y2="13"/>
@@ -365,12 +366,12 @@
 		<p class="offline-hint">Переподключение...</p>
 	</div>
 {:else if booting}
-	<div class="loading-screen">
+	<div class="loading-screen" data-awg-ui-protected>
 		<div class="loading-spinner"></div>
 		<p style="color: var(--text-muted); font-size: 0.875rem; margin-top: 1rem;">Роутер загружается...</p>
 	</div>
 {:else if $isLoading}
-	<div class="loading-screen">
+	<div class="loading-screen" data-awg-ui-protected>
 		<div class="loading-spinner"></div>
 	</div>
 {:else}
@@ -396,7 +397,7 @@
 			{@render children()}
 		</main>
 
-		<div class="toast-container">
+		<div class="toast-container" data-awg-ui-protected>
 			{#if $notifications.length > 1}
 				<button class="toast-dismiss-all" onclick={() => notifications.clearAll()}>
 					Закрыть все ({$notifications.length})
@@ -455,6 +456,10 @@
 
 	{#if $isAuthenticated && isDevelopChannel}
 		<DevelopFeedbackFab />
+	{/if}
+
+	{#if $isAuthenticated}
+		<UiElementHider />
 	{/if}
 {/if}
 
