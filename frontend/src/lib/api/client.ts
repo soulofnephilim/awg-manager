@@ -871,6 +871,16 @@ class ApiClient {
 		});
 	}
 
+	async setWireguardServerNATEnabled(
+		name: string,
+		enabled: boolean
+	): Promise<import('$lib/stores/servers').ServersSnapshot> {
+		return this.request(`/servers/${encodeURIComponent(name)}/nat`, {
+			method: 'POST',
+			body: JSON.stringify({ enabled })
+		});
+	}
+
 	async setWireguardServerPolicy(
 		name: string,
 		policy: string

@@ -570,10 +570,6 @@
 
 
 <style>
-	.managed-card {
-		border-color: var(--accent);
-	}
-
 	.title-badges {
 		flex: 1 1 auto;
 		min-width: fit-content;

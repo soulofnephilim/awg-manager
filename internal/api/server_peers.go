@@ -555,9 +555,24 @@ func (h *ServersHandler) validateServerPeerTunnelIP(server *ndms.WireguardServer
 
 const builtInVPNServerDescription = "Wireguard VPN Server"
 
+func (h *ServersHandler) readSystemServerEnabled(ctx context.Context, iface string) (enabled bool, known bool) {
+	if h.queries == nil || h.queries.Interfaces == nil {
+		return false, false
+	}
+	details, err := h.queries.Interfaces.GetDetails(ctx, iface)
+	if err != nil || details == nil {
+		return false, false
+	}
+	return details.ConfLayer == "running", true
+}
+
 func (h *ServersHandler) enrichServerDTO(ctx context.Context, srv ndms.WireguardServer) WireguardServerDTO {
 	dto := toWireguardServerDTO(srv)
 	dto.BuiltIn = srv.Description == builtInVPNServerDescription
+	if enabled, known := h.readSystemServerEnabled(ctx, srv.ID); known {
+		dto.Enabled = enabled
+		dto.EnabledKnown = true
+	}
 	if _, mode, err := h.readSystemServerNATMode(ctx, srv.ID); err == nil {
 		dto.NATEnabled = mode == "full"
 		dto.NATMode = mode

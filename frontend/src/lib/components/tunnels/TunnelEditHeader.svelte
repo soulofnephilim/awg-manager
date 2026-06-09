@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Check, Download, RefreshCw, Save, X } from 'lucide-svelte';
+	import { Check, Download, RefreshCw, Save, SaveAll, X } from 'lucide-svelte';
 	import { Button, BackLink, type ButtonVariant } from '$lib/components/ui';
 
 	type ActionStatus = 'loading' | 'success' | 'error';
@@ -58,7 +58,7 @@
 				{#snippet iconBefore()}
 					<RefreshCw size={16} strokeWidth={2} aria-hidden="true" />
 				{/snippet}
-				<span class="btn-label">Заменить</span>
+				Заменить
 			</Button>
 		{/if}
 		{#if onExport}
@@ -66,11 +66,14 @@
 				{#snippet iconBefore()}
 					<Download size={16} strokeWidth={2} aria-hidden="true" />
 				{/snippet}
-				<span class="btn-label">Скачать</span>
+				Скачать
 			</Button>
 		{/if}
 		{#if onSaveOnly}
 			<Button variant="secondary" disabled={saving} onclick={onSaveOnly}>
+				{#snippet iconBefore()}
+					<Save size={16} strokeWidth={2} aria-hidden="true" />
+				{/snippet}
 				Сохранить
 			</Button>
 		{/if}
@@ -81,7 +84,7 @@
 			<X size={16} strokeWidth={2} aria-hidden="true" />
 		{/snippet}
 		{#snippet saveIcon()}
-			<Save size={16} strokeWidth={2} aria-hidden="true" />
+			<SaveAll size={16} strokeWidth={2} aria-hidden="true" />
 		{/snippet}
 		<Button
 			variant={primaryVariant}
@@ -152,10 +155,6 @@
 	}
 
 	@media (max-width: 600px) {
-		.btn-label {
-			display: none;
-		}
-
 		.sticky-header {
 			padding: 10px 12px;
 			margin: -12px -12px 16px -12px;

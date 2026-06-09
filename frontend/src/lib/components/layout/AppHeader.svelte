@@ -432,6 +432,8 @@
 		min-width: 0;
 		display: flex;
 		overflow-x: auto;
+		overflow-y: hidden;
+		overscroll-behavior-y: none;
 		scrollbar-width: none;
 	}
 

@@ -22,6 +22,7 @@
 	import { dedupBy } from '$lib/utils/dedupBy';
 	import { createIngressMutationLock } from '$lib/utils/ingressMutation';
 	import { countActiveManagedPeers, countActiveSystemPeers } from '$lib/utils/serverPeerActivity';
+	import { systemServerIsUp } from '$lib/utils/systemServerState';
 
 	const withIngressLock = createIngressMutationLock();
 
@@ -156,7 +157,7 @@
 				name: s.description || s.interfaceName,
 				iface: s.interfaceName,
 				listenPort: s.listenPort,
-				status: s.status === 'up' ? 'running' : 'stopped',
+				status: systemServerIsUp(s) ? 'running' : 'stopped',
 				peerCount: sPeers.length,
 				peerActive: countActiveSystemPeers(sPeers),
 				kind: 'system',

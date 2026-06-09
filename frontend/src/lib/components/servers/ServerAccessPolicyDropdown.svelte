@@ -1,4 +1,5 @@
 <script lang="ts">
+	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api/client';
 	import { Dropdown, type DropdownOption } from '$lib/components/ui';
@@ -8,9 +9,10 @@
 		policy: string;
 		disabled?: boolean;
 		onchange: (policy: string) => void | Promise<void>;
+		extra?: Snippet;
 	}
 
-	let { policy, disabled = false, onchange }: Props = $props();
+	let { policy, disabled = false, onchange, extra }: Props = $props();
 
 	let policies = $state<{ id: string; description: string }[]>([]);
 	let selectedPolicy = $state('');
@@ -52,6 +54,7 @@
 		<span class="setting-description"
 			>Регулирует выход в интернет для клиентов сервера. Применяется ко всем клиентам этого сервера.</span
 		>
+		{#if extra}{@render extra()}{/if}
 	</div>
 	<div class="setting-control">
 		<Dropdown value={selectedPolicy} options={policyOptions} {disabled} {onchange} fullWidth />

@@ -13,8 +13,9 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { comparePeerFieldsDirected } from '$lib/utils/peerSort';
 	import { peerSort } from '$lib/stores/peerSort';
-	import { maskToPrefix, resolveNatMode, type NatMode } from '$lib/utils/network';
+	import { maskToPrefix, resolveNatMode } from '$lib/utils/network';
 	import { countActiveSystemPeers } from '$lib/utils/serverPeerActivity';
+	import { patchSystemServerEnabledInSnapshot, systemServerIsUp } from '$lib/utils/systemServerState';
 	import {
 		PeerSortControls,
 		ManagedPeerTable,
@@ -24,7 +25,7 @@
 		ConfGeneratorModal,
 		ServerAccessPolicyDropdown,
 	} from '$lib/components/servers';
-	import { Toggle, Button, Dropdown, Stat, StatStrip, type DropdownOption } from '$lib/components/ui';
+	import { Toggle, Button, Stat, StatStrip } from '$lib/components/ui';
 	import { Plus, RefreshCw, ExternalLink } from 'lucide-svelte';
 
 	interface Props {
@@ -64,21 +65,17 @@
 	let policyChanging = $state(false);
 	let togglingPeerKeys = $state(new Set<string>());
 
-	let natMode = $derived<NatMode>(resolveNatMode(server.natMode, server.natEnabled));
+	let natMode = $derived(resolveNatMode(server.natMode, server.natEnabled));
+	// Keenetic exposes NAT as on/off; internet-only is normalized to "on" in the UI.
+	let natEnabled = $derived(natMode !== 'none');
 	// When the backend couldn't read NAT/policy from NDMS, natMode/policy are a
 	// fabricated 'none' — surface "unknown" and block edits instead of letting
 	// the user act on it. Absent flags (legacy/managed) are treated as known.
 	let natModeKnown = $derived(server.natModeKnown ?? true);
 	let policyKnown = $derived(server.policyKnown ?? true);
 
-	const natModeOptions: DropdownOption<NatMode>[] = [
-		{ value: 'full', label: 'Полный NAT' },
-		{ value: 'internet-only', label: 'NAT только для интернета' },
-		{ value: 'none', label: 'Без NAT' },
-	];
-
 	let serverName = $derived(server.description || server.id);
-	let isUp = $derived(server.status === 'up' || server.connected);
+	let isUp = $derived(systemServerIsUp(server));
 	let onlineCount = $derived(countActiveSystemPeers(server.peers));
 	let totalPeers = $derived((server.peers ?? []).length);
 	let totalRx = $derived((server.peers ?? []).reduce((sum, p) => sum + p.rxBytes, 0));
@@ -162,11 +159,11 @@
 		return map;
 	});
 
-	async function handleToggleEnabled() {
+	async function handleToggleEnabled(enabled: boolean) {
 		togglingEnabled = true;
 		try {
-			const fresh = await api.setWireguardServerEnabled(server.id, !isUp);
-			servers.applyMutationResponse(fresh);
+			const fresh = await api.setWireguardServerEnabled(server.id, enabled);
+			servers.applyMutationResponse(patchSystemServerEnabledInSnapshot(fresh, server.id, enabled));
 		} catch (e) {
 			notifications.error(e instanceof Error ? e.message : 'Ошибка переключения');
 		} finally {
@@ -199,11 +196,11 @@
 		}
 	}
 
-	async function handleSetNATMode(mode: NatMode) {
-		if (mode === natMode) return;
+	async function handleToggleNAT(enabled: boolean) {
+		if (enabled === natEnabled) return;
 		togglingNAT = true;
 		try {
-			const fresh = await api.setWireguardServerNATMode(server.id, mode);
+			const fresh = await api.setWireguardServerNATEnabled(server.id, enabled);
 			servers.applyMutationResponse(fresh);
 		} catch (e) {
 			notifications.error(e instanceof Error ? e.message : 'Ошибка изменения NAT');
@@ -311,8 +308,10 @@
 				<div class="title-main">
 					<Toggle
 						checked={isUp}
+						controlled
 						onchange={handleToggleEnabled}
 						disabled={togglingEnabled || restartingServer}
+						loading={togglingEnabled}
 						size="sm"
 						spinner="none"
 					/>
@@ -379,29 +378,28 @@
 
 	{#if isBuiltIn}
 		<div class="server-settings">
-			<div class="setting-row">
+			<div class="setting-row setting-row-toggle">
 				<div class="setting-copy">
 					<span class="setting-title">NAT</span>
 					{#if !natModeKnown}
 						<span class="setting-description setting-description-warning">Не удалось прочитать состояние NAT с роутера — обновите страницу.</span>
-					{:else if natMode === 'full'}
+					{:else if natEnabled}
 						<span class="setting-description">Для доступа клиентов в интернет через NAT роутера.</span>
-					{:else if natMode === 'internet-only'}
-						<span class="setting-description">NAT только для интернет-трафика; в LAN клиент виден со своим VPN-адресом.</span>
 					{:else}
 						<span class="setting-description">Без NAT — клиенты не выходят в интернет напрямую.</span>
 					{/if}
-					{#if natModeKnown && ingressEnabled && natMode === 'full'}
+					{#if natModeKnown && ingressEnabled && natEnabled}
 						<span class="setting-description setting-description-warning">Интернет-трафик идёт через sing-box - NAT влияет только на видимость в LAN.</span>
 					{/if}
 				</div>
-				<div class="setting-control">
-					<Dropdown
-						value={natMode}
-						options={natModeOptions}
+				<div class="setting-control setting-control-toggle">
+					<Toggle
+						checked={natEnabled}
+						controlled
+						onchange={handleToggleNAT}
 						disabled={togglingNAT || !natModeKnown}
-						onchange={handleSetNATMode}
-						fullWidth
+						loading={togglingNAT}
+						spinner="before"
 					/>
 				</div>
 			</div>
@@ -425,10 +423,13 @@
 				policy={server.policy ?? 'none'}
 				disabled={policyChanging || !policyKnown}
 				onchange={handlePolicyChange}
-			/>
-			{#if !policyKnown}
-				<span class="setting-description setting-description-warning">Не удалось прочитать политику доступа с роутера — обновите страницу.</span>
-			{/if}
+			>
+				{#snippet extra()}
+					{#if !policyKnown}
+						<span class="setting-description setting-description-warning">Не удалось прочитать политику доступа с роутера — обновите страницу.</span>
+					{/if}
+				{/snippet}
+			</ServerAccessPolicyDropdown>
 		</div>
 	{/if}
 
@@ -534,10 +535,6 @@
 {/snippet}
 
 <style>
-	.server-card {
-		transition: border-color 0.2s;
-	}
-
 	.badge {
 		display: inline-flex;
 		align-items: center;

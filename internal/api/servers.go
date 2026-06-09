@@ -62,6 +62,10 @@ type WireguardServerDTO struct {
 	// which would otherwise read as a fabricated "none".
 	NATModeKnown bool `json:"natModeKnown" example:"true"`
 	PolicyKnown  bool `json:"policyKnown" example:"true"`
+	// Enabled reflects NDMS admin intent (summary.layer.conf == "running").
+	// Status/connected alone are unreliable for the on/off toggle.
+	Enabled      bool `json:"enabled" example:"true"`
+	EnabledKnown bool `json:"enabledKnown" example:"true"`
 }
 
 // ManagedPeerStatsDTO mirrors frontend ManagedPeerStats.
@@ -215,8 +219,14 @@ func (h *ServersHandler) getListedServer(ctx context.Context, name string) (*ndm
 	return nil, nil
 }
 
-func serverIsUp(server *ndms.WireguardServer) bool {
-	return server != nil && (server.Status == "up" || server.Connected)
+func (h *ServersHandler) serverIsUp(ctx context.Context, server *ndms.WireguardServer) bool {
+	if server == nil {
+		return false
+	}
+	if enabled, known := h.readSystemServerEnabled(ctx, server.ID); known {
+		return enabled
+	}
+	return server.Status == "up"
 }
 
 // listServers builds the filtered server list for API response and SSE snapshots.
@@ -474,6 +484,9 @@ func (h *ServersHandler) SetEnabled(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.queries != nil && h.queries.WGServers != nil {
+		h.queries.WGServers.Invalidate(name)
+	}
 	publishInvalidated(h.bus, ResourceServers, "server-enabled-changed")
 	h.writeAll(w, r)
 }
@@ -517,7 +530,7 @@ func (h *ServersHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wasUp := serverIsUp(server)
+	wasUp := h.serverIsUp(r.Context(), server)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
 
 	go func() {

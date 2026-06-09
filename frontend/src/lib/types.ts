@@ -328,6 +328,9 @@ export interface WireguardServer {
 	 */
 	natModeKnown?: boolean;
 	policyKnown?: boolean;
+	/** NDMS admin intent (conf layer running). Prefer over status/connected for toggles. */
+	enabled?: boolean;
+	enabledKnown?: boolean;
 }
 
 export interface WireguardServerPeer {

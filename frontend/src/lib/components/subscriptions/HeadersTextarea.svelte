@@ -21,11 +21,25 @@
 </script>
 
 <div class="head">
-	<label class="lbl" for="hdr">Заголовки запроса</label>
+	<div class="head-label">
+		<label class="lbl" for="hdr">Заголовки запроса</label>
+		<span class="info-hint">
+			<button
+				type="button"
+				class="info-trigger"
+				aria-label="Подсказка по заголовкам"
+				aria-expanded={showHelp}
+				onclick={() => (showHelp = !showHelp)}
+			>
+				<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+					<circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
+					<circle cx="8" cy="4.8" r="0.95" fill="currentColor" />
+					<rect x="7.25" y="6.9" width="1.5" height="4.8" rx="0.75" fill="currentColor" />
+				</svg>
+			</button>
+		</span>
+	</div>
 	<div class="head-actions">
-		<button type="button" class="help-toggle" onclick={() => (showHelp = !showHelp)}>
-			{showHelp ? 'Скрыть подсказку' : 'Что писать?'}
-		</button>
 		<Dropdown
 			placeholder="Подставить пресет"
 			options={[
@@ -83,27 +97,60 @@
 		margin-bottom: 0.4rem;
 		gap: 0.5rem;
 	}
+	.head-label {
+		display: inline-flex;
+		align-items: center;
+		min-width: 0;
+	}
 	.head-actions {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
+		flex-shrink: 0;
+	}
+	.head-actions :global(.field) {
+		min-width: 0;
+	}
+	.head-actions :global(.trigger) {
+		width: auto;
+		white-space: nowrap;
 	}
 	.lbl {
-		color: var(--color-text-muted);
-		font-size: 0.85rem;
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--color-text-secondary);
 	}
-	.help-toggle {
+	.info-hint {
+		position: relative;
+		display: inline-flex;
+		vertical-align: middle;
+		margin-left: 0.25rem;
+	}
+
+	.info-trigger {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.05rem;
+		height: 1.05rem;
+		padding: 0;
+		border: none;
+		border-radius: 50%;
 		background: transparent;
-		border: 1px solid var(--color-border);
-		color: var(--color-text-muted);
-		font-size: 0.78rem;
-		padding: 0.25rem 0.55rem;
-		border-radius: 4px;
+		color: var(--text-muted, var(--color-text-muted));
 		cursor: pointer;
+		transition: color 0.12s ease;
 	}
-	.help-toggle:hover {
-		color: var(--color-text-primary);
-		border-color: var(--color-text-muted);
+
+	.info-trigger:hover,
+	.info-trigger[aria-expanded='true'] {
+		color: var(--accent);
+	}
+
+	.info-trigger:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+		border-radius: 50%;
 	}
 	.help {
 		margin-bottom: 0.6rem;
@@ -111,7 +158,7 @@
 		background: var(--color-bg-secondary, var(--color-bg-primary));
 		border: 1px solid var(--color-border);
 		border-radius: 4px;
-		font-size: 0.78rem;
+		font-size: 13px;
 		color: var(--color-text-muted);
 		line-height: 1.5;
 	}
@@ -130,19 +177,39 @@
 		padding: 0.05rem 0.3rem;
 		border-radius: 3px;
 		font-family: var(--font-mono, ui-monospace, monospace);
-		font-size: 0.74rem;
+		font-size: 12px;
 		color: var(--color-text-primary);
 	}
 	.textarea {
 		width: 100%;
 		min-height: 180px;
 		font-family: var(--font-mono, ui-monospace, monospace);
-		font-size: 0.82rem;
+		font-size: 13px;
+		line-height: 1.45;
 		padding: 0.7rem;
 		background: var(--color-bg-primary);
 		border: 1px solid var(--color-border);
 		border-radius: 4px;
 		color: var(--color-text-primary);
 		resize: vertical;
+	}
+
+	@media (max-width: 640px) {
+		.head {
+			flex-wrap: wrap;
+			align-items: flex-start;
+		}
+
+		.head-actions {
+			width: 100%;
+		}
+
+		.head-actions :global(.field) {
+			width: 100%;
+		}
+
+		.head-actions :global(.trigger) {
+			width: 100%;
+		}
 	}
 </style>
