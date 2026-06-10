@@ -29,7 +29,13 @@ import type {
 } from './types';
 import { detectService } from './serviceDetection';
 import { resolveRuleSetDisplayType } from '$lib/utils/ruleSetType';
+import { formatIpCidrForList } from '$lib/utils/singboxInlineRules';
 import { COMPOSITE_OUTBOUND_TYPES, resolveCompositeOutboundView } from './compositeOutboundDisplay';
+import {
+  classifyRuleSimplicity,
+  isCustomInlineRuleSetTag,
+  type RuleSimplicity,
+} from './simpleRule';
 
 /* ─── System rule detection ─────────────────────────────────────────── */
 
@@ -230,6 +236,91 @@ export function extractMatcherChips(
   return chips;
 }
 
+/** Первый домен из inline rules (domain_suffix, затем domain) — для custom-N карточек. */
+export function firstDomainFromInlineRules(rules: Record<string, unknown>[] | undefined): string | undefined {
+  if (!Array.isArray(rules)) return undefined;
+  for (const r of rules) {
+    const suffixes = r['domain_suffix'];
+    if (Array.isArray(suffixes)) {
+      for (const s of suffixes) {
+        if (typeof s === 'string' && s.trim()) return s.trim();
+      }
+    }
+    const domains = r['domain'];
+    if (Array.isArray(domains)) {
+      for (const d of domains) {
+        if (typeof d === 'string' && d.trim()) return d.trim();
+      }
+    }
+  }
+  return undefined;
+}
+
+function chipsFromInlineRules(rules: Record<string, unknown>[] | undefined): MatcherChip[] {
+  const chips: MatcherChip[] = [];
+  if (!Array.isArray(rules)) return chips;
+
+  for (const r of rules) {
+    const suffixes = r['domain_suffix'];
+    if (Array.isArray(suffixes)) {
+      for (const s of suffixes) {
+        if (typeof s === 'string') chips.push({ kind: 'domain', label: s });
+      }
+    }
+    const domains = r['domain'];
+    if (Array.isArray(domains)) {
+      for (const d of domains) {
+        if (typeof d === 'string') chips.push({ kind: 'domain', label: d });
+      }
+    }
+    const cidrs = r['ip_cidr'];
+    if (Array.isArray(cidrs)) {
+      for (const c of cidrs) {
+        if (typeof c === 'string') {
+          chips.push({ kind: 'ip', label: formatIpCidrForList(c), mono: true });
+        }
+      }
+    }
+  }
+  return chips;
+}
+
+/** Matcher chips с учётом простого режима (разворот custom-N inline). */
+export function extractMatchersForCard(
+  rule: SingboxRouterRule,
+  simplicity: RuleSimplicity,
+  rulesetLabels: Record<string, string>,
+  ruleSets: SingboxRouterRuleSet[] = [],
+): MatcherChip[] {
+  if (!simplicity.simple) {
+    return extractMatcherChips(rule, rulesetLabels, ruleSets);
+  }
+
+  if (simplicity.kind === 'inline-text') {
+    const chips: MatcherChip[] = [];
+    for (const d of rule.domain_suffix ?? []) {
+      chips.push({ kind: 'domain', label: d });
+    }
+    for (const c of rule.ip_cidr ?? []) {
+      chips.push({ kind: 'ip', label: c, mono: true });
+    }
+    return chips;
+  }
+
+  if (simplicity.kind === 'inline-set' && simplicity.inlineRuleSetTag) {
+    const tag = simplicity.inlineRuleSetTag;
+    if (isCustomInlineRuleSetTag(tag)) {
+      const rs = ruleSets.find((r) => r.tag === tag);
+      if (rs?.type === 'inline' && rs.rules?.length) {
+        return chipsFromInlineRules(rs.rules);
+      }
+    }
+    return extractMatcherChips(rule, rulesetLabels, ruleSets);
+  }
+
+  return extractMatcherChips(rule, rulesetLabels, ruleSets);
+}
+
 /* ─── Title fallback ────────────────────────────────────────────────── */
 
 function fallbackTitle(
@@ -288,7 +379,24 @@ export function singboxRuleToCard(
   proxyGroups: SingboxProxyGroup[] = [],
   singboxTunnels: SingboxTunnel[] = [],
 ): RuleCardData {
-  const detected = detectService(rule, routerPresets, catalog);
+  const simplicity = classifyRuleSimplicity(rule, ruleSets);
+
+  let customInlineFirstDomain: string | undefined;
+  if (
+    simplicity.simple
+    && simplicity.kind === 'inline-set'
+    && simplicity.inlineRuleSetTag
+    && isCustomInlineRuleSetTag(simplicity.inlineRuleSetTag)
+  ) {
+    const rs = ruleSets.find((r) => r.tag === simplicity.inlineRuleSetTag);
+    if (rs?.type === 'inline') {
+      customInlineFirstDomain = firstDomainFromInlineRules(rs.rules);
+    }
+  }
+
+  const detected = customInlineFirstDomain
+    ? detectService({ domain_suffix: [customInlineFirstDomain] }, routerPresets, catalog)
+    : detectService(rule, routerPresets, catalog);
   const serviceKey = detected.iconSlug;
   const action = mapRuleAction(rule);
   const outbound = resolveOutboundDisplay(
@@ -300,9 +408,11 @@ export function singboxRuleToCard(
     proxyGroups,
     singboxTunnels,
   );
-  const matchers = extractMatcherChips(rule, rulesetLabels, ruleSets);
+  const matchers = extractMatchersForCard(rule, simplicity, rulesetLabels, ruleSets);
   const isSystem = isSystemRule(rule);
-  const title = fallbackTitle(rule, serviceKey, index, detected.displayName);
+  const title = customInlineFirstDomain
+    ? customInlineFirstDomain
+    : fallbackTitle(rule, serviceKey, index, detected.displayName);
   const subtitle = isSystem
     ? systemSubtitle(rule)
     : matchers.length > 4
@@ -318,6 +428,7 @@ export function singboxRuleToCard(
     action,
     outbound,
     isSystem,
+    simplicity,
     tooltip: isSystem ? systemRuleTooltip(rule) : undefined,
   };
 }

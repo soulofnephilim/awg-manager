@@ -21,6 +21,8 @@
 		 * is fine — all sets render as unused.
 		 */
 		ruleSetUsage?: Map<string, number>;
+		/** Только domain_suffix и ip_cidr; outbound/action не меняются. */
+		matchersOnly?: boolean;
 		onClose: () => void;
 		onSave: (rule: SingboxRouterRule) => Promise<void> | void;
 	}
@@ -30,6 +32,7 @@
 		availableRuleSets,
 		initialRuleSetTags,
 		ruleSetUsage,
+		matchersOnly = false,
 		onClose,
 		onSave,
 	}: Props = $props();
@@ -147,15 +150,25 @@
 				return;
 			}
 
-			const built: SingboxRouterRule = {
-				domain_suffix: domain_suffix.length ? domain_suffix : undefined,
-				ip_cidr: ip_cidr.length ? ip_cidr : undefined,
-				source_ip_cidr: source_ip_cidr.length ? source_ip_cidr : undefined,
-				rule_set: rule_set.length ? rule_set : undefined,
-				port: port.length ? port : undefined,
-				action,
-				outbound: action === 'route' ? outbound : undefined,
-			};
+			let built: SingboxRouterRule;
+			if (matchersOnly && rule) {
+				built = {
+					domain_suffix: domain_suffix.length ? domain_suffix : undefined,
+					ip_cidr: ip_cidr.length ? ip_cidr : undefined,
+					action: rule.action === 'reject' ? 'reject' : 'route',
+					outbound: rule.action === 'reject' ? undefined : rule.outbound,
+				};
+			} else {
+				built = {
+					domain_suffix: domain_suffix.length ? domain_suffix : undefined,
+					ip_cidr: ip_cidr.length ? ip_cidr : undefined,
+					source_ip_cidr: source_ip_cidr.length ? source_ip_cidr : undefined,
+					rule_set: rule_set.length ? rule_set : undefined,
+					port: port.length ? port : undefined,
+					action,
+					outbound: action === 'route' ? outbound : undefined,
+				};
+			}
 
 			await onSave(built);
 		} catch (e) {
@@ -166,7 +179,12 @@
 	}
 </script>
 
-<Modal open onclose={onClose} title={rule ? 'Редактировать правило' : 'Новое правило'} hasUnsavedChanges={() => isDirty}>
+<Modal
+	open
+	onclose={onClose}
+	title={matchersOnly ? 'Домены и адреса' : rule ? 'Редактировать правило' : 'Новое правило'}
+	hasUnsavedChanges={() => isDirty}
+>
 	<div class="form">
 		<div class="section-label">Matchers (минимум один)</div>
 
@@ -196,55 +214,57 @@
 			<textarea bind:value={ipCidrStr} rows="6" placeholder="142.250.0.0/15"></textarea>
 		</label>
 
-		<label class="field">
-			<div class="field-head">
-				<span class="lbl">Source IP CIDR</span>
-				{#if sourceIPsCount > 0}
-					<span class="count-chip">
-						{sourceIPsCount}
-						{sourceIPsCount === 1 ? 'источник' : sourceIPsCount < 5 ? 'источника' : 'источников'}
-					</span>
+		{#if !matchersOnly}
+			<label class="field">
+				<div class="field-head">
+					<span class="lbl">Source IP CIDR</span>
+					{#if sourceIPsCount > 0}
+						<span class="count-chip">
+							{sourceIPsCount}
+							{sourceIPsCount === 1 ? 'источник' : sourceIPsCount < 5 ? 'источника' : 'источников'}
+						</span>
+					{/if}
+				</div>
+				<textarea bind:value={sourceIpCidrStr} rows="6" placeholder="192.168.1.50"></textarea>
+			</label>
+
+			<div class="field">
+				<div class="lbl">Rule sets</div>
+				<ChipMultiSelect
+					values={ruleSetTags}
+					options={ruleSetOptions}
+					onchange={(next) => (ruleSetTags = next)}
+					placeholder="не выбрано"
+					allowOrphans
+				/>
+				<div class="hint">
+					Готовые наборы (geosite/geoip). Для своих доменов и подсетей используйте поля выше.
+				</div>
+			</div>
+
+			<label class="field">
+				<div class="lbl">Порты (через запятую)</div>
+				<input bind:value={portStr} placeholder="443, 80" />
+				<div class="hint">
+					Необязательно. Дополнительно ограничивает правило конкретными портами.
+				</div>
+			</label>
+
+			<div class="action-section">
+				<div class="section-label">Действие</div>
+				<div class="segment">
+					<button class:active={action === 'route'} onclick={() => (action = 'route')} type="button">Направить</button>
+					<button class:active={action === 'reject'} onclick={() => (action = 'reject')} type="button">Заблокировать</button>
+				</div>
+
+				{#if action === 'route'}
+					<label class="field">
+						<div class="lbl">Куда направить</div>
+						<Dropdown bind:value={outbound} options={outboundDropdownOptions} fullWidth />
+					</label>
 				{/if}
 			</div>
-			<textarea bind:value={sourceIpCidrStr} rows="6" placeholder="192.168.1.50"></textarea>
-		</label>
-
-		<div class="field">
-			<div class="lbl">Rule sets</div>
-			<ChipMultiSelect
-				values={ruleSetTags}
-				options={ruleSetOptions}
-				onchange={(next) => (ruleSetTags = next)}
-				placeholder="не выбрано"
-				allowOrphans
-			/>
-			<div class="hint">
-				Готовые наборы (geosite/geoip). Для своих доменов и подсетей используйте поля выше.
-			</div>
-		</div>
-
-		<label class="field">
-			<div class="lbl">Порты (через запятую)</div>
-			<input bind:value={portStr} placeholder="443, 80" />
-			<div class="hint">
-				Необязательно. Дополнительно ограничивает правило конкретными портами.
-			</div>
-		</label>
-
-		<div class="action-section">
-			<div class="section-label">Действие</div>
-			<div class="segment">
-				<button class:active={action === 'route'} onclick={() => (action = 'route')} type="button">Направить</button>
-				<button class:active={action === 'reject'} onclick={() => (action = 'reject')} type="button">Заблокировать</button>
-			</div>
-
-			{#if action === 'route'}
-				<label class="field">
-					<div class="lbl">Куда направить</div>
-					<Dropdown bind:value={outbound} options={outboundDropdownOptions} fullWidth />
-				</label>
-			{/if}
-		</div>
+		{/if}
 
 		{#if error}<div class="error">{error}</div>{/if}
 	</div>

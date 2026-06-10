@@ -11,16 +11,18 @@
   import { onDestroy, onMount } from 'svelte';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { SectionLabel, Button, ConfirmModal } from '$lib/components/ui';
-  import { openAddWizard } from './addWizardStore';
+  import { openAddWizard, openEditWizard } from './addWizardStore';
   import RuleCard from './RuleCard.svelte';
   import { isSystemRule, singboxRuleToCard } from './adapters';
+  import { classifyRuleSimplicity } from './simpleRule';
+  import { prefillWizardFromRule } from './ruleWizardPrefill';
+  import { setTemplateSelection } from './templatesStore';
   import { presetCatalog } from '$lib/stores/presets';
   import { subscriptionsStore } from '$lib/stores/subscriptions';
   import { singboxProxies } from '$lib/stores/singboxProxies';
   import { singboxTunnels } from '$lib/stores/singbox';
   import RuleEditModal from '$lib/components/routing/singboxRouter/RuleEditModal.svelte';
   import RuleSetAddModal from '$lib/components/routing/singboxRouter/RuleSetAddModal.svelte';
-  import { computeRuleSetUsage } from '$lib/components/routing/singboxRouter';
   import type { SingboxRouterRuleSet } from '$lib/types';
   import { api } from '$lib/api/client';
   import { notifications } from '$lib/stores/notifications';
@@ -91,7 +93,7 @@
   let deleteIndex = $state<number | null>(null);
   let deleteTarget = $state<{ index: number; summary: string } | null>(null);
   let deleteBusy = $state(false);
-  let editIndex = $state<number | null>(null);
+  let textMatchersEditIndex = $state<number | null>(null);
   let rsEditTag = $state<string | null>(null);
 
   const rsEditTarget = $derived<SingboxRouterRuleSet | undefined>(
@@ -130,9 +132,39 @@
   }
 
   function requestEdit(index: number) {
-    if (isSystemRule($rules[index])) return;
+    const rule = $rules[index];
+    if (!rule || isSystemRule(rule)) return;
+    const info = classifyRuleSimplicity(rule, $ruleSets);
+    if (!info.simple) return;
     cancelDrag();
-    editIndex = index;
+    const prefill = prefillWizardFromRule(rule, $presets, $ruleSets);
+    if (!prefill.editMode) return;
+    setTemplateSelection(prefill.templateIds);
+    openEditWizard(index, {
+      editMode: prefill.editMode,
+      rulesList: prefill.rulesList,
+      outboundCategory: prefill.outboundCategory,
+      tunnelTag: prefill.tunnelTag,
+      existingInlineRuleSetTag: prefill.existingInlineRuleSetTag,
+      wasInlineText: prefill.wasInlineText,
+    });
+  }
+
+  function requestTextMatchersEdit(index: number) {
+    const rule = $rules[index];
+    if (!rule) return;
+    const info = classifyRuleSimplicity(rule, $ruleSets);
+    if (!info.simple || info.kind !== 'inline-text') return;
+    cancelDrag();
+    textMatchersEditIndex = index;
+  }
+
+  function requestInlineListEdit(index: number) {
+    const rule = $rules[index];
+    if (!rule) return;
+    const info = classifyRuleSimplicity(rule, $ruleSets);
+    if (!info.simple || info.kind !== 'inline-set' || !info.inlineRuleSetTag) return;
+    requestRulesetEdit(info.inlineRuleSetTag);
   }
 
   function requestRulesetEdit(tag: string) {
@@ -179,22 +211,13 @@
     }
   }
 
-  const editRuleSetUsage = $derived(
-    editIndex === null ? new Map<string, number>() : computeRuleSetUsage($rules, editIndex),
-  );
-
-  async function handleEditSave(rule: (typeof $rules)[number]) {
-    if (editIndex === null) return;
+  async function handleTextMatchersSave(rule: (typeof $rules)[number]) {
+    if (textMatchersEditIndex === null) return;
     try {
-      await api.singboxRouterUpdateRule(editIndex, rule);
-      try {
-        await syncTunnelDnsRule();
-      } catch (e) {
-        notifications.error(`DNS sync: ${e instanceof Error ? e.message : String(e)}`);
-      }
+      await api.singboxRouterUpdateRule(textMatchersEditIndex, rule);
       await singboxRouterStore.loadAll();
-      notifications.success('Правило обновлено');
-      editIndex = null;
+      notifications.success('Адреса обновлены');
+      textMatchersEditIndex = null;
     } catch (e) {
       notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -348,7 +371,7 @@
     event.preventDefault();
     event.stopPropagation();
     if (card.isSystem) return;
-    if (deleteBusy || editIndex !== null || rsEditTag !== null || deleteTarget) return;
+    if (deleteBusy || textMatchersEditIndex !== null || rsEditTag !== null || deleteTarget) return;
     if (event.button !== 0) return;
     const shell = rowElements.get(card.id);
     const handleEl = event.currentTarget as HTMLElement | null;
@@ -429,6 +452,8 @@
               index={i}
               dragging={draggingIndex === i}
               onEdit={() => requestEdit(i)}
+              onTextMatchersClick={() => requestTextMatchersEdit(i)}
+              onInlineListClick={() => requestInlineListEdit(i)}
               onRulesetClick={requestRulesetEdit}
               {knownRulesetTags}
               onDelete={() => requestDelete(i)}
@@ -453,14 +478,14 @@
   onClose={() => { if (!deleteBusy) { deleteIndex = null; deleteTarget = null; } }}
 />
 
-{#if editIndex !== null && $rules[editIndex]}
+{#if textMatchersEditIndex !== null && $rules[textMatchersEditIndex]}
   <RuleEditModal
-    rule={$rules[editIndex]}
+    rule={$rules[textMatchersEditIndex]}
     outboundOptions={$options}
     availableRuleSets={$ruleSets}
-    ruleSetUsage={editRuleSetUsage}
-    onClose={() => (editIndex = null)}
-    onSave={handleEditSave}
+    matchersOnly
+    onClose={() => (textMatchersEditIndex = null)}
+    onSave={handleTextMatchersSave}
   />
 {/if}
 

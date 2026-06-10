@@ -7,6 +7,7 @@
  */
 
 import type { RuleSetDisplayType } from '$lib/utils/ruleSetType';
+import type { RuleSimplicity } from './simpleRule';
 
 export type RuleAction = 'route' | 'block' | 'direct' | 'sniff' | 'hijack-dns';
 
@@ -76,6 +77,8 @@ export interface RuleCardData {
   outbound: OutboundDisplay;
   /** System rule (ip_is_private bypass, sniff, hijack-dns) — рендерится muted */
   isSystem: boolean;
+  /** Эвристика простого правила для beginner UI */
+  simplicity: RuleSimplicity;
   /** Пояснение при наведении (только системные правила) */
   tooltip?: string;
 }

@@ -552,6 +552,43 @@ function isValidSimpleIpv6(addr: string): boolean {
 /** Reserved for AWG-compiled inline → local .srs companion (see ruleset_materializer). */
 export const INLINE_RULE_SET_SRS_SUFFIX = '-srs';
 
+/** JSON rules → smart-list для визарда / редактора простых правил. */
+export function stringifyInlineRuleListForWizard(
+	rules: Record<string, unknown>[] | undefined,
+): string {
+	return stringifyInlineRuleList(rules);
+}
+
+const WIZARD_STRIP_INLINE_KEYS = [
+	'source_ip_cidr',
+	'port',
+	'process_name',
+	'process_path',
+	'package_name',
+	'network',
+] as const;
+
+/** Убирает поля, которые в простом режиме задаются на rule, не в списке. */
+export function stripWizardRuleOnlyFieldsFromInlineRules(
+	rules: Record<string, unknown>[],
+): Record<string, unknown>[] {
+	return rules
+		.map((r) => {
+			const next = { ...r };
+			for (const k of WIZARD_STRIP_INLINE_KEYS) delete next[k];
+			return next;
+		})
+		.filter((r) => Object.keys(r).length > 0);
+}
+
+export function collectSourceIpCidrFromInlineRules(rules: Record<string, unknown>[]): boolean {
+	return rules.some((r) => asStringArray(r['source_ip_cidr']).length > 0);
+}
+
+export function collectPortFromInlineRules(rules: Record<string, unknown>[]): boolean {
+	return rules.some((r) => asNumberArray(r['port']).length > 0);
+}
+
 /** Returns a user-facing error, or null when the tag is allowed. */
 export function validateRuleSetTag(tag: string): string | null {
 	const t = tag.trim();

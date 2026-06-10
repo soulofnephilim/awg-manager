@@ -78,7 +78,12 @@ export {
   wizardOutboundCategory,
   wizardTunnelTag,
   wizardCustom,
+  wizardEditRuleIndex,
+  wizardEditMode,
+  wizardExistingInlineRuleSetTag,
+  wizardWasInlineText,
   openAddWizard,
+  openEditWizard,
   closeAddWizard,
   setOutboundCategory,
   setTunnelTag,
@@ -90,13 +95,16 @@ export {
 export {
   resolveOutbound,
   submitWizard,
+  submitWizardEdit,
   ValidationError,
   type SubmitWizardArgs,
+  type SubmitWizardEditArgs,
 } from './addWizardActions';
 export {
   dismissTemplatesModal,
   catalogIdsFromTemplatesSelection,
   setServiceTemplateSelection,
+  setTemplateSelection,
 } from './templatesStore';
 
 // F5c — EmptyState

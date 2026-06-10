@@ -11,7 +11,8 @@
   import RuleOutboundAction from './RuleOutboundAction.svelte';
   import { Badge } from '$lib/components/ui';
   import { Edit3, GripVertical, Trash2 } from 'lucide-svelte';
-  import { outboundDisplayTitle, outboundFullLabel } from './outboundLabelFormat';
+  import { outboundDisplayTitle } from './outboundLabelFormat';
+  import { COMPLEX_RULE_EDIT_MESSAGE } from './simpleRule';
 
   interface Props {
     card: RuleCardData;
@@ -20,6 +21,8 @@
     onDelete?: () => void;
     onEdit?: () => void;
     onRulesetClick?: (tag: string) => void;
+    onTextMatchersClick?: () => void;
+    onInlineListClick?: () => void;
     knownRulesetTags?: Set<string>;
     onDragHandlePointerDown?: (event: PointerEvent) => void;
     dragging?: boolean;
@@ -30,6 +33,8 @@
     onDelete,
     onEdit,
     onRulesetClick,
+    onTextMatchersClick,
+    onInlineListClick,
     knownRulesetTags,
     onDragHandlePointerDown,
     dragging = false,
@@ -42,6 +47,8 @@
   let useServiceTile = $derived(!card.isSystem);
   let editTip = $derived(actionTooltip('edit', card, index));
   let deleteTip = $derived(actionTooltip('delete', card, index));
+  let editDisabled = $derived(!card.isSystem && !card.simplicity.simple);
+  let editDisabledTip = $derived(editDisabled ? COMPLEX_RULE_EDIT_MESSAGE : editTip);
 
   const isCompositeOutbound = $derived(
     (card.outbound.kind === 'composite' || card.outbound.kind === 'subscription')
@@ -71,21 +78,38 @@
   }
 
   function chipOnclick(chip: MatcherChipData): (() => void) | undefined {
+    const sim = card.simplicity;
+    // Развёрнутые домены/IP custom-N — тот же редактор набора, что и по бейджу inline.
+    if (sim.simple && sim.kind === 'inline-set') {
+      if ((chip.kind === 'domain' || chip.kind === 'ip') && onInlineListClick) {
+        return onInlineListClick;
+      }
+    }
+    if (sim.simple && sim.kind === 'inline-text') {
+      if ((chip.kind === 'domain' || chip.kind === 'ip') && onTextMatchersClick) {
+        return onTextMatchersClick;
+      }
+    }
     if (chip.kind === 'ruleset' && chip.rulesetTag && onRulesetClick && knownRulesetTags?.has(chip.rulesetTag)) {
       return () => onRulesetClick(chip.rulesetTag!);
-    }
-    if (chip.kind === 'domain' && onEdit) {
-      return onEdit;
     }
     return undefined;
   }
 
   function chipTitle(chip: MatcherChipData): string | undefined {
+    const sim = card.simplicity;
+    if (sim.simple && sim.kind === 'inline-set' && onInlineListClick) {
+      if (chip.kind === 'domain' || chip.kind === 'ip') {
+        return 'Редактировать набор';
+      }
+    }
+    if (sim.simple && sim.kind === 'inline-text' && onTextMatchersClick) {
+      if (chip.kind === 'domain' || chip.kind === 'ip') {
+        return 'Редактировать домены и адреса';
+      }
+    }
     if (chip.kind === 'ruleset' && chip.rulesetTag && onRulesetClick && knownRulesetTags?.has(chip.rulesetTag)) {
       return `Редактировать набор «${chip.label}»`;
-    }
-    if (chip.kind === 'domain' && onEdit) {
-      return editTip;
     }
     return undefined;
   }
@@ -163,8 +187,16 @@
     {:else if onDelete || onEdit}
       <div class="right-slot">
         {#if onEdit}
-          <span class="action-tip" data-tip={editTip}>
-            <button type="button" class="route-action-btn" onclick={onEdit} aria-label={editTip} title={editTip}>
+          <span class="action-tip" data-tip={editDisabledTip}>
+            <button
+              type="button"
+              class="route-action-btn"
+              class:is-disabled={editDisabled}
+              onclick={editDisabled ? undefined : onEdit}
+              disabled={editDisabled}
+              aria-label={editDisabledTip}
+              title={editDisabledTip}
+            >
               <Edit3 size={15} />
             </button>
           </span>
@@ -363,6 +395,14 @@
     position: relative;
     display: inline-flex;
   }
+  .route-action-btn.is-disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .route-action-btn.is-disabled:hover {
+    color: var(--text-muted);
+  }
+
   .action-tip:hover::after,
   .action-tip:focus-within::after {
     content: attr(data-tip);

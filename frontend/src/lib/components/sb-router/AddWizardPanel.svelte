@@ -22,13 +22,14 @@
   import {
     addWizardOpen,
     wizardOutboundCategory, wizardTunnelTag, wizardCustom,
+    wizardEditRuleIndex, wizardEditMode, wizardExistingInlineRuleSetTag, wizardWasInlineText,
     closeAddWizard, setOutboundCategory, setTunnelTag, resetWizardState,
   } from './addWizardStore';
   import {
-    templatesSelection, openTemplatesModal, toggleTemplate, clearSelection,
+    templatesSelection, openTemplatesModal, clearSelection,
   } from './templatesStore';
   import { buildTemplateList } from './templatesData';
-  import { submitWizard, ValidationError } from './addWizardActions';
+  import { submitWizard, submitWizardEdit, ValidationError } from './addWizardActions';
   import { isInlineRuleListEmpty } from '$lib/utils/singboxInlineRules';
   import MobileBottomBar from './MobileBottomBar.svelte';
   import { mode } from './modeStore';
@@ -66,9 +67,16 @@
 
   const groups = $derived(buildTemplateList($presets, $ruleSets, ''));
 
+  const isEditMode = $derived($wizardEditRuleIndex !== null);
+  const editMode = $derived($wizardEditMode);
+
   const hasTemplates = $derived($templatesSelection.size > 0);
   const hasCustom = $derived(!isInlineRuleListEmpty($wizardCustom.rulesList));
-  const step1Ok = $derived(hasTemplates || hasCustom);
+  const step1Ok = $derived.by(() => {
+    if (isEditMode && editMode === 'external') return hasTemplates;
+    if (isEditMode && editMode === 'inline') return hasCustom;
+    return hasTemplates || hasCustom;
+  });
   const step2Ok = $derived.by(() => {
     if ($wizardOutboundCategory === null) return false;
     if ($wizardOutboundCategory === 'tunnel') return $wizardTunnelTag !== null;
@@ -81,10 +89,45 @@
   // визард не уничтожается, поэтому локальный value формы надо сбросить вместе со стором.
   let customResetKey = $state(0);
 
+  async function syncDnsAfterSave() {
+    if (get(mode) !== 'beginner') return;
+    try {
+      const cat = get(wizardOutboundCategory);
+      const tag = get(wizardTunnelTag);
+      if (cat === 'tunnel' && tag) await ensureTunnelDnsInfra(tag);
+      await syncTunnelDnsRule();
+    } catch (e) {
+      notifications.error(`DNS: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   async function doSave(continueAfter: boolean) {
     if (!canSave) return;
     submitting = true;
     try {
+      const editIndex = get(wizardEditRuleIndex);
+      if (editIndex !== null && get(wizardEditMode)) {
+        await submitWizardEdit({
+          ruleIndex: editIndex,
+          editMode: get(wizardEditMode)!,
+          selectedTemplates: Array.from(get(templatesSelection)),
+          customFields: get(wizardCustom),
+          outboundCategory: get(wizardOutboundCategory)!,
+          tunnelTag: get(wizardTunnelTag),
+          groups,
+          presets: get(presets),
+          existingRuleSetTags: get(ruleSets).map((r) => r.tag),
+          existingInlineRuleSetTag: get(wizardExistingInlineRuleSetTag),
+          wasInlineText: get(wizardWasInlineText),
+        });
+        await syncDnsAfterSave();
+        notifications.success('Правило обновлено');
+        clearSelection();
+        closeAddWizard();
+        await singboxRouterStore.loadAll();
+        return;
+      }
+
       const result = await submitWizard({
         selectedTemplates: Array.from(get(templatesSelection)),
         customFields: get(wizardCustom),
@@ -94,16 +137,7 @@
         existingRuleSetTags: get(ruleSets).map((r) => r.tag),
       });
       if (result.failures.length === 0) {
-        if (get(mode) === 'beginner') {
-          try {
-            const cat = get(wizardOutboundCategory);
-            const tag = get(wizardTunnelTag);
-            if (cat === 'tunnel' && tag) await ensureTunnelDnsInfra(tag);
-            await syncTunnelDnsRule();
-          } catch (e) {
-            notifications.error(`DNS: ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
+        await syncDnsAfterSave();
         const created = result.successes.length;
         if (continueAfter) {
           notifications.success(`Создано ${pluralize(created, RULE_WORDS)}. Можно добавить ещё одно.`);
@@ -151,41 +185,60 @@
         <ArrowLeft size={12} /> Маршрутизация
       </button>
       <span class="bc-sep">/</span>
-      <span class="bc-current">Новое правило</span>
+      <span class="bc-current">{isEditMode ? 'Редактирование' : 'Новое правило'}</span>
     </div>
 
-    <h1 class="title">Куда направить трафик?</h1>
-    <p class="sub">Выберите сервис или опишите свой. Затем — куда его пустить.</p>
+    <h1 class="title">{isEditMode ? 'Редактировать правило' : 'Куда направить трафик?'}</h1>
+    <p class="sub">
+      {#if isEditMode && editMode === 'external'}
+        Выберите другой шаблон и куда направить трафик.
+      {:else if isEditMode}
+        Измените список и куда направить трафик.
+      {:else}
+        Выберите сервис или опишите свой. Затем — куда его пустить.
+      {/if}
+    </p>
 
     <div class="stepper">
       <StepPill n={1} label="Что направить" shortLabel="Что" active={!step1Ok} done={step1Ok} />
       <div class="connector" aria-hidden="true"></div>
       <StepPill n={2} label="Куда" shortLabel="Куда" active={step1Ok && !step2Ok} done={step1Ok && step2Ok} />
       <div class="connector" aria-hidden="true"></div>
-      <StepPill n={3} label="Превью" shortLabel="Проверка" active={step1Ok && step2Ok} done={false} />
+      <StepPill n={3} label="Предпросмотр" shortLabel="Проверка" active={step1Ok && step2Ok} done={false} />
     </div>
 
-    <WizardStep n={1} title="Что направить" hint="выберите шаблон или опишите вручную" active={true}>
-      <button type="button" class="picker-btn" onclick={() => openTemplatesModal()}>
-        <div class="picker-icon"><Plus size={20} /></div>
-        <div class="picker-text">
-          <div class="picker-title">Выбрать из готовых шаблонов</div>
-          <div class="picker-sub">
-            {#if $mode === 'beginner'}
-              {pluralize($presets.length, SERVICE_WORDS)}
-            {:else}
-              {pluralize($presets.length, SERVICE_WORDS)} · {pluralize($ruleSets.length, SET_WORDS)}
-            {/if}
+    <WizardStep
+      n={1}
+      title="Что направить"
+      hint={isEditMode && editMode === 'inline' ? 'список доменов и адресов' : 'выберите шаблон или опишите вручную'}
+      active={true}
+    >
+      {#if !isEditMode || editMode === 'external'}
+        <button type="button" class="picker-btn" onclick={() => openTemplatesModal()}>
+          <div class="picker-icon"><Plus size={20} /></div>
+          <div class="picker-text">
+            <div class="picker-title">
+              {isEditMode ? 'Заменить шаблон' : 'Выбрать из готовых шаблонов'}
+            </div>
+            <div class="picker-sub">
+              {#if $mode === 'beginner'}
+                {pluralize($presets.length, SERVICE_WORDS)}
+              {:else}
+                {pluralize($presets.length, SERVICE_WORDS)} · {pluralize($ruleSets.length, SET_WORDS)}
+              {/if}
+            </div>
           </div>
-        </div>
-        <div class="picker-chev">›</div>
-      </button>
+          <div class="picker-chev">›</div>
+        </button>
 
-      <SelectedTemplatesRow />
+        <SelectedTemplatesRow />
+      {/if}
 
-      {#key customResetKey}
-        <CustomMatcherForm />
-      {/key}
+      {#if !isEditMode || editMode === 'inline'}
+        {#key customResetKey}
+          <CustomMatcherForm expanded={isEditMode && editMode === 'inline'} />
+        {/key}
+      {/if}
     </WizardStep>
 
     <WizardStep n={2} title="Куда направить" active={step1Ok}>
@@ -239,26 +292,32 @@
       {/if}
     </WizardStep>
 
-    <WizardStep n={3} title="Превью" active={step1Ok && step2Ok}>
-      <p class="preview-hint">
-        Правила появятся в конце списка. После создания можно перетаскивать.
-      </p>
-      <div class="preview-info">
-        <Info size={14} />
-        <span>
-          {pluralize($templatesSelection.size + (hasCustom ? 1 : 0), RULE_WORDS)} будет создано.
-        </span>
-      </div>
+    <WizardStep n={3} title="Предпросмотр" active={step1Ok && step2Ok}>
+      {#if isEditMode}
+        <p class="preview-hint">Изменения применятся к текущему правилу.</p>
+      {:else}
+        <p class="preview-hint">
+          Правила появятся в конце списка. После создания можно перетаскивать.
+        </p>
+        <div class="preview-info">
+          <Info size={14} />
+          <span>
+            {pluralize($templatesSelection.size + (hasCustom ? 1 : 0), RULE_WORDS)} будет создано.
+          </span>
+        </div>
+      {/if}
     </WizardStep>
 
     <div class="actions desktop-only">
       <Button variant="ghost" size="md" onclick={closeAddWizard} disabled={submitting}>Отмена</Button>
       <div class="actions-right">
-        <Button variant="secondary" size="md" onclick={() => doSave(true)} disabled={!canSave || submitting}>
-          + Добавить ещё одно
-        </Button>
+        {#if !isEditMode}
+          <Button variant="secondary" size="md" onclick={() => doSave(true)} disabled={!canSave || submitting}>
+            + Добавить ещё одно
+          </Button>
+        {/if}
         <Button variant="primary" size="md" onclick={() => doSave(false)} disabled={!canSave || submitting} iconBefore={iconCheck}>
-          Сохранить
+          {isEditMode ? 'Сохранить изменения' : 'Сохранить'}
         </Button>
       </div>
     </div>

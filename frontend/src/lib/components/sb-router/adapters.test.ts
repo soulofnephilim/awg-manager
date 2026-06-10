@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { singboxRuleToCard, resolveOutboundDisplay, extractMatcherChips, isSystemRule, systemRuleTooltip } from './adapters';
+import {
+  singboxRuleToCard,
+  resolveOutboundDisplay,
+  extractMatcherChips,
+  extractMatchersForCard,
+  firstDomainFromInlineRules,
+  isSystemRule,
+  systemRuleTooltip,
+} from './adapters';
+import { classifyRuleSimplicity } from './simpleRule';
 import type { SingboxRouterRule, SingboxRouterOutbound, CatalogPreset } from '$lib/types';
 import type { OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
 
@@ -258,6 +267,109 @@ describe('extractMatcherChips', () => {
   });
 });
 
+describe('firstDomainFromInlineRules', () => {
+  it('returns first domain_suffix', () => {
+    expect(
+      firstDomainFromInlineRules([{ domain_suffix: ['youtube.com', 'ytimg.com'] }]),
+    ).toBe('youtube.com');
+  });
+
+  it('falls back to domain field', () => {
+    expect(firstDomainFromInlineRules([{ domain: ['exact.example.com'] }])).toBe('exact.example.com');
+  });
+
+  it('suffix before domain in later record', () => {
+    expect(
+      firstDomainFromInlineRules([
+        { ip_cidr: ['1.1.1.1/32'] },
+        { domain_suffix: ['first.com'] },
+      ]),
+    ).toBe('first.com');
+  });
+
+  it('undefined for empty / missing', () => {
+    expect(firstDomainFromInlineRules(undefined)).toBeUndefined();
+    expect(firstDomainFromInlineRules([])).toBeUndefined();
+    expect(firstDomainFromInlineRules([{ ip_cidr: ['10.0.0.0/8'] }])).toBeUndefined();
+  });
+
+  it('trims whitespace', () => {
+    expect(firstDomainFromInlineRules([{ domain_suffix: ['  spaced.com  '] }])).toBe('spaced.com');
+  });
+});
+
+describe('extractMatchersForCard', () => {
+  const ruleSets = [
+    { tag: 'custom-1', type: 'inline' as const, rules: [{ domain_suffix: ['a.com', 'b.com'] }] },
+    { tag: 'neo-demo', type: 'inline' as const, rules: [{ domain_suffix: ['hidden.com'] }] },
+  ];
+
+  it('expands custom-N inline to domain chips', () => {
+    const rule = { rule_set: ['custom-1'], outbound: 'warp' };
+    const sim = classifyRuleSimplicity(rule, ruleSets);
+    const chips = extractMatchersForCard(rule, sim, {}, ruleSets);
+    expect(chips).toEqual([
+      { kind: 'domain', label: 'a.com' },
+      { kind: 'domain', label: 'b.com' },
+    ]);
+  });
+
+  it('named inline shows ruleset chip', () => {
+    const rule = { rule_set: ['neo-demo'], outbound: 'warp' };
+    const sim = classifyRuleSimplicity(rule, ruleSets);
+    const chips = extractMatchersForCard(rule, sim, { 'neo-demo': 'neo-demo' }, ruleSets);
+    expect(chips).toHaveLength(1);
+    expect(chips[0].kind).toBe('ruleset');
+    expect(chips[0].label).toBe('neo-demo');
+  });
+
+  it('inline-text shows domain and ip chips', () => {
+    const rule = { domain_suffix: ['x.com'], ip_cidr: ['10.0.0.0/8'], outbound: 'direct' };
+    const sim = classifyRuleSimplicity(rule, ruleSets);
+    const chips = extractMatchersForCard(rule, sim, {}, ruleSets);
+    expect(chips).toEqual([
+      { kind: 'domain', label: 'x.com' },
+      { kind: 'ip', label: '10.0.0.0/8', mono: true },
+    ]);
+  });
+
+  it('custom-N: только IP в наборе', () => {
+    const rs = [{ tag: 'custom-2', type: 'inline' as const, rules: [{ ip_cidr: ['1.1.1.1/32'] }] }];
+    const rule = { rule_set: ['custom-2'], outbound: 'warp' };
+    const sim = classifyRuleSimplicity(rule, rs);
+    const chips = extractMatchersForCard(rule, sim, {}, rs);
+    expect(chips).toEqual([{ kind: 'ip', label: '1.1.1.1', mono: true }]);
+  });
+
+  it('custom-N: пустой набор → ruleset chip', () => {
+    const rs = [{ tag: 'custom-3', type: 'inline' as const, rules: [] }];
+    const rule = { rule_set: ['custom-3'], outbound: 'warp' };
+    const sim = classifyRuleSimplicity(rule, rs);
+    const chips = extractMatchersForCard(rule, sim, { 'custom-3': 'custom-3' }, rs);
+    expect(chips).toHaveLength(1);
+    expect(chips[0].kind).toBe('ruleset');
+  });
+
+  it('external simple → ruleset chip', () => {
+    const rs = [
+      { tag: 'geosite-discord', type: 'remote' as const, url: 'https://x/discord.srs' },
+    ];
+    const rule = { rule_set: ['geosite-discord'], outbound: 'warp' };
+    const sim = classifyRuleSimplicity(rule, rs);
+    const chips = extractMatchersForCard(rule, sim, {}, rs);
+    expect(chips[0].kind).toBe('ruleset');
+    expect(chips[0].rulesetType).toBe('remote');
+  });
+
+  it('complex → все матчеры rule', () => {
+    const rule = { domain_suffix: ['x.com'], port: [443], outbound: 'warp' };
+    const sim = classifyRuleSimplicity(rule, ruleSets);
+    expect(sim.simple).toBe(false);
+    const chips = extractMatchersForCard(rule, sim, {}, ruleSets);
+    expect(chips.some((c) => c.kind === 'port')).toBe(true);
+  });
+});
+
 describe('singboxRuleToCard', () => {
   it('produces a netflix card', () => {
     const card = singboxRuleToCard(
@@ -364,6 +476,133 @@ describe('singboxRuleToCard', () => {
     expect(card.title).toBe('Локальная сеть');
     expect(card.subtitle).toBe('RFC1918 · loopback · link-local · CGNAT');
     expect(card.tooltip).toMatch(/LAN/);
+  });
+
+  it('custom-N inline uses first domain as title and catalog icon', () => {
+    const card = singboxRuleToCard(
+      { rule_set: ['custom-1'], outbound: 'warp' },
+      0,
+      [{ tag: 'warp', type: 'wireguard' } as unknown as SingboxRouterOutbound],
+      {},
+      [],
+      [],
+      catalog,
+      [{ tag: 'custom-1', type: 'inline', rules: [{ domain_suffix: ['netflix.com', 'nflxext.com'] }] }],
+    );
+    expect(card.title).toBe('netflix.com');
+    expect(card.serviceKey).toBe('netflix');
+    expect(card.matchers).toHaveLength(2);
+    expect(card.simplicity).toEqual({
+      simple: true,
+      kind: 'inline-set',
+      inlineRuleSetTag: 'custom-1',
+    });
+  });
+
+  it('custom-N без домена: title = tag, icon custom', () => {
+    const card = singboxRuleToCard(
+      { rule_set: ['custom-1'], outbound: 'warp' },
+      0,
+      [],
+      {},
+      [],
+      [],
+      [],
+      [{ tag: 'custom-1', type: 'inline', rules: [{ ip_cidr: ['10.0.0.0/8'] }] }],
+    );
+    expect(card.title).toBe('custom-1');
+    expect(card.serviceKey).toBe('custom');
+    expect(card.matchers[0].kind).toBe('ip');
+  });
+
+  it('custom-N неизвестный домен: title домен, icon custom', () => {
+    const card = singboxRuleToCard(
+      { rule_set: ['custom-1'], outbound: 'direct' },
+      0,
+      [],
+      {},
+      [],
+      [],
+      catalog,
+      [{ tag: 'custom-1', type: 'inline', rules: [{ domain_suffix: ['unknown-service.xyz'] }] }],
+    );
+    expect(card.title).toBe('unknown-service.xyz');
+    expect(card.serviceKey).toBe('custom');
+  });
+
+  it('inline-text: simplicity + matchers', () => {
+    const card = singboxRuleToCard(
+      { domain_suffix: ['foo.com'], ip_cidr: ['192.168.0.0/16'], outbound: 'direct' },
+      0,
+      [],
+      {},
+    );
+    expect(card.simplicity).toEqual({ simple: true, kind: 'inline-text' });
+    expect(card.matchers).toHaveLength(2);
+    expect(card.title).toBe('foo.com');
+  });
+
+  it('complex rule: simplicity false', () => {
+    const card = singboxRuleToCard(
+      { domain_suffix: ['foo.com'], port: [443], outbound: 'warp' },
+      0,
+      [],
+      {},
+    );
+    expect(card.simplicity).toEqual({ simple: false });
+  });
+
+  it('external simple: simplicity + preset title', () => {
+    const presets = [{
+      id: 'discord',
+      name: 'Discord',
+      iconSlug: 'discord',
+      ruleSets: [{ tag: 'geosite-discord', url: 'https://x/discord.srs' }],
+      rules: [{ ruleSetRef: 'geosite-discord', actionTarget: 'tunnel' as const }],
+    }];
+    const card = singboxRuleToCard(
+      { rule_set: ['geosite-discord'], outbound: 'warp' },
+      0,
+      [],
+      {},
+      presets,
+      [],
+      catalog,
+      [{ tag: 'geosite-discord', type: 'remote', url: 'https://x/discord.srs' }],
+    );
+    expect(card.simplicity).toEqual({
+      simple: true,
+      kind: 'external',
+      externalRuleSetTag: 'geosite-discord',
+    });
+    expect(card.serviceKey).toBe('discord');
+    expect(card.title).toBe('Discord');
+  });
+
+  it('subtitle при >4 матчерах', () => {
+    const domains = ['a.com', 'b.com', 'c.com', 'd.com', 'e.com'];
+    const card = singboxRuleToCard(
+      { domain_suffix: domains, outbound: 'direct' },
+      0,
+      [],
+      {},
+    );
+    expect(card.subtitle).toBe('5 матчеров');
+  });
+
+  it('named inline-set: title от preset ruleset, не первый домен', () => {
+    const card = singboxRuleToCard(
+      { rule_set: ['neo-demo'], outbound: 'warp' },
+      0,
+      [],
+      {},
+      [],
+      [],
+      catalog,
+      [{ tag: 'neo-demo', type: 'inline', rules: [{ domain_suffix: ['hidden.com'] }] }],
+    );
+    expect(card.title).toBe('neo-demo');
+    expect(card.matchers[0].kind).toBe('ruleset');
   });
 
   it('resolves icon and title from geosite rule_set via router presets', () => {
