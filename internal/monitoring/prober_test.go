@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hoaxisr/awg-manager/internal/sys/exec"
+	"github.com/hoaxisr/awg-manager/internal/icmpprobe"
 	"github.com/hoaxisr/awg-manager/internal/sys/httpclient"
 )
 
@@ -105,55 +105,24 @@ func TestHTTPProber_ParseLatency(t *testing.T) {
 	}
 }
 
-// runnerStub is retained for ICMPProber tests.
-type runnerStub struct {
-	stdout   string
-	exitCode int
-	err      error
-}
-
-func (s runnerStub) Run(_ context.Context, _ string, _ ...string) (*exec.Result, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return &exec.Result{Stdout: s.stdout, ExitCode: s.exitCode}, nil
-}
-
-// ICMPProber parses `time=NN.N ms` from busybox ping output.
-func TestICMPProber_ParseLatency(t *testing.T) {
+// ICMPProber maps icmpprobe results to (latency, ok).
+func TestICMPProber_Probe(t *testing.T) {
 	cases := []struct {
-		name     string
-		stdout   string
-		exitCode int
-		err      error
-		wantOK   bool
-		wantMs   int
+		name   string
+		res    icmpprobe.Result
+		err    error
+		wantOK bool
+		wantMs int
 	}{
-		{
-			name:     "stdout with time=14.2 ms",
-			stdout:   "PING 1.1.1.1\n64 bytes from 1.1.1.1: time=14.2 ms",
-			exitCode: 0,
-			wantOK:   true,
-			wantMs:   14,
-		},
-		{
-			name:     "exit code != 0 means failure",
-			stdout:   "request timeout",
-			exitCode: 1,
-			wantOK:   false,
-		},
-		{
-			name:     "exit 0 without timing — floor latency 1ms",
-			stdout:   "PING 8.8.8.8\n64 bytes from 8.8.8.8",
-			exitCode: 0,
-			wantOK:   true,
-			wantMs:   1,
-		},
+		{name: "success", res: icmpprobe.Result{LatencyMs: 14}, wantOK: true, wantMs: 14},
+		{name: "probe error means failure", err: errors.New("no reply"), wantOK: false},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			p := &ICMPProber{Runner: runnerStub{stdout: c.stdout, exitCode: c.exitCode, err: c.err}}
+			p := &ICMPProber{Pinger: func(context.Context, string, string, []string) (icmpprobe.Result, error) {
+				return c.res, c.err
+			}}
 			ms, ok := p.Probe(context.Background(), "1.1.1.1", "wg0", 5*time.Second)
 			if ok != c.wantOK {
 				t.Errorf("ok = %v, want %v", ok, c.wantOK)
