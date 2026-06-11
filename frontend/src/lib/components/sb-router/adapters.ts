@@ -20,6 +20,7 @@ import type {
   SingboxTunnel,
   Subscription,
 } from '$lib/types';
+import { hashString } from '$lib/utils/letter-icon-color';
 import type { OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
 import type {
   MatcherChip,
@@ -355,14 +356,9 @@ function systemSubtitle(rule: SingboxRouterRule): string | undefined {
 /* ─── Stable id ─────────────────────────────────────────────────────── */
 
 function ruleId(rule: SingboxRouterRule, index: number): string {
-  const sig = [
-    rule.domain_suffix?.[0],
-    rule.ip_cidr?.[0],
-    rule.rule_set?.[0],
-    rule.protocol,
-    rule.ip_is_private ? 'priv' : null,
-  ].filter(Boolean).join('|');
-  return `${index}:${rule.outbound ?? 'no-ob'}:${sig || 'empty'}`;
+  const payload = JSON.stringify(rule);
+  if (!payload || payload === '{}') return `rule:idx-${index}`;
+  return `rule:${hashString(payload)}`;
 }
 
 /* ─── Main adapter ──────────────────────────────────────────────────── */
