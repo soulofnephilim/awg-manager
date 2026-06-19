@@ -303,8 +303,10 @@
 	}
 
 	function canUpdate(f: GeoFileEntry): boolean {
+		// external — управляется HR Neo; «локальный» (без url) обновлять неоткуда
+		// (нет источника), иначе «Обновить» затёр бы файл дефолтным Ground-Zerro.
 		if (f.external) return false;
-		return !!(f.url || f.type === 'geoip' || f.type === 'geosite');
+		return !!f.url;
 	}
 
 	async function confirmRemove() {
