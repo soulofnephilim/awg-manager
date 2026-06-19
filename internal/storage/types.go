@@ -18,6 +18,7 @@ type Settings struct {
 	Updates              UpdateSettings    `json:"updates"`
 	Download             DownloadSettings  `json:"download"`
 	DNSRoute             DNSRouteSettings  `json:"dnsRoute"`
+	GeoFile              GeoFileSettings   `json:"geoFile"`
 	ConnectivityCheckURL string            `json:"connectivityCheckUrl"`
 	UsageLevel           string            `json:"usageLevel"`
 	ServerInterfaces     []string          `json:"serverInterfaces,omitempty"`
@@ -210,6 +211,16 @@ type DNSRouteSettings struct {
 	RefreshIntervalHours int    `json:"refreshIntervalHours"`       // default: 0 (user must choose)
 	RefreshMode          string `json:"refreshMode,omitempty"`      // "interval" (default/empty) or "daily"
 	RefreshDailyTime     string `json:"refreshDailyTime,omitempty"` // "HH:MM" 24h format, e.g. "03:00"
+}
+
+// GeoFileSettings contains geo-file (geoip/geosite) auto-refresh configuration.
+// Mirrors DNSRouteSettings. The download route is NOT stored here — background
+// refresh reuses the global Download route via downloader.ResolveClient(ctx, nil).
+type GeoFileSettings struct {
+	AutoRefreshEnabled   bool   `json:"autoRefreshEnabled"`         // default: false
+	RefreshIntervalHours int    `json:"refreshIntervalHours"`       // default: 0 (user chooses)
+	RefreshMode          string `json:"refreshMode,omitempty"`      // "interval" (default) or "daily"
+	RefreshDailyTime     string `json:"refreshDailyTime,omitempty"` // "HH:MM" 24h, e.g. "03:00"
 }
 
 // ConnectivityCheckConfig holds per-tunnel connectivity check settings.
