@@ -76,14 +76,18 @@
 {#if settings}
 	<div class="geo-settings">
 		<HrNeoGeoRefreshSettings value={settings.geoFile} saving={saving} onToggle={toggleAutoRefresh} onSave={saveGeo} />
-		<Button variant="secondary" size="sm" onclick={updateAllNow} loading={updatingAll}>
-			Запустить обновление сейчас
-		</Button>
 	</div>
 {/if}
+
+<div class="geo-actions">
+	<Button variant="secondary" size="sm" onclick={updateAllNow} loading={updatingAll}>
+		Запустить обновление сейчас
+	</Button>
+</div>
 
 <HrNeoGeoDataView files={geoFiles} onrefresh={loadGeoFiles} />
 
 <style>
 	.geo-settings { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1rem; }
+	.geo-actions { margin-bottom: 1rem; }
 </style>

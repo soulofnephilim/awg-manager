@@ -51,6 +51,15 @@ func (s *GeoRefreshScheduler) Stop() {
 
 func (s *GeoRefreshScheduler) run() {
 	defer close(s.done)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-s.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	select {
 	case <-time.After(geoSchedulerInitialDelay):
 	case <-s.stop:
@@ -58,7 +67,7 @@ func (s *GeoRefreshScheduler) run() {
 	}
 	for {
 		if s.shouldRefresh() {
-			s.doRefresh()
+			s.doRefresh(ctx)
 			s.lastRefresh = time.Now()
 		}
 		select {
@@ -111,8 +120,8 @@ func (s *GeoRefreshScheduler) shouldRefreshDaily(targetTime string) bool {
 	return true
 }
 
-func (s *GeoRefreshScheduler) doRefresh() {
-	ctx, cancel := context.WithTimeout(context.Background(), geoRefreshTimeout)
+func (s *GeoRefreshScheduler) doRefresh(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, geoRefreshTimeout)
 	defer cancel()
 
 	gds := s.svc.GetGeoData()
