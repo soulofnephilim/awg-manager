@@ -1859,18 +1859,17 @@ func (o *Operator) AddTunnels(ctx context.Context, linksText string) ([]TunnelIn
 				existingFps[fp] = p.Tag // защита от повтора внутри одного batch
 			}
 		}
-		var freeIdx int
-		if ndmsProxyEnabled {
-			var idxErr error
-			freeIdx, idxErr = o.proxyMgr.NextFreeIndex(ctx, reserved)
-			if idxErr != nil {
-				parseErrs = append(parseErrs, BatchError{Input: p.Tag, Err: fmt.Errorf("allocate proxy slot: %w", idxErr)})
-				continue
+		alloc := func() (int, error) {
+			if ndmsProxyEnabled {
+				return o.proxyMgr.NextFreeIndex(ctx, reserved)
 			}
-		} else {
-			freeIdx = nextFreeListenPortSlot(cfg, reserved)
+			return nextFreeListenPortSlot(cfg, reserved), nil
 		}
-		listenPort := firstPort + freeIdx
+		freeIdx, listenPort, allocErr := allocBindableSlot(reserved, alloc)
+		if allocErr != nil {
+			parseErrs = append(parseErrs, BatchError{Input: p.Tag, Err: fmt.Errorf("allocate listen port: %w", allocErr)})
+			continue
+		}
 		tag := allocUniqueTunnelTag(tagOccupied, p.Tag)
 		outbound, jerr := outboundJSONWithTag(p.Outbound, tag)
 		if jerr != nil {
