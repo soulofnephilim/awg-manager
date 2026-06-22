@@ -1116,8 +1116,9 @@ func main() {
 		SubscriptionComposites: router.NewSubscriptionCompositesAdapter(subAdapter),
 		Orch:                   sbOrch,
 		WANInterfaces:          &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces},
-		BindableInterfaces:     &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces},
+		BindableInterfaces:     &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces, nativeProxies: singboxOp.ListNativeProxies},
 		IngressResolver:        &routerIngressResolverAdapter{store: ndmsQueries.Interfaces},
+		NativeProxies:          singboxOp,
 		PresetCatalog:          presetCatalog,
 		GeoData:                geoDataStore,
 	})

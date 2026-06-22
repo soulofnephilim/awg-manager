@@ -2171,6 +2171,32 @@ func (o *Operator) removeOrphanSingboxProxies(ctx context.Context) error {
 	return o.proxyMgr.RemoveOrphanSingboxProxies(ctx, tunnelTags, portSlots, subProxyIdx)
 }
 
+// ListNativeProxies returns kernel names of KeenOS-native (non-ours) NDMS
+// Proxy interfaces — bind targets for router direct outbounds (#323). Assembles
+// the same ownership sets as removeOrphanSingboxProxies and delegates.
+func (o *Operator) ListNativeProxies(ctx context.Context) ([]string, error) {
+	cfg, err := o.loadConfig()
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	tunnelTags := map[string]bool{}
+	portSlots := map[int]bool{}
+	if cfg != nil {
+		for _, t := range cfg.Tunnels() {
+			tunnelTags[t.Tag] = true
+			slot := t.ListenPort - firstPort
+			if slot >= 0 {
+				portSlots[slot] = true
+			}
+		}
+	}
+	subProxyIdx := map[int]bool{}
+	for _, sp := range o.subscriptionProxies() {
+		subProxyIdx[sp.Index] = true
+	}
+	return o.proxyMgr.ListNativeProxies(ctx, tunnelTags, portSlots, subProxyIdx)
+}
+
 // Reconcile: ensure process is running if config has tunnels; ensure Proxies are up.
 // Honours the sticky-stop intent — when the user pressed Stop, watchdog/Reconcile
 // must not bring sing-box back up. Cleared only by Control("start"/"restart").

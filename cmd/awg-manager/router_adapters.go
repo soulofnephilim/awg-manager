@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/accesspolicy"
+	"github.com/hoaxisr/awg-manager/internal/ndms"
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
@@ -129,6 +130,10 @@ var _ router.BindableInterfaceLister = (*routerWANInterfaceAdapter)(nil)
 // projection lives in main alongside the other router adapters.
 type routerWANInterfaceAdapter struct {
 	store *ndmsquery.InterfaceStore
+	// nativeProxies returns kernel names of KeenOS-native (non-ours) proxy
+	// interfaces. Only set on the bindable-interfaces instance; nil on the
+	// WAN instance. Used by ListBindable to surface native SOCKS proxies (#323).
+	nativeProxies func(context.Context) ([]string, error)
 }
 
 func (a *routerWANInterfaceAdapter) ListWAN(ctx context.Context) ([]router.WANInterfaceInfo, error) {
@@ -167,14 +172,40 @@ func (a *routerIngressResolverAdapter) Resolve(ctx context.Context, ref string) 
 	return a.store.ResolveSystemName(ctx, strings.TrimPrefix(ref, prefix))
 }
 
+// ListBindable returns router interfaces a user can bind a direct outbound to:
+// egress-capable (security-level "public"), minus our own auto-managed
+// interfaces — except KeenOS-native proxies (kernel t2sN whose NDMS ProxyN is
+// not ours), which are rescued from the auto-managed exclusion (#323).
 func (a *routerWANInterfaceAdapter) ListBindable(ctx context.Context) ([]router.WANInterfaceInfo, error) {
 	ifaces, err := a.store.ListAll(ctx)
 	if err != nil {
 		return nil, err
 	}
+	// On lookup error, leave native empty (fail-safe: don't offer a proxy we
+	// can't prove is non-ours, avoiding a routing loop through our own t2s).
+	native := map[string]bool{}
+	if a.nativeProxies != nil {
+		if names, e := a.nativeProxies(ctx); e == nil {
+			for _, n := range names {
+				native[n] = true
+			}
+		}
+	}
+	return filterBindable(ifaces, native), nil
+}
+
+// filterBindable keeps egress interfaces (security-level "public") minus our
+// own auto-managed ones, rescuing KeenOS-native proxies in the native set.
+func filterBindable(ifaces []ndms.AllInterface, native map[string]bool) []router.WANInterfaceInfo {
 	out := make([]router.WANInterfaceInfo, 0, len(ifaces))
 	for _, iface := range ifaces {
-		if router.IsAutoManagedIface(iface.Name) {
+		// Egress only: drops LAN bridges, Wi-Fi APs, switch ports, LAN VLANs.
+		if iface.SecurityLevel != "public" {
+			continue
+		}
+		// Our own auto-managed interfaces already have outbounds; exclude them
+		// unless this is a native proxy we explicitly rescue.
+		if router.IsAutoManagedIface(iface.Name) && !native[iface.Name] {
 			continue
 		}
 		out = append(out, router.WANInterfaceInfo{
@@ -184,5 +215,5 @@ func (a *routerWANInterfaceAdapter) ListBindable(ctx context.Context) ([]router.
 			Type:  iface.Type,
 		})
 	}
-	return out, nil
+	return out
 }

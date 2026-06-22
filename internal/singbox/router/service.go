@@ -171,6 +171,14 @@ type IngressResolver interface {
 	Resolve(ctx context.Context, ref string) string
 }
 
+// NativeProxyLister returns kernel names of KeenOS-native (non-ours) NDMS
+// Proxy interfaces — bind targets that must survive stripAutoManagedDirect
+// even though their kernel name matches the auto-managed "t2s"/"proxy" prefix
+// (#323). Optional dep; nil = no native proxies (legacy strip behavior).
+type NativeProxyLister interface {
+	ListNativeProxies(ctx context.Context) ([]string, error)
+}
+
 // PolicyInfo is the public projection of one NDMS access policy that
 // the router UI consumes for the policy selector.
 type PolicyInfo struct {
@@ -270,6 +278,10 @@ type Deps struct {
 	// kernel-имена на сборке спека. Optional — nil → managed:-ref'ы
 	// пропускаются (iface:-ref'ы резолвятся без него).
 	IngressResolver IngressResolver
+	// NativeProxies lists KeenOS-native proxy interfaces a user may bind a
+	// direct outbound to; Enable consults it so stripAutoManagedDirect keeps
+	// those outbounds. Optional — nil = legacy strip (#323).
+	NativeProxies NativeProxyLister
 	// NetfilterPreflight is an optional override for the module-load /
 	// target-availability check that Enable and reconcileInstalled both
 	// call before every Install. When nil, prepareNetfilter runs the
@@ -692,9 +704,10 @@ func (s *ServiceImpl) Enable(ctx context.Context) error {
 		return err
 	}
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, sr.UDPTimeout)
-	// nativeProxies is wired in a later step (provider over proxyIsOurs); nil
-	// here preserves legacy behavior until then — see #323 design.
-	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds, nil)
+	// Keep user direct outbounds bound to KeenOS-native proxies (#323). On a
+	// lookup error fall back to legacy strip (fail-safe: a native outbound may
+	// be dropped, but our own t2s is never offered as a loop).
+	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds, s.nativeProxySet(ctx))
 	cfg.EnsureSystemRules(sr.SnifferEnabled)
 	// Settings was already loaded above; revalidate here in case the
 	// store is corrupted or hand-edited around a schema migration. We
@@ -831,6 +844,25 @@ func filterTProxyInbound(in []Inbound) []Inbound {
 		}
 	}
 	return out
+}
+
+// nativeProxySet returns kernel names of KeenOS-native proxy interfaces as a
+// set, for stripAutoManagedDirect. Nil dep or lookup error → nil (legacy
+// strip), which is the fail-safe direction (#323).
+func (s *ServiceImpl) nativeProxySet(ctx context.Context) map[string]bool {
+	if s.deps.NativeProxies == nil {
+		return nil
+	}
+	names, err := s.deps.NativeProxies.ListNativeProxies(ctx)
+	if err != nil {
+		s.appLog.Warn("native-proxies", "", err.Error())
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	return set
 }
 
 // healTProxyInbound checks the persisted router config and re-adds the
