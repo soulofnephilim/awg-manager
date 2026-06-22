@@ -9,6 +9,7 @@
 		DEFAULT_SUBSCRIPTION_URLTEST,
 		type SubscriptionMode,
 	} from '$lib/types';
+	import { Check, LayoutGrid, Link, Globe } from 'lucide-svelte';
 	import HeadersTextarea from './HeadersTextarea.svelte';
 	import ShareLinksTextarea from './ShareLinksTextarea.svelte';
 	import { DEFAULT_PRESET, parseHeadersText } from './headersParser';
@@ -234,10 +235,7 @@
 		<p class="lead">Что добавить?</p>
 		<div class="kind-grid">
 			<button type="button" class="kind-card" onclick={() => (kind = 'single')}>
-				<svg class="kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07L11 5" />
-					<path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07L13 19" />
-				</svg>
+				<Link size={28} strokeWidth={1.6} style="color: var(--color-primary, #3b82f6)" aria-hidden="true" />
 				<div class="kind-title">Один сервер</div>
 				<div class="kind-desc">
 					Вставь одну или несколько share-link'ов — каждая станет
@@ -245,12 +243,7 @@
 				</div>
 			</button>
 			<button type="button" class="kind-card" onclick={() => (kind = 'inline')}>
-				<svg class="kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<rect x="3" y="3" width="7" height="7" rx="1" />
-					<rect x="14" y="3" width="7" height="7" rx="1" />
-					<rect x="3" y="14" width="7" height="7" rx="1" />
-					<rect x="14" y="14" width="7" height="7" rx="1" />
-				</svg>
+				<LayoutGrid size={28} strokeWidth={1.6} style="color: var(--color-primary, #3b82f6)" aria-hidden="true" />
 				<div class="kind-title">Группа серверов</div>
 				<div class="kind-desc">
 					Несколько ссылок становятся одной группой с общим Proxy.
@@ -258,11 +251,7 @@
 				</div>
 			</button>
 			<button type="button" class="kind-card" onclick={() => (kind = 'url')}>
-				<svg class="kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<circle cx="12" cy="12" r="10" />
-					<line x1="2" y1="12" x2="22" y2="12" />
-					<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-				</svg>
+				<Globe size={28} strokeWidth={1.6} style="color: var(--color-primary, #3b82f6)" aria-hidden="true" />
 				<div class="kind-title">Подписка по URL</div>
 				<div class="kind-desc">
 					Адрес подписки провайдера. Список серверов обновляется
@@ -377,7 +366,7 @@
 						</div>
 						{#if mode === 'selector'}
 							<span class="mode-check" aria-hidden="true">
-								<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12" /></svg>
+								<Check size={12} strokeWidth={3} aria-hidden="true" />
 							</span>
 						{/if}
 					</button>
@@ -395,7 +384,7 @@
 						</div>
 						{#if mode === 'urltest'}
 							<span class="mode-check" aria-hidden="true">
-								<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12" /></svg>
+								<Check size={12} strokeWidth={3} aria-hidden="true" />
 							</span>
 						{/if}
 					</button>
@@ -502,7 +491,7 @@
 		outline: 2px solid var(--color-primary, #3b82f6);
 		outline-offset: 2px;
 	}
-	.kind-icon { width: 28px; height: 28px; color: var(--color-primary, #3b82f6); }
+
 	.kind-title { font-weight: 500; font-size: 0.92rem; }
 	.kind-desc { color: var(--color-text-muted); font-size: 0.78rem; line-height: 1.4; }
 
@@ -574,7 +563,7 @@
 		justify-content: center;
 		color: var(--color-primary, #3b82f6);
 	}
-	.mode-check svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 3; }
+
 	.urltest-block {
 		display: flex;
 		flex-direction: column;
