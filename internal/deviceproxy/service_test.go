@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/events"
 )
@@ -697,4 +698,31 @@ func TestService_BuildSpec_RouterOutboundsBecomeSelectorMembers(t *testing.T) {
 	if !found {
 		t.Fatalf("expected grp-eu in SBTags, got %v", spec.SBTags)
 	}
+}
+
+func TestService_SubscribeBus_RouterOutboundsTriggersReconcile(t *testing.T) {
+	sb := &fakeSingboxOperator{running: true}
+	ndms := &fakeNDMSQuery{addr: "10.10.10.1"}
+	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
+	_ = store.Save(Config{
+		Enabled:          true,
+		ListenAll:        true,
+		Port:             1099,
+		SelectedOutbound: "router-ghost", // нет ни в одном каталоге
+	})
+	bus := events.NewBus()
+	s := NewService(Deps{Store: store, Singbox: sb, NDMSQuery: ndms, Bus: bus})
+	unsub := s.SubscribeBus(context.Background())
+	defer unsub()
+
+	bus.Publish("singbox-router:outbounds", nil)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !store.Get().Enabled {
+			return // reconcile отработал и отключил висячий инстанс
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("reconcile не сработал на событие singbox-router:outbounds")
 }

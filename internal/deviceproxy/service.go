@@ -1007,7 +1007,9 @@ func (s *Service) SubscribeBus(ctx context.Context) func() {
 	_, ch, unsub := s.d.Bus.Subscribe()
 	go func() {
 		for ev := range ch {
-			if ev.Type != "resource:invalidated" && ev.Type != "singbox:tunnels-changed" {
+			if ev.Type != "resource:invalidated" &&
+				ev.Type != "singbox:tunnels-changed" &&
+				ev.Type != "singbox-router:outbounds" {
 				continue
 			}
 			if ev.Type == "resource:invalidated" {
