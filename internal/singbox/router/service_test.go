@@ -142,6 +142,37 @@ func newTestService(_ *testing.T, deps Deps) *ServiceImpl {
 	return &ServiceImpl{deps: deps}
 }
 
+type fakeNativeProxyLister struct {
+	names []string
+	err   error
+}
+
+func (f fakeNativeProxyLister) ListNativeProxies(_ context.Context) ([]string, error) {
+	return f.names, f.err
+}
+
+func TestNativeProxySet(t *testing.T) {
+	ctx := context.Background()
+
+	// nil dep → nil (legacy strip behavior).
+	if got := newTestService(t, Deps{}).nativeProxySet(ctx); got != nil {
+		t.Errorf("nil dep: want nil, got %v", got)
+	}
+
+	// lookup error → nil (fail-safe; appLog is nil but Warn is nil-safe).
+	errSvc := newTestService(t, Deps{NativeProxies: fakeNativeProxyLister{err: errors.New("boom")}})
+	if got := errSvc.nativeProxySet(ctx); got != nil {
+		t.Errorf("error: want nil, got %v", got)
+	}
+
+	// success → set of kernel names.
+	okSvc := newTestService(t, Deps{NativeProxies: fakeNativeProxyLister{names: []string{"t2s0", "t2s3"}}})
+	got := okSvc.nativeProxySet(ctx)
+	if len(got) != 2 || !got["t2s0"] || !got["t2s3"] {
+		t.Errorf("success: want {t2s0,t2s3}, got %v", got)
+	}
+}
+
 // stubListeningProbe overrides the singboxListeningProbe seam for the test
 // duration so waitForSingbox/GetStatus don't read the real procfs.
 func stubListeningProbe(t *testing.T, fn func() bool) {
