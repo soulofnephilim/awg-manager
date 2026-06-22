@@ -638,3 +638,63 @@ func TestService_DeleteInstance_Default_PersistsWhenApplyFails(t *testing.T) {
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+type fakeRouterOutboundsCatalog struct {
+	items []RouterOutboundInfo
+}
+
+func (f *fakeRouterOutboundsCatalog) ListDeviceProxyRouterOutbounds() []RouterOutboundInfo {
+	return append([]RouterOutboundInfo(nil), f.items...)
+}
+
+func TestService_ListOutbounds_IncludesRouterOutbounds(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
+	cat := &fakeRouterOutboundsCatalog{items: []RouterOutboundInfo{
+		{Tag: "grp-eu", Label: "grp-eu", Detail: "selector · 3"},
+	}}
+	s := NewService(Deps{Store: store})
+	s.SetRouterOutbounds(cat)
+
+	out := s.ListOutbounds(context.Background())
+
+	var found *Outbound
+	for i := range out {
+		if out[i].Tag == "grp-eu" {
+			found = &out[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("router outbound grp-eu not listed")
+	}
+	if found.Kind != "router" {
+		t.Fatalf("expected kind=router, got %q", found.Kind)
+	}
+	if found.Detail != "selector · 3" {
+		t.Fatalf("expected detail passthrough, got %q", found.Detail)
+	}
+}
+
+func TestService_BuildSpec_RouterOutboundsBecomeSelectorMembers(t *testing.T) {
+	sb := &fakeSingboxOperator{running: true}
+	ndms := &fakeNDMSQuery{addr: "10.10.10.1"}
+	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
+	cat := &fakeRouterOutboundsCatalog{items: []RouterOutboundInfo{
+		{Tag: "grp-eu", Label: "grp-eu", Detail: "selector · 3"},
+	}}
+	s := NewService(Deps{Store: store, Singbox: sb, NDMSQuery: ndms})
+	s.SetRouterOutbounds(cat)
+
+	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099})
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	found := false
+	for _, tag := range spec.SBTags {
+		if tag == "grp-eu" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected grp-eu in SBTags, got %v", spec.SBTags)
+	}
+}
