@@ -45,7 +45,7 @@
   const MAX_CHIPS = 4;
   let visibleChips = $derived(card.matchers.slice(0, MAX_CHIPS));
   let hiddenCount = $derived(Math.max(0, card.matchers.length - MAX_CHIPS));
-  let orderStr = $derived(String(index + 1).padStart(2, '0'));
+  let orderStr = $derived(String(index).padStart(2, '0'));
   let useServiceTile = $derived(!card.isSystem);
   let editTip = $derived(actionTooltip('edit', card, index));
   let deleteTip = $derived(actionTooltip('delete', card, index));

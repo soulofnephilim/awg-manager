@@ -141,7 +141,7 @@
 
         <TracePathStation
           tone={outcomeTone}
-          kicker={result.matchedRule === -1 ? 'По default' : `Правило #${result.matchedRule + 1}`}
+          kicker={result.matchedRule === -1 ? 'По default' : `Правило #${result.matchedRule}`}
           title={result.matchedRule === -1 ? 'нет матча' : `match ${matchedRuleAction}`}
         >
           {#snippet icon()}
