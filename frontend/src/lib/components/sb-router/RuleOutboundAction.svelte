@@ -103,7 +103,7 @@
     gap: 6px;
   }
 
-  :global(.arrow) {
+  .wrap :global(.arrow) {
     color: var(--text-muted);
     flex-shrink: 0;
   }
