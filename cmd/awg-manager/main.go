@@ -1104,6 +1104,7 @@ func main() {
 	srv.SetNDMSSaveCoordinator(ndmsSaveCoord)
 	srv.SetMetricsPoller(ndmsMetricsPoller)
 
+	bindableAdapter := &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces, nativeProxies: singboxOp.ListNativeProxies}
 	routerSvc := router.NewService(router.Deps{
 		AppLog:                 loggingService,
 		Settings:               settingsStore,
@@ -1116,12 +1117,27 @@ func main() {
 		SubscriptionComposites: router.NewSubscriptionCompositesAdapter(subAdapter),
 		Orch:                   sbOrch,
 		WANInterfaces:          &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces},
-		BindableInterfaces:     &routerWANInterfaceAdapter{store: ndmsQueries.Interfaces, nativeProxies: singboxOp.ListNativeProxies},
+		BindableInterfaces:     bindableAdapter,
 		IngressResolver:        &routerIngressResolverAdapter{store: ndmsQueries.Interfaces},
 		NativeProxies:          singboxOp,
 		PresetCatalog:          presetCatalog,
 		GeoData:                geoDataStore,
 	})
+	// Exclude interfaces already bound by an existing direct outbound from the
+	// bindable picker (#323). Wired post-construction — needs routerSvc.
+	bindableAdapter.occupiedBinds = func(ctx context.Context) (map[string]bool, error) {
+		obs, err := routerSvc.ListCompositeOutbounds(ctx)
+		if err != nil {
+			return nil, err
+		}
+		set := make(map[string]bool)
+		for _, o := range obs {
+			if o.Type == "direct" && o.BindInterface != "" {
+				set[o.BindInterface] = true
+			}
+		}
+		return set, nil
+	}
 	singboxOp.SetOutboundReferenceRenamer(routerSvc)
 	tunnelService.SetAWGSyncer(awgoutboundsSvc)
 	tunnelService.SetDeviceProxyRefChecker(deviceProxySvc)

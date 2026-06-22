@@ -134,6 +134,9 @@ type routerWANInterfaceAdapter struct {
 	// interfaces. Only set on the bindable-interfaces instance; nil on the
 	// WAN instance. Used by ListBindable to surface native SOCKS proxies (#323).
 	nativeProxies func(context.Context) ([]string, error)
+	// occupiedBinds returns kernel names already bound by an existing direct
+	// outbound, excluded from the bindable list. Bindable-instance only (#323).
+	occupiedBinds func(context.Context) (map[string]bool, error)
 }
 
 func (a *routerWANInterfaceAdapter) ListWAN(ctx context.Context) ([]router.WANInterfaceInfo, error) {
@@ -191,16 +194,30 @@ func (a *routerWANInterfaceAdapter) ListBindable(ctx context.Context) ([]router.
 			}
 		}
 	}
-	return filterBindable(ifaces, native), nil
+	// Interfaces already bound by an existing direct outbound — don't offer
+	// them again. On lookup error treat as none (a duplicate bind is harmless,
+	// so fail toward offering rather than hiding).
+	occupied := map[string]bool{}
+	if a.occupiedBinds != nil {
+		if set, e := a.occupiedBinds(ctx); e == nil {
+			occupied = set
+		}
+	}
+	return filterBindable(ifaces, native, occupied), nil
 }
 
 // filterBindable keeps egress interfaces (security-level "public") minus our
-// own auto-managed ones, rescuing KeenOS-native proxies in the native set.
-func filterBindable(ifaces []ndms.AllInterface, native map[string]bool) []router.WANInterfaceInfo {
+// own auto-managed ones and minus already-bound interfaces, rescuing
+// KeenOS-native proxies in the native set.
+func filterBindable(ifaces []ndms.AllInterface, native, occupied map[string]bool) []router.WANInterfaceInfo {
 	out := make([]router.WANInterfaceInfo, 0, len(ifaces))
 	for _, iface := range ifaces {
 		// Egress only: drops LAN bridges, Wi-Fi APs, switch ports, LAN VLANs.
 		if iface.SecurityLevel != "public" {
+			continue
+		}
+		// Already bound by an existing direct outbound — skip the duplicate.
+		if occupied[iface.Name] {
 			continue
 		}
 		// Our own auto-managed interfaces already have outbounds; exclude them
