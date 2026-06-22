@@ -821,12 +821,20 @@ func stripAutoManagedDirect(in []Outbound) []Outbound {
 	out := make([]Outbound, 0, len(in))
 	for _, o := range in {
 		if o.Type == "direct" && o.BindInterface != "" &&
-			IsAutoManagedIface(o.BindInterface) && !isProxyIface(o.BindInterface) {
+			IsStrippedDirectBind(o.BindInterface) {
 			continue
 		}
 		out = append(out, o)
 	}
 	return out
+}
+
+// IsStrippedDirectBind reports whether a direct outbound bound to iface is
+// removed from the effective config by stripAutoManagedDirect (auto-managed
+// AWG/WG/NWG ifaces, excluding proxy t2sN/proxyN which are kept). Exported so
+// the device-proxy outbound catalog can hide non-selectable router directs.
+func IsStrippedDirectBind(iface string) bool {
+	return IsAutoManagedIface(iface) && !isProxyIface(iface)
 }
 
 // isProxyIface reports a Keenetic proxy kernel interface name (tun2socks

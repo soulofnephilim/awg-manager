@@ -194,6 +194,23 @@ func TestUserDirectOutboundSurvivesStrip(t *testing.T) {
 	}
 }
 
+func TestIsStrippedDirectBind(t *testing.T) {
+	cases := map[string]bool{
+		"awg0":   true,  // auto-managed AWG → стрипается
+		"nwg1":   true,  // auto-managed NativeWG → стрипается
+		"wg0":    true,  // auto-managed wireguard → стрипается
+		"t2s0":   false, // proxy iface — намеренно сохраняется
+		"proxy3": false, // proxy iface — намеренно сохраняется
+		"ipsec0": false, // пользовательский VPN — не auto-managed
+		"":       false, // пусто
+	}
+	for iface, want := range cases {
+		if got := IsStrippedDirectBind(iface); got != want {
+			t.Errorf("IsStrippedDirectBind(%q) = %v, want %v", iface, got, want)
+		}
+	}
+}
+
 func TestIsAutoManagedIface(t *testing.T) {
 	managed := []string{"opkgtun10", "awgm0", "awg-x", "wg0", "wireguard0", "nwg1", "t2s0", "Proxy3"}
 	for _, n := range managed {
