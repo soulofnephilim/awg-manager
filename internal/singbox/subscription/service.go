@@ -876,10 +876,16 @@ func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*S
 		return updated, nil
 	}
 	out := parts.Valid[0]
-	tag := StableTag(sub.ID, out)
-
-	for _, existing := range sub.MemberTags {
-		if existing == tag {
+	// Набор для chooseKeys недоступен (credential существующих членов не
+	// хранится), поэтому тег нового члена считаем по расширенному ключу, а
+	// точный повтор ловим по метаданным MemberInfo (server+port+protocol+SNI).
+	// ponytail: short_id/uuid в MemberInfo нет — два сервера на одном
+	// server:port:SNI с разным short_id/uuid дадут ложный отказ; редкий край.
+	tag := stableTagFromKey(sub.ID, extendedKey(out))
+	mi := toMemberInfo(tag, out)
+	for _, existing := range sub.Members {
+		if existing.Server == mi.Server && existing.Port == mi.Port &&
+			existing.Protocol == mi.Protocol && existing.SNI == mi.SNI {
 			return nil, ErrMemberDuplicate
 		}
 	}
