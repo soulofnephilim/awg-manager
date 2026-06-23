@@ -1308,6 +1308,7 @@ export interface SingboxRouterSettings {
 	wanInterface?: string; // kernel system-name (e.g. "ppp0"); empty when wanAutoDetect=true
 	bypassPresets?: string[];
 	bypassExtraPorts?: string;
+	bypassExtraSubnets?: string;
 	ingressInterfaces?: string[];
 	// fakeip-tun engine settings (user-editable; round-trip via GET/PUT
 	// /singbox/router/settings). Defaults mirror DefaultFakeIPTunParams:

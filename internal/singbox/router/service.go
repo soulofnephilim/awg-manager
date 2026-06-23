@@ -341,8 +341,9 @@ type ServiceImpl struct {
 	currentWANIPs           []string            // last-collected WAN IPs; used by Reconcile to detect change
 	currentLANBridges       []LANBridgeDNSRedir // last-discovered LAN-bridge (name, ndnproxy port) pairs; reconcile triggers re-install when this changes (e.g. NDMS hotspot reconfigured, bridge added/removed, port reassigned)
 	currentBypassPresets    []string
-	currentBypassExtraPorts string
-	currentIngress          []string // last-installed резолвленные ingress kernel-имена
+	currentBypassExtraPorts   string
+	currentBypassExtraSubnets string
+	currentIngress            []string // last-installed резолвленные ingress kernel-имена
 
 	// netfilterStateKnown tracks whether we know for certain that the
 	// installed iptables rules match the current desired state. It starts
@@ -1039,6 +1040,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	}
 
 	bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
+	bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
 	if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
 		PolicyMark:        mark,
 		MatchAll:          !policyMode,
@@ -1046,6 +1048,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 		LANBridges:        lanBridges,
 		BypassUDPPorts:    bypassUDP,
 		BypassTCPPorts:    bypassTCP,
+		BypassCIDRs:       bypassSubnets,
 		IngressInterfaces: ingress,
 	}); err != nil {
 		// Stop sing-box from listening on the now-orphan TPROXY port,
@@ -1067,6 +1070,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	s.currentLANBridges = lanBridges
 	s.currentBypassPresets = sr.BypassPresets
 	s.currentBypassExtraPorts = sr.BypassExtraPorts
+	s.currentBypassExtraSubnets = sr.BypassExtraSubnets
 	s.currentIngress = ingress
 	s.netfilterStateKnown = true
 
@@ -1361,6 +1365,7 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	s.currentLANBridges = nil
 	s.currentBypassPresets = nil
 	s.currentBypassExtraPorts = ""
+	s.currentBypassExtraSubnets = ""
 	s.currentIngress = nil
 	s.netfilterStateKnown = false
 
@@ -1479,6 +1484,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	ingressChanged := !slices.Equal(s.currentIngress, ingress)
 	bypassPresetsChanged := !slices.Equal(s.currentBypassPresets, sr.BypassPresets)
 	bypassExtraChanged := s.currentBypassExtraPorts != sr.BypassExtraPorts
+	bypassSubnetsChanged := s.currentBypassExtraSubnets != sr.BypassExtraSubnets
 
 	// After a daemon restart or upgrade the old awg-manager process died
 	// with no chance to run Uninstall, so stale AWGM chains, ip rules
@@ -1495,7 +1501,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// during an NDMS reload must not trigger a needless rebuild.
 	_, jumps, probeErr := s.deps.IPTables.Probe(ctx)
 	jumpsMissing := probeErr == nil && !jumps
-	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged
+	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged
 
 	if needsInstall {
 		if forceInitialSync {
@@ -1509,6 +1515,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 		}
 
 		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
+		bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
 		s.mu.Lock()
 		if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
 			PolicyMark:        mark,
@@ -1517,6 +1524,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 			LANBridges:        lanBridges,
 			BypassUDPPorts:    bypassUDP,
 			BypassTCPPorts:    bypassTCP,
+			BypassCIDRs:       bypassSubnets,
 			IngressInterfaces: ingress,
 		}); err != nil {
 			s.mu.Unlock()
@@ -1527,6 +1535,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 		s.currentLANBridges = lanBridges
 		s.currentBypassPresets = sr.BypassPresets
 		s.currentBypassExtraPorts = sr.BypassExtraPorts
+		s.currentBypassExtraSubnets = sr.BypassExtraSubnets
 		s.currentIngress = ingress
 		s.netfilterStateKnown = true
 		s.mu.Unlock()
@@ -1935,6 +1944,9 @@ func NormalizeSingboxRouterSettings(sr storage.SingboxRouterSettings) (storage.S
 	}
 	if _, _, err := parseExtraPorts(sr.BypassExtraPorts); err != nil {
 		return sr, fmt.Errorf("bypassExtraPorts: %w", err)
+	}
+	if _, err := resolveBypassSubnets(sr.BypassExtraSubnets); err != nil {
+		return sr, fmt.Errorf("bypassExtraSubnets: %w", err)
 	}
 	if err := validateIngressRefs(sr.IngressInterfaces); err != nil {
 		return sr, err
