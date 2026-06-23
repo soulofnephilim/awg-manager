@@ -27,7 +27,6 @@
 		stopped: { dot: 'muted', pulse: false, label: 'остановлен', badge: 'muted' },
 	};
 	const st = $derived(STATUS[statusKind]);
-	const lossVariant = $derived<BadgeVariant>(stats && stats.lossPct > 0 ? 'error' : 'muted');
 	const fmt = (v: number | null) => (v === null ? '—' : `${v}ms`);
 </script>
 

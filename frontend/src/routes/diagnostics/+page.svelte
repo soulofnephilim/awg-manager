@@ -161,6 +161,7 @@
 		activeTab === 'about' ? 'Окружение · Диагностика' :
 		activeTab === 'awgConfig' ? 'Конфиг AWG · Диагностика' :
 		activeTab === 'dns' ? 'Сведения о DNS · Диагностика' :
+		activeTab === 'monitoring' ? 'Мониторинг · Диагностика' :
 		'Журнал · Диагностика',
 	);
 </script>
