@@ -136,7 +136,7 @@ type CreateInput struct {
 	Enabled      bool
 	Mode         SubscriptionMode // "" = ModeSelector
 	URLTest      *URLTestConfig   // ignored when Mode != ModeURLTest; defaults applied otherwise
-	ExcludedKeys []string         // identity-суффиксы (IdentityHash) для исключения на первичном refresh
+	ExcludedKeys []string         // суффиксы тегов из превью (suffixOf, узкий или расширенный) для исключения на первичном refresh
 }
 
 // UpdatePatch is partial update; nil pointers mean "leave as-is".
