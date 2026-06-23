@@ -62,8 +62,8 @@
 		return tunnelMeta.find((t) => t.id === id);
 	}
 
-	function configLine(cfg: AWGTunnel['pingCheck'] | undefined, method: string): string {
-		if (!cfg) return method.toUpperCase();
+	function configLine(cfg: AWGTunnel['pingCheck'] | undefined, method: string, failThreshold: number): string {
+		if (!cfg) return `${method.toUpperCase()} · порог ${failThreshold}`;
 		return `${(cfg.method || method).toUpperCase()} → ${cfg.target} · ${cfg.interval}с · порог ${cfg.failThreshold}`;
 	}
 
@@ -73,8 +73,7 @@
 		const enabled = statuses.map((s) => {
 			const cfg = configs[s.tunnelId];
 			const meta = metaFor(s.tunnelId);
-			const isWatchdog =
-				s.enabled && (s.backend === 'kernel' ? true : cfg?.restart === true);
+			const isWatchdog = s.enabled === true;
 			return {
 				kind: 'pc' as const,
 				id: s.tunnelId,
@@ -83,7 +82,7 @@
 				awgVersion: meta?.awgVersion,
 				statusKind: s.status,
 				isWatchdog,
-				configLine: configLine(cfg, s.method),
+				configLine: configLine(cfg, s.method, s.failThreshold),
 				stats: computeCardStats(logsByTunnel.get(s.tunnelId) ?? [], s),
 			};
 		});
