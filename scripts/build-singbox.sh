@@ -125,7 +125,26 @@ apply_mieru_patch() {
     fi
 }
 
+apply_xhttp_patch() {
+    local patch_file="$PROJECT_ROOT/scripts/patches/xhttp.patch"
+    if [[ ! -f "$patch_file" ]]; then
+        echo "ERROR: missing XHTTP sing-box patch: $patch_file" >&2
+        exit 1
+    fi
+    if git apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+        echo "XHTTP patch already applied"
+        return
+    fi
+    echo "Applying XHTTP patch: $patch_file"
+    if ! git apply --3way --whitespace=fix "$patch_file"; then
+        echo "ERROR: failed to apply XHTTP patch to sing-box source at $SINGBOX_DIR" >&2
+        echo "       Check that SINGBOX_REF=$SINGBOX_REF is compatible with scripts/patches/xhttp.patch" >&2
+        exit 1
+    fi
+}
+
 apply_mieru_patch
+apply_xhttp_patch
 
 append_tag() {
     local tag="$1"
