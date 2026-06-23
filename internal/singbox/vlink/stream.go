@@ -234,6 +234,25 @@ func (s *StreamBuilder) MergeIntoOutbound(out map[string]any) {
 			if s.Path != "" {
 				transport["path"] = s.Path
 			}
+		case "xhttp":
+			// host is a separate top-level field (the option layer rejects a
+			// headers key named "host"). x_padding_bytes is mandatory and must
+			// be non-zero, so always emit a default when unset.
+			transport["type"] = "xhttp"
+			if s.Path != "" {
+				transport["path"] = s.Path
+			}
+			if s.Host != "" {
+				transport["host"] = s.Host
+			}
+			if s.Mode != "" {
+				transport["mode"] = s.Mode
+			}
+			pad := s.XPaddingBytes
+			if pad == "" {
+				pad = "100-1000"
+			}
+			transport["x_padding_bytes"] = pad
 		}
 		out["transport"] = transport
 	}

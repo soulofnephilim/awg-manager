@@ -158,3 +158,39 @@ func TestBuildStreamFromQuery_SplitHTTPAlias(t *testing.T) {
 		t.Errorf("network=%q, want xhttp (splithttp alias)", s.Network)
 	}
 }
+
+func TestMergeIntoOutbound_XHTTP(t *testing.T) {
+	s := &StreamBuilder{Network: "xhttp", Path: "/xh", Host: "cdn.example.com", Mode: "auto"}
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	tr, ok := out["transport"].(map[string]any)
+	if !ok {
+		t.Fatalf("no transport block: %v", out)
+	}
+	if tr["type"] != "xhttp" {
+		t.Errorf("type=%v, want xhttp", tr["type"])
+	}
+	if tr["path"] != "/xh" {
+		t.Errorf("path=%v", tr["path"])
+	}
+	if tr["host"] != "cdn.example.com" {
+		t.Errorf("host=%v", tr["host"])
+	}
+	if tr["mode"] != "auto" {
+		t.Errorf("mode=%v", tr["mode"])
+	}
+	// x_padding_bytes is mandatory and non-zero (sing-box rejects 0/missing).
+	if tr["x_padding_bytes"] != "100-1000" {
+		t.Errorf("x_padding_bytes=%v, want default 100-1000", tr["x_padding_bytes"])
+	}
+}
+
+func TestMergeIntoOutbound_XHTTP_KeepsExplicitPadding(t *testing.T) {
+	s := &StreamBuilder{Network: "xhttp", XPaddingBytes: "200-800"}
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	tr := out["transport"].(map[string]any)
+	if tr["x_padding_bytes"] != "200-800" {
+		t.Errorf("x_padding_bytes=%v, want 200-800", tr["x_padding_bytes"])
+	}
+}
