@@ -1093,18 +1093,24 @@ func filterTProxyInbound(in []Inbound) []Inbound {
 	return out
 }
 
-// healTProxyInbound checks the persisted router config and re-adds the
-// tproxy-in inbound if missing. Idempotent. Used by Reconcile to
-// recover from a prior failed-Install rollback (which used to strip
-// the inbound destructively).
+// healTProxyInbound checks the persisted router config and brings the
+// tproxy-in inbound to spec: re-adds it if missing, and applies the current
+// udpTimeout if it drifted (e.g. the user changed the setting while the engine
+// was running — this is the Reconcile path that path takes). Idempotent.
 func (s *ServiceImpl) healTProxyInbound(ctx context.Context, udpTimeout string) error {
 	cfg, err := s.loadRouterConfig()
 	if err != nil {
 		return err
 	}
+	// Cheap steady-state guard: present and already at the desired timeout →
+	// skip the marshal/write entirely (this runs on every reconcile tick).
+	effective := resolveUDPTimeout(udpTimeout)
 	for _, in := range cfg.Inbounds {
 		if in.Tag == "tproxy-in" {
-			return nil // already present, nothing to do
+			if in.UDPTimeout == effective {
+				return nil
+			}
+			break // present but drifted — fall through to re-apply
 		}
 	}
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, udpTimeout)
