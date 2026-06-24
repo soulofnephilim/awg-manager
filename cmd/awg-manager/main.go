@@ -1412,6 +1412,61 @@ func main() {
 						fmt.Sprintf("Phase 1: NDMS ready after %s", time.Since(bootStart).Round(time.Second)))
 				}
 				ndmsWaitCancel()
+
+				// === Phase 1b: Wait for WAN gateway stability ===
+				//
+				// RCI alive does not guarantee the WAN interface has settled —
+				// USB modems and slow carrier links can flap for tens of seconds
+				// after NDMS reports ready. Without a stable WAN, opkgtun tunnels
+				// loop start/stop because their active-WAN anchor disappears.
+				//
+				// Poll GetDefaultGatewayInterface every second; proceed when
+				// the same gateway name has been returned for wanStableDuration
+				// without change. Deadline equals Phase 1 ceiling — if WAN
+				// never stabilises, proceed anyway (WAN-down path handles it).
+				const wanStableDuration = 5 * time.Second
+				wanDeadline := bootStart.Add(ndmsWait)
+				var lastGW string
+				var stableSince time.Time
+
+				for {
+					select {
+					case <-shutdownCtx.Done():
+						return
+					case <-time.After(time.Second):
+					}
+
+					gw, err := ndmsQueries.Routes.GetDefaultGatewayInterface(shutdownCtx)
+					now := time.Now()
+
+					if err == nil && gw != "" {
+						if gw != lastGW {
+							lastGW = gw
+							stableSince = now
+							bootLog.Debug("startup", "",
+								fmt.Sprintf("Phase 1b: WAN gateway changed to %s at %s", gw,
+									time.Since(bootStart).Round(time.Second)))
+						}
+						if now.Sub(stableSince) >= wanStableDuration {
+							bootLog.Info("startup", "",
+								fmt.Sprintf("Phase 1b: WAN stable (%s) after %s", gw,
+									time.Since(bootStart).Round(time.Second)))
+							break
+						}
+					} else {
+						// Gateway unavailable — reset so a reappearing
+						// gateway with the same name does not inherit
+						// stability from before the outage.
+						lastGW = ""
+						stableSince = time.Time{}
+					}
+					if now.After(wanDeadline) {
+						bootLog.Info("startup", "",
+							fmt.Sprintf("Phase 1b: WAN stability deadline expired after %s — proceeding anyway",
+								time.Since(bootStart).Round(time.Second)))
+						break
+					}
+				}
 			} else {
 				bootLog.Info("startup", "",
 					fmt.Sprintf("Phase 1: skipped (uptime %ds ≥ %ds)", int(uptime), minBootUptime))
