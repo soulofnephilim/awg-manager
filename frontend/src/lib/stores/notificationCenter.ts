@@ -68,11 +68,17 @@ function writeStored(entries: CenterEntry[]): void {
   }
 }
 
-/** Keep newest MAX_ENTRIES and drop anything older than RETENTION_MS relative to `now`. */
+/** Keep newest MAX_ENTRIES, drop anything older than RETENTION_MS, and dedup by id. */
 function prune(entries: CenterEntry[], now: number): CenterEntry[] {
+  const seen = new Set<string>();
   return entries
     .filter((e) => now - e.lastTs < RETENTION_MS)
     .sort((a, b) => b.lastTs - a.lastTs)
+    .filter((e) => {
+      if (seen.has(e.id)) return false;
+      seen.add(e.id);
+      return true;
+    })
     .slice(0, MAX_ENTRIES);
 }
 
@@ -87,8 +93,15 @@ export function dayBucket(ts: number, now: number): DayBucket {
 }
 
 export function createNotificationCenterStore() {
-  let counter = 0;
-  const { subscribe, update, set } = writable<CenterEntry[]>(prune(loadStored(), Date.now()));
+  const initial = prune(loadStored(), Date.now());
+  // Seed from the max stored suffix: counter is in-memory and resets on reload,
+  // but ids persist in localStorage — without seeding, new ids (nc-1, nc-2, …)
+  // collide with stored ones and the keyed {#each} throws each_key_duplicate.
+  let counter = initial.reduce((max, e) => {
+    const n = Number(e.id.slice(3)); // strip "nc-"
+    return Number.isFinite(n) && n > max ? n : max;
+  }, 0);
+  const { subscribe, update, set } = writable<CenterEntry[]>(initial);
 
   function commit(entries: CenterEntry[]): CenterEntry[] {
     writeStored(entries);
