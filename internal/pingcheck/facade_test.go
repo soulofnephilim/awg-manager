@@ -229,3 +229,35 @@ func TestFacade_MinInterval(t *testing.T) {
 		t.Errorf("interval = %v, want 10s (minimum)", mon.interval)
 	}
 }
+
+// TestNwgCardStatus_WarmupVsRealStates verifies the card status mapping:
+// a freshly started tunnel (NDMS reports provisional "fail" with zero counters
+// and the interval has not ticked yet) must read as "warming", NOT a fail/
+// recovering — see the live fail/0/0 NDMS payload. Once a real check lands
+// (fail or success counter > 0) the warming label gives way to the real state.
+func TestNwgCardStatus_WarmupVsRealStates(t *testing.T) {
+	cases := []struct {
+		name                       string
+		status                     string
+		failCount, successCount    int
+		bound, restartDetected     bool
+		want                       string
+	}{
+		{"fresh warmup fail/0/0", "fail", 0, 0, true, false, "warming"},
+		{"warmup empty status", "", 0, 0, true, false, "warming"},
+		{"real failing", "fail", 2, 0, true, false, "recovering"},
+		{"post-restart zeroed", "fail", 0, 0, true, true, "recovering"},
+		{"passing", "pass", 0, 5, true, false, "alive"},
+		{"first success", "pass", 0, 1, true, false, "alive"},
+		{"not bound", "fail", 0, 0, false, false, "stopped"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := nwgCardStatus(c.status, c.failCount, c.successCount, c.bound, c.restartDetected)
+			if got != c.want {
+				t.Errorf("nwgCardStatus(%q,%d,%d,%v,%v) = %q, want %q",
+					c.status, c.failCount, c.successCount, c.bound, c.restartDetected, got, c.want)
+			}
+		})
+	}
+}

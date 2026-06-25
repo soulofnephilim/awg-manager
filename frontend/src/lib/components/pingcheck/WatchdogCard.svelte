@@ -10,7 +10,7 @@
 		name: string;
 		backend: 'kernel' | 'nativewg';
 		awgVersion?: string;
-		statusKind: 'alive' | 'recovering' | 'disabled' | 'stopped';
+		statusKind: 'alive' | 'recovering' | 'disabled' | 'stopped' | 'warming';
 		hasPingcheck: boolean;
 		isWatchdog: boolean;
 		configLine: string;
@@ -29,6 +29,7 @@
 		recovering: { dot: 'warning', pulse: true, label: 'восстановление', badge: 'warning' },
 		disabled: { dot: 'muted', pulse: false, label: 'выключен', badge: 'muted' },
 		stopped: { dot: 'muted', pulse: false, label: 'остановлен', badge: 'muted' },
+		warming: { dot: 'muted', pulse: true, label: 'ждём первого интервала', badge: 'muted' },
 	};
 	const st = $derived(STATUS[statusKind]);
 	const fmt = (v: number | null) => (v === null ? '—' : `${v}ms`);

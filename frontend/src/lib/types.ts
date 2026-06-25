@@ -832,7 +832,7 @@ export interface TunnelPingStatus {
 	tunnelName: string;
 	enabled: boolean;
 	backend: 'kernel' | 'nativewg';
-	status: 'alive' | 'recovering' | 'disabled' | 'stopped';
+	status: 'alive' | 'recovering' | 'disabled' | 'stopped' | 'warming';
 	method: string;
 	lastCheck?: string;
 	lastLatency: number;

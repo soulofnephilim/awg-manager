@@ -52,13 +52,14 @@ func TestNwgDelta_FailIncrement(t *testing.T) {
 	defer buf.Stop()
 	m := newTestNwgMonitor(buf)
 
-	// Baseline with status "fail" so no state change on next poll.
+	// Baseline with status "fail"/0/0 — a warmup poll that emits NO initial
+	// entry (provisional NDMS fail before the interval ticks).
 	m.processDelta(0, 0, "fail", true)
 
 	// 2 new failures, same status — no state change entry.
 	m.processDelta(2, 0, "fail", true)
-	if buf.Len() != 3 {
-		t.Fatalf("got %d entries, want 3 (INIT + 2 fails)", buf.Len())
+	if buf.Len() != 2 {
+		t.Fatalf("got %d entries, want 2 (warmup suppressed + 2 fails)", buf.Len())
 	}
 
 	entries := buf.GetAll()
@@ -241,5 +242,38 @@ func TestNwgDelta_StartupMixedDelta_SuppressesTransientFail(t *testing.T) {
 	entries := buf.GetAll()
 	if !entries[0].Success {
 		t.Fatalf("got transient fail, want success-only entry")
+	}
+}
+
+// TestNwgDelta_WarmupFirstPoll_NoFailEntry verifies that the very first poll of
+// a freshly started tunnel — NDMS reports the provisional fail/0/0 before the
+// interval has ticked — does NOT emit a fail log entry. A bogus "✗" entry would
+// otherwise drive the UI to 100% loss and a red history bar on a healthy tunnel.
+func TestNwgDelta_WarmupFirstPoll_NoFailEntry(t *testing.T) {
+	buf := NewLogBuffer()
+	defer buf.Stop()
+	m := newTestNwgMonitor(buf)
+
+	m.processDelta(0, 0, "fail", true) // fresh-start warmup
+
+	if buf.Len() != 0 {
+		t.Fatalf("warmup first poll must emit no log entry, got %d: %+v", buf.Len(), buf.GetAll())
+	}
+	if !m.initialized {
+		t.Error("baseline must still be initialized after warmup poll")
+	}
+}
+
+// TestNwgDelta_NonWarmupFirstPoll_EmitsInitial confirms a first poll that is
+// already healthy still emits its initial entry (unchanged behavior).
+func TestNwgDelta_NonWarmupFirstPoll_EmitsInitial(t *testing.T) {
+	buf := NewLogBuffer()
+	defer buf.Stop()
+	m := newTestNwgMonitor(buf)
+
+	m.processDelta(0, 1, "pass", true)
+
+	if buf.Len() != 1 {
+		t.Fatalf("healthy first poll must emit 1 initial entry, got %d", buf.Len())
 	}
 }

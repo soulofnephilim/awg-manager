@@ -193,30 +193,9 @@ func (f *Facade) getNativeWGStatuses() []TunnelStatus {
 			// interface → status/counts are meaningless. Show "stopped" so the
 			// UI can distinguish "monitoring enabled but tunnel not running"
 			// from "alive and checking".
-			if !status.Bound {
-				ts.Status = "stopped"
-			} else {
-				switch status.Status {
-				case "pass":
-					ts.Status = "alive"
-				case "fail":
-					if status.FailCount > 0 {
-						// Active failures — NDMS is counting towards threshold.
-						ts.Status = "recovering"
-						ts.RestartCount = 1
-					} else if f.isNwgRestartDetected(t.ID) {
-						// Post-restart: NDMS reset counters after interface
-						// restart, no checks completed yet. Show "recovering"
-						// so user sees the tunnel was just restarted.
-						ts.Status = "recovering"
-						ts.RestartCount = 1
-					} else {
-						// Fresh start or stale "fail" with no active failures.
-						ts.Status = "alive"
-					}
-				default:
-					ts.Status = "alive" // pending/unknown → treat as alive
-				}
+			ts.Status = nwgCardStatus(status.Status, status.FailCount, status.SuccessCount, status.Bound, f.isNwgRestartDetected(t.ID))
+			if ts.Status == "recovering" {
+				ts.RestartCount = 1
 			}
 		}
 
@@ -224,6 +203,40 @@ func (f *Facade) getNativeWGStatuses() []TunnelStatus {
 	}
 
 	return result
+}
+
+// nwgCardStatus maps an NDMS ping-check profile status to a UI card status.
+//
+//   - not bound                         → "stopped" (interface down)
+//   - bound, no check completed yet     → "warming" (interval hasn't ticked;
+//     NDMS reports a provisional "fail" with zeroed counters on a fresh start —
+//     this is NOT a real failure, so we surface a distinct waiting state)
+//   - bound, "pass"                     → "alive"
+//   - bound, "fail" with real failures  → "recovering" (counting to threshold)
+//   - bound, "fail" right after restart → "recovering"
+//   - anything else                     → "alive"
+//
+// restartDetected distinguishes a post-restart counter reset (recovering) from a
+// never-yet-checked fresh start (warming): both show fail/0/0, but only the
+// fresh start should read as "warming".
+func nwgCardStatus(status string, failCount, successCount int, bound, restartDetected bool) string {
+	if !bound {
+		return "stopped"
+	}
+	if failCount == 0 && successCount == 0 && status != "pass" && !restartDetected {
+		return "warming"
+	}
+	switch status {
+	case "pass":
+		return "alive"
+	case "fail":
+		if failCount > 0 || restartDetected {
+			return "recovering"
+		}
+		return "alive"
+	default:
+		return "alive" // pending/unknown → treat as alive
+	}
 }
 
 // isNwgRestartDetected returns true if the nwgMonitor for the given tunnel

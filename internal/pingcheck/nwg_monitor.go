@@ -87,28 +87,41 @@ func (m *nwgMonitor) processDelta(failCount, successCount int, status string, bo
 		m.initialized = true
 		m.startupPhase = true
 
-		success := status != "fail"
-		entry := LogEntry{
-			Timestamp:   time.Now(),
-			TunnelID:    m.tunnelID,
-			TunnelName:  m.tunnelName,
-			Backend:     "nativewg",
-			Success:     success,
-			Latency:     latency,
-			FailCount:   failCount,
-			Threshold:   m.threshold,
-			StateChange: "initial",
+		// Warmup: a freshly started tunnel reports NDMS's provisional fail/0/0
+		// before the check interval has ticked. That is not a real failure, so
+		// emit NO initial log entry (a bogus "✗" would drive the UI to 100% loss
+		// and a red history bar) and publish a neutral "" status so dnsroute
+		// failover does not treat the warmup as down. The first real check
+		// (fail or success counter > 0) flows through the delta path below.
+		warmup := status == "fail" && failCount == 0 && successCount == 0
+		if !warmup {
+			success := status != "fail"
+			entry := LogEntry{
+				Timestamp:   time.Now(),
+				TunnelID:    m.tunnelID,
+				TunnelName:  m.tunnelName,
+				Backend:     "nativewg",
+				Success:     success,
+				Latency:     latency,
+				FailCount:   failCount,
+				Threshold:   m.threshold,
+				StateChange: "initial",
+			}
+			m.logBuffer.Add(entry)
+			m.publishLog(entry)
 		}
-		m.logBuffer.Add(entry)
-		m.publishLog(entry)
 
 		// Still publish current state immediately so internal subscribers
 		// (dnsroute failover) react. Frontend polls the status list; the
 		// invalidation hint below prompts an immediate refetch.
 		if m.bus != nil {
+			publishStatus := status
+			if warmup {
+				publishStatus = "" // pending — not a real fail
+			}
 			m.bus.Publish("pingcheck:state", events.PingCheckStateEvent{
 				TunnelID:     m.tunnelID,
-				Status:       status,
+				Status:       publishStatus,
 				FailCount:    failCount,
 				SuccessCount: successCount,
 			})
