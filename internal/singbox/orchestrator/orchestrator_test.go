@@ -817,3 +817,41 @@ func TestKnownSlots_FakeIP(t *testing.T) {
 		t.Fatalf("SlotFakeIP missing/wrong: %+v", fi)
 	}
 }
+
+// TestSetEnabledReconcilesMapDiskDrift reproduces the live bug where a
+// map↔disk drift left 20-router.json in BOTH config.d/ and config.d/disabled/
+// while the in-memory enabled-map still said "disabled". The old no-op
+// short-circuit (o.enabled[slot]==enabled → return nil) skipped renameForToggle,
+// so the stray active file kept leaking into MergeDir (mixed FakeIP+TPROXY DNS).
+// SetEnabled(false) must reconcile against disk and remove the stray active file.
+func TestSetEnabledReconcilesMapDiskDrift(t *testing.T) {
+	o, dir := newTestOrch(t)
+	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
+	if err := o.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+
+	active := filepath.Join(dir, "20-router.json")
+	disabled := filepath.Join(dir, "disabled", "20-router.json")
+
+	// Drift: both copies present on disk, but the map still says disabled
+	// (Bootstrap saw no active file, so o.enabled[SlotRouter] == false).
+	if err := os.WriteFile(active, []byte(`{"dns":{"servers":[{"tag":"tproxy"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(disabled, []byte(`{"dns":{"servers":[{"tag":"tproxy"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabling must remove the stray active file rather than no-op on the
+	// stale map.
+	if err := o.SetEnabled(SlotRouter, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := os.Stat(active); !os.IsNotExist(err) {
+		t.Errorf("stray active file must be removed; stat err=%v", err)
+	}
+	if _, err := os.Stat(disabled); err != nil {
+		t.Errorf("parked disabled copy must survive: %v", err)
+	}
+}

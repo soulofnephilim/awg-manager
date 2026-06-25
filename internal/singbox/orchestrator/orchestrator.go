@@ -270,27 +270,11 @@ func (o *Orchestrator) saveLocked(slot Slot, jsonBytes []byte) error {
 
 // SetEnabled toggles slot activity by renaming the file between
 // active and disabled locations. AlwaysOn slots reject disable.
-// Marks the orchestrator dirty.
+// Marks the orchestrator dirty and schedules a debounced reload.
 func (o *Orchestrator) SetEnabled(slot Slot, enabled bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	meta, ok := o.slots[slot]
-	if !ok {
-		return ErrUnknownSlot
-	}
-	if !enabled && meta.AlwaysOn {
-		return ErrSlotAlwaysOn
-	}
-	if o.enabled[slot] == enabled {
-		return nil // already in target state
-	}
-	if err := o.renameForToggle(meta, enabled); err != nil {
-		return fmt.Errorf("toggle %s: %w", slot, err)
-	}
-	o.enabled[slot] = enabled
-	o.dirty = true
-	o.scheduleReload()
-	return nil
+	return o.setEnabledLocked(slot, enabled, true)
 }
 
 // SetEnabledSilent toggles slot activity without scheduling a debounced reload.
@@ -298,7 +282,15 @@ func (o *Orchestrator) SetEnabled(slot Slot, enabled bool) error {
 func (o *Orchestrator) SetEnabledSilent(slot Slot, enabled bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	return o.setEnabledLocked(slot, enabled, false)
+}
 
+// setEnabledLocked is the shared body. Caller MUST hold o.mu. The short-circuit
+// reconciles against the ACTUAL on-disk layout, not just the in-memory map: a
+// map↔disk drift (e.g. saveLocked wrote the active file while the map said
+// disabled) must not let a no-op leave a stray active file that MergeDir would
+// still pick up. renameForToggle already heals the both-locations case.
+func (o *Orchestrator) setEnabledLocked(slot Slot, enabled, scheduleReload bool) error {
 	meta, ok := o.slots[slot]
 	if !ok {
 		return ErrUnknownSlot
@@ -306,7 +298,15 @@ func (o *Orchestrator) SetEnabledSilent(slot Slot, enabled bool) error {
 	if !enabled && meta.AlwaysOn {
 		return ErrSlotAlwaysOn
 	}
-	if o.enabled[slot] == enabled {
+	a, d := o.scanDirForSlot(meta)
+	// Disk already in the target shape? enabled → active present, no stray
+	// disabled copy; disabled → no active file (a parked copy may or may not
+	// exist). Only then is a no-op safe.
+	diskMatches := !a
+	if enabled {
+		diskMatches = a && !d
+	}
+	if o.enabled[slot] == enabled && diskMatches {
 		return nil
 	}
 	if err := o.renameForToggle(meta, enabled); err != nil {
@@ -314,6 +314,9 @@ func (o *Orchestrator) SetEnabledSilent(slot Slot, enabled bool) error {
 	}
 	o.enabled[slot] = enabled
 	o.dirty = true
+	if scheduleReload {
+		o.scheduleReload()
+	}
 	return nil
 }
 

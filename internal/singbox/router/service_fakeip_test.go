@@ -324,7 +324,7 @@ func TestEnable_DispatchesFakeIPTun(t *testing.T) {
 //   - 21-fakeip.json contains the engine-locked overlay bits (tun-in, fakeip DNS
 //     server, hijack-dns at route.rules[0]) and the seeded A/AAAA→fakeip DNS rule.
 //   - route.final is set (seed provides "direct").
-//   - SlotRouter was NOT promoted by enable (20-router.json is unchanged).
+//   - SlotRouter is parked under disabled/ by the XOR, content unchanged.
 func TestEnableFakeIPTun_SlotFakeIPWritten(t *testing.T) {
 	h := newFakeIPEnableHarness(t, "")
 
@@ -412,11 +412,15 @@ func TestEnableFakeIPTun_SlotFakeIPWritten(t *testing.T) {
 		t.Errorf("21-fakeip.json: seeded A/AAAA→fakeip DNS rule missing: %s", data)
 	}
 
-	// 20-router.json was NOT promoted (still the file we seeded the harness with,
-	// not overwritten by fakeip enable).
-	routerData, err := os.ReadFile(filepath.Join(h.dir, "20-router.json"))
+	// 20-router.json was parked under disabled/ by the XOR (not deleted, not
+	// modified) — fakeip enable must move the router slot out of the active dir
+	// so MergeDir no longer concatenates its DNS, while leaving its content intact.
+	if _, err := os.Stat(filepath.Join(h.dir, "20-router.json")); !os.IsNotExist(err) {
+		t.Errorf("20-router.json must not stay in the active dir after fakeip enable (XOR); stat err=%v", err)
+	}
+	routerData, err := os.ReadFile(filepath.Join(h.dir, "disabled", "20-router.json"))
 	if err != nil {
-		t.Fatalf("20-router.json missing: %v", err)
+		t.Fatalf("parked 20-router.json missing from disabled/: %v", err)
 	}
 	var routerCfg RouterConfig
 	if err := json.Unmarshal(routerData, &routerCfg); err != nil {

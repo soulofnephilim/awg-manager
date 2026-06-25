@@ -30,7 +30,7 @@
   поддерживают (общий DNSRewritesList без грипа). MoveDNSServer — в бэкенде.
 -->
 <script lang="ts">
-	import { onDestroy } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { fakeipConfig } from '$lib/stores/fakeipConfig';
 	import { createReorderDrag } from '$lib/components/sb-router/reorderDrag.svelte';
@@ -147,6 +147,10 @@
 				notifications.error(`Ошибка перемещения: ${e instanceof Error ? e.message : String(e)}`);
 			}
 		},
+	});
+
+	onMount(() => {
+		void fakeipConfig.loadAll();
 	});
 
 	onDestroy(() => {
