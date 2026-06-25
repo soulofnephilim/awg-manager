@@ -708,7 +708,7 @@ func main() {
 	// after startup would miss CONNMARK rules without this.
 	if hydraService != nil {
 		orch.SetOnTunnelRunning(func(id string) {
-			hydraService.ScheduleRestart("tunnel-running: " + id)
+			go hydraService.ScheduleRestart("tunnel-running: " + id)
 		})
 	}
 	loggingService.SetEventBus(eventBus)

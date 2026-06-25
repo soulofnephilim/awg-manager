@@ -26,7 +26,7 @@ func WaitForNDMS(ctx context.Context, routes *query.RouteStore, log *logging.Sco
 	start := time.Now()
 
 	// Try once before entering the poll loop — NDMS may already be up.
-	if err := ndmsResponds(routes); err == nil {
+	if err := ndmsResponds(ctx, routes); err == nil {
 		log.Debug("ndms-wait", "", "NDMS ready immediately")
 		return nil
 	}
@@ -36,7 +36,7 @@ func WaitForNDMS(ctx context.Context, routes *query.RouteStore, log *logging.Sco
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := ndmsResponds(routes); err == nil {
+			if err := ndmsResponds(ctx, routes); err == nil {
 				log.Debug("ndms-wait", "",
 					fmt.Sprintf("NDMS ready after %s polling", time.Since(start).Round(time.Second)))
 				return nil
@@ -56,8 +56,8 @@ func WaitForNDMS(ctx context.Context, routes *query.RouteStore, log *logging.Sco
 // goroutine already checks after the wait). A successful response
 // ("there is a default gateway") AND ErrNoDefaultRoute ("NDMS answered
 // but no default route exists yet") both signal a working RCI endpoint.
-func ndmsResponds(routes *query.RouteStore) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func ndmsResponds(ctx context.Context, routes *query.RouteStore) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := routes.GetDefaultGatewayInterface(ctx)
 	if err == nil || errors.Is(err, query.ErrNoDefaultRoute) {
