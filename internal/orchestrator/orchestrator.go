@@ -95,6 +95,10 @@ type Orchestrator struct {
 	// nil-safe. Production wires an async closure; the orchestrator calls it
 	// synchronously so async-ness stays a wiring detail (and tests deterministic).
 	ifaceInvalidator func(name string)
+
+	// onTunnelRunning is an optional callback on confirmed running
+	// transition. Nil-safe.
+	onTunnelRunning func(tunnelID string)
 }
 
 // New creates a new Orchestrator.
@@ -136,6 +140,11 @@ func (o *Orchestrator) SetEventBus(bus *events.Bus) { o.bus = bus }
 // SetInterfaceInvalidator wires the NDMS interface-cache refresh invoked on a
 // kernel tunnel's confirmed "running" transition. nil-safe. See issue #328.
 func (o *Orchestrator) SetInterfaceInvalidator(fn func(name string)) { o.ifaceInvalidator = fn }
+
+// SetOnTunnelRunning wires a callback invoked when any tunnel (kernel or
+// NativeWG) reaches confirmed running state. Used to restart HydraRoute Neo
+// so it re-applies CONNMARK rules.
+func (o *Orchestrator) SetOnTunnelRunning(fn func(tunnelID string)) { o.onTunnelRunning = fn }
 
 // SetSupportsASC sets the ASC support flag.
 func (o *Orchestrator) SetSupportsASC(fn func() bool) {
@@ -266,6 +275,8 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 		consumed := o.consumeExpectedHook(event.NDMSName, event.Level)
 		o.mu.Unlock()
 		if consumed {
+			o.appLog.Debug("boot-trace", event.NDMSName,
+				fmt.Sprintf("expected-hook consumed level=%s", event.Level))
 			return nil
 		}
 	}
@@ -281,6 +292,27 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 		o.state.ensureTunnel(event.Tunnel, o.store)
 	}
 	actions := decide(event, &o.state)
+	// conf=disabled detail: тот же резолвер, что decideNDMSHook —
+	// findByNDMSName(event.NDMSName), layer=="conf" (НЕ event.Tunnel).
+	if event.Type == EventNDMSHook && event.Layer == "conf" && event.Level == "disabled" {
+		if t := o.state.findByNDMSName(event.NDMSName); t != nil && t.Running {
+			sinceStart := bootQuiescenceWindow - t.quiescentUntil.Sub(event.Now)
+			windowLeft := t.quiescentUntil.Sub(event.Now)
+			stop := false
+			for _, a := range actions {
+				if a.Type == ActionStopKernel || a.Type == ActionStopNativeWG {
+					stop = true
+				}
+			}
+			if stop {
+				o.appLog.Warn("boot-trace", t.ID,
+					fmt.Sprintf("conf=disabled OUTSIDE-WINDOW->STOP sinceStart=%s windowLeft=%s", sinceStart.Round(time.Second), windowLeft.Round(time.Second)))
+			} else {
+				o.appLog.Debug("boot-trace", t.ID,
+					fmt.Sprintf("conf=disabled suppressed sinceStart=%s windowLeft=%s", sinceStart.Round(time.Second), windowLeft.Round(time.Second)))
+			}
+		}
+	}
 	o.mu.Unlock()
 
 	if len(actions) == 0 {
@@ -409,6 +441,7 @@ func (o *Orchestrator) updateState(action Action) {
 	case ActionColdStartKernel, ActionStartNativeWG, ActionReconcileNativeWG, ActionReconcileKernel, ActionResumeKernel:
 		t.Running = true
 		t.quiescentUntil = o.nowFn().Add(bootQuiescenceWindow)
+		o.appLog.Debug("boot-trace", t.ID, fmt.Sprintf("tunnel-start action=%d", action.Type))
 		// Refresh ActiveWAN from store. Execute layer persists the resolved
 		// WAN; we mirror it into the in-memory cache so decideWANDown can
 		// match correctly via affectedByWANDown.
@@ -419,6 +452,7 @@ func (o *Orchestrator) updateState(action Action) {
 		t.Running = false
 		t.Monitoring = false
 		t.ActiveWAN = ""
+		o.appLog.Debug("boot-trace", t.ID, fmt.Sprintf("tunnel-stop action=%d", action.Type))
 	case ActionSuspendProxy, ActionSuspendKernel:
 		// Keep t.Running=true so the next WANUp picks Resume/Reconcile,
 		// not a fresh ColdStart. Keep ActiveWAN so a duplicate WANDown
@@ -454,6 +488,9 @@ func (o *Orchestrator) updateState(action Action) {
 				if ndmsName := tunnel.NewNames(t.ID).NDMSName; ndmsName != "" {
 					o.ifaceInvalidator(ndmsName)
 				}
+			}
+			if o.onTunnelRunning != nil {
+				o.onTunnelRunning(t.ID)
 			}
 		case ActionStopKernel, ActionStopNativeWG, ActionSuspendProxy, ActionSuspendKernel:
 			o.bus.Publish("tunnel:state", events.TunnelStateEvent{

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -702,6 +703,14 @@ func main() {
 	// a frozen "down" snapshot and policy/WAN/all-interface lists misreport the
 	// tunnel as down (#328). Async — Invalidate does a blocking HTTP.
 	orch.SetInterfaceInvalidator(func(name string) { go ndmsQueries.Interfaces.Invalidate(name) })
+	// Full hr-neo restart on tunnel-running — NDMS assigns fwmarks only
+	// during rci_create_policies (hr-neo startup), so tunnels appearing
+	// after startup would miss CONNMARK rules without this.
+	if hydraService != nil {
+		orch.SetOnTunnelRunning(func(id string) {
+			go hydraService.ScheduleRestart("tunnel-running: " + id)
+		})
+	}
 	loggingService.SetEventBus(eventBus)
 	tunnelService.SetEventBus(eventBus)
 	pingCheckFacade.SetEventBus(eventBus)
@@ -1373,37 +1382,126 @@ func main() {
 			fmt.Sprintf("Boot detected (uptime %ds), starting tunnels", int(uptime)))
 
 		go func() {
+			bootStart := time.Now()
 
-			// Wait for NDMS to fully initialize interface subsystem.
-			// Without this delay, tunnels enter start/stop loops because
-			// NDMS cycles their conf layer between running/disabled.
-			const minBootUptime = 120 // seconds
+			// === Phase 1: Wait for NDMS readiness ===
+			//
+			// Previously used a fixed sleep to reach 120s system uptime. The
+			// fixed window was brittle: slow NDMS (interface subsystem not yet
+			// initialized) delayed the tunnel start by several extra minutes
+			// because the sequential migration steps that followed each needed
+			// a working RCI endpoint.
+			//
+			// Now we probe NDMS every second and return as soon as it answers
+			// — even "no default route yet" is sufficient signal that the RCI
+			// endpoint is alive. If the deadline expires, we proceed anyway
+			// (the WAN-down path later handles the missing-default-route case).
+			const minBootUptime = 120 // seconds — minimum uptime before tunnel start
 			if uptime < float64(minBootUptime) {
-				waitSec := int(float64(minBootUptime) - uptime)
+				ndmsWait := time.Duration(float64(minBootUptime)-uptime) * time.Second
 				bootLog.Info("startup", "",
-					fmt.Sprintf("Waiting %ds for NDMS initialization (uptime %ds, target %ds)", waitSec, int(uptime), minBootUptime))
-				select {
-				case <-time.After(time.Duration(waitSec) * time.Second):
-				case <-shutdownCtx.Done():
-					return
+					fmt.Sprintf("Phase 1: wait for NDMS (uptime %ds, max wait %v)", int(uptime), ndmsWait))
+
+				ndmsWaitCtx, ndmsWaitCancel := context.WithTimeout(shutdownCtx, ndmsWait)
+				if err := ndmsinfo.WaitForNDMS(ndmsWaitCtx, ndmsQueries.Routes, bootLog); err != nil {
+					bootLog.Info("startup", "",
+						fmt.Sprintf("Phase 1: NDMS wait deadline expired (%v) after %s — proceeding anyway",
+							ndmsWait, time.Since(bootStart).Round(time.Second)))
+				} else {
+					bootLog.Info("startup", "",
+						fmt.Sprintf("Phase 1: NDMS ready after %s", time.Since(bootStart).Round(time.Second)))
 				}
+				ndmsWaitCancel()
+
+				// === Phase 1b: Wait for WAN gateway stability ===
+				//
+				// RCI alive does not guarantee the WAN interface has settled —
+				// USB modems and slow carrier links can flap for tens of seconds
+				// after NDMS reports ready. Without a stable WAN, opkgtun tunnels
+				// loop start/stop because their active-WAN anchor disappears.
+				//
+				// Poll GetDefaultGatewayInterface every second; proceed when
+				// the same gateway name has been returned for wanStableDuration
+				// without change. Deadline equals Phase 1 ceiling — if WAN
+				// never stabilises, proceed anyway (WAN-down path handles it).
+				const wanStableDuration = 5 * time.Second
+				wanDeadline := bootStart.Add(ndmsWait)
+				var lastGW string
+				var stableSince time.Time
+
+				for {
+					select {
+					case <-shutdownCtx.Done():
+						return
+					case <-time.After(time.Second):
+					}
+
+					// Force a fresh /show/ip/route read each poll: the route
+					// cache (routeTTL 30m) is warmed by Phase 1's WaitForNDMS and
+					// is invalidated only out-of-band by NDMS hooks, so without
+					// this drop Phase 1b would re-read a frozen gateway and never
+					// observe a flap — degenerating into a fixed delay.
+					ndmsQueries.Routes.InvalidateAll()
+					gw, err := ndmsQueries.Routes.GetDefaultGatewayInterface(shutdownCtx)
+					now := time.Now()
+
+					if err == nil && gw != "" {
+						if gw != lastGW {
+							lastGW = gw
+							stableSince = now
+							bootLog.Debug("startup", "",
+								fmt.Sprintf("Phase 1b: WAN gateway changed to %s at %s", gw,
+									time.Since(bootStart).Round(time.Second)))
+						}
+						if now.Sub(stableSince) >= wanStableDuration {
+							bootLog.Info("startup", "",
+								fmt.Sprintf("Phase 1b: WAN stable (%s) after %s", gw,
+									time.Since(bootStart).Round(time.Second)))
+							break
+						}
+					} else {
+						// Gateway unavailable — reset so a reappearing
+						// gateway with the same name does not inherit
+						// stability from before the outage.
+						lastGW = ""
+						stableSince = time.Time{}
+					}
+					if now.After(wanDeadline) {
+						bootLog.Info("startup", "",
+							fmt.Sprintf("Phase 1b: WAN stability deadline expired after %s — proceeding anyway",
+								time.Since(bootStart).Round(time.Second)))
+						break
+					}
+				}
+			} else {
+				bootLog.Info("startup", "",
+					fmt.Sprintf("Phase 1: skipped (uptime %ds ≥ %ds)", int(uptime), minBootUptime))
 			}
 
 			// Seed WAN model with current interface state from NDMS.
 			// Must happen before tunnel start so ISP resolution works.
 			populateWANModel(shutdownCtx, ndmsQueries, wanModel, bootLog)
 
-			// Back-fill ManagedServer.PrivateKey for entries created before
-			// the field existed in storage. Best-effort, idempotent — already
-			// populated entries are skipped. Must run AFTER the NDMS interface
-			// cache is ready so kernel-name resolution works.
-			managedService.MigratePrivateKeys(shutdownCtx)
-
-			// One-time sweep: strip the legacy default 0.0.0.0/0 from
-			// managed-server peers' allow-ips (per-peer /32 only). New
-			// firmware rejects multiple peers sharing 0.0.0.0/0. Gated by a
-			// persisted flag; best-effort, retries next boot if NDMS is down.
-			managedService.MigratePeerAllowIPs(shutdownCtx)
+			// Best-effort, idempotent migrations — must NOT block tunnel start.
+			// tunnelService cleanup below is fast and stays inline.
+			var bgDone sync.WaitGroup
+			bgDone.Add(2)
+			go func() {
+				defer bgDone.Done()
+				// Back-fill ManagedServer.PrivateKey for entries created before
+				// the field existed in storage. Best-effort, idempotent — already
+				// populated entries are skipped. Must run AFTER the NDMS interface
+				// cache is ready so kernel-name resolution works.
+				managedService.MigratePrivateKeys(shutdownCtx)
+			}()
+			go func() {
+				defer bgDone.Done()
+				// One-time sweep: strip the legacy default 0.0.0.0/0 from
+				// managed-server peers' allow-ips (per-peer /32 only). New
+				// firmware rejects multiple peers sharing 0.0.0.0/0. Gated by a
+				// persisted flag; best-effort, retries next boot if NDMS is down.
+				managedService.MigratePeerAllowIPs(shutdownCtx)
+			}()
 
 			// Migrate legacy NDMS ID values to kernel names (one-time after model is populated).
 			tunnelService.MigrateISPInterfaceToKernel()
@@ -1412,16 +1510,28 @@ func main() {
 			tunnelService.HealStaleActiveWAN()
 
 			// Detect actual WAN state.
-			if _, err := ndmsQueries.Routes.GetDefaultGatewayInterface(shutdownCtx); err != nil {
+			gwIface, err := ndmsQueries.Routes.GetDefaultGatewayInterface(shutdownCtx)
+			if err != nil {
 				bootLog.Info("startup", "",
-					"WAN down at boot — waiting for WAN UP event")
+					fmt.Sprintf("WAN down at boot after %s — waiting for WAN UP event",
+						time.Since(bootStart).Round(time.Second)))
 			} else {
+				bootLog.Info("startup", "", fmt.Sprintf("wan-decision gw=%s after=%s", gwIface, time.Since(bootStart).Round(time.Second)))
+				bootLog.Info("startup", "",
+					fmt.Sprintf("Tunnel start at %s (uptime ~%ds)",
+						time.Since(bootStart).Round(time.Second),
+						int(time.Since(bootStart).Seconds())+int(uptime)))
 				orch.LoadState(shutdownCtx)
 				orch.HandleEvent(shutdownCtx, orchestrator.Event{Type: orchestrator.EventBoot})
 			}
 
+			// Wait for background migrations to finish (non-critical but
+			// we track them so they don't leak on shutdown).
+			bgDone.Wait()
+
 			atomic.StoreInt32(&bootDone, 1)
-			bootLog.Info("startup", "", "Boot initialization complete")
+			bootLog.Info("startup", "",
+				fmt.Sprintf("Boot initialization complete after %s", time.Since(bootStart).Round(time.Second)))
 		}()
 	} else {
 		atomic.StoreInt32(&bootDone, 1) // Not booting — mark done immediately.
@@ -1596,7 +1706,11 @@ func populateWANModel(ctx context.Context, queries *ndmsquery.Queries, model *wa
 		return
 	}
 	model.Populate(interfaces)
-	appLog.Info("populate-wan", "", fmt.Sprintf("WAN model populated, count=%d", len(interfaces)))
+	ifaceList := make([]string, 0, len(interfaces))
+	for _, iface := range interfaces {
+		ifaceList = append(ifaceList, fmt.Sprintf("%s(up=%t)", iface.Name, iface.Up))
+	}
+	appLog.Info("populate-wan", "", fmt.Sprintf("WAN model populated, count=%d ifaces=[%s]", len(interfaces), strings.Join(ifaceList, " ")))
 }
 
 // getInterfaceIP returns the first IPv4 address of the given interface.
