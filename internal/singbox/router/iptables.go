@@ -223,16 +223,16 @@ type RestoreInputSpec struct {
 	// router).
 	LANBridges []LANBridgeDNSRedir
 
-	// BypassUDPPorts lists UDP destination ports that should RETURN from
+	// BypassUDPPorts lists UDP destination ports/ranges that should RETURN from
 	// AWGM-TPROXY before the catch-all TPROXY rule — they bypass sing-box
 	// entirely and route as if no policy were active.
-	BypassUDPPorts []int
+	BypassUDPPorts []PortRange
 
-	// BypassTCPPorts lists TCP destination ports that should RETURN from
+	// BypassTCPPorts lists TCP destination ports/ranges that should RETURN from
 	// AWGM-REDIRECT before the catch-all REDIRECT rule.
 	// Note: port 79 (NDMS admin) is always excluded by a hardcoded rule;
 	// including 79 here produces a harmless duplicate RETURN rule.
-	BypassTCPPorts []int
+	BypassTCPPorts []PortRange
 
 	// BypassCIDRs — пользовательские IPv4 IP/CIDR назначения, чей трафик
 	// целиком (включая DNS/53) идёт мимо sing-box: ранний `-j RETURN` в начале
@@ -333,8 +333,8 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 
 	// Bypass ports: RETURN first — before DNS intercept and catch-all so that
 	// any explicitly excluded port skips sing-box entirely (including port 53).
-	for _, port := range spec.BypassUDPPorts {
-		fmt.Fprintf(&b, "-A %s -p udp --dport %d -j RETURN\n", ChainName, port)
+	for _, pr := range spec.BypassUDPPorts {
+		fmt.Fprintf(&b, "-A %s -p udp --dport %s -j RETURN\n", ChainName, pr.String())
 	}
 
 	// set_chain_rules: DNS first (when INTERCEPT_DNS_ENABLE=1)
@@ -384,8 +384,8 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	fmt.Fprintf(&b, "-A %s -p tcp --dport 79 -j RETURN\n", RedirectChain)
 
 	// Bypass ports: RETURN before catch-all TCP REDIRECT.
-	for _, port := range spec.BypassTCPPorts {
-		fmt.Fprintf(&b, "-A %s -p tcp --dport %d -j RETURN\n", RedirectChain, port)
+	for _, pr := range spec.BypassTCPPorts {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport %s -j RETURN\n", RedirectChain, pr.String())
 	}
 
 	// add_redirect_rules: catch-all REDIRECT for TCP.
