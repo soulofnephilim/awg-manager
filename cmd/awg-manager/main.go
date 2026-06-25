@@ -1436,6 +1436,12 @@ func main() {
 					case <-time.After(time.Second):
 					}
 
+					// Force a fresh /show/ip/route read each poll: the route
+					// cache (routeTTL 30m) is warmed by Phase 1's WaitForNDMS and
+					// is invalidated only out-of-band by NDMS hooks, so without
+					// this drop Phase 1b would re-read a frozen gateway and never
+					// observe a flap — degenerating into a fixed delay.
+					ndmsQueries.Routes.InvalidateAll()
 					gw, err := ndmsQueries.Routes.GetDefaultGatewayInterface(shutdownCtx)
 					now := time.Now()
 
