@@ -66,4 +66,5 @@ var additions = []addition{
 	{"binance", "Binance", "binance", "cloud", srs("binance"), "tunnel"},
 	{"patreon", "Patreon", "patreon", "social", srs("patreon"), "tunnel"},
 	{"medium", "Medium", "medium", "social", srs("medium"), "tunnel"},
+	{"kinopub", "Kino.pub", "kinopub", "media", srs("kinopub"), "tunnel"},
 }

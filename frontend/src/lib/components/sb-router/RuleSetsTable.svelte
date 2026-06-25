@@ -4,7 +4,7 @@
 
 <script lang="ts">
   import type { SingboxRouterRuleSet } from '$lib/types';
-  import { Edit3, Trash2 } from 'lucide-svelte';
+  import { Edit3, Trash2, ArrowDownAZ } from 'lucide-svelte';
   import RuleSetTypeBadge from './RuleSetTypeBadge.svelte';
   import {
     datInfo,
@@ -19,9 +19,11 @@
     onEdit: (tag: string) => void;
     onDelete: (tag: string) => void;
     bare?: boolean;
+    alphaSort?: boolean;
+    onToggleAlphaSort?: () => void;
   }
 
-  let { ruleSets, onEdit, onDelete, bare = false }: Props = $props();
+  let { ruleSets, onEdit, onDelete, bare = false, alphaSort = false, onToggleAlphaSort }: Props = $props();
 
   let filter = $state<RsFilter>('all');
 
@@ -60,6 +62,19 @@
         </button>
       {/each}
     </div>
+    {#if onToggleAlphaSort}
+      <button
+        type="button"
+        class="seg-tab sort"
+        class:active={alphaSort}
+        title="Сортировать наборы по алфавиту"
+        aria-label="Сортировать наборы по алфавиту"
+        aria-pressed={alphaSort}
+        onclick={onToggleAlphaSort}
+      >
+        <ArrowDownAZ size={15} />
+      </button>
+    {/if}
   </div>
 
   <div class="table" class:bare>
@@ -121,6 +136,8 @@
   .seg {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
+    flex: 1;
+    min-width: 0;
     width: 100%;
     gap: 0;
     padding: 0;
@@ -156,6 +173,11 @@
     background: var(--accent-soft);
     color: var(--text-primary);
     box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .seg-tab.sort {
+    flex: 0 0 auto;
+    border-right: 0;
+    border-left: 1px solid var(--border);
   }
   .table {
     background: var(--bg-secondary);

@@ -99,6 +99,39 @@ describe('notificationCenter: persistence', () => {
   });
 });
 
+describe('notificationCenter: id collision after reload', () => {
+  it('does not reissue an id that survived in localStorage (no duplicate keys)', () => {
+    const now = Date.now();
+    const a = createNotificationCenterStore();
+    a.record({ type: 'error', message: 'before reload', ts: now });
+    const survivingId = get(a)[0].id;
+
+    // Fresh store = page reload: counter resets, but the entry is still stored.
+    const b = createNotificationCenterStore();
+    b.record({ type: 'error', message: 'after reload', ts: now + 1 });
+
+    const list = get(b);
+    const ids = list.map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length); // all unique
+    // Both must survive: a colliding id would let prune's dedup drop a real entry.
+    expect(list.map((e) => e.message).sort()).toEqual(['after reload', 'before reload']);
+    expect(ids.filter((id) => id === survivingId)).toHaveLength(1);
+  });
+
+  it('prune dedups entries that already share an id', () => {
+    const now = Date.now();
+    localStorage.setItem(
+      'awg-manager-notification-center',
+      JSON.stringify([
+        { id: 'nc-1', type: 'error', message: 'a', firstTs: now, lastTs: now, count: 1, read: false },
+        { id: 'nc-1', type: 'error', message: 'b', firstTs: now, lastTs: now, count: 1, read: false },
+      ]),
+    );
+    const nc = createNotificationCenterStore();
+    expect(get(nc)).toHaveLength(1);
+  });
+});
+
 describe('notificationCenter: retention', () => {
   it('keeps at most 100 newest entries', () => {
     const nc = createNotificationCenterStore();

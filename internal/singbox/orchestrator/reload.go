@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -38,10 +39,19 @@ func (o *Orchestrator) Reload() error {
 	}
 	o.reloading = true
 	o.dirty = false
+	// Defense-in-depth: strip dangling selector/urltest members and defaults
+	// (a tag whose outbound was deleted from another slot) BEFORE validating.
+	// sing-box check does not catch these — like composite cycles, a missing
+	// selector dependency only surfaces at "start service" (FATAL), so a stale
+	// reference would otherwise reach the daemon and take the whole config down.
+	pruneLogs := o.pruneDanglingSelectorRefsLocked()
 	res := o.validateLocked()
 	if !res.Ok() {
 		o.reloading = false
 		o.mu.Unlock()
+		for _, m := range pruneLogs {
+			o.log("info", m)
+		}
 		msg := fmt.Sprintf("orchestrator validation failed; reload skipped: %s", res.Error())
 		o.log("error", msg)
 		return res
@@ -52,6 +62,9 @@ func (o *Orchestrator) Reload() error {
 	prevHasTun := o.prevHasTun
 	newHasTun := res.HasTun
 	o.mu.Unlock()
+	for _, m := range pruneLogs {
+		o.log("info", m)
+	}
 
 	var err error
 	if proc == nil {
@@ -101,6 +114,105 @@ func (o *Orchestrator) Reload() error {
 	o.prevHasTun = newHasTun
 	o.mu.Unlock()
 	return err
+}
+
+// pruneDanglingSelectorRefsLocked rewrites enabled slot files in place,
+// dropping any selector/urltest member or `default` that points at an
+// outbound tag no slot declares. Caller MUST hold o.mu. Returns log lines
+// describing what was pruned — the caller logs them AFTER releasing o.mu
+// (o.log takes o.mu, so logging here would self-deadlock).
+//
+// A selector member is the ONLY ref sing-box check lets through (the error
+// is deferred to "start service"), so this is the one place the orchestrator
+// must self-heal rather than merely reject. The surviving-member guard keeps
+// a selector from being emptied (sing-box rejects a memberless selector); an
+// all-dangling selector is left untouched so validateLocked still reports it.
+func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
+	var logs []string
+	// builtins sing-box defines implicitly (mirrors validateWith).
+	known := map[string]bool{"direct": true, "block": true, "dns": true}
+	for _, m := range KnownSlots() {
+		if _, ok := o.slots[m.Slot]; !ok || !o.enabled[m.Slot] {
+			continue
+		}
+		data, err := o.readActiveBytes(m.Slot)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var c slotConfig
+		if json.Unmarshal(data, &c) != nil {
+			continue
+		}
+		for _, ob := range c.Outbounds {
+			if ob.Tag != "" {
+				known[ob.Tag] = true
+			}
+		}
+	}
+
+	for _, m := range KnownSlots() {
+		meta := m
+		if _, ok := o.slots[meta.Slot]; !ok || !o.enabled[meta.Slot] {
+			continue
+		}
+		data, err := o.readActiveBytes(meta.Slot)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var root map[string]any
+		if json.Unmarshal(data, &root) != nil {
+			continue
+		}
+		obs, ok := root["outbounds"].([]any)
+		if !ok {
+			continue
+		}
+		changed := false
+		for _, v := range obs {
+			ob, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			members, ok := ob["outbounds"].([]any)
+			if !ok || len(members) == 0 {
+				continue // not a selector/urltest
+			}
+			kept := make([]any, 0, len(members))
+			var dropped []string
+			for _, mv := range members {
+				tag, _ := mv.(string)
+				if tag == "" || known[tag] {
+					kept = append(kept, mv)
+					continue
+				}
+				dropped = append(dropped, tag)
+			}
+			// Never empty a selector — leave it for validateLocked to flag.
+			if len(dropped) > 0 && len(kept) > 0 {
+				ob["outbounds"] = kept
+				changed = true
+				tag, _ := ob["tag"].(string)
+				logs = append(logs, fmt.Sprintf("orchestrator: pruned dangling selector members %v from %q in [%s]", dropped, tag, meta.Slot))
+			}
+			if def, _ := ob["default"].(string); def != "" && !known[def] {
+				delete(ob, "default")
+				changed = true
+				tag, _ := ob["tag"].(string)
+				logs = append(logs, fmt.Sprintf("orchestrator: cleared dangling selector default %q from %q in [%s]", def, tag, meta.Slot))
+			}
+		}
+		if !changed {
+			continue
+		}
+		out, err := json.MarshalIndent(root, "", "  ")
+		if err != nil {
+			continue
+		}
+		if err := writeAtomic(o.activePath(meta), out); err != nil {
+			logs = append(logs, fmt.Sprintf("orchestrator: rewrite pruned slot [%s]: %v", meta.Slot, err))
+		}
+	}
+	return logs
 }
 
 // hasActiveWorkLocked reports whether sing-box has anything to do

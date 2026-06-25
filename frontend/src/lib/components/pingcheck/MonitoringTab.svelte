@@ -9,7 +9,7 @@
 	import NativeWGPingCheckModal from '$lib/components/pingcheck/NativeWGPingCheckModal.svelte';
 	import { EmptyState } from '$lib/components/layout';
 	import { notifications } from '$lib/stores/notifications';
-	import type { AWGTunnel, TunnelListItem, NativePingCheckStatus } from '$lib/types';
+	import type { AWGTunnel, TunnelListItem, NativePingCheckStatus, NativePingCheckConfig } from '$lib/types';
 
 	// Метаданные туннелей (awgVersion + список) и полный pingCheck-конфиг.
 	let tunnelMeta = $state<TunnelListItem[]>([]);
@@ -52,9 +52,10 @@
 		}
 	});
 
-	// Догружаем конфиги для набора pingcheck-туннелей при изменении статусов.
+	// Догружаем конфиги для всех туннелей из статуса (включая выключенные) —
+	// наличие cfg отличает «настроен, но выключен» от «никогда не настраивался».
 	$effect(() => {
-		const ids = statuses.filter((s) => s.enabled).map((s) => s.tunnelId);
+		const ids = statuses.map((s) => s.tunnelId);
 		if (ids.length) loadConfigs(ids);
 	});
 
@@ -82,6 +83,8 @@
 				awgVersion: meta?.awgVersion,
 				statusKind: s.status,
 				isWatchdog,
+				// Активный мониторинг ИЛИ есть сохранённый конфиг → «настроен».
+				configured: isWatchdog || !!cfg,
 				configLine: configLine(cfg, s.method, s.failThreshold),
 				stats: computeCardStats(logsByTunnel.get(s.tunnelId) ?? [], s),
 			};
@@ -128,6 +131,37 @@
 			notifications.error('Не удалось запустить проверку');
 		}
 	}
+	async function enablePingcheck(id: string, name: string, backend: 'kernel' | 'nativewg') {
+		try {
+			const t = await api.getTunnel(id);
+			const pc = t.pingCheck;
+			if (!pc) {
+				notifications.error('Нет сохранённых настроек мониторинга');
+				return;
+			}
+			if (backend === 'nativewg') {
+				const cfg: NativePingCheckConfig = {
+					host: pc.target,
+					mode: pc.method as 'icmp' | 'connect' | 'tls',
+					updateInterval: pc.interval,
+					maxFails: pc.failThreshold,
+					minSuccess: pc.minSuccess,
+					timeout: pc.timeout,
+					restart: pc.restart,
+				};
+				if (pc.port) cfg.port = pc.port;
+				await api.configureNativePingCheck(id, cfg);
+			} else {
+				pc.enabled = true;
+				await api.updateTunnel(id, t);
+			}
+			notifications.success(`Watchdog включён: ${name}`);
+			pingCheckStatus.refetch();
+			loadPingLogs();
+		} catch {
+			notifications.error('Не удалось включить watchdog');
+		}
+	}
 	async function disablePingcheck(id: string, name: string, backend: 'kernel' | 'nativewg') {
 		try {
 			if (backend === 'nativewg') {
@@ -163,13 +197,14 @@
 					backend={c.backend}
 					awgVersion={c.awgVersion}
 					statusKind={c.statusKind}
-					hasPingcheck={true}
+					hasPingcheck={c.configured}
 					isWatchdog={c.isWatchdog}
 					configLine={c.configLine}
 					stats={c.stats}
 					onConfigure={() => openConfig(c.id, c.name, c.backend)}
 					onCheckNow={checkNow}
 					onDisable={() => disablePingcheck(c.id, c.name, c.backend)}
+					onEnable={() => enablePingcheck(c.id, c.name, c.backend)}
 				/>
 			{:else}
 				<WatchdogCard
@@ -184,6 +219,7 @@
 					onConfigure={() => openConfig(c.id, c.name, c.backend)}
 					onCheckNow={checkNow}
 					onDisable={() => {}}
+					onEnable={() => {}}
 				/>
 			{/if}
 		{/each}

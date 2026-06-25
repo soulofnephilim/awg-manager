@@ -130,6 +130,86 @@ func TestPersistConfigDirect_WritesActiveWhenAbsent(t *testing.T) {
 	}
 }
 
+// Regression: changing the UDP timeout on a running engine goes through
+// Reconcile→reconcileInstalled→healTProxyInbound. The old heal returned early
+// whenever a tproxy-in inbound was present, so a changed udpTimeout was never
+// written to the config (UI showed "1 час" while the file kept "3m0s").
+func TestHealTProxyInbound_AppliesChangedUDPTimeout(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+
+	// Seed active config with a tproxy-in at the default 3m0s timeout.
+	cfg := NewEmptyConfig()
+	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, "")
+	seed, _ := json.MarshalIndent(cfg, "", "  ")
+	activePath := filepath.Join(dir, "20-router.json")
+	if err := os.WriteFile(activePath, seed, 0644); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	if err := svc.deps.Orch.Bootstrap(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	if err := svc.healTProxyInbound(context.Background(), "1h0m0s"); err != nil {
+		t.Fatalf("healTProxyInbound: %v", err)
+	}
+
+	raw, err := os.ReadFile(activePath)
+	if err != nil {
+		t.Fatalf("read active: %v", err)
+	}
+	var got RouterConfig
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var found bool
+	for _, in := range got.Inbounds {
+		if in.Tag == "tproxy-in" {
+			found = true
+			if in.UDPTimeout != "1h0m0s" {
+				t.Errorf("udp_timeout not applied: want 1h0m0s, got %q", in.UDPTimeout)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("tproxy-in inbound missing after heal")
+	}
+}
+
+// The cheap steady-state guard: when the timeout already matches, heal must
+// not rewrite the active file (no spurious SIGHUP every reconcile tick).
+func TestHealTProxyInbound_NoOpWhenTimeoutMatches(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+
+	cfg := NewEmptyConfig()
+	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, "1h0m0s")
+	seed, _ := json.MarshalIndent(cfg, "", "  ")
+	activePath := filepath.Join(dir, "20-router.json")
+	if err := os.WriteFile(activePath, seed, 0644); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	if err := svc.deps.Orch.Bootstrap(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	before, err := os.Stat(activePath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	if err := svc.healTProxyInbound(context.Background(), "1h0m0s"); err != nil {
+		t.Fatalf("healTProxyInbound: %v", err)
+	}
+
+	after, err := os.Stat(activePath)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("active rewritten despite matching timeout (before=%v after=%v)", before.ModTime(), after.ModTime())
+	}
+}
+
 func TestWaitForSingbox_ReturnsWhenRunning(t *testing.T) {
 	svc, _ := newOrchedTestService(t)
 	stubListeningProbe(t, func() bool { return true })

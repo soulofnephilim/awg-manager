@@ -3301,6 +3301,39 @@
     }
   },
   {
+    "id": "kinopub",
+    "name": "Kino.pub",
+    "iconSlug": "kinopub",
+    "category": "media",
+    "origin": "",
+    "engines": {
+      "dns": {
+        "domains": [
+          "ahc.ovh",
+          "cdn-service.space",
+          "cdn2cdn.com",
+          "cdn2site.com",
+          "gfw.ovh",
+          "kino.pub",
+          "kinopub.online",
+          "kpdl.link",
+          "mos-gorsud.co",
+          "pushbr.com",
+          "smarttvcdn.online"
+        ]
+      },
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-kinopub",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-kinopub.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
     "id": "netflix",
     "name": "Netflix",
     "iconSlug": "netflix",

@@ -57,6 +57,7 @@
   import { DNSRewritesList } from '$lib/components/routing/singboxRouter';
   import { ConfirmModal, Dropdown, Button, type DropdownOption } from '$lib/components/ui';
   import { LayoutGrid } from 'lucide-svelte';
+  import { browser } from '$app/environment';
 
   // Store subscriptions
   const storeStatus = singboxRouterStore.status;
@@ -69,6 +70,31 @@
   const storeDnsRewrites = singboxRouterStore.dnsRewrites;
   const storeDnsGlobals = singboxRouterStore.dnsGlobals;
   const storeOptions = singboxRouterStore.options;
+
+  // Сортировка наборов rule-sets по алфавиту (только отображение, UI-преференс)
+  const RULESET_SORT_KEY = 'awg.sb-router.ruleset-sort-alpha';
+  function readAlphaSortRuleSets(): boolean {
+    if (!browser) return false;
+    try {
+      return localStorage.getItem(RULESET_SORT_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  }
+  function persistAlphaSortRuleSets(on: boolean): void {
+    if (!browser) return;
+    try {
+      localStorage.setItem(RULESET_SORT_KEY, on ? 'true' : 'false');
+    } catch {
+      /* приватный режим / quota — игнор */
+    }
+  }
+  let alphaSortRuleSets = $state(readAlphaSortRuleSets());
+  const sortedRuleSets = $derived(
+    alphaSortRuleSets
+      ? [...$storeRuleSets].sort((a, b) => a.tag.localeCompare(b.tag))
+      : $storeRuleSets,
+  );
 
   // ── Globals (route-final + DNS final/strategy) ──────────────────────
   // route-final: direct + все outbounds, кроме группы «Специальные»
@@ -618,7 +644,12 @@
         <div class="panel-cap">наборы доменов и IP, на которые ссылаются правила</div>
         <RuleSetsTable
           bare
-          ruleSets={$storeRuleSets}
+          ruleSets={sortedRuleSets}
+          alphaSort={alphaSortRuleSets}
+          onToggleAlphaSort={() => {
+            alphaSortRuleSets = !alphaSortRuleSets;
+            persistAlphaSortRuleSets(alphaSortRuleSets);
+          }}
           onEdit={(tag) => (rsEditTag = tag)}
           onDelete={handleDeleteRs}
         />
@@ -811,7 +842,7 @@
 {#if dnsRuleAddOpen}
   <DNSRuleEditModal
     servers={$storeDnsServers}
-    availableRuleSets={$storeRuleSets}
+    availableRuleSets={sortedRuleSets}
     ruleSetUsage={ruleSetUsageForDnsAdd}
     onClose={() => (dnsRuleAddOpen = false)}
     onSave={handleDnsRuleAddSave}
@@ -823,7 +854,7 @@
   <DNSRuleEditModal
     rule={dnsRuleEditTarget}
     servers={$storeDnsServers}
-    availableRuleSets={$storeRuleSets}
+    availableRuleSets={sortedRuleSets}
     ruleSetUsage={ruleSetUsageForDnsEdit}
     onClose={() => (dnsRuleEditIdx = null)}
     onSave={handleDnsRuleEditSave}

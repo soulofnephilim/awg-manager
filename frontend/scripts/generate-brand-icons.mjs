@@ -149,6 +149,15 @@ const MANUAL = {
 		hex: 'BB1919',
 		path: 'M0 9 h7 v6 h-7 z M8.5 9 h7 v6 h-7 z M17 9 h7 v6 h-7 z',
 	},
+	kinopub: {
+		// Монохромная редукция официального логотипа kino.pub: кольцо-объектив
+		// (внешний диск с вырезанной линзой) + play-треугольник в центре линзы.
+		// fillRule evenodd делает линзу дыркой, а треугольник внутри неё — заливкой.
+		hex: '1C202B',
+		path: 'M2 24a22 22 0 1 0 44 0a22 22 0 1 0-44 0ZM14 24a10 10 0 1 0 20 0a10 10 0 1 0-20 0ZM20 18L20 30L30 24Z',
+		viewBox: '0 0 48 48',
+		fillRule: 'evenodd',
+	},
 };
 
 async function extractFromSimpleIcons(slug) {

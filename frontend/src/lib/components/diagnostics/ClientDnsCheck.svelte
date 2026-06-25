@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import { Button, StatusDot } from '$lib/components/ui';
 	import { api } from '$lib/api/client';
+	import { singboxStatus } from '$lib/stores/singbox';
 	import type { DnsCheckResult } from '$lib/types';
 	import ChecksGroup, { type GroupLed } from './ChecksGroup.svelte';
 
@@ -44,6 +45,8 @@
 	let policyCheck = $state<CheckRow | null>(null);
 	let proxyMode = $derived(clientIP === '127.0.0.1' || clientIP === '::1' || clientIP === '');
 	let expanded = $state(false);
+	let staleNotice = $state(false);
+	let prevRunning: boolean | undefined = undefined;
 
 	const hasResult = $derived(
 		resolveCheck.status !== 'pending' || policyCheck !== null,
@@ -80,6 +83,28 @@
 		if (hasResult && (hasFail || hasWarn)) expanded = true;
 	});
 
+	// Reset stale result when Sing-box is toggled: its running state changes
+	// whether the DNS probe is applicable, so a prior result no longer reflects
+	// reality. Track ONLY `running`; do all comparison reads + mutations under
+	// untrack so reading hasResult (derived) doesn't make this effect depend on
+	// resolveCheck/policyCheck (which would loop).
+	$effect(() => {
+		const cur = $singboxStatus.data?.running ?? false;
+		untrack(() => {
+			if (prevRunning !== undefined && prevRunning !== cur && hasResult) {
+				resolveCheck = {
+					id: 'dns_probe',
+					title: 'Резолв через клиентский DNS',
+					status: 'pending',
+					message: 'Не запускалось',
+				};
+				policyCheck = null;
+				staleNotice = true;
+			}
+			prevRunning = cur;
+		});
+	});
+
 	function toRow(r: DnsCheckResult): CheckRow {
 		return {
 			id: r.id,
@@ -92,6 +117,7 @@
 
 	async function runCheck(e?: Event) {
 		e?.stopPropagation();
+		staleNotice = false;
 		// External trigger (no click event): skip if already running to avoid piling requests onto NDMS.
 		if (!e && runInFlight) return;
 		runInFlight = true;
@@ -120,6 +146,15 @@
 	}
 
 	async function doResolveProbe(): Promise<CheckRow> {
+		if ($singboxStatus.data?.running ?? false) {
+			return {
+				id: 'dns_probe',
+				title: 'Резолв через клиентский DNS',
+				status: 'warning',
+				message:
+					'Проверка актуальна только для DNS-маршрутизации средствами NDMS / HR Neo. При включённом Sing-box DNS обрабатывается им — probe пропущен.',
+			};
+		}
 		try {
 			const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
 			const scheme = window.location.protocol === 'https:' ? 'https' : 'http';
@@ -178,6 +213,12 @@
 	{/snippet}
 
 	{#snippet body()}
+		{#if staleNotice && !hasResult}
+			<div class="proxy-banner">
+				<strong>Состояние Sing-box изменилось</strong>
+				<p>Результат проверки сброшен. Запустите проверку заново.</p>
+			</div>
+		{/if}
 		{#if hasResult && proxyMode}
 			<div class="proxy-banner">
 				<strong>Подключение через reverse proxy</strong>

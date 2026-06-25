@@ -5,6 +5,13 @@
 	import { tunnels as tunnelsStore } from '$lib/stores/tunnels';
 	import type { AWGTunnel, TunnelListItem } from '$lib/types';
 	import { buildManagedTunnelListDropdownOptions } from '$lib/utils/routingTunnelOptions';
+	import { get } from 'svelte/store';
+	import { servers } from '$lib/stores/servers';
+	import type { ServersSnapshot } from '$lib/stores/servers';
+	import {
+		buildServerPeerDropdownOptions,
+		decodeServerPeerValue,
+	} from '$lib/utils/serverPeerOptions';
 	import {
 		parseAWG,
 		detectVersion,
@@ -56,6 +63,14 @@
 
 	let tunnels = $state<TunnelListItem[]>([]);
 	let selectedTunnelId = $state('');
+	// Источник анализа: локальный туннель (по умолчанию) или пир AWGM-сервера.
+	let sourceMode = $state<'tunnel' | 'server'>('tunnel');
+	let serverSnap = $state<ServersSnapshot | null>(null);
+	let serversLoading = $state(false);
+	let serversLoaded = $state(false);
+	let selectedPeerValue = $state('');
+	let peerLoading = $state(false);
+	let peerLoadError = $state('');
 	let tunnelsLoading = $state(false);
 	let tunnelLoading = $state(false);
 	let tunnelLoadError = $state('');
@@ -135,6 +150,8 @@
 		fixes = [];
 		camouflage = 'LOW';
 		selectedTunnelId = isEmbeddedLocked() ? initialTunnelId : '';
+		selectedPeerValue = '';
+		peerLoadError = '';
 		tunnelLoadError = '';
 	}
 
@@ -328,6 +345,59 @@
 		}
 	}
 
+	async function loadServersOnce() {
+		if (serversLoaded) return;
+		serversLoading = true;
+		peerLoadError = '';
+		// servers.refetch() НЕ бросает — ошибку запроса пишет в state стора и
+		// резолвится. Поэтому читаем стор после await и поднимаем его error;
+		// serversLoaded оставляем false при сбое → следующее переключение
+		// повторит загрузку.
+		await servers.refetch();
+		const st = get(servers);
+		if (st.error && !st.data) {
+			peerLoadError = st.error;
+			serversLoading = false;
+			return;
+		}
+		serverSnap = st.data;
+		serversLoaded = true;
+		serversLoading = false;
+	}
+
+	function setSource(mode: 'tunnel' | 'server') {
+		sourceMode = mode;
+		if (mode === 'server') {
+			// Держим selectedTunnelId пустым → save-back скрыт (read-only).
+			selectedTunnelId = '';
+			void loadServersOnce();
+		} else {
+			selectedPeerValue = '';
+		}
+	}
+
+	async function applyFromSelectedPeer() {
+		if (!selectedPeerValue) {
+			peerLoadError = '';
+			return;
+		}
+		const { kind, serverId, pubkey } = decodeServerPeerValue(selectedPeerValue);
+		peerLoading = true;
+		peerLoadError = '';
+		try {
+			const conf =
+				kind === 'system'
+					? await api.getSystemServerPeerConf(serverId, pubkey)
+					: await api.getManagedPeerConf(serverId, pubkey);
+			raw = conf;
+			analyze();
+		} catch (e) {
+			peerLoadError = e instanceof Error ? e.message : String(e);
+		} finally {
+			peerLoading = false;
+		}
+	}
+
 	async function applyFromSelectedTunnel() {
 		if (!selectedTunnelId) {
 			tunnelLoadError = '';
@@ -426,6 +496,14 @@
 	});
 
 	const tunnelOptions = $derived(buildManagedTunnelListDropdownOptions(tunnels));
+	const serverPeerOptions = $derived(buildServerPeerDropdownOptions(serverSnap));
+	const serverPlaceholder = $derived(
+		serversLoading
+			? 'Загрузка серверов…'
+			: serverPeerOptions.length
+				? 'Выберите пир сервера'
+				: 'Нет доступных пиров',
+	);
 	const tunnelPlaceholder = $derived(
 		tunnelsLoading
 			? 'Загрузка туннелей…'
@@ -516,30 +594,78 @@
 	<div class="layout">
 		<div class="col-input">
 			{#if !embedded || !lockTunnelSelection}
-				<div class="existing-tunnel-box">
-					<div class="existing-tunnel-head">
-						<span class="existing-tunnel-title">Существующий AWG-туннель</span>
-						<span class="existing-tunnel-note">или вставьте .conf ниже</span>
-					</div>
-					<div class="existing-tunnel-row">
-						<div class="existing-tunnel-select">
-							<Dropdown
-								bind:value={selectedTunnelId}
-								options={tunnelOptions}
-								placeholder={tunnelPlaceholder}
-								onchange={() => void applyFromSelectedTunnel()}
-								disabled={tunnelsLoading || tunnelLoading || tunnelOptions.length === 0}
-								fullWidth
-							/>
+				<div class="source-toggle">
+					<button
+						type="button"
+						class="source-tab"
+						class:active={sourceMode === 'tunnel'}
+						onclick={() => setSource('tunnel')}
+					>
+						Локальный туннель
+					</button>
+					<button
+						type="button"
+						class="source-tab"
+						class:active={sourceMode === 'server'}
+						onclick={() => setSource('server')}
+					>
+						Сервер AWGM
+					</button>
+				</div>
+
+				{#if sourceMode === 'tunnel'}
+					<div class="existing-tunnel-box">
+						<div class="existing-tunnel-head">
+							<span class="existing-tunnel-title">Существующий AWG-туннель</span>
+							<span class="existing-tunnel-note">или вставьте .conf ниже</span>
 						</div>
-						{#if tunnelLoading}
-							<span class="existing-tunnel-loading">Загрузка…</span>
+						<div class="existing-tunnel-row">
+							<div class="existing-tunnel-select">
+								<Dropdown
+									bind:value={selectedTunnelId}
+									options={tunnelOptions}
+									placeholder={tunnelPlaceholder}
+									onchange={() => void applyFromSelectedTunnel()}
+									disabled={tunnelsLoading || tunnelLoading || tunnelOptions.length === 0}
+									fullWidth
+								/>
+							</div>
+							{#if tunnelLoading}
+								<span class="existing-tunnel-loading">Загрузка…</span>
+							{/if}
+						</div>
+						{#if tunnelLoadError}
+							<div class="warn" role="alert">{tunnelLoadError}</div>
 						{/if}
 					</div>
-					{#if tunnelLoadError}
-						<div class="warn" role="alert">{tunnelLoadError}</div>
-					{/if}
-				</div>
+				{:else}
+					<div class="existing-tunnel-box">
+						<div class="existing-tunnel-head">
+							<span class="existing-tunnel-title">Пир AWGM-сервера</span>
+							<span class="existing-tunnel-note">
+								оценивается обфускация/стойкость к DPI выдаваемого конфига, не коллизии IP/ключей
+							</span>
+						</div>
+						<div class="existing-tunnel-row">
+							<div class="existing-tunnel-select">
+								<Dropdown
+									bind:value={selectedPeerValue}
+									options={serverPeerOptions}
+									placeholder={serverPlaceholder}
+									onchange={() => void applyFromSelectedPeer()}
+									disabled={serversLoading || peerLoading || serverPeerOptions.length === 0}
+									fullWidth
+								/>
+							</div>
+							{#if peerLoading}
+								<span class="existing-tunnel-loading">Загрузка…</span>
+							{/if}
+						</div>
+						{#if peerLoadError}
+							<div class="warn" role="alert">{peerLoadError}</div>
+						{/if}
+					</div>
+				{/if}
 			{:else}
 				<div class="existing-tunnel-box embedded">
 					<div class="existing-tunnel-head">
@@ -1619,6 +1745,30 @@
 		align-self: center;
 		min-width: 36px;
 		text-align: right;
+	}
+
+	.source-toggle {
+		display: inline-flex;
+		gap: 4px;
+		padding: 3px;
+		margin-bottom: 10px;
+		background: var(--color-bg-tertiary);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md, 8px);
+	}
+	.source-tab {
+		padding: 6px 12px;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--color-text-muted);
+		background: none;
+		border: none;
+		border-radius: var(--radius-sm, 6px);
+		cursor: pointer;
+	}
+	.source-tab.active {
+		color: var(--color-text-primary);
+		background: var(--color-bg-secondary);
 	}
 
 	/* Existing AWG tunnel selector */

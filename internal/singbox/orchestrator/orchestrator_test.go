@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -815,5 +816,93 @@ func TestKnownSlots_FakeIP(t *testing.T) {
 	}
 	if fi == nil || fi.Filename != "21-fakeip.json" || fi.AlwaysOn {
 		t.Fatalf("SlotFakeIP missing/wrong: %+v", fi)
+	}
+}
+
+// TestSetEnabledReconcilesMapDiskDrift reproduces the live bug where a
+// map↔disk drift left 20-router.json in BOTH config.d/ and config.d/disabled/
+// while the in-memory enabled-map still said "disabled". The old no-op
+// short-circuit (o.enabled[slot]==enabled → return nil) skipped renameForToggle,
+// so the stray active file kept leaking into MergeDir (mixed FakeIP+TPROXY DNS).
+// SetEnabled(false) must reconcile against disk and remove the stray active file.
+func TestSetEnabledReconcilesMapDiskDrift(t *testing.T) {
+	o, dir := newTestOrch(t)
+	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
+	if err := o.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+
+	active := filepath.Join(dir, "20-router.json")
+	disabled := filepath.Join(dir, "disabled", "20-router.json")
+
+	// Drift: both copies present on disk, but the map still says disabled
+	// (Bootstrap saw no active file, so o.enabled[SlotRouter] == false).
+	if err := os.WriteFile(active, []byte(`{"dns":{"servers":[{"tag":"tproxy"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(disabled, []byte(`{"dns":{"servers":[{"tag":"tproxy"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabling must remove the stray active file rather than no-op on the
+	// stale map.
+	if err := o.SetEnabled(SlotRouter, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := os.Stat(active); !os.IsNotExist(err) {
+		t.Errorf("stray active file must be removed; stat err=%v", err)
+	}
+	if _, err := os.Stat(disabled); err != nil {
+		t.Errorf("parked disabled copy must survive: %v", err)
+	}
+}
+
+// TestReloadPrunesDanglingSelectorRefs reproduces the live FATAL
+// "dependency[YC-FIN] not found for outbound[device-proxy-selector]": a selector
+// keeps a member tag whose outbound was deleted from another slot. sing-box check
+// does not catch it (like composite cycles, it only surfaces at "start service"),
+// so the broken config reaches the daemon. Reload must prune dangling selector
+// members (and a dangling default) from the slot file before applying.
+func TestReloadPrunesDanglingSelectorRefs(t *testing.T) {
+	o, dir := newTestOrch(t)
+	_ = o.Register(SlotMeta{Slot: SlotDeviceProxy, Filename: "30-deviceproxy.json"})
+
+	// Active slot: selector references "direct" (builtin, ok) + "YC-FIN" (gone).
+	active := filepath.Join(dir, "30-deviceproxy.json")
+	dp := `{"inbounds":[{"type":"mixed","tag":"device-proxy-in","listen_port":1090}],` +
+		`"outbounds":[{"type":"selector","tag":"device-proxy-selector","outbounds":["direct","YC-FIN"],"default":"YC-FIN"}]}`
+	if err := os.WriteFile(active, []byte(dp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Bootstrap(); err != nil { // file present → enabled[deviceproxy]=true
+		t.Fatal(err)
+	}
+
+	if err := o.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	data, err := os.ReadFile(active)
+	if err != nil {
+		t.Fatalf("read pruned slot: %v", err)
+	}
+	var c slotConfig
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatalf("unmarshal pruned slot: %v", err)
+	}
+	if len(c.Outbounds) != 1 {
+		t.Fatalf("want 1 outbound, got %d", len(c.Outbounds))
+	}
+	sel := c.Outbounds[0]
+	for _, m := range sel.Outbounds {
+		if m == "YC-FIN" {
+			t.Errorf("dangling member YC-FIN must be pruned, got %v", sel.Outbounds)
+		}
+	}
+	if sel.Default == "YC-FIN" {
+		t.Errorf("dangling default YC-FIN must be cleared, got %q", sel.Default)
+	}
+	if len(sel.Outbounds) == 0 {
+		t.Errorf("selector must keep surviving member \"direct\"")
 	}
 }
