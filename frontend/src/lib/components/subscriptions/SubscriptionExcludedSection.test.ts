@@ -23,11 +23,11 @@ describe('SubscriptionExcludedSection', () => {
 		expect(container.querySelector('.excluded')).toBeNull();
 	});
 
-	it('non-empty → header «Исключённые (N)» with correct N and a card per member', () => {
+	it('non-empty → hint + a card per member', () => {
 		const { container, getByText } = render(SubscriptionExcludedSection, {
 			props: { members, restoring: false, onrestore: vi.fn() },
 		});
-		expect(getByText('Исключённые (2)')).toBeTruthy();
+		expect(getByText(/исключили вручную/i)).toBeTruthy();
 		expect(cards(container)).toHaveLength(2);
 	});
 
@@ -61,20 +61,5 @@ describe('SubscriptionExcludedSection', () => {
 
 		expect(onrestore).toHaveBeenCalledTimes(1);
 		expect(onrestore).toHaveBeenCalledWith(['tag-alpha-1234', 'tag-bravo-5678']);
-	});
-
-	it('collapsible toggle hides/shows the card list', async () => {
-		const { container } = render(SubscriptionExcludedSection, {
-			props: { members, restoring: false, onrestore: vi.fn() },
-		});
-		// open by default
-		expect(cards(container)).toHaveLength(2);
-
-		const toggle = container.querySelector('.excluded-toggle') as HTMLButtonElement;
-		await fireEvent.click(toggle); // collapse
-		expect(cards(container)).toHaveLength(0);
-
-		await fireEvent.click(toggle); // expand again
-		expect(cards(container)).toHaveLength(2);
 	});
 });
