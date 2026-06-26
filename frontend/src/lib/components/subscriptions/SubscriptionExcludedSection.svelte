@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { SubscriptionMember } from '$lib/types';
-	import { ChevronDown, ChevronRight, RotateCcw } from 'lucide-svelte';
+	import { RotateCcw } from 'lucide-svelte';
 	import { Button } from '$lib/components/ui';
 
 	interface Props {
@@ -10,7 +10,6 @@
 	}
 	let { members, restoring, onrestore }: Props = $props();
 
-	let open = $state(true);
 	let selected = $state<Set<string>>(new Set());
 
 	function toggleSel(tag: string): void {
@@ -39,20 +38,11 @@
 {#if members.length > 0}
 	<section class="excluded">
 		<div class="excluded-head">
-			<button
-				type="button"
-				class="excluded-toggle"
-				aria-expanded={open}
-				onclick={() => (open = !open)}
-			>
-				{#if open}
-					<ChevronDown size={14} aria-hidden="true" />
-				{:else}
-					<ChevronRight size={14} aria-hidden="true" />
-				{/if}
-				<span class="lbl accent">Исключённые ({members.length})</span>
-			</button>
-			{#if open && selected.size > 0}
+			<div class="hint">
+				Эти серверы вы исключили вручную. Они не материализуются и не участвуют в выборе,
+				пока вы их не вернёте. Набор переживает обновление подписки.
+			</div>
+			{#if selected.size > 0}
 				<Button
 					variant="ghost"
 					size="sm"
@@ -65,41 +55,35 @@
 				</Button>
 			{/if}
 		</div>
-		{#if open}
-			<div class="hint">
-				Эти серверы вы исключили вручную. Они не материализуются и не участвуют в выборе,
-				пока вы их не вернёте. Набор переживает обновление подписки.
-			</div>
-			<div class="grid">
-				{#each members as member (member.tag)}
-					<div class="excluded-card">
-						<label class="excluded-sel">
-							<input
-								type="checkbox"
-								checked={selected.has(member.tag)}
-								disabled={restoring}
-								onchange={() => toggleSel(member.tag)}
-							/>
-						</label>
-						<div class="excluded-main">
-							<div class="excluded-title">{member.label || `${member.server}:${member.port}`}</div>
-							<div class="excluded-meta mono">
-								{member.protocol} · {member.server}:{member.port} · {tagSuffix(member.tag)}
-							</div>
-						</div>
-						<Button
-							variant="ghost"
-							size="sm"
+		<div class="grid">
+			{#each members as member (member.tag)}
+				<div class="excluded-card">
+					<label class="excluded-sel">
+						<input
+							type="checkbox"
+							checked={selected.has(member.tag)}
 							disabled={restoring}
-							iconBefore={restoreIcon}
-							onclick={() => restoreOne(member.tag)}
-						>
-							Вернуть
-						</Button>
+							onchange={() => toggleSel(member.tag)}
+						/>
+					</label>
+					<div class="excluded-main">
+						<div class="excluded-title">{member.label || `${member.server}:${member.port}`}</div>
+						<div class="excluded-meta mono">
+							{member.protocol} · {member.server}:{member.port} · {tagSuffix(member.tag)}
+						</div>
 					</div>
-				{/each}
-			</div>
-		{/if}
+					<Button
+						variant="ghost"
+						size="sm"
+						disabled={restoring}
+						iconBefore={restoreIcon}
+						onclick={() => restoreOne(member.tag)}
+					>
+						Вернуть
+					</Button>
+				</div>
+			{/each}
+		</div>
 	</section>
 {/if}
 
@@ -108,40 +92,22 @@
 {/snippet}
 
 <style>
-	.excluded {
-		margin-top: 1.5rem;
-		padding-top: 1rem;
-		border-top: 1px solid var(--color-border);
-	}
 	.excluded-head {
 		display: flex;
 		justify-content: space-between;
-		align-items: center;
-		gap: 1rem;
-		margin-bottom: 0.6rem;
+		align-items: flex-start;
+		gap: 1.5rem;
+		margin-bottom: 1rem;
 	}
-	.excluded-toggle {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.4rem;
-		padding: 0;
-		border: none;
-		background: transparent;
-		color: var(--color-text-muted);
-		cursor: pointer;
-	}
-	.lbl {
-		font-size: 0.7rem;
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-	}
-	.lbl.accent {
-		color: var(--color-accent);
+	.excluded-head :global(.btn) {
+		flex-shrink: 0;
+		white-space: nowrap;
 	}
 	.hint {
 		color: var(--color-text-muted);
 		font-size: 0.82rem;
-		margin-bottom: 0.8rem;
+		margin: 0;
+		max-width: 70ch;
 	}
 	.grid {
 		display: grid;
@@ -187,6 +153,11 @@
 		font-family: var(--font-mono, ui-monospace, monospace);
 	}
 	@media (max-width: 640px) {
+		.excluded-head {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 0.6rem;
+		}
 		.grid {
 			grid-template-columns: 1fr;
 		}
