@@ -6,6 +6,7 @@
 	import { PageContainer, PageHeader, LoadingSpinner } from '$lib/components/layout';
 	import { Tabs, LayoutViewToggle } from '$lib/components/ui';
 	import SubscriptionMembersTab from '$lib/components/subscriptions/SubscriptionMembersTab.svelte';
+	import SubscriptionExcludedSection from '$lib/components/subscriptions/SubscriptionExcludedSection.svelte';
 	import SubscriptionSettingsTab from '$lib/components/subscriptions/SubscriptionSettingsTab.svelte';
 	import { usageLevel } from '$lib/stores/settings';
 	import {
@@ -33,7 +34,8 @@
 	let progressTotal = $state(0);
 	let progressLoaded = $state(0);
 
-	let active = $state<'members' | 'settings'>('members');
+	let active = $state<'members' | 'excluded' | 'settings'>('members');
+	let excludedRestoring = $state(false);
 	let membersAutoDelayCheckNonce = $state(0);
 	let liveActiveMember = $state<string | null>(null);
 	let currentSubscriptionSurface = '';
@@ -60,6 +62,19 @@
 	function patchSubscriptionEnabled(nextEnabled: boolean): void {
 		if (subscription) {
 			subscription = { ...subscription, enabled: nextEnabled };
+		}
+	}
+
+	async function restoreExcluded(tags: string[]): Promise<void> {
+		if (excludedRestoring || tags.length === 0) return;
+		excludedRestoring = true;
+		try {
+			await api.restoreSubscriptionMembers(id, tags);
+			loadStream();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Не удалось вернуть';
+		} finally {
+			excludedRestoring = false;
 		}
 	}
 
@@ -105,6 +120,8 @@
 				rejectedMembers: meta.rejectedMembers ?? [],
 				infoItems: meta.infoItems ?? [],
 				activeMember: '',
+				excludedTags: [],
+				excludedMembers: [],
 			} as Subscription;
 			progressTotal = meta.total ?? 0;
 		});
@@ -124,6 +141,8 @@
 				subscription.activeMember = data.activeMember ?? '';
 				subscription.rejectedMembers = data.rejectedMembers ?? subscription.rejectedMembers ?? [];
 				subscription.infoItems = data.infoItems ?? subscription.infoItems ?? [];
+				subscription.excludedTags = data.excludedTags ?? [];
+				subscription.excludedMembers = data.excludedMembers ?? [];
 			}
 			streamDone = true;
 			loading = false;
@@ -237,6 +256,12 @@
 		if (!singboxLayoutReady) return;
 		localStorage.setItem(SINGBOX_LAYOUT_STORAGE_KEY, singboxLayoutMode);
 	});
+
+	$effect(() => {
+		if (!loading && active === 'excluded' && subscription && (subscription.excludedMembers?.length ?? 0) === 0) {
+			active = 'members';
+		}
+	});
 </script>
 
 <svelte:head>
@@ -253,13 +278,17 @@
 		<div class="err">{error}</div>
 	{:else if subscription}
 		<PageHeader title={subscription.label || subscription.url} backTo="/?tab=subscriptions" />
+		{@const excludedCount = subscription.excludedMembers?.length ?? 0}
 		<Tabs
 			tabs={[
 				{ id: 'members', label: `Серверы (${subscription.memberTags.length})` },
+				...(excludedCount > 0
+					? [{ id: 'excluded', label: 'Исключённые', badge: excludedCount }]
+					: []),
 				{ id: 'settings', label: 'Настройки' },
 			]}
 			active={active}
-			onchange={(tabId) => (active = tabId as 'members' | 'settings')}
+			onchange={(tabId) => (active = tabId as 'members' | 'excluded' | 'settings')}
 			urlParam="tab"
 			defaultTab="members"
 		/>
@@ -294,6 +323,12 @@
 					onUpdated={loadStream}
 					autoDelayCheckNonce={membersAutoDelayCheckNonce}
 					layout={singboxEffectiveLayout}
+				/>
+			{:else if active === 'excluded'}
+				<SubscriptionExcludedSection
+					members={subscription.excludedMembers ?? []}
+					restoring={excludedRestoring}
+					onrestore={restoreExcluded}
 				/>
 			{:else}
 				<div class="edit-wrapper">
