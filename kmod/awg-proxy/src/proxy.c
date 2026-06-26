@@ -7,9 +7,11 @@
  *
  * Each proxy instance creates two kernel UDP sockets and two threads:
  *   listen_sock  - binds to 127.0.0.1:auto, receives from WG
- *   remote_sock  - connected to AWG server, sends/receives AWG packets
+ *   remote_sock  - UDP-encap socket to AWG server (sends, and receives via
+ *                  awg_encap_rcv instead of recvmsg — keeps the flow out of
+ *                  Keenetic FASTNAT/PPE offload; see awg_encap_rcv)
  *   c2s_thread   - WG->AWG: recvmsg(listen) -> transform -> sendmsg(remote)
- *   s2c_thread   - AWG->WG: recvmsg(remote) -> transform -> sendmsg(listen)
+ *   s2c_thread   - AWG->WG: drain rx_queue -> transform -> sendmsg(listen)
  */
 
 #include <linux/kernel.h>
@@ -22,7 +24,16 @@
 #include <linux/random.h>
 #include <linux/delay.h>
 #include <linux/ktime.h>
+#include <linux/skbuff.h>
+#include <linux/udp.h>
+#include <linux/netdevice.h>
 #include <net/sock.h>
+#include <net/inet_sock.h>
+#include <net/udp.h>
+#include <net/udp_tunnel.h>
+#include <net/route.h>
+#include <net/ip.h>
+#include <net/dst_cache.h>
 
 #include "proxy.h"
 #include "transform.h"
@@ -39,6 +50,45 @@
 
 static struct awg_proxy proxies[AWG_MAX_TUNNELS];
 static DEFINE_MUTEX(proxy_mutex);
+
+/*
+ * Dummy net_device for the udp_tunnel_xmit_skb TX path. iptunnel_xmit
+ * (ip_tunnel_core.c) unconditionally derefs skb->dev->tstats for stats; a bare
+ * alloc_skb has dev==NULL (panic) and a real WAN dev (ppp0/eth) leaves the
+ * tstats union unset (corruption). So egress skbs point at this owned dev,
+ * which exists ONLY to carry an allocated per-cpu tstats. Never registered.
+ */
+static struct net_device *awg_xmit_dev;
+
+static void awg_xmit_dev_setup(struct net_device *dev)
+{
+	/* Unregistered, no xmit/ops — nothing to set up. */
+}
+
+int awg_xmit_dev_create(void)
+{
+	awg_xmit_dev = alloc_netdev(0, "awgproxy", NET_NAME_UNKNOWN,
+				    awg_xmit_dev_setup);
+	if (!awg_xmit_dev)
+		return -ENOMEM;
+
+	awg_xmit_dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
+	if (!awg_xmit_dev->tstats) {
+		free_netdev(awg_xmit_dev);
+		awg_xmit_dev = NULL;
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+void awg_xmit_dev_destroy(void)
+{
+	if (!awg_xmit_dev)
+		return;
+	free_percpu(awg_xmit_dev->tstats);
+	free_netdev(awg_xmit_dev);
+	awg_xmit_dev = NULL;
+}
 
 static inline bool cookie_expired(u64 birthdate_ns)
 {
@@ -154,16 +204,6 @@ static int create_remote_socket(struct socket **sock, __be32 ip, __be16 port,
 	return 0;
 }
 
-/* Fill a sockaddr_in from the proxy's stored server endpoint. */
-static inline void proxy_server_addr(struct sockaddr_in *out,
-				     const struct awg_proxy *proxy)
-{
-	memset(out, 0, sizeof(*out));
-	out->sin_family = AF_INET;
-	out->sin_addr.s_addr = proxy->cfg.remote_ip;
-	out->sin_port = proxy->cfg.remote_port;
-}
-
 /* ---- send helpers ---- */
 
 static int proxy_sendmsg(struct socket *sock, u8 *buf, int len,
@@ -178,6 +218,73 @@ static int proxy_sendmsg(struct socket *sock, u8 *buf, int len,
 	}
 
 	return kernel_sendmsg(sock, &msg, &iov, 1, len);
+}
+
+/*
+ * Send a payload to the AWG server via the udp_tunnel xmit path, mirroring
+ * native AWG/WG send4 (src/socket.c). This is the SEND half of the udp_tunnel
+ * conversion: a plain kernel_sendmsg egress is what trips Keenetic FASTNAT/PPE
+ * into forward-only-offloading the UNREPLIED flow and dropping the handshake
+ * reply; udp_tunnel_xmit_skb egress is treated as tunnel traffic, like the
+ * immune native AWG. ds = IP TOS/DSCP for this datagram.
+ *
+ * Called only from c2s_thread (process context). alloc_skb + memcpy happen
+ * BEFORE local_bh_disable() — dst_cache uses this_cpu_ptr and the route/cache/
+ * xmit block must run with BH disabled (matches send4's rcu_read_lock_bh).
+ * Returns 0 on success; on route/alloc failure the skb is freed here.
+ */
+static int proxy_tunnel_xmit(struct awg_proxy *p, const u8 *buf, int len, u8 ds)
+{
+	int headroom = sizeof(struct iphdr) + sizeof(struct udphdr) + MAX_HEADER;
+	struct sock *sk = p->remote_sock->sk;
+	__be16 sport = inet_sk(sk)->inet_sport;
+	struct flowi4 fl = {
+		.daddr = p->cfg.remote_ip,
+		.fl4_dport = p->cfg.remote_port,
+		.fl4_sport = sport,
+		.flowi4_oif = p->bind_oif,
+		.flowi4_mark = 0,
+		.flowi4_proto = IPPROTO_UDP,
+	};
+	struct sk_buff *skb;
+	struct rtable *rt;
+
+	skb = alloc_skb(len + headroom, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+	skb_reserve(skb, headroom);
+	memcpy(skb_put(skb, len), buf, len);
+
+	local_bh_disable();
+
+	rt = dst_cache_get_ip4(&p->tx_dst_cache, &fl.saddr);
+	if (!rt) {
+		rt = ip_route_output_flow(&init_net, &fl, sk);
+		if (IS_ERR(rt)) {
+			long err = PTR_ERR(rt);
+
+			local_bh_enable();
+			kfree_skb(skb);
+			pr_warn_ratelimited("awg_proxy: no route to %pI4: %ld\n",
+					    &p->cfg.remote_ip, err);
+			return (int)err;
+		}
+		dst_cache_set_ip4(&p->tx_dst_cache, &rt->dst, fl.saddr);
+	}
+
+	skb->dev = awg_xmit_dev;
+	skb->mark = 0;
+	skb->ignore_df = 1;
+
+	/* 4.9: udp_tunnel_xmit_skb takes 12 args. It consumes both rt and skb
+	 * on every path (skb_dst_set + ip_local_out) — do NOT ip_rt_put or touch
+	 * skb after this call. */
+	udp_tunnel_xmit_skb(rt, sk, skb, fl.saddr, p->cfg.remote_ip, ds,
+			    ip4_dst_hoplimit(&rt->dst), 0, sport,
+			    p->cfg.remote_port, false, false);
+
+	local_bh_enable();
+	return 0;
 }
 
 /*
@@ -197,14 +304,11 @@ static void send_cps_packets(struct awg_proxy *proxy)
 	u8 (*bufs)[1500];
 	int lens[5];
 	u32 counters[5];
-	struct sockaddr_in dst;
 	int count, i, slot;
 
 	bufs = kmalloc(5 * 1500, GFP_KERNEL);
 	if (!bufs)
 		return;
-
-	proxy_server_addr(&dst, proxy);
 
 	/* Counters[k] = current counter + k, one per non-null template. */
 	for (i = 0; i < 5; i++)
@@ -217,8 +321,7 @@ static void send_cps_packets(struct awg_proxy *proxy)
 
 		if (lens[slot] <= 0)
 			continue;
-		sret = proxy_sendmsg(proxy->remote_sock, bufs[slot], lens[slot],
-				     &dst);
+		sret = proxy_tunnel_xmit(proxy, bufs[slot], lens[slot], 0);
 		if (sret >= 0)
 			proxy->cps_counter++;
 		/*
@@ -252,42 +355,27 @@ static void send_junk_packets(struct awg_proxy *proxy)
 {
 	u8 *junk;
 	int sizes[128]; /* jc max */
-	struct sockaddr_in dst;
 	int count, i;
 
 	junk = kmalloc(1500, GFP_KERNEL);
 	if (!junk)
 		return;
 
-	proxy_server_addr(&dst, proxy);
-
 	count = generate_junk(&proxy->cfg, junk, sizes, AWG_MAX_JC);
 	for (i = 0; i < count; i++) {
 		u8 ds;
-		int tos;
 
 		if (sizes[i] <= 0 || sizes[i] > 1500)
 			continue;
 		get_random_bytes(junk, sizes[i]);
 
-		/* Random per-packet IP TOS. setsockopt expects an int. */
+		/* Random per-packet IP TOS (DSCP), passed straight to the xmit
+		 * helper — mirrors amneziawg src/send.c per-junk DSCP. No more
+		 * IP_TOS setsockopt dance (it was racy on the shared socket). */
 		get_random_bytes(&ds, 1);
-		tos = ds;
-		(void)kernel_setsockopt(proxy->remote_sock, IPPROTO_IP, IP_TOS,
-					(char *)&tos, sizeof(tos));
-
-		proxy_sendmsg(proxy->remote_sock, junk, sizes[i], &dst);
+		proxy_tunnel_xmit(proxy, junk, sizes[i], ds);
 		/* No inter-packet delay — burst like the reference; see
 		 * send_cps_packets() for rationale. */
-	}
-
-	/* Restore default TOS=0 so the subsequent handshake init / steady-state
-	 * traffic doesn't inherit the last junk DSCP value. */
-	{
-		int zero_tos = 0;
-
-		(void)kernel_setsockopt(proxy->remote_sock, IPPROTO_IP, IP_TOS,
-					(char *)&zero_tos, sizeof(zero_tos));
 	}
 
 	kfree(junk);
@@ -464,47 +552,22 @@ static int c2s_thread_fn(void *data)
 		if (sendJunk)
 			send_junk_packets(proxy);
 
-		/* Send transformed packet to remote AWG server.
+		/* Send transformed packet to remote AWG server via the
+		 * udp_tunnel xmit path (see proxy_tunnel_xmit).
 		 *
-		 * For handshake init/response, set IP TOS = AWG_HANDSHAKE_DSCP
-		 * to mirror amneziawg-linux-kernel-module: without this, some
-		 * middleboxes on the path to the AWG server silently drop
-		 * handshake packets, leaving local WG retrying forever while
-		 * the server side stays mute. Confirmed empirically by pcap
-		 * diff: kernel-AWG init goes out with TOS=0x88 and gets a
-		 * response; our previous TOS=0 sends got no reply at all.
+		 * Handshake init/response go out with IP TOS = AWG_HANDSHAKE_DSCP
+		 * (passed as the ds arg, no more setsockopt) to mirror
+		 * amneziawg-linux-kernel-module: without it some middleboxes
+		 * silently drop handshakes; pcap diff confirmed kernel-AWG init
+		 * uses TOS=0x88 and gets a response while TOS=0 got none.
 		 *
-		 * Capture and log negative returns so we can confirm in the
-		 * field whether handshake retries correlate with -ENOBUFS
-		 * (ARP queue overflow) or transient errors. The log is
-		 * ratelimited to keep dmesg usable on flaky links. */
+		 * Log ratelimited negative returns to correlate handshake
+		 * retries with route/alloc failures on flaky links. */
 		{
-			int sret;
-			int is_handshake = (msgType == WG_HANDSHAKE_INIT ||
-					    msgType == WG_HANDSHAKE_RESPONSE);
-			int tos;
-			struct sockaddr_in dst;
-
-			proxy_server_addr(&dst, proxy);
-
-			if (is_handshake) {
-				tos = AWG_HANDSHAKE_DSCP;
-				(void)kernel_setsockopt(proxy->remote_sock,
-							IPPROTO_IP, IP_TOS,
-							(char *)&tos,
-							sizeof(tos));
-			}
-
-			sret = proxy_sendmsg(proxy->remote_sock, out,
-					     out_len, &dst);
-
-			if (is_handshake) {
-				tos = 0;
-				(void)kernel_setsockopt(proxy->remote_sock,
-							IPPROTO_IP, IP_TOS,
-							(char *)&tos,
-							sizeof(tos));
-			}
+			u8 ds = (msgType == WG_HANDSHAKE_INIT ||
+				 msgType == WG_HANDSHAKE_RESPONSE) ?
+					AWG_HANDSHAKE_DSCP : 0;
+			int sret = proxy_tunnel_xmit(proxy, out, out_len, ds);
 
 			if (sret < 0) {
 				pr_warn_ratelimited("awg_proxy: send to %pI4:%d failed: %d\n",
@@ -524,8 +587,47 @@ out:
 }
 
 /*
- * Server-to-client thread: reads AWG packets from remote_sock,
- * transforms to WG via transform_inbound(), sends to listen_sock -> WG.
+ * UDP-encap receive callback — runs in softirq from the udp_rcv path.
+ *
+ * Mirrors native AWG/WG wg_receive (src/socket.c: encap_rcv=wg_receive). The
+ * server->client flow terminating on a udp_tunnel/encap socket is what keeps
+ * it out of Keenetic's FASTNAT/PPE offload: a plain recvmsg socket gets a
+ * forward-only offload entry latched while the conntrack is still [UNREPLIED]
+ * (our I1+junk handshake burst trips the offload heuristic before the reply),
+ * and the server's handshake response is then dropped before delivery.
+ *
+ * Softirq context: no sleeping, no GFP_KERNEL. Strip the UDP header (matches
+ * native prepare_skb_header's skb_pull of sizeof(udphdr)), enqueue, and wake
+ * s2c_thread — all transform/cookie/sendmsg work stays in process context.
+ * Returns 0: skb consumed.
+ */
+static int awg_encap_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	struct awg_proxy *proxy = rcu_dereference_sk_user_data(sk);
+
+	if (unlikely(!proxy) || !READ_ONCE(proxy->active))
+		goto drop;
+
+	if (unlikely(!pskb_may_pull(skb, sizeof(struct udphdr))))
+		goto drop;
+	__skb_pull(skb, sizeof(struct udphdr));
+
+	/* Bound the backlog — a stalled drain must not OOM. AWG tolerates loss:
+	 * WG retransmits handshakes, transport data is best-effort. */
+	if (skb_queue_len(&proxy->rx_queue) >= AWG_RX_QUEUE_MAX)
+		goto drop;
+
+	skb_queue_tail(&proxy->rx_queue, skb);  /* own lock — softirq-safe */
+	wake_up(&proxy->rx_wait);
+	return 0;
+drop:
+	kfree_skb(skb);
+	return 0;
+}
+
+/*
+ * Server-to-client thread: drains rx_queue (fed by awg_encap_rcv),
+ * transforms AWG->WG via transform_inbound(), sends to listen_sock -> WG.
  *
  * transform_inbound() returns NULL for junk/CPS packets (drop silently).
  */
@@ -541,28 +643,27 @@ static int s2c_thread_fn(void *data)
 	}
 
 	while (!kthread_should_stop()) {
-		struct msghdr msg = {};
-		struct kvec iov;
+		struct sk_buff *skb;
 		u8 *out;
 		int n, out_len;
 
-		iov.iov_base = buf;
-		iov.iov_len = AWG_BUF_SIZE;
-
-		n = kernel_recvmsg(proxy->remote_sock, &msg, &iov, 1,
-				   AWG_BUF_SIZE, 0);
-		switch (awg_classify_recv(n, kthread_should_stop())) {
-		case AWG_RECV_BREAK:
+		wait_event_interruptible(proxy->rx_wait,
+			!skb_queue_empty(&proxy->rx_queue) ||
+			kthread_should_stop());
+		if (kthread_should_stop())
 			goto out;
-		case AWG_RECV_RETRY_SLEEP:
-			msleep(10);
+
+		skb = skb_dequeue(&proxy->rx_queue);
+		if (!skb)
 			continue;
-		case AWG_RECV_RETRY_YIELD:
-			cond_resched();
+
+		n = skb->len;
+		if (n <= 0 || n > AWG_BUF_SIZE ||
+		    skb_copy_bits(skb, 0, buf, n) < 0) {
+			kfree_skb(skb);
 			continue;
-		case AWG_RECV_PROCESS:
-			break;
 		}
+		kfree_skb(skb);
 
 		atomic_inc(&proxy->rx_packets);
 		atomic64_add(n, &proxy->rx_bytes);
@@ -708,6 +809,28 @@ int awg_proxy_add(const char *config_line)
 	spin_lock_init(&p->client_lock);
 	spin_lock_init(&p->mac1_lock);
 	spin_lock_init(&p->cookie_lock);
+	skb_queue_head_init(&p->rx_queue);
+	init_waitqueue_head(&p->rx_wait);
+
+	ret = dst_cache_init(&p->tx_dst_cache, GFP_KERNEL);
+	if (ret) {
+		pr_err("awg_proxy: dst_cache_init failed: %d\n", ret);
+		goto out_cleanup;
+	}
+
+	/* Resolve WAN egress ifindex for the udp_tunnel_xmit route lookup.
+	 * Cached once; a WAN flap that changes ifindex needs a tunnel restart
+	 * (nwg does this on WAN change). 0 = let routing pick the default. */
+	p->bind_oif = 0;
+	if (p->cfg.bind_iface[0]) {
+		struct net_device *dev = dev_get_by_name(&init_net,
+							 p->cfg.bind_iface);
+		if (dev) {
+			p->bind_oif = dev->ifindex;
+			dev_put(dev);
+		}
+	}
+
 	p->cps_counter = 0;
 	p->have_last_mac1 = false;
 	p->latest_cookie_valid = false;
@@ -736,6 +859,18 @@ int awg_proxy_add(const char *config_line)
 	if (ret) {
 		pr_err("awg_proxy: failed to create remote socket: %d\n", ret);
 		goto out_cleanup;
+	}
+
+	/* Turn remote_sock into a UDP-encap socket: server replies now go to
+	 * awg_encap_rcv (softirq) instead of the recv queue. This is what keeps
+	 * the flow out of Keenetic FASTNAT/PPE offload — see awg_encap_rcv. */
+	{
+		struct udp_tunnel_sock_cfg tcfg = {
+			.sk_user_data = p,
+			.encap_type   = 1,
+			.encap_rcv    = awg_encap_rcv,
+		};
+		setup_udp_tunnel_sock(&init_net, p->remote_sock, &tcfg);
 	}
 
 	/*
@@ -783,6 +918,11 @@ int awg_proxy_add(const char *config_line)
 	return 0;
 
 out_cleanup:
+	/* Stop encap dispatch before teardown (encap may already be enabled). */
+	if (p->remote_sock && p->remote_sock->sk) {
+		udp_sk(p->remote_sock->sk)->encap_type = 0;
+		WRITE_ONCE(udp_sk(p->remote_sock->sk)->encap_rcv, NULL);
+	}
 	/* Shutdown sockets first to unblock threads in kernel_recvmsg */
 	if (p->listen_sock)
 		kernel_sock_shutdown(p->listen_sock, SHUT_RDWR);
@@ -806,6 +946,8 @@ out_cleanup:
 		sock_release(p->remote_sock);
 		p->remote_sock = NULL;
 	}
+	skb_queue_purge(&p->rx_queue);
+	dst_cache_destroy(&p->tx_dst_cache);  /* NULL-guarded if init never ran */
 	memzero_explicit(p->cookie_aead_key,
 			 sizeof(p->cookie_aead_key));
 	memzero_explicit(p->latest_cookie, sizeof(p->latest_cookie));
@@ -828,7 +970,15 @@ static void proxy_stop(struct awg_proxy *p)
 {
 	p->active = false;
 
-	/* Closing sockets unblocks kernel_recvmsg in the threads */
+	/* Stop encap dispatch first: with encap_type cleared udp_rcv no longer
+	 * calls awg_encap_rcv, so no new skbs get queued during teardown. */
+	if (p->remote_sock && p->remote_sock->sk) {
+		udp_sk(p->remote_sock->sk)->encap_type = 0;
+		WRITE_ONCE(udp_sk(p->remote_sock->sk)->encap_rcv, NULL);
+	}
+
+	/* Closing sockets unblocks kernel_recvmsg in c2s; kthread_stop wakes
+	 * s2c out of wait_event (condition includes kthread_should_stop). */
 	if (p->listen_sock)
 		kernel_sock_shutdown(p->listen_sock, SHUT_RDWR);
 	if (p->remote_sock)
@@ -851,6 +1001,13 @@ static void proxy_stop(struct awg_proxy *p)
 		sock_release(p->remote_sock);
 		p->remote_sock = NULL;
 	}
+
+	/* Free any skbs the encap callback left queued. */
+	skb_queue_purge(&p->rx_queue);
+
+	/* Safe now: c2s_thread (sole tx_dst_cache user) is stopped. */
+	dst_cache_destroy(&p->tx_dst_cache);
+
 	memzero_explicit(p->cookie_aead_key,
 			 sizeof(p->cookie_aead_key));
 	memzero_explicit(p->latest_cookie, sizeof(p->latest_cookie));
