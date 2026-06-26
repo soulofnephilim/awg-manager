@@ -467,3 +467,64 @@ func TestToSubscriptionDTO_ProxyIndexGate(t *testing.T) {
 		t.Errorf("meta enabled=false: ProxyIndex=%d want -1", meta.ProxyIndex)
 	}
 }
+
+func TestSubscriptionHandler_GetStream_DoneIncludesExcluded(t *testing.T) {
+	linkA := "vless://3a3b1c2e-9999-4321-aaaa-1234567890a1@a.example:443?security=tls&sni=a#A"
+	linkB := "vless://3a3b1c2e-9999-4321-aaaa-1234567890b2@b.example:443?security=tls&sni=b#B"
+	body := linkA + "\n" + linkB
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	store, err := subscription.NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	svc := subscription.NewService(store, noopMutator{})
+	h := NewSubscriptionHandler(svc, &fakePresenceProbe{installed: true})
+
+	// create from URL → оба члена материализованы
+	createBody, _ := json.Marshal(CreateSubscriptionRequest{Label: "x", URL: srv.URL, Enabled: true})
+	crr := httptest.NewRecorder()
+	h.Create(crr, httptest.NewRequest(http.MethodPost, "/create", strings.NewReader(string(createBody))))
+	if crr.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", crr.Code, crr.Body.String())
+	}
+	var created SubscriptionResponse
+	if err := json.Unmarshal(crr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v body=%s", err, crr.Body.String())
+	}
+	id := created.Data.ID
+	excludeTag := created.Data.MemberTags[0]
+
+	// post-create exclude одного члена → пишет строку в ExcludedMembers (service.go:1087)
+	exBody, _ := json.Marshal(ExcludeMembersRequest{MemberTags: []string{excludeTag}})
+	exr := httptest.NewRecorder()
+	h.ExcludeMembers(exr, httptest.NewRequest(http.MethodPost, "/members/exclude?id="+id, strings.NewReader(string(exBody))))
+	if exr.Code != http.StatusOK {
+		t.Fatalf("exclude status=%d body=%s", exr.Code, exr.Body.String())
+	}
+
+	// stream: событие done обязано нести исключённого члена
+	rr := httptest.NewRecorder()
+	h.GetStream(rr, httptest.NewRequest(http.MethodGet, "/get-stream?id="+id, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("stream status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	_, doneData, ok := strings.Cut(rr.Body.String(), "event: done\ndata: ")
+	if !ok {
+		t.Fatalf("no done event: %s", rr.Body.String())
+	}
+	doneData, _, _ = strings.Cut(doneData, "\n")
+	var done SubscriptionStreamDoneDTO
+	if err := json.Unmarshal([]byte(doneData), &done); err != nil {
+		t.Fatalf("unmarshal done: %v (%s)", err, doneData)
+	}
+	if !containsString(done.ExcludedTags, excludeTag) {
+		t.Fatalf("excludedTags missing %s: %v", excludeTag, done.ExcludedTags)
+	}
+	if !memberDTOHasTag(done.ExcludedMembers, excludeTag) {
+		t.Fatalf("excludedMembers missing %s: %v", excludeTag, memberDTOTags(done.ExcludedMembers))
+	}
+}

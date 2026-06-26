@@ -8,11 +8,16 @@
 #include <linux/kthread.h>
 #include <linux/atomic.h>
 #include <linux/spinlock.h>
+#include <linux/skbuff.h>
+#include <linux/wait.h>
+#include <linux/netdevice.h>
+#include <net/dst_cache.h>
 
 #include "transform.h"
 
 #define AWG_MAX_TUNNELS 16
 #define AWG_BUF_SIZE    2048  /* per-packet buffer (MTU + headroom) */
+#define AWG_RX_QUEUE_MAX 1024 /* max server->client skbs queued by encap_rcv */
 
 /*
  * Per-tunnel UDP proxy instance.
@@ -23,7 +28,16 @@
  *
  * Two kernel threads per proxy:
  *   c2s_thread: reads from listen_sock, transforms WG->AWG, sends to remote_sock
- *   s2c_thread: reads from remote_sock, transforms AWG->WG, sends to listen_sock
+ *   s2c_thread: drains rx_queue (fed by encap_rcv), transforms AWG->WG, sends to listen_sock
+ *
+ * Server->client receive uses a UDP-encap socket (setup_udp_tunnel_sock +
+ * awg_encap_rcv) instead of kernel_recvmsg. This mirrors the native AWG/WG
+ * kernel module (src/socket.c: encap_rcv=wg_receive) and is what keeps the
+ * flow out of Keenetic's FASTNAT/PPE offload — a plain recvmsg socket gets a
+ * forward-only offload entry latched while [UNREPLIED] and the server's
+ * handshake reply is then dropped before delivery. The softirq encap_rcv
+ * callback only enqueues; all sleeping work (cookie crypto, sendmsg) stays in
+ * s2c_thread's process context.
  */
 /*
  * Forced 8-byte alignment: atomic64_t below requires 8-aligned address
@@ -54,6 +68,17 @@ struct awg_proxy {
 	/* Worker threads */
 	struct task_struct *c2s_thread;  /* client->server */
 	struct task_struct *s2c_thread;  /* server->client */
+
+	/* Server->client receive queue: awg_encap_rcv (softirq) enqueues skbs,
+	 * s2c_thread drains in process context. */
+	struct sk_buff_head rx_queue;
+	wait_queue_head_t rx_wait;
+
+	/* Client->server TX route cache (udp_tunnel_xmit_skb path). Accessed
+	 * only from c2s_thread, but dst_cache uses this_cpu_ptr → callers must
+	 * local_bh_disable() around get/set. */
+	struct dst_cache tx_dst_cache;
+	int bind_oif;   /* WAN egress ifindex from cfg.bind_iface; 0 = default route */
 
 	/* AWG configuration (parsed from procfs) */
 	awg_config_t cfg;
@@ -121,5 +146,13 @@ void awg_proxy_cleanup(void);
 
 /* Format proxy list for procfs read */
 int awg_proxy_list(char *buf, int buflen);
+
+/*
+ * Dummy net_device for the udp_tunnel_xmit_skb TX path. iptunnel_xmit derefs
+ * skb->dev->tstats for stats, so egress skbs need a dev with allocated per-cpu
+ * stats. Created at module init, destroyed at exit (after awg_proxy_cleanup).
+ */
+int awg_xmit_dev_create(void);
+void awg_xmit_dev_destroy(void);
 
 #endif /* _AWG_PROXY_PROXY_H */

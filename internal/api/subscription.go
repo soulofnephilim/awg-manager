@@ -276,6 +276,24 @@ type PreviewURLRequest struct {
 // composite interface → no proxyIndex to display). Mirrors the
 // ProxyInterface/KernelInterface stripping ListTunnels already does
 // for tunnels in disabled mode.
+// buildExcludedDTO извлекает excluded-набор подписки в DTO-форму:
+// excludedTags (никогда не nil — пустой срез для стабильного JSON "[]")
+// и excludedMembers (nil → omitempty при пустом наборе).
+func buildExcludedDTO(s subscription.Subscription) ([]string, []SubscriptionMemberDTO) {
+	tags := s.ExcludedTags
+	if tags == nil {
+		tags = []string{}
+	}
+	var members []SubscriptionMemberDTO
+	if len(s.ExcludedMembers) > 0 {
+		members = make([]SubscriptionMemberDTO, len(s.ExcludedMembers))
+		for i, m := range s.ExcludedMembers {
+			members[i] = subscriptionMemberToDTO(m)
+		}
+	}
+	return tags, members
+}
+
 func toSubscriptionDTO(s subscription.Subscription, ndmsProxyEnabled bool) SubscriptionDTO {
 	hh := make([]SubscriptionHeader, len(s.Headers))
 	for i, h := range s.Headers {
@@ -299,17 +317,7 @@ func toSubscriptionDTO(s subscription.Subscription, ndmsProxyEnabled bool) Subsc
 	for i, m := range s.Members {
 		memberDTOs[i] = subscriptionMemberToDTO(m)
 	}
-	excludedTags := s.ExcludedTags
-	if excludedTags == nil {
-		excludedTags = []string{}
-	}
-	var excludedMemberDTOs []SubscriptionMemberDTO
-	if len(s.ExcludedMembers) > 0 {
-		excludedMemberDTOs = make([]SubscriptionMemberDTO, len(s.ExcludedMembers))
-		for i, m := range s.ExcludedMembers {
-			excludedMemberDTOs[i] = subscriptionMemberToDTO(m)
-		}
-	}
+	excludedTags, excludedMemberDTOs := buildExcludedDTO(s)
 	mode := string(s.EffectiveMode())
 	var urltest *SubscriptionURLTestDTO
 	if s.EffectiveMode() == subscription.ModeURLTest {
@@ -388,10 +396,12 @@ type SubscriptionStreamMemberDTO struct {
 // fields that don't fit the meta header but the frontend needs to
 // complete the rendering.
 type SubscriptionStreamDoneDTO struct {
-	OrphanTags      []string                    `json:"orphanTags"`
-	ActiveMember    string                      `json:"activeMember"`
-	RejectedMembers []SubscriptionRejectedDTO   `json:"rejectedMembers"`
-	InfoItems       []SubscriptionInfoItemDTO   `json:"infoItems"`
+	OrphanTags      []string                  `json:"orphanTags"`
+	ActiveMember    string                    `json:"activeMember"`
+	RejectedMembers []SubscriptionRejectedDTO `json:"rejectedMembers"`
+	InfoItems       []SubscriptionInfoItemDTO `json:"infoItems"`
+	ExcludedTags    []string                  `json:"excludedTags"`
+	ExcludedMembers []SubscriptionMemberDTO   `json:"excludedMembers,omitempty"`
 }
 
 // buildSubscriptionMetaDTO extracts the meta-event payload from a
@@ -923,11 +933,14 @@ func (h *SubscriptionHandler) GetStream(w http.ResponseWriter, r *http.Request) 
 	if orphans == nil {
 		orphans = []string{}
 	}
+	excludedTags, excludedMemberDTOs := buildExcludedDTO(*sub)
 	doneJSON, _ := json.Marshal(SubscriptionStreamDoneDTO{
 		OrphanTags:      orphans,
 		ActiveMember:    sub.ActiveMember,
 		RejectedMembers: rejectedMembersToDTO(sub.RejectedMembers),
 		InfoItems:       infoItemsToDTO(sub.InfoItems),
+		ExcludedTags:    excludedTags,
+		ExcludedMembers: excludedMemberDTOs,
 	})
 	fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneJSON)
 	flusher.Flush()

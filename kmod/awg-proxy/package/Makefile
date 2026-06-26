@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=awg-proxy
-PKG_VERSION:=1.1.12
+PKG_VERSION:=1.2.0
 
 PKG_LICENSE:=GPL-2.0
 PKG_LICENSE_FILES:=COPYING
@@ -57,7 +57,8 @@ define KernelPackage/awg-proxy
   CATEGORY:=Kernel modules
   SUBMENU:=Network Support
   TITLE:=AWG Proxy netfilter module
-  DEPENDS:=
+  # udp_tunnel: setup_udp_tunnel_sock (encap rx) + udp_tunnel_xmit_skb (tx) — FASTNAT/PPE bypass
+  DEPENDS:=+kmod-udptunnel4
   FILES:=$(PKG_BUILD_DIR)/src/awg_proxy.ko
 endef
 

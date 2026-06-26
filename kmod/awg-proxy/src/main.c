@@ -220,6 +220,8 @@ static const struct file_operations proc_version_ops = {
 
 static int __init awg_proxy_init(void)
 {
+	int ret;
+
 	pr_info("awg_proxy: loading v%s (UDP proxy mode)\n", AWG_PROXY_VERSION);
 
 	/* Create procfs directory */
@@ -227,6 +229,15 @@ static int __init awg_proxy_init(void)
 	if (!proc_dir) {
 		pr_err("awg_proxy: failed to create /proc/awg_proxy\n");
 		return -ENOMEM;
+	}
+
+	/* Dummy netdev for the udp_tunnel_xmit_skb TX path — must exist before
+	 * any /proc/awg_proxy/add can install a proxy. */
+	ret = awg_xmit_dev_create();
+	if (ret) {
+		pr_err("awg_proxy: failed to create xmit dev: %d\n", ret);
+		remove_proc_entry("awg_proxy", NULL);
+		return ret;
 	}
 
 	proc_create("add", 0220, proc_dir, &proc_add_ops);
@@ -249,6 +260,10 @@ static void __exit awg_proxy_exit(void)
 
 	/* Stop all proxies */
 	awg_proxy_cleanup();
+
+	/* Free the TX dummy netdev after all proxies (and their c2s threads,
+	 * the only xmit users) are gone. */
+	awg_xmit_dev_destroy();
 
 	pr_info("awg_proxy: unloaded\n");
 }

@@ -10,7 +10,6 @@
 	import { singboxDelayHistory, triggerDelayCheck } from '$lib/stores/singbox';
 	import { notifications } from '$lib/stores/notifications';
 	import SubscriptionMemberList from './SubscriptionMemberList.svelte';
-	import SubscriptionExcludedSection from './SubscriptionExcludedSection.svelte';
 	import type { SingboxLayoutMode } from '$lib/constants/singboxLayout';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 
@@ -44,7 +43,6 @@
 	let selected = $state<Set<string>>(new Set());
 	let excluding = $state(false);
 	let confirmExcludeSelected = $state(false);
-	let restoring = $state(false);
 
 	const infoItems = $derived(subscription.infoItems ?? []);
 	const rejectedMembers = $derived(subscription.rejectedMembers ?? []);
@@ -313,20 +311,6 @@
 			lastError = e instanceof Error ? e.message : 'Не удалось исключить';
 		} finally {
 			excluding = false;
-		}
-	}
-
-	async function restore(tags: string[]): Promise<void> {
-		if (restoring || tags.length === 0) return;
-		restoring = true;
-		lastError = '';
-		try {
-			await api.restoreSubscriptionMembers(subscription.id, tags);
-			onUpdated();
-		} catch (e) {
-			lastError = e instanceof Error ? e.message : 'Не удалось вернуть';
-		} finally {
-			restoring = false;
 		}
 	}
 
@@ -630,7 +614,7 @@
 			<strong>{pendingExclude.label || `${pendingExclude.server}:${pendingExclude.port}`}</strong>
 			будет исключён из подписки и перестанет участвовать в выборе. Сервер
 			останется исключённым при обновлении подписки; вернуть его можно в
-			разделе «Исключённые».
+			вкладке «Исключённые».
 		</p>
 	{/if}
 	{#snippet actions()}
@@ -738,12 +722,6 @@
 		</div>
 	</section>
 {/if}
-
-<SubscriptionExcludedSection
-	members={subscription.excludedMembers ?? []}
-	{restoring}
-	onrestore={restore}
-/>
 
 <style>
 	.head {
