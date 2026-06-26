@@ -67,6 +67,7 @@
 
 	async function restoreExcluded(tags: string[]): Promise<void> {
 		if (excludedRestoring || tags.length === 0) return;
+		error = '';
 		excludedRestoring = true;
 		try {
 			await api.restoreSubscriptionMembers(id, tags);

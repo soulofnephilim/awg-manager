@@ -29,6 +29,7 @@ describe('SubscriptionExcludedSection', () => {
 		});
 		expect(getByText(/исключили вручную/i)).toBeTruthy();
 		expect(cards(container)).toHaveLength(2);
+		expect(container.querySelector('.excluded-toggle')).toBeNull();
 	});
 
 	it('per-card «Вернуть» calls onrestore([member.tag])', async () => {
