@@ -47,6 +47,7 @@
     'access-policy': 'Access policies',
     'client-route': 'Per-client routes',
     'singbox-router': 'Sing-box router',
+    selective: 'Селективный ipset',
     deviceproxy: 'Device proxy',
     hrneo: 'HrNeo',
     catalog: 'Каталог',

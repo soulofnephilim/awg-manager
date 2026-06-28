@@ -7,6 +7,7 @@ import { get, writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 import { fakeipTransition, type FakeIPMode } from '$lib/stores/fakeipTransition';
 import { singboxRouter } from '$lib/stores/singboxRouter';
+import { selectiveBypass } from '$lib/stores/selectiveBypass';
 import type { SingboxRouterStatus, SingboxRouterSettings } from '$lib/types';
 
 export type ModeSwitchPhase = 'idle' | 'confirming' | 'running';
@@ -58,12 +59,11 @@ function createModeSwitch() {
 		const { from, target } = get(store);
 		store.update((s) => ({ ...s, phase: 'running' }));
 		fakeipTransition.begin(from, target);
+		selectiveBypass.resetProgress();
 		try {
 			await api.singboxRouterSwitchMode(target);
+			// Переключение асинхронное: прогресс и финал — только из SSE.
 		} catch (e) {
-			// POST failed: STAY in 'running' — the progress modal surfaces the error
-			// (via fakeipTransition.fail below) and the user dismisses it through
-			// closeProgress → 'idle'. Mirrors the success path's modal lifecycle.
 			fakeipTransition.fail(e instanceof Error ? e.message : 'Не удалось переключить режим');
 		}
 	}
@@ -71,6 +71,7 @@ function createModeSwitch() {
 	function closeProgress(): void {
 		store.update((s) => ({ ...s, phase: 'idle' }));
 		fakeipTransition.reset();
+		selectiveBypass.resetProgress();
 		void singboxRouter.loadAll();
 	}
 

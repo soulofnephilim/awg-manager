@@ -129,6 +129,9 @@ func (s *ServiceImpl) SwitchRoutingMode(ctx context.Context, target string) erro
 
 	source, err := s.currentState()
 	if err != nil {
+		s.emitTransition(id, stateOff, target,
+			TransitionStep{Step: "error", Status: "error", Message: err.Error()},
+			true, stateOff, err.Error())
 		return err
 	}
 
@@ -173,15 +176,43 @@ func (s *ServiceImpl) SwitchRoutingMode(ctx context.Context, target string) erro
 
 	// ── Bring up the TARGET mode ────────────────────────────────────────────
 	if err := s.persistMode(target, true); err != nil {
+		s.emitTransition(id, source, target,
+			TransitionStep{Step: "error", Status: "error", Message: err.Error()},
+			true, source, err.Error())
 		return fmt.Errorf("switch %s→%s: persist target mode: %w", source, target, err)
 	}
-	s.emitTransition(id, source, target,
-		TransitionStep{Step: "provision", Status: "current"}, false, "", "")
+	s.transitionReadinessProgress = func(msg string) {
+		s.emitTransition(id, source, target,
+			TransitionStep{Step: "readiness", Status: "current", Message: msg},
+			false, "", "")
+	}
+	defer func() { s.transitionReadinessProgress = nil }()
+
+	// tproxy Enable waits for sing-box BEFORE iptables install — emit readiness
+	// (not provision) so the UI spinner matches reality. fakeip-tun still uses
+	// provision:current because its long bring-up is mapped to that milestone.
+	if target == stateTProxy {
+		s.emitTransition(id, source, target,
+			TransitionStep{Step: "readiness", Status: "current", Message: "запуск sing-box"},
+			false, "", "")
+	} else {
+		s.emitTransition(id, source, target,
+			TransitionStep{Step: "provision", Status: "current"}, false, "", "")
+	}
 
 	if enableErr := s.Enable(ctx); enableErr != nil {
+		failStep := "provision"
+		if target == stateTProxy {
+			failStep = "readiness"
+		}
+		s.emitTransition(id, source, target,
+			TransitionStep{Step: failStep, Status: "error", Message: enableErr.Error()},
+			false, "", "")
 		return s.rollbackSwitch(ctx, id, source, target, enableErr)
 	}
 
+	s.emitTransition(id, source, target,
+		TransitionStep{Step: "provision", Status: "done"}, false, "", "")
 	s.emitTransition(id, source, target,
 		TransitionStep{Step: "readiness", Status: "done"}, false, "", "")
 	s.emitTransition(id, source, target,

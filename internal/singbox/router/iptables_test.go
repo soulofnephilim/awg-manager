@@ -1311,3 +1311,59 @@ func TestBuildRestoreInput_BypassCIDRs(t *testing.T) {
 		t.Errorf("user bypass (%d) must precede DNS intercept (%d) in mangle", bypassIdx, dnsIdx)
 	}
 }
+
+func TestBuildRestoreInput_SelectiveIPSet_AddsGuardRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	mangleGuard := fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", ChainName, selectiveSetName)
+	natGuard := fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", RedirectChain, selectiveSetName)
+
+	if !strings.Contains(out, mangleGuard) {
+		t.Errorf("mangle chain missing selective guard rule\ngot:\n%s", out)
+	}
+	if !strings.Contains(out, natGuard) {
+		t.Errorf("nat chain missing selective guard rule\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_Disabled_NoGuardRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: false,
+	}
+	out := buildRestoreInput(spec)
+
+	if strings.Contains(out, "--match-set") {
+		t.Errorf("unexpected selective guard rule when SelectiveIPSet=false\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_GuardAfterDNS(t *testing.T) {
+	// The selective guard must appear AFTER the DNS intercept rule so that
+	// DNS (port 53) is always intercepted regardless of ipset membership.
+	// This ensures that the hijack-dns action keeps working even when
+	// selective mode is on.
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	dnsIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp --dport 53 -j TPROXY", ChainName))
+	guardIdx := strings.Index(out, fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", ChainName, selectiveSetName))
+	catchAllIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp -j TPROXY", ChainName))
+
+	if dnsIdx == -1 || guardIdx == -1 || catchAllIdx == -1 {
+		t.Fatalf("missing rule(s): dns=%d guard=%d catchAll=%d\n%s", dnsIdx, guardIdx, catchAllIdx, out)
+	}
+	if guardIdx < dnsIdx {
+		t.Errorf("selective guard (%d) must appear AFTER DNS intercept (%d)", guardIdx, dnsIdx)
+	}
+	if guardIdx > catchAllIdx {
+		t.Errorf("selective guard (%d) must appear BEFORE catch-all TPROXY (%d)", guardIdx, catchAllIdx)
+	}
+}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -495,11 +496,15 @@ func (h *SingboxRouterHandler) SwitchMode(w http.ResponseWriter, r *http.Request
 			"invalid routing mode (want off|tproxy|fakeip-tun)", "INVALID_MODE")
 		return
 	}
-	if err := h.svc.SwitchRoutingMode(r.Context(), body.Mode); err != nil {
-		h.handleErr(w, "request", err)
-		return
-	}
-	response.Success(w, map[string]bool{"ok": true})
+	mode := body.Mode
+	go func() {
+		if err := h.svc.SwitchRoutingMode(context.Background(), mode); err != nil {
+			// Terminal errors are emitted as singbox-router:transition events;
+			// log only for diagnostics.
+			_ = err
+		}
+	}()
+	response.Success(w, map[string]bool{"accepted": true})
 }
 
 // GetSettings reads singbox-router settings (policy-mode, defaults, etc.).

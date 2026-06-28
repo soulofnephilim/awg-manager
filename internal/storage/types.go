@@ -146,6 +146,14 @@ type SingboxRouterSettings struct {
 	// (DefaultUDPTimeout). Увеличение помогает при работе игр и других UDP-приложений,
 	// которые могут молчать дольше стандартных 3 минут.
 	UDPTimeout string `json:"udpTimeout,omitempty"`
+	// SelectiveBypass, when true, installs an iptables -m set guard in front
+	// of the TPROXY/REDIRECT catch-all rules so only traffic whose destination
+	// IP is present in the AWGM-SELECTIVE ipset reaches sing-box. All other
+	// traffic bypasses sing-box entirely (RETURN → WAN). The ipset is built
+	// from ip_cidr matchers and resolved domain_suffix/domain entries across
+	// all active router rules and their rule sets. Only meaningful when
+	// RoutingMode == "tproxy" and ipset + xt_set are available on the router.
+	SelectiveBypass bool `json:"selectiveBypass,omitempty"`
 }
 
 // ManagedServer represents the user-created WireGuard server interface.

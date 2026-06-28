@@ -75,6 +75,10 @@ var (
 	netfilterRulesPath = "/opt/etc/awg-manager/singbox/router-netfilter.rules"
 )
 
+// selectiveSetName is the ipset name used for selective bypass. Must match
+// selective.SetName in the selective sub-package.
+const selectiveSetName = "AWGM-SELECTIVE"
+
 func kernelModuleName() string { return "xt_TPROXY" }
 
 func buildTProxyModulePath(kernelVersion string) string {
@@ -245,6 +249,16 @@ type RestoreInputSpec struct {
 	// чей ingress-трафик помечается policy-меткой в mangle PREROUTING до
 	// connmark-jump'а. Пусто / MatchAll / пустой PolicyMark = no-op.
 	IngressInterfaces []string
+
+	// SelectiveIPSet, when true, inserts an iptables -m set guard rule in
+	// both AWGM-TPROXY (mangle) and AWGM-REDIRECT (nat) chains so that
+	// only traffic whose destination IP is listed in AWGM-SELECTIVE reaches
+	// sing-box. All other traffic gets an early RETURN and bypasses sing-box
+	// entirely (going straight to WAN). The guard is placed after user bypass
+	// RETURN rules (port/CIDR exclusions) but before the catch-all TPROXY /
+	// REDIRECT rule, so explicit bypass rules still take precedence.
+	// Only meaningful when the xt_set kernel module is loaded.
+	SelectiveIPSet bool
 }
 
 var bypassCIDRs = []string{
@@ -341,6 +355,15 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	fmt.Fprintf(&b, "-A %s -p udp --dport 53 -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
 		ChainName, TPROXYPort, Fwmark)
 
+	// Selective-bypass guard: only traffic to IPs in AWGM-SELECTIVE reaches
+	// sing-box; everything else returns to PREROUTING and goes to WAN.
+	// Placed after DNS intercept so DNS still reaches sing-box regardless
+	// of ipset membership (DNS must always be intercepted for hijack-dns).
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
+			ChainName, selectiveSetName)
+	}
+
 	// set_chain_rules: bypass set. SKeen uses one ipset rule; we render
 	// the same destinations as discrete CIDR rules (semantically equal).
 	emitBypassReturns(&b, ChainName, spec.WANIPs)
@@ -386,6 +409,12 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	// Bypass ports: RETURN before catch-all TCP REDIRECT.
 	for _, pr := range spec.BypassTCPPorts {
 		fmt.Fprintf(&b, "-A %s -p tcp --dport %s -j RETURN\n", RedirectChain, pr.String())
+	}
+
+	// Selective-bypass guard for TCP: mirrors the mangle guard above.
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
+			RedirectChain, selectiveSetName)
 	}
 
 	// add_redirect_rules: catch-all REDIRECT for TCP.

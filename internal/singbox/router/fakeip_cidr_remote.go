@@ -19,6 +19,9 @@ var ruleSetDownload = func(ctx context.Context, url, format string) (string, err
 var ruleSetDecompileExec = func(binary, srsPath string) ([]byte, error) {
 	return defaultRuleSetDecompile(binary, srsPath)
 }
+var ruleSetDecompileToFile = func(binary, srsPath string) (string, error) {
+	return defaultRuleSetDecompileToFile(binary, srsPath)
+}
 
 // remoteCIDRCache is a process-wide on-disk cache for the Tier-2 download path.
 // It shares the same sha256-by-URL layout (and default $TMPDIR/awgm-router-rulesets
@@ -45,27 +48,38 @@ func defaultRuleSetDownload(_ context.Context, url, format string) (string, erro
 	return sharedRemoteCIDRCache().getOrDownload(url, format, nil, "")
 }
 
+// defaultRuleSetDecompileToFile runs sing-box rule-set decompile into a temp JSON
+// file and returns its path. The caller must remove the file when done.
+func defaultRuleSetDecompileToFile(binary, srsPath string) (string, error) {
+	if binary == "" {
+		return "", fmt.Errorf("no sing-box binary for decompile")
+	}
+	tmp, err := os.CreateTemp("", "awgm-decompile-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create temp: %w", err)
+	}
+	jsonPath := tmp.Name()
+	_ = tmp.Close()
+
+	cmd := exec.Command(binary, "rule-set", "decompile", "--output", jsonPath, srsPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(jsonPath)
+		return "", fmt.Errorf("sing-box decompile: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return jsonPath, nil
+}
+
 // defaultRuleSetDecompile runs `sing-box rule-set decompile --output <tmp.json>
 // <srs>` (the genpresets form) and returns the decompiled source JSON bytes.
 // sing-box writes to the --output file rather than stdout, so we point it at a
 // temp file, read it back, and remove it. An empty binary (dev box without
 // sing-box) yields an error the caller logs + skips.
 func defaultRuleSetDecompile(binary, srsPath string) ([]byte, error) {
-	if binary == "" {
-		return nil, fmt.Errorf("no sing-box binary for decompile")
-	}
-	tmp, err := os.CreateTemp("", "awgm-decompile-*.json")
+	jsonPath, err := defaultRuleSetDecompileToFile(binary, srsPath)
 	if err != nil {
-		return nil, fmt.Errorf("create temp: %w", err)
+		return nil, err
 	}
-	jsonPath := tmp.Name()
-	_ = tmp.Close()
 	defer os.Remove(jsonPath)
-
-	cmd := exec.Command(binary, "rule-set", "decompile", "--output", jsonPath, srsPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("sing-box decompile: %v: %s", err, strings.TrimSpace(string(out)))
-	}
 	return os.ReadFile(jsonPath)
 }
 

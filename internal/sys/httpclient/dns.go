@@ -55,6 +55,74 @@ func LookupIPv4ForBind(ctx context.Context, host string, dnsServers []string, bi
 	return "", fmt.Errorf("httpclient: no IPv4 address for %q", host)
 }
 
+// LookupAllIPv4ForBind resolves host to ALL of its IPv4 addresses. Server and
+// bind semantics match LookupIPv4ForBind, but every A record found is returned
+// (deduplicated) instead of just the first. This matters for the selective
+// ipset: a domain may serve several A records (CDN, round-robin) and the client
+// can connect to any of them — the set must contain all so none leak past the
+// guard. Returns an error only when nothing could be resolved.
+func LookupAllIPv4ForBind(ctx context.Context, host string, dnsServers []string, bindIface string) ([]string, error) {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" {
+		return nil, fmt.Errorf("httpclient: empty host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return []string{ip4.String()}, nil
+		}
+		return nil, fmt.Errorf("httpclient: non-IPv4 literal %q", host)
+	}
+
+	if len(dnsServers) > 0 {
+		var lastErr error
+		for _, srv := range dnsServers {
+			srv = strings.TrimSpace(srv)
+			if srv == "" {
+				continue
+			}
+			ips, err := lookupAllAViaDNS(ctx, host, srv, bindIface, 0)
+			if err == nil && len(ips) > 0 {
+				return ips, nil
+			}
+			if err != nil {
+				lastErr = err
+			}
+		}
+		if lastErr != nil {
+			return nil, fmt.Errorf("httpclient: tunnel DNS lookup %q: %w", host, lastErr)
+		}
+		return nil, fmt.Errorf("httpclient: no A record in DNS response for %q", host)
+	}
+
+	addrs, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+	if err != nil {
+		return nil, fmt.Errorf("httpclient: system DNS lookup %q: %w", host, err)
+	}
+	out := dedupeIPv4(addrs)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("httpclient: no IPv4 address for %q", host)
+	}
+	return out, nil
+}
+
+func dedupeIPv4(ips []net.IP) []string {
+	seen := make(map[string]struct{}, len(ips))
+	var out []string
+	for _, ip := range ips {
+		ip4 := ip.To4()
+		if ip4 == nil {
+			continue
+		}
+		s := ip4.String()
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
 func lookupAViaDNS(ctx context.Context, host, dnsServer, bindIface string, depth int) (string, error) {
 	if depth > 5 {
 		return "", fmt.Errorf("CNAME chain too deep for %q", host)
@@ -168,6 +236,181 @@ func parseDNSARecord(ctx context.Context, pkt []byte, dnsServer, bindIface strin
 		return lookupAViaDNS(ctx, cname, dnsServer, bindIface, depth+1)
 	}
 	return "", fmt.Errorf("no A record in DNS response")
+}
+
+// lookupAllAViaDNS is the multi-record sibling of lookupAViaDNS: it returns
+// every A record in the response (following a single CNAME chain) rather than
+// stopping at the first.
+// LookupCNAMETargetsViaDNS returns CNAME target hostnames from the answer
+// section for host (not followed). Useful for discovering CDN origin names
+// that should be resolved into ipset entries.
+func LookupCNAMETargetsViaDNS(ctx context.Context, host, dnsServer, bindIface string) ([]string, error) {
+	pkt, err := exchangeDNS(ctx, host, dnsServer, bindIface)
+	if err != nil {
+		return nil, err
+	}
+	return parseDNSCNAMETargets(pkt)
+}
+
+func lookupAllAViaDNS(ctx context.Context, host, dnsServer, bindIface string, depth int) ([]string, error) {
+	if depth > 5 {
+		return nil, fmt.Errorf("CNAME chain too deep for %q", host)
+	}
+	pkt, err := exchangeDNS(ctx, host, dnsServer, bindIface)
+	if err != nil {
+		return nil, err
+	}
+	return parseAllDNSARecords(ctx, pkt, dnsServer, bindIface, depth)
+}
+
+func exchangeDNS(ctx context.Context, host, dnsServer, bindIface string) ([]byte, error) {
+	query, err := encodeDNSQuery(host)
+	if err != nil {
+		return nil, err
+	}
+
+	d := bindDialer(bindIface, 5*time.Second)
+	conn, err := d.DialContext(ctx, "udp4", net.JoinHostPort(dnsServer, "53"))
+	if err != nil {
+		return nil, fmt.Errorf("dial DNS %s: %w", dnsServer, err)
+	}
+	defer conn.Close()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	}
+
+	if _, err := conn.Write(query); err != nil {
+		return nil, fmt.Errorf("write DNS query: %w", err)
+	}
+
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, fmt.Errorf("read DNS response: %w", err)
+	}
+	return buf[:n], nil
+}
+
+// parseDNSCNAMETargets collects every CNAME rdata hostname in the answer section.
+func parseDNSCNAMETargets(pkt []byte) ([]string, error) {
+	if len(pkt) < 12 {
+		return nil, fmt.Errorf("short DNS packet")
+	}
+	if pkt[3]&0x0f != 0 {
+		return nil, fmt.Errorf("DNS error rcode %d", pkt[3]&0x0f)
+	}
+	ancount := int(binary.BigEndian.Uint16(pkt[6:8]))
+	off := 12
+	off, err := skipDNSName(pkt, off)
+	if err != nil {
+		return nil, err
+	}
+	if off+4 > len(pkt) {
+		return nil, fmt.Errorf("truncated DNS question")
+	}
+	off += 4
+
+	seen := make(map[string]struct{})
+	var out []string
+	for i := 0; i < ancount; i++ {
+		off, err = skipDNSName(pkt, off)
+		if err != nil {
+			return nil, err
+		}
+		if off+10 > len(pkt) {
+			return nil, fmt.Errorf("truncated DNS answer header")
+		}
+		rrType := binary.BigEndian.Uint16(pkt[off : off+2])
+		rdLen := int(binary.BigEndian.Uint16(pkt[off+8 : off+10]))
+		rdataOff := off + 10
+		off = rdataOff + rdLen
+		if off > len(pkt) {
+			return nil, fmt.Errorf("truncated DNS rdata")
+		}
+		if rrType != 5 { // CNAME
+			continue
+		}
+		target, err := decodeDNSName(pkt, rdataOff)
+		if err != nil || target == "" {
+			continue
+		}
+		target = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(target)), ".")
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		out = append(out, target)
+	}
+	return out, nil
+}
+
+// parseAllDNSARecords collects every A record in the answer section. If the
+// answer carries only CNAMEs, it follows the first one (bounded by depth).
+func parseAllDNSARecords(ctx context.Context, pkt []byte, dnsServer, bindIface string, depth int) ([]string, error) {
+	if len(pkt) < 12 {
+		return nil, fmt.Errorf("short DNS packet")
+	}
+	if pkt[3]&0x0f != 0 {
+		return nil, fmt.Errorf("DNS error rcode %d", pkt[3]&0x0f)
+	}
+	ancount := int(binary.BigEndian.Uint16(pkt[6:8]))
+	off := 12
+	off, err := skipDNSName(pkt, off)
+	if err != nil {
+		return nil, err
+	}
+	if off+4 > len(pkt) {
+		return nil, fmt.Errorf("truncated DNS question")
+	}
+	off += 4
+
+	var ips []string
+	var cname string
+	for i := 0; i < ancount; i++ {
+		off, err = skipDNSName(pkt, off)
+		if err != nil {
+			return nil, err
+		}
+		if off+10 > len(pkt) {
+			return nil, fmt.Errorf("truncated DNS answer header")
+		}
+		rrType := binary.BigEndian.Uint16(pkt[off : off+2])
+		rdLen := int(binary.BigEndian.Uint16(pkt[off+8 : off+10]))
+		rdataOff := off + 10
+		off = rdataOff + rdLen
+		if off > len(pkt) {
+			return nil, fmt.Errorf("truncated DNS rdata")
+		}
+		switch rrType {
+		case 1: // A
+			if rdLen == 4 {
+				ips = append(ips, net.IP(pkt[rdataOff:rdataOff+4]).String())
+			}
+		case 5: // CNAME
+			if cname == "" {
+				cname, _ = decodeDNSName(pkt, rdataOff)
+			}
+		}
+	}
+	if len(ips) > 0 {
+		seen := make(map[string]struct{}, len(ips))
+		out := ips[:0]
+		for _, ip := range ips {
+			if _, ok := seen[ip]; ok {
+				continue
+			}
+			seen[ip] = struct{}{}
+			out = append(out, ip)
+		}
+		return out, nil
+	}
+	if cname != "" {
+		return lookupAllAViaDNS(ctx, cname, dnsServer, bindIface, depth+1)
+	}
+	return nil, fmt.Errorf("no A record in DNS response")
 }
 
 func skipDNSName(pkt []byte, off int) (int, error) {

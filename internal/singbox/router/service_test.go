@@ -478,6 +478,111 @@ func TestUpdateSettings_MalformedSubnet_RejectedBeforeSaveAndInstall(t *testing.
 	}
 }
 
+func TestUpdateSettings_SelectiveBypassRejectedWhenFinalNotDirect(t *testing.T) {
+	svc, _ := newOrchedTestService(t)
+	cfg := NewEmptyConfig()
+	cfg.Route.Final = "my-vpn"
+	cfg.Outbounds = append(cfg.Outbounds, Outbound{Tag: "my-vpn", Type: "direct"})
+	if err := svc.persistConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	err := svc.UpdateSettings(context.Background(), storage.SingboxRouterSettings{
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		SelectiveBypass: true,
+	})
+	if err == nil {
+		t.Fatal("expected UpdateSettings to reject selectiveBypass when route.final is not direct")
+	}
+	if !strings.Contains(err.Error(), "selectiveBypass") {
+		t.Errorf("error should mention selectiveBypass, got %q", err.Error())
+	}
+	all, err := svc.deps.Settings.Load()
+	if err != nil {
+		t.Fatalf("settingsStore.Load: %v", err)
+	}
+	if all.SingboxRouter.SelectiveBypass {
+		t.Error("selectiveBypass must not be persisted when validation fails")
+	}
+}
+
+func TestSetRouteFinal_DisablesSelectiveBypass(t *testing.T) {
+	singbox := newTestSingbox(t)
+	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
+		PolicyName:      "Policy0",
+		SelectiveBypass: true,
+	})
+	svc := &ServiceImpl{
+		deps: Deps{
+			Singbox:  singbox,
+			Settings: settingsStore,
+			IPTables: newStubIPTables(func(_ context.Context, _ string) error { return nil }),
+			SubscriptionComposites: NewSubscriptionCompositesAdapter(
+				&fakeSubscriptionSource{tags: []string{"sub-test"}},
+			),
+		},
+	}
+	cfg := NewEmptyConfig()
+	if err := svc.persistConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.SetRouteFinal(context.Background(), "sub-test"); err != nil {
+		t.Fatalf("SetRouteFinal(sub-test): %v", err)
+	}
+	all, err := settingsStore.Load()
+	if err != nil {
+		t.Fatalf("settingsStore.Load: %v", err)
+	}
+	if all.SingboxRouter.SelectiveBypass {
+		t.Error("expected selectiveBypass disabled after setting route.final to non-direct")
+	}
+}
+
+func TestReconcileInstalled_SelectiveSelfHealWhenFinalNotDirect(t *testing.T) {
+	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
+		Enabled:         true,
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		SelectiveBypass: true,
+	})
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	svc, _ := newOrchedTestService(t)
+	svc.deps.Settings = settingsStore
+	svc.deps.Policies = &fakeAccessPolicyProvider{mark: "0xffffaaa"}
+	svc.deps.IPTables = ipt
+	svc.deps.WANIPCollector = &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}}
+	svc.deps.NetfilterPreflight = func(context.Context) error { return nil }
+	svc.currentSelectiveBypass = true
+
+	cfg := NewEmptyConfig()
+	cfg.Route.Final = "my-vpn"
+	cfg.Outbounds = append(cfg.Outbounds, Outbound{Tag: "my-vpn", Type: "direct"})
+	if err := svc.persistConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.reconcileInstalled(context.Background(), storage.SingboxRouterSettings{
+		Enabled:         true,
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		SelectiveBypass: true,
+	}); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	all, err := settingsStore.Load()
+	if err != nil {
+		t.Fatalf("settingsStore.Load: %v", err)
+	}
+	if all.SingboxRouter.SelectiveBypass {
+		t.Error("expected self-heal to disable selectiveBypass in settings")
+	}
+	if svc.currentSelectiveBypass {
+		t.Error("expected currentSelectiveBypass=false after self-heal reconcile")
+	}
+}
+
 // TestReconcileInstalled_MalformedSubnet_RejectedBeforeInstall guards the second
 // Install entry point. reconcileInstalled re-Normalizes the settings it is
 // handed (e.g. a hand-edited settings.json read from disk), so a malformed

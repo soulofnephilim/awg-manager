@@ -57,6 +57,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
 	"github.com/hoaxisr/awg-manager/internal/staticroute"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -120,6 +121,16 @@ func detectArch() string {
 		return "aarch64-3.10"
 	}
 	return ""
+}
+
+func applyGoMemoryLimits(disableMemorySaving bool) {
+	for _, entry := range osdetect.GetGCEnv(disableMemorySaving) {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 || os.Getenv(parts[0]) != "" {
+			continue
+		}
+		_ = os.Setenv(parts[0], parts[1])
+	}
 }
 
 // deviceproxySubscriptionOutboundsAdapter adapts *subscription.Service to
@@ -286,6 +297,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to load settings: %v\n", err)
 		os.Exit(1)
 	}
+	applyGoMemoryLimits(settings.DisableMemorySaving)
 
 	awgStore := storage.NewAWGTunnelStore(
 		filepath.Join(*dataDir, "tunnels"),
@@ -1192,11 +1204,51 @@ func main() {
 			p.CachePath = singbox.DefaultCacheDBPath()
 			return p
 		}(),
+		ClashHealthy: func() bool {
+			return singboxOp.Clash().IsHealthy()
+		},
 	})
+	// Wire selective-bypass builder. The adapter wraps selective.Builder with the
+	// router service's live config so reconcileInstalled can trigger an ipset
+	// rebuild with a single Rebuild(ctx) call.
+	selectiveGeo := selective.GeoPaths{}
+	if geoCfg, err := hydraroute.ReadConfig(); err == nil {
+		selectiveGeo.GeoSite = geoCfg.GeoSiteFiles
+		selectiveGeo.GeoIP = geoCfg.GeoIPFiles
+	}
+	selectiveBuilder := selective.NewBuilder(selective.BuilderConfig{
+		ConfigDir:         singboxOp.ConfigDir(),
+		DNSSource:         ndmsQueries.DNSProxyStatus,
+		Log:               logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSelective),
+		Bus:               eventBus,
+		Geo:               selectiveGeo,
+		OpenRuleSetJSON:   routerSvc.OpenSelectiveRuleSetJSON,
+	})
+	selectiveAdapter := router.NewSelectiveBuilderAdapter(routerSvc, selectiveBuilder)
+	routerSvc.SetSelectiveBuilder(selectiveAdapter)
+	srv.SetSelectiveHandler(api.NewSelectiveHandler(
+		settingsStore,
+		singboxOp.ConfigDir(),
+		selectiveAdapter,
+		selectiveBuilder,
+	))
+	selectiveCDNRefresh := selective.StartCDNRefreshLoop(
+		selective.CDNRefreshInterval,
+		func() bool {
+			st, err := settingsStore.Load()
+			if err != nil {
+				return false
+			}
+			return st.SingboxRouter.Enabled && st.SingboxRouter.SelectiveBypass
+		},
+		selectiveAdapter.RefreshCDN,
+		logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSelective),
+	)
+	_ = selectiveCDNRefresh // stopped via process exit; no explicit Stop on shutdown today
+
 	// Exclude interfaces already bound by an existing direct outbound from the
 	// bindable picker (#323). Wired post-construction — needs routerSvc.
-	bindableAdapter.occupiedBinds = func(ctx context.Context) (map[string]bool, error) {
-		obs, err := routerSvc.ListCompositeOutbounds(ctx)
+	bindableAdapter.occupiedBinds = func(ctx context.Context) (map[string]bool, error) {		obs, err := routerSvc.ListCompositeOutbounds(ctx)
 		if err != nil {
 			return nil, err
 		}
