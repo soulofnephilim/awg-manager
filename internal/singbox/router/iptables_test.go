@@ -1094,7 +1094,7 @@ func TestProbe(t *testing.T) {
 func TestBuildRestoreInput_BypassUDPPorts_AddsReturnRules(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassUDPPorts: []int{500, 4500, 1701},
+		BypassUDPPorts: []PortRange{{500, 500}, {4500, 4500}, {1701, 1701}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1109,7 +1109,7 @@ func TestBuildRestoreInput_BypassUDPPorts_AddsReturnRules(t *testing.T) {
 func TestBuildRestoreInput_BypassTCPPorts_AddsReturnRules(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassTCPPorts: []int{139, 445},
+		BypassTCPPorts: []PortRange{{139, 139}, {445, 445}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1134,7 +1134,7 @@ func TestBuildRestoreInput_EmptyBypassPorts_NoExtraReturnRules(t *testing.T) {
 func TestBuildRestoreInput_BypassPortsBeforeCatchAll(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassUDPPorts: []int{500},
+		BypassUDPPorts: []PortRange{{500, 500}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1155,7 +1155,7 @@ func TestBuildRestoreInput_BypassPortsBeforeCatchAll(t *testing.T) {
 func TestBuildRestoreInput_BypassTCPPortsBeforeCatchAll(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassTCPPorts: []int{445},
+		BypassTCPPorts: []PortRange{{445, 445}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1170,6 +1170,32 @@ func TestBuildRestoreInput_BypassTCPPortsBeforeCatchAll(t *testing.T) {
 	}
 	if bypassIdx > catchAllIdx {
 		t.Errorf("TCP bypass rule appears AFTER catch-all REDIRECT — must be before it")
+	}
+}
+
+func TestBuildRestoreInput_BypassUDPPortRange_AddsReturnRule(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		BypassUDPPorts: []PortRange{{5000, 5500}},
+	}
+	out := buildRestoreInput(spec)
+
+	rule := fmt.Sprintf("-A %s -p udp --dport 5000:5500 -j RETURN", ChainName)
+	if !strings.Contains(out, rule) {
+		t.Errorf("mangle chain missing UDP bypass range rule\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_BypassTCPPortRange_AddsReturnRule(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		BypassTCPPorts: []PortRange{{8000, 9000}},
+	}
+	out := buildRestoreInput(spec)
+
+	rule := fmt.Sprintf("-A %s -p tcp --dport 8000:9000 -j RETURN", RedirectChain)
+	if !strings.Contains(out, rule) {
+		t.Errorf("nat chain missing TCP bypass range rule\ngot:\n%s", out)
 	}
 }
 

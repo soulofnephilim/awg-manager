@@ -8,6 +8,27 @@ import (
 	"strings"
 )
 
+// PortRange represents a single port or a contiguous range of ports.
+// When From == To it is a single port.
+type PortRange struct {
+	From int
+	To   int
+}
+
+// String returns the iptables --dport representation: "N" for single ports,
+// "N:M" for ranges (iptables multiport uses "N:M" range syntax).
+func (pr PortRange) String() string {
+	if pr.From == pr.To {
+		return strconv.Itoa(pr.From)
+	}
+	return fmt.Sprintf("%d:%d", pr.From, pr.To)
+}
+
+// portRangeKey returns a canonical dedup key for a PortRange.
+func portRangeKey(pr PortRange) string {
+	return fmt.Sprintf("%d-%d", pr.From, pr.To)
+}
+
 type portSet struct {
 	UDP []int
 	TCP []int
@@ -31,17 +52,21 @@ func KnownPresetNames() []string {
 	return names
 }
 
-// resolveBypassPorts collects the final UDP and TCP port lists from named
-// presets and the user-supplied extra-ports string.
+// resolveBypassPorts collects the final UDP and TCP port/range lists from
+// named presets and the user-supplied extra-ports string.
 // Returns an error if any preset name is unknown or the extra string is malformed.
-func resolveBypassPorts(presets []string, extra string) (udp, tcp []int, err error) {
+func resolveBypassPorts(presets []string, extra string) (udp, tcp []PortRange, err error) {
 	for _, name := range presets {
 		ps, ok := knownPresets[name]
 		if !ok {
 			return nil, nil, fmt.Errorf("unknown bypass preset %q", name)
 		}
-		udp = append(udp, ps.UDP...)
-		tcp = append(tcp, ps.TCP...)
+		for _, p := range ps.UDP {
+			udp = append(udp, PortRange{From: p, To: p})
+		}
+		for _, p := range ps.TCP {
+			tcp = append(tcp, PortRange{From: p, To: p})
+		}
 	}
 	eu, et, err := parseExtraPorts(extra)
 	if err != nil {
@@ -83,10 +108,17 @@ func resolveBypassSubnets(extra string) ([]string, error) {
 	return out, nil
 }
 
-// parseExtraPorts parses a comma-separated list of "<port> <UDP|TCP>" entries.
-// Empty string returns nil slices and no error.
+// parseExtraPorts parses a comma-separated list of port entries in the format
+// "PORT UDP|TCP" or "PORT-PORT UDP|TCP" (range). Single ports and ranges are
+// both supported. Empty string returns nil slices and no error.
 // Case-insensitive for the protocol part.
-func parseExtraPorts(s string) (udp, tcp []int, err error) {
+//
+// Examples:
+//
+//	"51820 UDP"         → UDP range {51820,51820}
+//	"5000-5500 UDP"     → UDP range {5000,5500}
+//	"51820 UDP, 443 TCP, 8000-9000 TCP"
+func parseExtraPorts(s string) (udp, tcp []PortRange, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil, nil, nil
@@ -98,17 +130,39 @@ func parseExtraPorts(s string) (udp, tcp []int, err error) {
 		}
 		parts := strings.Fields(entry)
 		if len(parts) != 2 {
-			return nil, nil, fmt.Errorf("invalid port entry %q: expected \"PORT UDP|TCP\"", entry)
+			return nil, nil, fmt.Errorf("invalid port entry %q: expected \"PORT UDP|TCP\" or \"PORT-PORT UDP|TCP\"", entry)
 		}
-		port, err := strconv.Atoi(parts[0])
-		if err != nil || port < 1 || port > 65535 {
-			return nil, nil, fmt.Errorf("invalid port %q in %q: must be 1–65535", parts[0], entry)
+		portPart := parts[0]
+		var from, to int
+		if idx := strings.Index(portPart, "-"); idx >= 0 {
+			// Range: "5000-5500"
+			fromStr := portPart[:idx]
+			toStr := portPart[idx+1:]
+			from, err = strconv.Atoi(fromStr)
+			if err != nil || from < 1 || from > 65535 {
+				return nil, nil, fmt.Errorf("invalid start port %q in %q: must be 1–65535", fromStr, entry)
+			}
+			to, err = strconv.Atoi(toStr)
+			if err != nil || to < 1 || to > 65535 {
+				return nil, nil, fmt.Errorf("invalid end port %q in %q: must be 1–65535", toStr, entry)
+			}
+			if from > to {
+				return nil, nil, fmt.Errorf("invalid range %q in %q: start must be ≤ end", portPart, entry)
+			}
+		} else {
+			// Single port
+			from, err = strconv.Atoi(portPart)
+			if err != nil || from < 1 || from > 65535 {
+				return nil, nil, fmt.Errorf("invalid port %q in %q: must be 1–65535", portPart, entry)
+			}
+			to = from
 		}
+		pr := PortRange{From: from, To: to}
 		switch strings.ToUpper(parts[1]) {
 		case "UDP":
-			udp = append(udp, port)
+			udp = append(udp, pr)
 		case "TCP":
-			tcp = append(tcp, port)
+			tcp = append(tcp, pr)
 		default:
 			return nil, nil, fmt.Errorf("invalid protocol %q in %q: must be UDP or TCP", parts[1], entry)
 		}
