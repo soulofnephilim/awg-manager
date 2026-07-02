@@ -1359,13 +1359,6 @@ type diagLogAdapter struct {
 	svc *logging.Service
 }
 
-func (a *diagLogAdapter) GetLogs(category, level string) []logging.LogEntry {
-	// For diagnostics, category maps to app-bucket group (empty = all).
-	// Kept for the legacy report.Logs section.
-	logs, _ := a.svc.GetLogs(logging.BucketApp, category, "", level, time.Time{}, 10000, 0)
-	return logs
-}
-
 func (a *diagLogAdapter) GetBucketLogs(bucket logging.Bucket, group, subgroup, level string, limit, offset int) ([]logging.LogEntry, int) {
 	if a == nil || a.svc == nil {
 		return []logging.LogEntry{}, 0

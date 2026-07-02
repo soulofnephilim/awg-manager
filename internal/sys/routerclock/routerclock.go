@@ -48,11 +48,6 @@ func Get() Info {
 	}
 }
 
-// Convert converts t to router local time location.
-func Convert(t time.Time) time.Time {
-	return t.In(Get().Location)
-}
-
 func readRouterTZ() (string, string, bool) {
 	for _, p := range tzCandidates {
 		b, err := os.ReadFile(p)

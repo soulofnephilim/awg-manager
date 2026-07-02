@@ -66,13 +66,6 @@ func (s *Service) SpeedTest(ctx context.Context, tunnelID, server string, port i
 	return s.runIperf3(ctx, ifaceName, server, port, direction)
 }
 
-// SpeedTestByIface runs iperf3 bound to the given kernel interface name,
-// without any tunnel-state precondition. Used by the sing-box speedtest flow
-// where the interface is t2sN.
-func (s *Service) SpeedTestByIface(ctx context.Context, ifaceName, server string, port int, direction string) (*SpeedTestResult, error) {
-	return s.runIperf3(ctx, ifaceName, server, port, direction)
-}
-
 // runIperf3 executes iperf3 in JSON mode bound to the given interface and
 // parses the final result.
 func (s *Service) runIperf3(ctx context.Context, ifaceName, server string, port int, direction string) (*SpeedTestResult, error) {

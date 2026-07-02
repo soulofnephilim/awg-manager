@@ -84,12 +84,6 @@ func checkWithDownloader(ctx context.Context, currentVersion, channel string, dl
 	return info
 }
 
-// Upgrade downloads the IPK from downloadURL and launches opkg install in a
-// detached process.
-func Upgrade(ctx context.Context, downloadURL string) error {
-	return upgradeWithDownloader(ctx, downloadURL, newDefaultDownloader())
-}
-
 var startDetachedUpgrade = func(ipkPath string) error {
 	cmd := osexec.Command("sh", "-c", fmt.Sprintf("sleep 2 && opkg install %s && rm -f %s", ipkPath, ipkPath))
 	setUpgradeDetachedProcess(cmd)

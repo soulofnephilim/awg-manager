@@ -69,10 +69,10 @@ func TestAnonymize_MACDedupAcrossFields(t *testing.T) {
 		WAN: WANInfo{
 			IPAddr: "link/ether a0:21:aa:be:40:58\n",
 		},
-		Logs: []logging.LogEntry{
+		Tests: []TestResult{
 			{
-				Target:  "system",
-				Message: "detected mac a0:21:aa:be:40:58 on eth3",
+				Name:   "system",
+				Detail: "detected mac a0:21:aa:be:40:58 on eth3",
 			},
 		},
 	}
@@ -82,14 +82,14 @@ func TestAnonymize_MACDedupAcrossFields(t *testing.T) {
 	if !strings.Contains(report.WAN.IPAddr, expectedMask) {
 		t.Fatalf("expected masked MAC %q not found in WAN.IPAddr:\n%s", expectedMask, report.WAN.IPAddr)
 	}
-	if !strings.Contains(report.Logs[0].Message, expectedMask) {
-		t.Fatalf("expected masked MAC %q not found in Logs[0].Message:\n%s", expectedMask, report.Logs[0].Message)
+	if !strings.Contains(report.Tests[0].Detail, expectedMask) {
+		t.Fatalf("expected masked MAC %q not found in Tests[0].Detail:\n%s", expectedMask, report.Tests[0].Detail)
 	}
 	// Both occurrences must carry the identical mask string.
 	wanHasMask := strings.Contains(report.WAN.IPAddr, expectedMask)
-	logHasMask := strings.Contains(report.Logs[0].Message, expectedMask)
-	if !wanHasMask || !logHasMask {
-		t.Fatalf("same MAC not masked identically: wan=%v log=%v", wanHasMask, logHasMask)
+	testHasMask := strings.Contains(report.Tests[0].Detail, expectedMask)
+	if !wanHasMask || !testHasMask {
+		t.Fatalf("same MAC not masked identically: wan=%v test=%v", wanHasMask, testHasMask)
 	}
 }
 
@@ -240,17 +240,20 @@ func TestAnonymize_HostnamesInJournalWarnings(t *testing.T) {
 	}
 }
 
-func TestAnonymize_HostnameAliasesAreStableAcrossLogsAndJournalWarnings(t *testing.T) {
+func TestAnonymize_HostnameAliasesAreStableAcrossJournalWarningBuckets(t *testing.T) {
 	report := Report{
-		Logs: []logging.LogEntry{
-			{
-				Target:  "connectivitycheck.gstatic.com",
-				Message: "app log mentions connectivitycheck.gstatic.com",
-			},
-		},
 		JournalWarnings: &JournalWarningsInfo{
 			Levels:         []string{"error", "warn"},
 			LimitPerBucket: 300,
+			AWGM: JournalWarningBucket{
+				Bucket: "awgm",
+				Entries: []logging.LogEntry{
+					{
+						Target:  "connectivitycheck.gstatic.com",
+						Message: "app log mentions connectivitycheck.gstatic.com",
+					},
+				},
+			},
 			Singbox: JournalWarningBucket{
 				Bucket: "singbox",
 				Entries: []logging.LogEntry{
@@ -265,7 +268,8 @@ func TestAnonymize_HostnameAliasesAreStableAcrossLogsAndJournalWarnings(t *testi
 
 	anonymize(&report)
 
-	oldLog := report.Logs[0].Target + " " + report.Logs[0].Message
+	oldLog := report.JournalWarnings.AWGM.Entries[0].Target + " " +
+		report.JournalWarnings.AWGM.Entries[0].Message
 	newLog := report.JournalWarnings.Singbox.Entries[0].Target + " " +
 		report.JournalWarnings.Singbox.Entries[0].Message
 	out := oldLog + " " + newLog
@@ -275,10 +279,10 @@ func TestAnonymize_HostnameAliasesAreStableAcrossLogsAndJournalWarnings(t *testi
 	}
 
 	if !strings.Contains(oldLog, "HOST-1") {
-		t.Fatalf("expected HOST-1 in legacy logs, got:\n%s", oldLog)
+		t.Fatalf("expected HOST-1 in awgm bucket, got:\n%s", oldLog)
 	}
 	if !strings.Contains(newLog, "HOST-1") {
-		t.Fatalf("expected same HOST-1 alias in journalWarnings, got:\n%s", newLog)
+		t.Fatalf("expected same HOST-1 alias in singbox bucket, got:\n%s", newLog)
 	}
 }
 

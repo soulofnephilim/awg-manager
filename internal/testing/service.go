@@ -54,14 +54,6 @@ func (s *Service) InterfaceExists(iface string) bool {
 	return err == nil
 }
 
-// GetInterface returns the network interface name for a tunnel.
-func (s *Service) GetInterface(id string) (string, error) {
-	if !IsAWGID(id) {
-		return "", ErrInvalidTunnelID
-	}
-	return s.resolveIfaceName(id), nil
-}
-
 // GetInterfaceName returns the kernel interface name for a tunnel.
 func (s *Service) GetInterfaceName(id string) (string, error) {
 	if !IsAWGID(id) {
