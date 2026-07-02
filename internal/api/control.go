@@ -108,6 +108,10 @@ func (h *ControlHandler) Start(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, tunnel.ErrAlreadyRunning) {
 		err = nil // tunnel already running — user's intent fulfilled
 	}
+	if errors.Is(err, tunnel.ErrOperationInProgress) {
+		response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+		return
+	}
 	if err != nil {
 		h.log.Warn("start", id, "Failed to start tunnel: "+err.Error())
 		response.Error(w, err.Error(), "START_FAILED")
@@ -157,6 +161,11 @@ func (h *ControlHandler) Stop(w http.ResponseWriter, r *http.Request) {
 		Type:   orchestrator.EventStop,
 		Tunnel: id,
 	}); err != nil {
+		if errors.Is(err, tunnel.ErrOperationInProgress) {
+			// Busy lock — nothing was attempted, do NOT flip Enabled.
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+			return
+		}
 		// Always sync Enabled=false — user's intent is "OFF" regardless of current state.
 		// ErrNotRunning means tunnel is already stopped/disabled, but we still want Enabled=false
 		// so it doesn't auto-start on boot.
@@ -209,6 +218,10 @@ func (h *ControlHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		Type:   orchestrator.EventRestart,
 		Tunnel: id,
 	}); err != nil {
+		if errors.Is(err, tunnel.ErrOperationInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+			return
+		}
 		h.log.Warn("restart", id, "Failed to restart tunnel: "+err.Error())
 		response.Error(w, err.Error(), "RESTART_FAILED")
 		return
