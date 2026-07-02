@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -1437,19 +1436,6 @@ func (h *SingboxRouterHandler) SetRouteFinal(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	response.Success(w, map[string]bool{"ok": true})
-}
-
-func decodeBody(r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
-	defer r.Body.Close()
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
-	}
-	if len(raw) == 0 {
-		return nil
-	}
-	return json.Unmarshal(raw, dst)
 }
 
 // GetStaging returns the current draft state for the router slot.
