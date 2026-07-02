@@ -937,10 +937,6 @@ func (c *Config) pruneAWGOutbounds(keep map[string]string) {
 	c.setOutbounds(out)
 }
 
-func (c *Config) ensureDeviceProxyRouteRule() {
-	c.ensureDeviceProxyInstanceRouteRule(deviceProxyInboundTag, deviceProxySelectorTag)
-}
-
 func (c *Config) ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag string) {
 	rule := map[string]any{
 		"inbound":  inboundTag,
@@ -960,10 +956,6 @@ func (c *Config) ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag stri
 		filtered = append(filtered, v)
 	}
 	c.setRouteRules(append([]any{rule}, filtered...))
-}
-
-func (c *Config) removeDeviceProxyRouteRule() {
-	c.removeDeviceProxyInstanceRouteRule(deviceProxyInboundTag)
 }
 
 func (c *Config) removeDeviceProxyInstanceRouteRule(inboundTag string) {

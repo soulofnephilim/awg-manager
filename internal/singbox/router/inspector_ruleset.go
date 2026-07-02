@@ -15,11 +15,6 @@ import (
 	"time"
 )
 
-// ruleSetMatchTimeout caps each `sing-box rule-set match` invocation.
-// Mirrors the routebox approach — the CLI is local-only, so failure to
-// finish quickly almost always means a hung binary or missing file.
-const ruleSetMatchTimeout = 10 * time.Second
-
 // ruleSetCacheTTL is how long a downloaded remote rule-set stays valid in
 // the on-disk cache before getOrDownload fetches a fresh copy.
 const ruleSetCacheTTL = 1 * time.Hour

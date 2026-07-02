@@ -330,10 +330,6 @@ func NewOperator(d OperatorDeps) *Operator {
 	return op
 }
 
-// migrationLock is for cross-file ops in this package (e.g.
-// MigrateOff/On) that must run under the same mutex as AddTunnels.
-func (o *Operator) migrationLock() *sync.Mutex { return &o.migrationMu }
-
 // singBoxStderrTextHead matches the wall-clock prefix sing-box's text logger
 // emits on stderr (e.g. "+0000 2026-05-14 21:45:56 …"). Used so JSON or
 // other structured blobs that mention "fatal" do not populate LastError.
