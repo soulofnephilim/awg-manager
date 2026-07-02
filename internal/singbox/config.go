@@ -975,17 +975,20 @@ func (c *Config) removeDeviceProxyInstanceRouteRule(inboundTag string) {
 	c.setRouteRules(out)
 }
 
-// MigrateLegacyConfigDir migrates the BASE portion (log/experimental/dns) of
-// an old monolithic config.json into config.d/00-base.json and creates the
-// config.d/ directory. No-op when config.d already exists.
+// MigrateLegacyConfigDir splits an old monolithic config.json into the
+// new config.d/ layout (00-base.json + 10-tunnels.json) on first run.
+// No-op when config.d already exists. Used by Operator.New to handle
+// upgrades from pre-router-engine builds.
 //
-// It intentionally does NOT split out inbounds/outbounds/route or delete the
-// legacy file — the tunnels migration is owned by ensureLegacyConfigMigrated,
-// which filters device-proxy artefacts, the v2.8.2 direct placeholder and our
-// DNS servers before writing 10-tunnels.json. Previously this function did a
-// blind tunnels split and deleted config.json first, so that richer filtering
-// never ran on the common upgrade path (config.d absent). The legacy file is
-// left in place for ensureLegacyConfigMigrated to consume and remove.
+// It splits AND deletes config.json in one pass: doing the tunnels split
+// here (not delegating to ensureLegacyConfigMigrated) keeps the two
+// migration paths mutually exclusive. Delegating the tunnels half while
+// leaving config.json behind makes ensureLegacyConfigMigrated ALSO run and
+// copy the legacy dns block into 10-tunnels.json, colliding with the dns
+// block this function writes into 00-base.json (configmerge rejects
+// duplicate dns.servers tags → sing-box dead after upgrade). It also
+// narrows route to {rules} only, dropping route.final/rule_set. Keep the
+// blind full-split here.
 func MigrateLegacyConfigDir(dir string) error {
 	configDir := filepath.Join(dir, "config.d")
 	if _, err := os.Stat(configDir); err == nil {
@@ -1016,7 +1019,21 @@ func MigrateLegacyConfigDir(dir string) error {
 			base[k] = v
 		}
 	}
-	return writeJSONFile(filepath.Join(configDir, "00-base.json"), base)
+	if err := writeJSONFile(filepath.Join(configDir, "00-base.json"), base); err != nil {
+		return err
+	}
+
+	tunnels := map[string]json.RawMessage{}
+	for _, k := range []string{"inbounds", "outbounds", "route"} {
+		if v, ok := cfg[k]; ok {
+			tunnels[k] = v
+		}
+	}
+	if err := writeJSONFile(filepath.Join(configDir, "10-tunnels.json"), tunnels); err != nil {
+		return err
+	}
+
+	return os.Remove(legacyPath)
 }
 
 // writeJSONFile is the shared atomic-ish JSON writer used by
