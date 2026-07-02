@@ -33,7 +33,6 @@ type Service struct {
 	monitors  map[string]*tunnelMonitor
 	logBuffer *LogBuffer
 	running   bool
-	stopCh    chan struct{}
 	ctx       context.Context
 	cancel    context.CancelFunc
 
@@ -96,7 +95,6 @@ func (s *Service) Start() {
 	}
 
 	s.running = true
-	s.stopCh = make(chan struct{})
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
 	s.logInfo("", "PingCheck service started")
@@ -112,7 +110,6 @@ func (s *Service) Stop() {
 	}
 
 	s.running = false
-	close(s.stopCh)
 	if s.cancel != nil {
 		s.cancel()
 	}

@@ -822,11 +822,6 @@ export interface NativePingCheckStatus {
 	successCount: number;
 }
 
-export interface PingCheckStatus {
-	enabled: boolean;
-	tunnels: TunnelPingStatus[];
-}
-
 export interface TunnelPingStatus {
 	tunnelId: string;
 	tunnelName: string;
@@ -1601,14 +1596,6 @@ export interface SingboxRouterPreset {
 	covers?: string[];
 	featured?: boolean;
 	sensitive?: boolean;
-}
-
-export interface SingboxRouterAvailableClient {
-	mac: string;
-	name?: string;
-	ip?: string;
-	registered?: boolean;
-	active?: boolean;
 }
 
 export type SingboxRouterDNSType = 'udp' | 'tls' | 'https' | 'quic' | 'h3' | 'local' | 'fakeip';

@@ -947,13 +947,6 @@ const maxGeoFileSize = 200 << 20 // 200 MB
 // without letting a runaway request hang forever.
 const downloadTimeout = 15 * time.Minute
 
-// downloadFile downloads rawURL to dest with a generous overall timeout and a
-// hard size cap. Uses atomic write: downloads to a temp file, then renames.
-// onProgress (optional) receives streaming byte counters during the copy.
-func downloadFile(rawURL, dest string, onProgress ProgressFn) (size int64, err error) {
-	return downloadFileWithClient(context.Background(), nil, rawURL, dest, onProgress)
-}
-
 func downloadFileWithClient(ctx context.Context, client *http.Client, rawURL, dest string, onProgress ProgressFn) (size int64, err error) {
 	// Defense-in-depth: re-validate scheme before making the request.
 	if u, parseErr := url.Parse(rawURL); parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") {

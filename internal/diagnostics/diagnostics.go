@@ -37,7 +37,6 @@ type Report struct {
 	JournalWarnings *JournalWarningsInfo `json:"journalWarnings,omitempty"`
 	Tunnels         []TunnelInfo         `json:"tunnels"`
 	Tests           []TestResult         `json:"tests"`
-	Logs            []logging.LogEntry   `json:"logs,omitempty"`
 }
 
 type PrivacyInfo struct {
@@ -392,9 +391,6 @@ type TunnelServiceForDiag interface {
 
 // LogServiceForDiag is the subset of logging.Service used by diagnostics.
 type LogServiceForDiag interface {
-	// Legacy app-bucket helper used by existing diagnostics log collection.
-	GetLogs(category, level string) []logging.LogEntry
-
 	// Bucket helpers used by journalWarnings report section.
 	GetBucketLogs(bucket logging.Bucket, group, subgroup, level string, limit, offset int) ([]logging.LogEntry, int)
 	GetBucketStats(bucket logging.Bucket) logging.BufferStats
@@ -511,17 +507,6 @@ func (r *Runner) subscribe() chan DiagEvent {
 	ch := make(chan DiagEvent, 64)
 	r.subscribers = append(r.subscribers, ch)
 	return ch
-}
-
-func (r *Runner) unsubscribe(ch chan DiagEvent) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, sub := range r.subscribers {
-		if sub == ch {
-			r.subscribers = append(r.subscribers[:i], r.subscribers[i+1:]...)
-			break
-		}
-	}
 }
 
 func (r *Runner) emit(ev DiagEvent) {

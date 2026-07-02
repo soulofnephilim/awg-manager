@@ -542,21 +542,6 @@ func TestValidateRoute_RejectsMismatchedKind(t *testing.T) {
 	}
 }
 
-func TestDescribeRoute_RespectsKind(t *testing.T) {
-	svc := NewService(Deps{
-		Outbounds: &fakeOutboundsProvider{
-			items: []Outbound{
-				{Tag: "same-tag", Kind: "subscription", Label: "Sub same"},
-			},
-		},
-	})
-
-	info := svc.DescribeRoute(context.Background(), &Route{Tag: "same-tag", Kind: "subscription"})
-	if info.Tag != "same-tag" || info.Kind != "subscription" || info.Label != "Sub same" {
-		t.Fatalf("unexpected describe info: %+v", info)
-	}
-}
-
 func TestResolveClient_RespectsKind(t *testing.T) {
 	resolver := NewTransportResolver(TransportResolverDeps{
 		Subs:    &fakeSubPorts{ports: map[string]int{"same-tag": 11002}},

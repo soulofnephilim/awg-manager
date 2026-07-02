@@ -10,7 +10,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/response"
-	"github.com/hoaxisr/awg-manager/internal/routing"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
 )
 
@@ -63,11 +62,6 @@ func (h *ControlHandler) SetTunnelsHandler(th *TunnelsHandler) {
 
 // SetEventBus sets the event bus for SSE publishing.
 func (h *ControlHandler) SetEventBus(bus *events.Bus) { h.bus = bus }
-
-// SetCatalog is a no-op retained for API compatibility. The control
-// handler no longer needs direct catalog access — it just emits a
-// resource:invalidated hint so the polling store refetches.
-func (h *ControlHandler) SetCatalog(_ routing.Catalog) {}
 
 // publishRoutingTunnels posts a resource:invalidated hint so clients
 // refetch the routing tunnel list after a start/stop that changed

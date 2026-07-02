@@ -548,7 +548,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	controlHandler.SetOrchestrator(s.orch)
 	controlHandler.SetTunnelsHandler(tunnelsHandler)
 	controlHandler.SetEventBus(s.bus)
-	controlHandler.SetCatalog(s.catalog)
 	testingHandler := api.NewTestingHandler(s.testingService)
 	systemHandler := api.NewSystemHandler(s.config.Version)
 	systemHandler.SetSettingsStore(s.settings)
@@ -1353,18 +1352,10 @@ func acceptsGzip(r *http.Request) bool {
 }
 
 // diagLogAdapter adapts logging.Service to diagnostics.LogServiceForDiag.
-// The legacy GetLogs helper still feeds report.Logs from the app bucket;
-// structured journalWarnings uses GetBucketLogs/GetBucketStats to collect
-// both app and sing-box buckets explicitly.
+// The structured journalWarnings report section uses GetBucketLogs/
+// GetBucketStats to collect both app and sing-box buckets explicitly.
 type diagLogAdapter struct {
 	svc *logging.Service
-}
-
-func (a *diagLogAdapter) GetLogs(category, level string) []logging.LogEntry {
-	// For diagnostics, category maps to app-bucket group (empty = all).
-	// Kept for the legacy report.Logs section.
-	logs, _ := a.svc.GetLogs(logging.BucketApp, category, "", level, time.Time{}, 10000, 0)
-	return logs
 }
 
 func (a *diagLogAdapter) GetBucketLogs(bucket logging.Bucket, group, subgroup, level string, limit, offset int) ([]logging.LogEntry, int) {

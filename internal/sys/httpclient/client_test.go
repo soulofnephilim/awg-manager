@@ -95,33 +95,6 @@ func TestDo_HEAD(t *testing.T) {
 	}
 }
 
-func TestDo_POST_Form(t *testing.T) {
-	ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("Method = %q, want POST", r.Method)
-		}
-		if ct := r.Header.Get("Content-Type"); !strings.Contains(ct, "application/x-www-form-urlencoded") {
-			t.Errorf("Content-Type = %q, want form-urlencoded", ct)
-		}
-		r.ParseForm()
-		if v := r.FormValue("type"); v != "ifcreated" {
-			t.Errorf("type = %q, want ifcreated", v)
-		}
-		if v := r.FormValue("id"); v != "eth2" {
-			t.Errorf("id = %q, want eth2", v)
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	c := New()
-	_, err := c.Do(context.Background(), CallConfig{
-		URL:      ts.URL,
-		PostData: map[string][]string{"type": {"ifcreated"}, "id": {"eth2"}},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestDo_WithProxy(t *testing.T) {
 	// Proxy server records the request and forwards.
 	var proxied bool

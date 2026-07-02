@@ -291,8 +291,8 @@ func TestDecide_Start_KernelTunnel(t *testing.T) {
 	s.anyWANUpFn = func() bool { return true }
 	s.tunnels["awg0"] = &tunnelState{
 		ID: "awg0", Backend: "kernel", Enabled: false, Running: false,
-		ISPInterface: "", Endpoint: "1.2.3.4:51820",
-		PingCheck: &storage.TunnelPingCheck{Enabled: true},
+		ISPInterface: "",
+		PingCheck:    &storage.TunnelPingCheck{Enabled: true},
 	}
 
 	actions := decide(Event{Type: EventStart, Tunnel: "awg0"}, &s)

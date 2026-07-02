@@ -510,7 +510,7 @@ func main() {
 	defer pingCheckService.Stop()
 
 	// Unified facade: kernel → custom loop, NativeWG → NDMS native
-	pingCheckFacade := pingcheck.NewFacade(pingCheckService, awgStore, settingsStore, nwgOp)
+	pingCheckFacade := pingcheck.NewFacade(pingCheckService, awgStore, nwgOp)
 	pingCheckFacade.SetNativeWGLatencyProbe(func(ctx context.Context, tunnelID string) int {
 		res, err := testService.CheckConnectivity(ctx, tunnelID)
 		if err != nil || res == nil || !res.Connected || res.Latency == nil {

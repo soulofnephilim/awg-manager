@@ -214,10 +214,6 @@ func (c *RouterConfig) rulesReferencingRuleSets(tags []string) ruleSetRefIndices
 	return out
 }
 
-func (c *RouterConfig) rulesReferencingRuleSet(tag string) []int {
-	return c.rulesReferencingRuleSets(ruleSetTagsWithCompanion(tag)).route
-}
-
 func (c *RouterConfig) AddRule(r Rule) error {
 	if !r.hasAnyMatcher() && r.Action != "sniff" && r.Action != "hijack-dns" {
 		return ErrInvalidMatchers

@@ -421,10 +421,6 @@ class ApiClient {
 		return this.request('/test/speed/servers');
 	}
 
-	async speedTest(id: string, server: string, port: number, direction: 'download' | 'upload'): Promise<SpeedTestResult> {
-		return this.request(`/test/speed?id=${encodeURIComponent(id)}&server=${encodeURIComponent(server)}&port=${port}&direction=${direction}`);
-	}
-
 	speedTestStream(
 		id: string, server: string, port: number, direction: 'download' | 'upload',
 		onInterval: (data: { second: number; bandwidth: number }) => void,

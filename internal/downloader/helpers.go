@@ -18,13 +18,10 @@ type Request struct {
 	Purpose       string
 	URL           string
 	Method        string
-	Headers       http.Header
 	Body          []byte
 	Timeout       time.Duration
 	MaxBodyBytes  int64
-	UserAgent     string
 	RouteOverride *Route
-	CheckRedirect func(req *http.Request, via []*http.Request) error
 	AllowedStatus []int
 }
 
@@ -86,26 +83,11 @@ func (s *Service) ReadAll(ctx context.Context, req Request) ([]byte, ResponseMet
 	if err != nil {
 		return nil, meta, fmt.Errorf("download via %s: build request: %w", lease.Route.DisplayName(), err)
 	}
-	if req.UserAgent != "" {
-		httpReq.Header.Set("User-Agent", req.UserAgent)
-	}
-	for k, vals := range req.Headers {
-		for _, v := range vals {
-			httpReq.Header.Add(k, v)
-		}
-	}
 	if strings.EqualFold(httpReq.Header.Get("Connection"), "close") {
 		httpReq.Close = true
 	}
 
-	client := lease.Client
-	if req.CheckRedirect != nil {
-		cloned := *lease.Client
-		cloned.CheckRedirect = req.CheckRedirect
-		client = &cloned
-	}
-
-	resp, err := client.Do(httpReq)
+	resp, err := lease.Client.Do(httpReq)
 	if err != nil {
 		return nil, meta, fmt.Errorf("download via %s: request failed: %w", lease.Route.DisplayName(), err)
 	}
@@ -168,26 +150,11 @@ func (s *Service) DownloadFile(ctx context.Context, req FileRequest) (FileResult
 	if err != nil {
 		return result, fmt.Errorf("download via %s: build request: %w", lease.Route.DisplayName(), err)
 	}
-	if req.UserAgent != "" {
-		httpReq.Header.Set("User-Agent", req.UserAgent)
-	}
-	for k, vals := range req.Headers {
-		for _, v := range vals {
-			httpReq.Header.Add(k, v)
-		}
-	}
 	if strings.EqualFold(httpReq.Header.Get("Connection"), "close") {
 		httpReq.Close = true
 	}
 
-	client := lease.Client
-	if req.CheckRedirect != nil {
-		cloned := *lease.Client
-		cloned.CheckRedirect = req.CheckRedirect
-		client = &cloned
-	}
-
-	resp, err := client.Do(httpReq)
+	resp, err := lease.Client.Do(httpReq)
 	if err != nil {
 		return result, fmt.Errorf("download via %s: request failed: %w", lease.Route.DisplayName(), err)
 	}

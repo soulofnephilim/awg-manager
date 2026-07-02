@@ -222,17 +222,6 @@ func (s *Service) GetChangelog(ctx context.Context, fromVer, toVer string) ([]En
 	return Slice(entries, fromVer, toVer), nil
 }
 
-// GetChangelogSingle fetches the monolithic CHANGELOG.md and returns
-// only the entry that exactly matches version, or nil if there is no
-// such entry.
-func (s *Service) GetChangelogSingle(ctx context.Context, version string) (*Entry, error) {
-	entries, err := s.changelog.Fetch(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return Single(entries, version), nil
-}
-
 // GetChangelogMinor returns all CHANGELOG entries for the same major.minor
 // as version up to and including that release (e.g. 2.11.0–2.11.2 on 2.11.2+r70).
 func (s *Service) GetChangelogMinor(ctx context.Context, version string) ([]Entry, error) {

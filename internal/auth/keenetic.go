@@ -132,9 +132,6 @@ func (c *KeeneticClient) Authenticate(ctx context.Context, login, password strin
 	// Formula: sha256(challenge + md5(login + ":" + realm + ":" + password))
 	hashedPassword := c.hashPassword(login, password, realm, challenge)
 
-	// Debug: log auth attempt
-	fmt.Printf("[AUTH DEBUG] URL: %s, login: %s, challenge: %s, realm: %s\n", authURL, login, challenge, realm)
-
 	// Step 3: POST /auth with credentials (include cookies from GET)
 	if err := c.postAuth(ctx, authURL, login, hashedPassword, cookies); err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
@@ -227,8 +224,6 @@ func (c *KeeneticClient) postAuth(ctx context.Context, authURL, login, hashedPas
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	fmt.Printf("[AUTH DEBUG] POST %s response status: %d\n", authURL, resp.StatusCode)
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return ErrInvalidCredentials

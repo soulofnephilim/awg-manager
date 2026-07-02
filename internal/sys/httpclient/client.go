@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"strings"
 	"time"
 )
 
@@ -59,10 +58,6 @@ type CallConfig struct {
 
 	// DiscardBody when true skips reading the response body (curl -o /dev/null).
 	DiscardBody bool
-
-	// PostData, if non-nil, makes this a POST request with form data
-	// (replaces curl --data-urlencode, -X POST).
-	PostData url.Values
 }
 
 // HTTPDoer is the interface satisfied by Client for test stubs.
@@ -111,19 +106,10 @@ func (c *Client) Do(ctx context.Context, cfg CallConfig) (*Result, error) {
 
 	method := cfg.Method
 	if method == "" {
-		if cfg.PostData != nil {
-			method = http.MethodPost
-		} else {
-			method = http.MethodGet
-		}
+		method = http.MethodGet
 	}
 
-	var bodyReader io.Reader
-	if cfg.PostData != nil {
-		bodyReader = strings.NewReader(cfg.PostData.Encode())
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, cfg.URL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, cfg.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("httpclient: new request: %w", err)
 	}
@@ -131,10 +117,6 @@ func (c *Client) Do(ctx context.Context, cfg CallConfig) (*Result, error) {
 	// Mimic curl's User-Agent so IP-check services (e.g. 2ip.ru) that
 	// block Go's default "Go-http-client/1.1" return plain-text responses.
 	req.Header.Set("User-Agent", "curl/8.7.1")
-
-	if cfg.PostData != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
 
 	// Timing trace setup — mirrors curl -w %{time_namelookup}|%{time_connect}
 	timings := &traceTimings{}

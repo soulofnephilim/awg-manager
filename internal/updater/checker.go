@@ -88,13 +88,6 @@ func checkWithDownloader(ctx context.Context, currentVersion, channel string, dl
 	return info
 }
 
-// Upgrade downloads the IPK from downloadURL and launches opkg install in a
-// detached process. wantSHA256 (from the repo Packages index) is verified
-// before the install; empty = no checksum available, install unverified.
-func Upgrade(ctx context.Context, downloadURL, wantSHA256 string) error {
-	return upgradeWithDownloader(ctx, downloadURL, wantSHA256, newDefaultDownloader())
-}
-
 // upgradeLogPath captures the detached opkg output. The old daemon is
 // stopped by the package prerm mid-install, so this file is the ONLY
 // diagnostic left if opkg fails and the router ends up without awg-manager.

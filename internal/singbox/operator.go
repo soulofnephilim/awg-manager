@@ -330,10 +330,6 @@ func NewOperator(d OperatorDeps) *Operator {
 	return op
 }
 
-// migrationLock is for cross-file ops in this package (e.g.
-// MigrateOff/On) that must run under the same mutex as AddTunnels.
-func (o *Operator) migrationLock() *sync.Mutex { return &o.migrationMu }
-
 // singBoxStderrTextHead matches the wall-clock prefix sing-box's text logger
 // emits on stderr (e.g. "+0000 2026-05-14 21:45:56 …"). Used so JSON or
 // other structured blobs that mention "fatal" do not populate LastError.
@@ -2300,7 +2296,7 @@ func (o *Operator) Control(ctx context.Context, action string) error {
 		}
 		return fmt.Errorf("sing-box is not installed")
 	}
-	running, _ := o.IsRunningPublic()
+	running, _ := o.IsRunning()
 	switch action {
 	case "start":
 		if err := o.setManualStop(false); err != nil {
@@ -2787,13 +2783,6 @@ func (o *Operator) LoadCurrentConfig() (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
-}
-
-// IsRunningPublic exposes the internal IsRunning probe for external
-// callers (deviceproxy adapter uses it to decide whether to push a
-// live selector update via the Clash API).
-func (o *Operator) IsRunningPublic() (bool, int) {
-	return o.proc.IsRunning()
 }
 
 // SetSelectorDefault switches a selector's active member live via

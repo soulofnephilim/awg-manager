@@ -933,10 +933,8 @@ func (r *Runner) testRouteLeak(ctx context.Context, report *Report) TestResult {
 			continue
 		}
 		// Only check routes on OUR managed interfaces, skip everything else.
-		isManagedRoute := false
 		for iface := range allManagedIfaces {
 			if strings.Contains(line, " dev "+iface+" ") || strings.HasSuffix(line, " dev "+iface) {
-				isManagedRoute = true
 				// Route exists on a managed interface that is NOT running → orphaned.
 				if !activeIfaces[iface] {
 					leaks = append(leaks, line)
@@ -944,7 +942,6 @@ func (r *Runner) testRouteLeak(ctx context.Context, report *Report) TestResult {
 				break
 			}
 		}
-		_ = isManagedRoute // only managed routes are checked
 	}
 
 	if len(leaks) > 0 {

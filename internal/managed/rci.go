@@ -89,18 +89,6 @@ func (s *Service) rciConfigureServer(ctx context.Context, name, description, add
 	})
 }
 
-// rciSetDescription updates the NDMS description for the interface.
-// The description is the user-facing display name on the router and in our UI.
-func (s *Service) rciSetDescription(ctx context.Context, ifaceName, description string) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"description": description,
-			},
-		},
-	})
-}
-
 // updateServerChanges holds the optional set of mutations rciUpdateServer
 // applies in a single atomic POST. Only fields with the corresponding flag
 // set are emitted into the payload.
@@ -159,54 +147,6 @@ func (s *Service) rciUpdateServer(ctx context.Context, ifaceName string, c updat
 	return s.rciPost(ctx, map[string]interface{}{
 		"interface": map[string]interface{}{
 			ifaceName: iface,
-		},
-	})
-}
-
-// rciSetListenPort updates the listen port.
-func (s *Service) rciSetListenPort(ctx context.Context, ifaceName string, port int) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"wireguard": map[string]interface{}{
-					"listen-port": map[string]interface{}{
-						"port": port,
-					},
-				},
-			},
-		},
-	})
-}
-
-// rciRemoveAddress removes an IP address from the interface.
-func (s *Service) rciRemoveAddress(ctx context.Context, ifaceName, address, mask string) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"ip": map[string]interface{}{
-					"address": map[string]interface{}{
-						"no":      true,
-						"address": address,
-						"mask":    mask,
-					},
-				},
-			},
-		},
-	})
-}
-
-// rciSetAddress sets an IP address on the interface.
-func (s *Service) rciSetAddress(ctx context.Context, ifaceName, address, mask string) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"ip": map[string]interface{}{
-					"address": map[string]interface{}{
-						"address": address,
-						"mask":    mask,
-					},
-				},
-			},
 		},
 	})
 }
