@@ -22,6 +22,11 @@ var (
 	// ErrTransitioning indicates the tunnel is currently starting or stopping.
 	ErrTransitioning = errors.New("tunnel is transitioning")
 
+	// ErrOperationInProgress indicates another lifecycle operation currently
+	// holds the tunnel's execution lock (issue #426). Callers surface it as a
+	// retryable 409 instead of queueing behind the lock indefinitely.
+	ErrOperationInProgress = errors.New("операция с туннелем уже выполняется — дождитесь завершения предыдущей")
+
 	// ErrAddressInUse indicates the tunnel address is already assigned to a system interface.
 	ErrAddressInUse = errors.New("address already in use")
 
