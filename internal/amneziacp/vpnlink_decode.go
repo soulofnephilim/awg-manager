@@ -55,14 +55,21 @@ func zlibHeaderOffset(raw []byte) int {
 	return -1
 }
 
+// maxVPNLinkJSON caps decompressed vpn:// payloads. Real AmneziaVPN exports
+// are a few KB; the cap stops a zlib bomb from OOMing a 128 MB router.
+const maxVPNLinkJSON = 4 << 20
+
 func tryReadZlib(data []byte) (string, bool) {
 	zr, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return "", false
 	}
 	defer zr.Close()
-	out, err := io.ReadAll(zr)
+	out, err := io.ReadAll(io.LimitReader(zr, maxVPNLinkJSON+1))
 	if err != nil {
+		return "", false
+	}
+	if len(out) > maxVPNLinkJSON {
 		return "", false
 	}
 	return string(out), true
