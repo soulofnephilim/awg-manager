@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
@@ -121,28 +122,32 @@ func SetExists(ctx context.Context) bool {
 
 // EntryCount returns the number of entries in the AWGM-SELECTIVE ipset,
 // or 0 if the set does not exist or the count cannot be determined.
+//
+// Uses `ipset list -t` (terse: header only) and reads the "Number of
+// entries" field. A full `ipset list` dump of a maxelem-262144 set is
+// megabytes of text piped through a fork on a 128MB router — and this
+// runs on every status request and CDN refresh.
 func EntryCount(ctx context.Context) int {
 	bin, err := ipsetBin()
 	if err != nil {
 		return 0
 	}
-	res, err := sysexec.Run(ctx, bin, "list", SetName)
+	res, err := sysexec.Run(ctx, bin, "list", SetName, "-t")
 	if err != nil || res == nil {
 		return 0
 	}
-	count := 0
-	inMembers := false
 	for _, line := range strings.Split(res.Stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "Members:" {
-			inMembers = true
+		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || strings.TrimSpace(k) != "Number of entries" {
 			continue
 		}
-		if inMembers && line != "" {
-			count++
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
 		}
+		return n
 	}
-	return count
+	return 0
 }
 
 // ListEntries returns every member CIDR currently in AWGM-SELECTIVE.

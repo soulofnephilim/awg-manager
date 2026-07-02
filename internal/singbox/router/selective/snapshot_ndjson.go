@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 // DomainMatcherRecord is one matcher persisted after rebuild (no IP list).
@@ -122,7 +124,9 @@ func writeSnapshotMeta(configDir string, summary SnapshotSummary) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(p, data, 0644)
+	// Atomic write: a torn meta file after power loss would make
+	// readSnapshotSummary silently return nil and lose the rebuild history.
+	_ = storage.AtomicWrite(p, data)
 }
 
 func readSnapshotSummary(configDir string) *SnapshotSummary {
