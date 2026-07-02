@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import { SegmentedControl } from '$lib/components/ui';
+	import { Badge, SegmentedControl } from '$lib/components/ui';
 	import LayoutViewToggle from '$lib/components/ui/LayoutViewToggle.svelte';
 	import TunnelSearchInput from './TunnelSearchInput.svelte';
 	import TunnelCreateMenu from './TunnelCreateMenu.svelte';
@@ -9,6 +9,10 @@
 		TUNNEL_DASHBOARD_LAYOUT_LABELS,
 		type TunnelDashboardLayout,
 	} from '$lib/stores/tunnelDashboardMode';
+	import type {
+		TunnelDashboardGroupMode,
+		TunnelDashboardOrderMode,
+	} from '$lib/stores/tunnelDashboardPrefs';
 
 	interface Props {
 		searchQuery: string;
@@ -17,6 +21,14 @@
 		onLayoutChange: (layout: TunnelDashboardLayout) => void;
 		viewMode: SingboxLayoutMode;
 		onViewModeChange: (mode: SingboxLayoutMode) => void;
+		orderMode?: TunnelDashboardOrderMode;
+		onOrderModeChange?: (mode: TunnelDashboardOrderMode) => void;
+		showOrderControl?: boolean;
+		groupMode?: TunnelDashboardGroupMode;
+		onGroupModeChange?: (mode: TunnelDashboardGroupMode) => void;
+		showGroupControl?: boolean;
+		activeTagFilter?: string | null;
+		onClearTagFilter?: () => void;
 		showViewToggle?: boolean;
 		showListOption?: boolean;
 		showSingboxCreate?: boolean;
@@ -36,6 +48,14 @@
 		onLayoutChange,
 		viewMode,
 		onViewModeChange,
+		orderMode = 'auto',
+		onOrderModeChange,
+		showOrderControl = false,
+		groupMode = 'type',
+		onGroupModeChange,
+		showGroupControl = false,
+		activeTagFilter = null,
+		onClearTagFilter,
 		showViewToggle = true,
 		showListOption = true,
 		showSingboxCreate = true,
@@ -50,6 +70,16 @@
 	const layoutOptions: Array<{ value: TunnelDashboardLayout; label: string }> = [
 		{ value: 'flat', label: TUNNEL_DASHBOARD_LAYOUT_LABELS.flat },
 		{ value: 'sections', label: TUNNEL_DASHBOARD_LAYOUT_LABELS.sections },
+	];
+
+	const orderOptions: Array<{ value: TunnelDashboardOrderMode; label: string }> = [
+		{ value: 'auto', label: 'Авто' },
+		{ value: 'manual', label: 'Вручную' },
+	];
+
+	const groupOptions: Array<{ value: TunnelDashboardGroupMode; label: string }> = [
+		{ value: 'type', label: 'Тип' },
+		{ value: 'tags', label: 'Теги' },
 	];
 </script>
 
@@ -66,6 +96,44 @@
 			onchange={(next) => onLayoutChange(next)}
 		/>
 	</div>
+
+	{#if showOrderControl}
+		<div class="dashboard-toolbar-order">
+			<SegmentedControl
+				value={orderMode}
+				options={orderOptions}
+				ariaLabel="Порядок туннелей на дашборде"
+				onchange={(next) => onOrderModeChange?.(next)}
+			/>
+		</div>
+	{/if}
+
+	{#if showGroupControl}
+		<div class="dashboard-toolbar-group">
+			<SegmentedControl
+				value={groupMode}
+				options={groupOptions}
+				ariaLabel="Группировка туннелей на дашборде"
+				onchange={(next) => onGroupModeChange?.(next)}
+			/>
+		</div>
+	{/if}
+
+	{#if activeTagFilter}
+		<div class="dashboard-toolbar-tag-filter">
+			<Badge variant="accent">
+				<span class="tag-filter-label">Тег: {activeTagFilter}</span>
+				<button
+					type="button"
+					class="tag-filter-clear"
+					aria-label="Сбросить фильтр по тегу"
+					onclick={() => onClearTagFilter?.()}
+				>
+					&times;
+				</button>
+			</Badge>
+		</div>
+	{/if}
 
 	{#if showViewToggle}
 		<div class="dashboard-toolbar-view">
@@ -117,8 +185,51 @@
 		min-width: 0;
 	}
 
-	.dashboard-toolbar-layout :global(.segmented-control) {
+	.dashboard-toolbar-order,
+	.dashboard-toolbar-group {
+		flex: 0 1 auto;
+		min-width: 0;
+	}
+
+	.dashboard-toolbar-layout :global(.segmented-control),
+	.dashboard-toolbar-order :global(.segmented-control),
+	.dashboard-toolbar-group :global(.segmented-control) {
 		height: 32px;
+	}
+
+	.dashboard-toolbar-tag-filter {
+		flex: 0 1 auto;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+	}
+
+	.dashboard-toolbar-tag-filter :global(.badge) {
+		max-width: 100%;
+		min-width: 0;
+	}
+
+	.tag-filter-label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	.tag-filter-clear {
+		border: none;
+		background: transparent;
+		padding: 0 2px;
+		font-size: 0.75rem;
+		line-height: 1;
+		font-family: inherit;
+		color: inherit;
+		opacity: 0.7;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+
+	.tag-filter-clear:hover {
+		opacity: 1;
 	}
 
 	.dashboard-toolbar-view {
@@ -137,8 +248,9 @@
 		flex: 0 0 auto;
 	}
 
-	/* Mobile: row 1 — layout + view 50/50; row 2 — actions (если есть) на всю ширину;
-	   последняя строка — search then create */
+	/* Mobile: авторазмещение по order — row 1: layout + view 50/50;
+	   далее order + group 50/50, чип тег-фильтра и actions (если есть) на всю
+	   ширину; последняя строка — search then create */
 	@media (max-width: 760px) {
 		.dashboard-toolbar {
 			display: grid;
@@ -148,52 +260,61 @@
 		}
 
 		.dashboard-toolbar-layout {
-			grid-row: 1;
-			grid-column: 1;
+			order: 1;
 			width: 100%;
 		}
 
 		.dashboard-toolbar-view {
-			grid-row: 1;
-			grid-column: 2;
+			order: 2;
 			width: 100%;
 		}
 
-		.dashboard-toolbar:not(:has(.dashboard-toolbar-view)) .dashboard-toolbar-layout {
+		.dashboard-toolbar-order {
+			order: 3;
+			width: 100%;
+		}
+
+		.dashboard-toolbar-group {
+			order: 4;
+			width: 100%;
+		}
+
+		.dashboard-toolbar-tag-filter {
+			order: 5;
 			grid-column: 1 / -1;
+			min-width: 0;
 		}
 
 		.dashboard-toolbar-actions {
-			grid-row: 2;
+			order: 6;
 			grid-column: 1 / -1;
 			width: 100%;
 		}
 
 		.tunnel-toolbar-search {
-			grid-row: 2;
-			grid-column: 1;
+			order: 7;
 			min-width: 0;
 			max-width: none;
 			width: 100%;
 		}
 
 		.dashboard-toolbar-create {
-			grid-row: 2;
-			grid-column: 2;
+			order: 8;
 			justify-self: stretch;
 			align-self: center;
 			min-width: 0;
 		}
 
-		.dashboard-toolbar:has(.dashboard-toolbar-actions) .tunnel-toolbar-search {
-			grid-row: 3;
-		}
-
-		.dashboard-toolbar:has(.dashboard-toolbar-actions) .dashboard-toolbar-create {
-			grid-row: 3;
+		/* Контрол без пары растягивается на всю строку */
+		.dashboard-toolbar:not(:has(.dashboard-toolbar-view)) .dashboard-toolbar-layout,
+		.dashboard-toolbar:not(:has(.dashboard-toolbar-group)) .dashboard-toolbar-order,
+		.dashboard-toolbar:not(:has(.dashboard-toolbar-order)) .dashboard-toolbar-group {
+			grid-column: 1 / -1;
 		}
 
 		.dashboard-toolbar-layout :global(.segmented-control),
+		.dashboard-toolbar-order :global(.segmented-control),
+		.dashboard-toolbar-group :global(.segmented-control),
 		.dashboard-toolbar-view :global(.segmented-control) {
 			width: 100%;
 			min-width: 0;

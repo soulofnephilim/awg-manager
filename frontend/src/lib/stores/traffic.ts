@@ -42,8 +42,16 @@ const listeners = new Set<() => void>();
 /** Tracks tunnels that have completed initial loadHistory to avoid duplicate fetches. */
 const initialized = new Set<string>();
 
+let notifyScheduled = false;
+
+/** Коалесцирует пачку feedTraffic (N SSE-сообщений/сек) в одно уведомление. */
 function notify() {
-	for (const fn of listeners) fn();
+	if (notifyScheduled) return;
+	notifyScheduled = true;
+	queueMicrotask(() => {
+		notifyScheduled = false;
+		for (const fn of listeners) fn();
+	});
 }
 
 /**

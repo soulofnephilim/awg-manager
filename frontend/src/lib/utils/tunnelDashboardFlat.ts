@@ -88,7 +88,9 @@ export function buildFlatDashboardItems(input: {
 	input.subscriptionsActive.forEach((card, index) => {
 		items.push({
 			kind: 'sub-active',
-			key: `sub-active:${card.subscription.id}`,
+			// Единый ключ активной/остановленной подписки: персонализация
+			// (порядок, теги) переживает старт/стоп.
+			key: `sub:${card.subscription.id}`,
 			name: card.subscription.label,
 			card,
 			index,
@@ -98,7 +100,7 @@ export function buildFlatDashboardItems(input: {
 	for (const subscription of input.subscriptionsStopped) {
 		items.push({
 			kind: 'sub-stopped',
-			key: `sub-stopped:${subscription.id}`,
+			key: `sub:${subscription.id}`,
 			name: subscription.label,
 			subscription,
 		});

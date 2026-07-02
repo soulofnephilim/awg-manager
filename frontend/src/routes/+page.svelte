@@ -63,7 +63,6 @@
 	import { nativewgUnavailableHint } from '$lib/utils/backendAvailability';
 	import {
 		SINGBOX_LAYOUT_STORAGE_KEY,
-		isTunnelListRenderMode,
 		parseSingboxLayoutMode,
 		readTunnelMobileLayout,
 		subscribeTunnelMobileLayout,
@@ -71,16 +70,27 @@
 		type TunnelRenderMode,
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode as getIsMockDevMode } from '$lib/env';
-	import { Download, Eye, EyeOff, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert } from 'lucide-svelte';
+	import { Download, Eye, EyeOff, GripVertical, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert } from 'lucide-svelte';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 	import { formatRunningSub, pluralForm, SUBSCRIPTION_WORDS, TUNNEL_WORDS } from '$lib/utils/pluralize';
 	import DashboardToolbar from '$lib/components/tunnels/DashboardToolbar.svelte';
+	import DashboardSummary from '$lib/components/tunnels/DashboardSummary.svelte';
+	import TunnelTagChips from '$lib/components/tunnels/TunnelTagChips.svelte';
 	import TunnelSectionHeader from '$lib/components/tunnels/TunnelSectionHeader.svelte';
 	import {
 		tunnelDashboardLayout,
 		tunnelDashboardMode,
 		tunnelDashboardView,
 	} from '$lib/stores/tunnelDashboardMode';
+	import {
+		tunnelDashboardGroupMode,
+		tunnelDashboardManualOrder,
+		tunnelDashboardOrderMode,
+		tunnelDashboardTags,
+	} from '$lib/stores/tunnelDashboardPrefs';
+	import { applyManualOrder, mergeManualOrder, reorder } from '$lib/utils/tunnelDashboardOrder';
+	import { filterItemsByTag, getItemTags, groupFlatItemsByTag } from '$lib/utils/tunnelDashboardTags';
+	import { createReorderDrag } from '$lib/components/sb-router/reorderDrag.svelte';
 	import { buildFlatDashboardItems, type TunnelDashboardFlatItem } from '$lib/utils/tunnelDashboardFlat';
 	import {
 		awgTunnelTableSort,
@@ -664,16 +674,30 @@
 				? 'list'
 				: 'compact',
 	);
-	// Flat layout is always card-based: «список» renders the merged list-card
-	// list (same as mobile) instead of three unlabeled tables.
 	let dashboardFlatLayout = $derived($tunnelDashboardLayout === 'flat');
 	let dashboardSectionsLayout = $derived(dashboardOn && $tunnelDashboardLayout === 'sections');
 	let dashboardFlatCardMode = $derived(dashboardOn && dashboardFlatLayout);
-	let dashboardAwgRenderMode = $derived(
-		resolveTunnelRenderMode(isAwgMobile || dashboardFlatLayout, dashboardAwgViewMode),
+	// Sections layout splits by kind ('type') or by user tags ('tags').
+	let dashboardGroupByTags = $derived(
+		dashboardSectionsLayout && $tunnelDashboardGroupMode === 'tags',
 	);
-	let dashboardSingboxRenderMode = $derived(
-		resolveTunnelRenderMode(isAwgMobile || dashboardFlatLayout, dashboardSingboxLayoutMode),
+	let dashboardTypeSections = $derived(
+		dashboardSectionsLayout && $tunnelDashboardGroupMode === 'type',
+	);
+	// Merged card surfaces (flat list / tag groups) can't host per-kind tables:
+	// «список» renders the merged list-card list (same as mobile) there. Card
+	// densities are honest in every layout: dense → full cards with graphs,
+	// compact → compact cards.
+	let dashboardCardSurface = $derived(dashboardFlatLayout || dashboardGroupByTags);
+	let dashboardAwgRenderMode = $derived<TunnelRenderMode>(
+		dashboardCardSurface && dashboardAwgViewMode === 'list'
+			? 'list-card'
+			: resolveTunnelRenderMode(isAwgMobile, dashboardAwgViewMode),
+	);
+	let dashboardSingboxRenderMode = $derived<TunnelRenderMode>(
+		dashboardCardSurface && dashboardSingboxLayoutMode === 'list'
+			? 'list-card'
+			: resolveTunnelRenderMode(isAwgMobile, dashboardSingboxLayoutMode),
 	);
 	let dashboardCardViewMode = $derived<'cards' | 'compact'>(
 		dashboardAwgViewMode === 'cards' ? 'cards' : 'compact',
@@ -1582,8 +1606,17 @@
 	let dashboardSubscriptionsCount = $derived(
 		dashboardSubscriptionsActive.length + dashboardSubscriptionsStopped.length,
 	);
-	let dashboardFlatItems = $derived.by(() => {
-		if (!dashboardFlatCardMode) return [];
+	// Локальный (не персистентный) фильтр по тегу; сбрасывается при выходе из
+	// дашборда и в видах, где он не применяется (секции с группировкой «Тип») —
+	// иначе чип в тулбаре остаётся, а секции показывают нефильтрованные списки.
+	let dashboardTagFilter = $state<string | null>(null);
+	$effect(() => {
+		if (!dashboardOn || dashboardTypeSections) dashboardTagFilter = null;
+	});
+	// Merged item base is needed by BOTH card surfaces: the flat layout and the
+	// tag-group view of the sections layout.
+	let dashboardFlatBase = $derived.by(() => {
+		if (!dashboardFlatCardMode && !dashboardGroupByTags) return [];
 		return buildFlatDashboardItems({
 			awg: sortedFilteredAwgList,
 			system: sortedFilteredSystemList,
@@ -1593,17 +1626,127 @@
 			subscriptionsStopped: dashboardSubscriptionsStopped,
 		});
 	});
-	let dashboardSearchEmpty = $derived(
-		dashboardSearchQuery.trim() !== '' &&
-			awgFilteredRowsCount + dashboardSingboxTunnels.length + dashboardSubscriptionsCount === 0,
+	// Единственная точка применения тег-фильтра: и сплошной список, и теговые
+	// группы потребляют один и тот же отфильтрованный набор.
+	let dashboardVisibleItems = $derived(
+		dashboardTagFilter !== null
+			? filterItemsByTag(dashboardFlatBase, $tunnelDashboardTags, dashboardTagFilter)
+			: dashboardFlatBase,
 	);
-	// No tunnels of any kind and no active search — show the same
-	// ghost-terminal onboarding the AWG tab shows instead of a blank page.
-	// Not while the admitted sing-box/subscription stores are still on their
-	// first load: a late-arriving list must not flash the onboarding screen.
+	let dashboardFlatItems = $derived.by(() => {
+		if (!dashboardFlatCardMode) return [];
+		if ($tunnelDashboardOrderMode === 'manual') {
+			return applyManualOrder(dashboardVisibleItems, $tunnelDashboardManualOrder);
+		}
+		return dashboardVisibleItems;
+	});
+	// Теговые группы сортируются всегда авто (kind → имя из buildFlatDashboardItems):
+	// контрол «Авто/Вручную» здесь скрыт, ручной порядок — фича сплошного списка.
+	// Элемент с N тегами рендерится N раз — auto-проверки (nonce) получает только
+	// первое вхождение ключа, иначе дублируются API-вызовы и гоняются обновления.
+	let dashboardTagGroups = $derived.by(() => {
+		if (!dashboardGroupByTags) return [];
+		const groups = groupFlatItemsByTag(dashboardVisibleItems, $tunnelDashboardTags);
+		const seen = new Set<string>();
+		return groups.map((group) => ({
+			tag: group.tag,
+			items: group.items.map((item) => {
+				const autoCheck = !seen.has(item.key);
+				seen.add(item.key);
+				return { item, autoCheck };
+			}),
+		}));
+	});
+	// Admitted sing-box/subscription stores still on their first load — a
+	// late-arriving list must not flash the onboarding screen (see
+	// dashboardNothingAtAll) и не должен принимать drag-переупорядочивание:
+	// коммит по неполному списку затёр бы позиции ещё не приехавших ключей.
 	let dashboardSingboxDataPending = $derived(
 		dashboardSingboxVisible &&
 			(singboxStatusLoading || singboxTunnelsInitialLoading || subscriptionsInitialLoading),
+	);
+	// D7: ручной порядок в сплошном дашборде — общее pointer-drag ядро sb-router
+	// (createReorderDrag). Активен только когда порядок реально редактируемый:
+	// без поиска, без фильтра по тегу и когда данные уже доехали.
+	let dashboardDndEnabled = $derived(
+		dashboardFlatCardMode &&
+			$tunnelDashboardOrderMode === 'manual' &&
+			dashboardSearchQuery.trim() === '' &&
+			dashboardTagFilter === null &&
+			!dashboardSingboxDataPending,
+	);
+	let flatRowEls = $state<Array<HTMLElement | null>>([]);
+	let flatGridEl = $state<HTMLElement | null>(null);
+	// dashboardFlatItems живой (5s-поллинг), а движок оперирует индексами,
+	// зафиксированными на pointerdown — на время drag грид рендерится из
+	// снапшота (те же ключи), чтобы мутация посреди drag не закоммитила чужой
+	// ключ и не подменила ghost. Обновления полла применяются после отпускания.
+	let dragSnapshot = $state<TunnelDashboardFlatItem[] | null>(null);
+	let dashboardRenderItems = $derived(dragSnapshot ?? dashboardFlatItems);
+	const flatDrag = createReorderDrag({
+		getRowElement: (i) => flatRowEls[i] ?? null,
+		count: () => dashboardRenderItems.length,
+		getPanelEl: () => flatGridEl,
+		onCommit: async (from, to) => {
+			// Движок отдаёт финальный splice-индекс `to` — переставляем ключи
+			// снапшота и вливаем видимую подпоследовательность в сохранённый
+			// порядок: позиции скрытых сейчас ключей (sing-box loading /
+			// uninstalled / другой usage level) не затираются.
+			const before = (dragSnapshot ?? dashboardFlatItems).map((item) => item.key);
+			const after = reorder(before, from, to);
+			tunnelDashboardManualOrder.set(mergeManualOrder($tunnelDashboardManualOrder, before, after));
+			dragSnapshot = null;
+		},
+	});
+	onDestroy(() => flatDrag.destroy());
+	function handleGripPointerDown(index: number, event: PointerEvent): void {
+		dragSnapshot = dashboardFlatItems;
+		flatDrag.handlePointerDown(index, event);
+		// Клик без движения не доходит ни до onCommit, ни до active=true —
+		// одноразовый слушатель снимает снапшот после того, как движок
+		// (зарегистрированный раньше) отработал свой pointerup.
+		const clearIfIdle = () => {
+			window.removeEventListener('pointerup', clearIfIdle);
+			window.removeEventListener('pointercancel', clearIfIdle);
+			if (!flatDrag.active && !flatDrag.busy) dragSnapshot = null;
+		};
+		window.addEventListener('pointerup', clearIfIdle);
+		window.addEventListener('pointercancel', clearIfIdle);
+	}
+	// Страховка: любое завершение drag (включая Escape-отмену) снимает снапшот.
+	let dragWasActive = false;
+	$effect(() => {
+		const active = flatDrag.active;
+		if (dragWasActive && !active) dragSnapshot = null;
+		dragWasActive = active;
+	});
+	// Перестановка с клавиатуры на грипе: ArrowUp/ArrowDown двигает элемент на
+	// одну позицию — тот же reorder + mergeManualOrder, без pointer.
+	function handleGripKeydown(index: number, event: KeyboardEvent): void {
+		if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+		event.preventDefault();
+		if (flatDrag.busy || flatDrag.active) return;
+		const before = dashboardFlatItems.map((item) => item.key);
+		const to = index + (event.key === 'ArrowUp' ? -1 : 1);
+		if (to < 0 || to >= before.length) return;
+		tunnelDashboardManualOrder.set(
+			mergeManualOrder($tunnelDashboardManualOrder, before, reorder(before, index, to)),
+		);
+	}
+	// Пустой результат поиска ИЛИ тег-фильтра: в карточных видах считаем по
+	// видимым элементам, в секциях по типу — по счётчикам блоков (тег-фильтр
+	// там не применяется и авто-сбрасывается).
+	let dashboardVisibleCount = $derived(
+		dashboardFlatCardMode
+			? dashboardFlatItems.length
+			: dashboardGroupByTags
+				? dashboardTagGroups.reduce((n, group) => n + group.items.length, 0)
+				: awgFilteredRowsCount + dashboardSingboxTunnels.length + dashboardSubscriptionsCount,
+	);
+	let dashboardFilterEmpty = $derived(
+		dashboardOn &&
+			(dashboardSearchQuery.trim() !== '' || dashboardTagFilter !== null) &&
+			dashboardVisibleCount === 0,
 	);
 	let dashboardNothingAtAll = $derived(
 		!dashboardSingboxDataPending &&
@@ -1617,38 +1760,108 @@
 	// Named gates for the three per-kind template blocks. They legitimately
 	// differ: AWG hosts the shared onboarding, subscriptions must surface its
 	// loading spinner and fetch-error state even in dashboard mode.
+	// Per-kind dashboard sections render only in sections layout with grouping
+	// by kind ('type'); the tag-group view replaces them wholesale.
 	let showAwgBlock = $derived(
 		(!dashboardOn && activeTab === 'awg') ||
-			(dashboardOn && !dashboardFlatCardMode && awgFilteredRowsCount > 0) ||
+			(dashboardTypeSections && awgFilteredRowsCount > 0) ||
 			(dashboardOn && dashboardNothingAtAll),
 	);
 	let showSingboxBlock = $derived(
 		(!dashboardOn && activeTab === 'singbox') ||
-			(dashboardOn && !dashboardFlatCardMode && dashboardSingboxTunnels.length > 0),
+			(dashboardTypeSections && dashboardSingboxTunnels.length > 0),
 	);
 	let showSubscriptionsBlock = $derived(
 		(!dashboardOn && activeTab === 'subscriptions') ||
-			(dashboardOn && !dashboardFlatCardMode && dashboardSubscriptionsCount > 0) ||
+			(dashboardTypeSections && dashboardSubscriptionsCount > 0) ||
 			(dashboardOn &&
 				dashboardSingboxVisible &&
 				(subscriptionsInitialLoading || subscriptionsFetchFailed)),
 	);
 
+	// Единый класс сетки для сплошного и тегового карточных видов — классы
+	// плотности не могут разъехаться между двумя разметками.
+	let dashboardGridClass = $derived(
+		[
+			'tunnel-grid',
+			effectiveAwgRenderMode === 'list-card' ? 'tunnel-grid--list' : '',
+			effectiveAwgRenderMode === 'dense' || effectiveSingboxTunnelsRenderMode === 'dense'
+				? 'tunnel-grid--dense'
+				: '',
+			effectiveAwgRenderMode === 'compact' ? 'tunnel-grid--compact' : '',
+		]
+			.filter(Boolean)
+			.join(' '),
+	);
 
+	// Бейдж вида для компактных рядов переупорядочивания и ghost-токена.
+	const DASHBOARD_KIND_LABELS: Record<TunnelDashboardFlatItem['kind'], string> = {
+		'awg-managed': 'AWG',
+		'awg-system': 'system',
+		'awg-external': 'external',
+		singbox: 'sing-box',
+		'sub-active': 'подписка',
+		'sub-stopped': 'подписка',
+	};
+
+	// D6 (issue #353): комбинированная сводка дашборда по трём видам туннелей.
+	// Sing-box и подписки учитываются только когда их данные допущены в дашборд.
+	let dashboardSummaryStats = $derived.by(() => {
+		if (!dashboardOn) return [];
+		const sb = dashboardSingboxVisible ? singboxTunnelListStats : null;
+		const subs = dashboardSingboxVisible ? singboxSubscriptionsTrafficStats : null;
+		const totalAll = awgSummaryTotal + (sb?.count ?? 0) + (subs?.count ?? 0);
+		const totalActive = awgSummaryActive + (sb?.running ?? 0) + (subs?.activeCount ?? 0);
+		const kinds = [`AWG ${awgSummaryActive}/${awgSummaryTotal}`];
+		if (sb) kinds.push(`Sing-box ${sb.running}/${sb.count}`);
+		if (subs) kinds.push(`Подписки ${subs.activeCount}/${subs.count}`);
+		const rx = awgSummaryRx + (sb?.down ?? 0) + (subs?.down ?? 0);
+		const tx = awgSummaryTx + (sb?.up ?? 0) + (subs?.up ?? 0);
+		const leaders = [
+			{ bytes: awgTrafficLeader.bytes, name: awgTrafficLeader.name },
+			{ bytes: sb?.leaderBytes ?? 0, name: sb?.leaderName ?? '—' },
+			{ bytes: subs?.leaderBytes ?? 0, name: subs?.leaderName ?? '—' },
+		];
+		const leader = leaders.reduce((best, cur) => (cur.bytes > best.bytes ? cur : best));
+		return [
+			{
+				value: `${totalActive}/${totalAll}`,
+				label: 'Туннели',
+				sub: kinds.join(' · '),
+			},
+			{
+				value: awgSummaryPeak.rate > 0 ? formatBitRate(awgSummaryPeak.rate) : '—',
+				label: 'Пиковая скорость',
+				// Метрика считается только по AWG-туннелям внутри кросс-видовой
+				// сводки — область видимости заявлена явно.
+				sub: awgSummaryPeak.rate > 0 ? `AWG · ${awgSummaryPeak.name}` : '—',
+			},
+			{
+				value: formatBytes(rx + tx),
+				label: 'Трафик всего',
+				sub: `↓ ${formatBytes(rx)} · ↑ ${formatBytes(tx)}`,
+			},
+			{
+				value: leader.bytes > 0 ? leader.name : '—',
+				label: 'Лидер трафика',
+				sub: leader.bytes > 0 ? formatBytes(leader.bytes) : '—',
+			},
+		];
+	});
 </script>
 
 {#snippet createIcon()}
 	<CreateIcon />
 {/snippet}
 
-{#snippet dashboardFlatCard(item: TunnelDashboardFlatItem)}
+{#snippet dashboardFlatCard(item: TunnelDashboardFlatItem, suppressAutoCheck: boolean = false)}
 	{#if item.kind === 'awg-managed'}
 		<TunnelCard
 			tunnel={item.tunnel}
 			view={effectiveAwgRenderMode === 'list-card' ? 'list' : effectiveAwgCardViewMode}
 			toggleLoading={toggleLoading[item.tunnel.id] ?? false}
 			deleteLoading={deleteLoading[item.tunnel.id] ?? false}
-			autoConnectivityNonce={awgAutoConnectivityNonce}
+			autoConnectivityNonce={suppressAutoCheck ? 0 : awgAutoConnectivityNonce}
 			autoConnectivityDelayMs={item.index * 180}
 			onToggleOnOff={() => handleToggleOnOff(item.tunnel.id)}
 			ondelete={() => requestDelete(item.tunnel.id)}
@@ -1673,7 +1886,7 @@
 			tunnel={item.tunnel}
 			layout={effectiveSingboxTunnelsRenderMode === 'list-card' ? 'list' : effectiveSingboxTunnelsEffectiveLayout}
 			renderMode={effectiveSingboxTunnelsRenderMode}
-			autoDelayCheckNonce={singboxAutoDelayCheckNonce}
+			autoDelayCheckNonce={suppressAutoCheck ? 0 : singboxAutoDelayCheckNonce}
 			autoDelayCheckDelayMs={item.index * 180}
 			ondetail={(tag) => openSingboxDetail(tag)}
 		/>
@@ -1681,7 +1894,7 @@
 		<SubscriptionActiveCard
 			subscription={item.card.subscription}
 			activeMember={item.card.activeMember}
-			autoDelayCheckNonce={singboxAutoDelayCheckNonce}
+			autoDelayCheckNonce={suppressAutoCheck ? 0 : singboxAutoDelayCheckNonce}
 			autoDelayCheckDelayMs={item.index * 180}
 			layout={effectiveSingboxSubscriptionsEffectiveLayout}
 			renderMode={effectiveSingboxSubscriptionsRenderMode}
@@ -1696,6 +1909,46 @@
 			ondelete={requestSubscriptionDelete}
 			ondetail={(tag) => openSingboxDetail(tag)}
 		/>
+	{/if}
+{/snippet}
+
+{#snippet dashboardItemFooter(item: TunnelDashboardFlatItem, dragIndex: number | null, dragDisabled: boolean = false)}
+	{@const itemTags = getItemTags($tunnelDashboardTags, item.key)}
+	<!-- Футер рендерится только когда в нём есть содержимое: грип ручного
+	     порядка и/или чипы тегов. Без тегов и вне тегового вида ряд с одиноким
+	     «+» под каждой карточкой не показывается; редактирование тегов живёт в
+	     группировке «Теги», в сплошном виде чипы readonly (клик = фильтр). -->
+	{#if dragIndex !== null || itemTags.length > 0 || dashboardGroupByTags}
+		<div class="dashboard-item-footer">
+			{#if dragIndex !== null}
+				<button
+					type="button"
+					class="dashboard-item-grip"
+					class:is-busy={flatDrag.busy}
+					disabled={dragDisabled}
+					title={dragDisabled
+						? 'Перетаскивание недоступно при поиске и фильтре'
+						: 'Перетащить для изменения порядка'}
+					aria-label="Перетащить «{item.name}»"
+					onpointerdown={dragDisabled || flatDrag.busy
+						? undefined
+						: (e) => handleGripPointerDown(dragIndex, e)}
+					onkeydown={dragDisabled ? undefined : (e) => handleGripKeydown(dragIndex, e)}
+				>
+					<GripVertical size={14} strokeWidth={2} aria-hidden="true" />
+				</button>
+			{/if}
+			{#if itemTags.length > 0 || dashboardGroupByTags}
+				<TunnelTagChips
+					tags={itemTags}
+					readonly={!dashboardGroupByTags}
+					onAdd={(raw) => tunnelDashboardTags.addTag(item.key, raw)}
+					onRemove={(tag) => tunnelDashboardTags.removeTag(item.key, tag)}
+					onSelect={(tag) => (dashboardTagFilter = tag)}
+					activeTag={dashboardTagFilter}
+				/>
+			{/if}
+		</div>
 	{/if}
 {/snippet}
 
@@ -1720,47 +1973,131 @@
 			{#if showSingboxSections}
 				<SingboxInstallBanner />
 			{/if}
-			<div class="tunnels-toolbar">
-				<div class="toolbar-actions">
-					<DashboardToolbar
-						searchQuery={dashboardSearchQuery}
-						onSearchChange={(value) => (dashboardSearchQuery = value)}
-						layout={$tunnelDashboardLayout}
-						onLayoutChange={(layout) => tunnelDashboardLayout.setLayout(layout)}
-						viewMode={$tunnelDashboardView}
-						onViewModeChange={tunnelDashboardView.setViewMode}
-						showViewToggle={showSingboxListOption}
-						showListOption={showSingboxListOption}
-						showSingboxCreate={showSingboxSections}
-						onCreateAwg={() => goto('/tunnels/new')}
-						onCreateSingboxSingle={() => openWizard('single')}
-						onCreateSingboxGroup={() => openWizard('inline')}
-						onCreateSingboxSubscription={() => openWizard('url')}
-						{createIcon}
-					>
-						{#snippet actions()}
-							<StoreStatusBadge store={tunnels} />
-							<Button variant="secondary" size="md" onclick={handleExportAll} disabled={exporting} iconBefore={exportIcon}>
-								Экспорт
-							</Button>
-						{/snippet}
-					</DashboardToolbar>
+			<div class="dashboard-sticky">
+				<div class="tunnels-toolbar">
+					<div class="toolbar-actions">
+						<DashboardToolbar
+							searchQuery={dashboardSearchQuery}
+							onSearchChange={(value) => (dashboardSearchQuery = value)}
+							layout={$tunnelDashboardLayout}
+							onLayoutChange={(layout) => tunnelDashboardLayout.setLayout(layout)}
+							viewMode={$tunnelDashboardView}
+							onViewModeChange={tunnelDashboardView.setViewMode}
+							showViewToggle={showSingboxListOption}
+							showListOption={showSingboxListOption}
+							orderMode={$tunnelDashboardOrderMode}
+							onOrderModeChange={tunnelDashboardOrderMode.setMode}
+							showOrderControl={dashboardFlatLayout}
+							groupMode={$tunnelDashboardGroupMode}
+							onGroupModeChange={tunnelDashboardGroupMode.setMode}
+							showGroupControl={!dashboardFlatLayout}
+							activeTagFilter={dashboardTagFilter}
+							onClearTagFilter={() => (dashboardTagFilter = null)}
+							showSingboxCreate={showSingboxSections}
+							onCreateAwg={() => goto('/tunnels/new')}
+							onCreateSingboxSingle={() => openWizard('single')}
+							onCreateSingboxGroup={() => openWizard('inline')}
+							onCreateSingboxSubscription={() => openWizard('url')}
+							{createIcon}
+						>
+							{#snippet actions()}
+								<StoreStatusBadge store={tunnels} />
+								<Button variant="secondary" size="md" onclick={handleExportAll} disabled={exporting} iconBefore={exportIcon}>
+									Экспорт
+								</Button>
+							{/snippet}
+						</DashboardToolbar>
+					</div>
 				</div>
+				<DashboardSummary stats={dashboardSummaryStats} />
 			</div>
 			{#if dashboardFlatCardMode}
 				<div
-					class="tunnel-grid"
-					class:tunnel-grid--list={effectiveAwgRenderMode === 'list-card'}
-					class:tunnel-grid--dense={effectiveAwgRenderMode === 'dense' || effectiveSingboxTunnelsRenderMode === 'dense'}
-					class:tunnel-grid--compact={effectiveAwgRenderMode === 'compact'}
+					bind:this={flatGridEl}
+					class={dashboardGridClass}
+					class:dashboard-grid--reordering={flatDrag.active}
+					style={dashboardDndEnabled ? flatDrag.cardsMotionStyle() : undefined}
 				>
-					{#each dashboardFlatItems as item (item.key)}
-						{@render dashboardFlatCard(item)}
+					{#each dashboardRenderItems as item, i (item.key)}
+						<div
+							class="dashboard-flat-item"
+							class:drag-source-exiting={flatDrag.isDragSource(i)}
+							class:drag-source-collapsed={flatDrag.sourceCollapsed(i)}
+							style={flatDrag.isDragSource(i) ? flatDrag.dropIndicatorStyle() : undefined}
+							bind:this={flatRowEls[i]}
+						>
+							{#if flatDrag.showsDropBefore(i)}
+								<div
+									class="drop-indicator"
+									class:expanded={flatDrag.dropBeforeExpanded(i)}
+									class:collapsing={flatDrag.dropBeforeCollapsing(i)}
+									style={flatDrag.dropIndicatorStyle()}
+								></div>
+							{/if}
+							{#if flatDrag.active}
+								<!-- Во время drag карточки (с графиками) заменяются
+								     компактными рядами фиксированной высоты: без двух
+								     полных релэйаутов страницы, и длинный список влезает
+								     на экран. Ключи те же — ключи снапшота. -->
+								<div class="dashboard-reorder-row">
+									<span class="dashboard-kind-badge">{DASHBOARD_KIND_LABELS[item.kind]}</span>
+									<span class="dashboard-reorder-name">{item.name}</span>
+								</div>
+							{:else}
+								{@render dashboardFlatCard(item)}
+								{@render dashboardItemFooter(
+									item,
+									$tunnelDashboardOrderMode === 'manual' ? i : null,
+									!dashboardDndEnabled,
+								)}
+							{/if}
+						</div>
 					{/each}
+					{#if flatDrag.showsDropAtEnd()}
+						<div
+							class="drop-indicator drop-indicator-end"
+							class:expanded={flatDrag.dropEndExpanded()}
+							class:collapsing={flatDrag.dropEndCollapsing()}
+							style={flatDrag.dropIndicatorStyle()}
+						></div>
+					{/if}
 				</div>
+			{:else if dashboardGroupByTags}
+				{#each dashboardTagGroups as group (group.tag ?? ' untagged')}
+					<TunnelSectionHeader
+						title={group.tag ?? 'Без тегов'}
+						count={group.items.length}
+						countLabel={pluralForm(group.items.length, TUNNEL_WORDS)}
+					/>
+					<div class={dashboardGridClass}>
+						{#each group.items as entry (entry.item.key)}
+							<div class="dashboard-flat-item">
+								{@render dashboardFlatCard(entry.item, !entry.autoCheck)}
+								{@render dashboardItemFooter(entry.item, null)}
+							</div>
+						{/each}
+					</div>
+				{/each}
 			{/if}
-			{#if dashboardSearchEmpty}
-				<p class="tunnel-list-empty">Ничего не найдено</p>
+			{#if dashboardFilterEmpty}
+				<EmptyState
+					title="Ничего не найдено"
+					description={dashboardTagFilter !== null
+						? `Нет туннелей с тегом «${dashboardTagFilter}»${dashboardSearchQuery.trim() !== '' ? ' по этому запросу' : ''}.`
+						: 'По запросу не нашлось ни одного туннеля.'}
+				>
+					{#snippet action()}
+						{#if dashboardTagFilter !== null}
+							<Button variant="secondary" size="md" onclick={() => (dashboardTagFilter = null)}>
+								Сбросить фильтр
+							</Button>
+						{:else}
+							<Button variant="secondary" size="md" onclick={() => (dashboardSearchQuery = '')}>
+								Очистить поиск
+							</Button>
+						{/if}
+					{/snippet}
+				</EmptyState>
 			{/if}
 		{:else}
 			<Tabs
@@ -1772,7 +2109,7 @@
 			/>
 		{/if}
 
-		{#if dashboardSectionsLayout && awgFilteredRowsCount > 0}
+		{#if dashboardTypeSections && awgFilteredRowsCount > 0}
 			<TunnelSectionHeader
 				title="Amnezia WireGuard"
 				count={awgFilteredRowsCount}
@@ -1928,7 +2265,7 @@
 				</div>
 			</div>
 			{/if}
-			{#if !dashboardOn && isTunnelListRenderMode(awgRenderMode)}
+			{#if !dashboardOn}
 				<div class="awg-summary-row">
 					<StatStrip>
 						<Stat
@@ -2442,7 +2779,7 @@
 		{/if}
 		{/if}
 
-		{#if dashboardSectionsLayout && dashboardSingboxTunnels.length > 0}
+		{#if dashboardTypeSections && dashboardSingboxTunnels.length > 0}
 			<TunnelSectionHeader
 				title="Sing-box туннели"
 				count={dashboardSingboxTunnels.length}
@@ -2543,7 +2880,7 @@
 					</div>
 				</div>
 			{:else if singboxTunnelsList.length > 0 || (dashboardOn && dashboardSingboxTunnels.length > 0)}
-				{#if !dashboardOn && isTunnelListRenderMode(singboxTunnelsRenderMode)}
+				{#if !dashboardOn}
 					<div class="awg-summary-row">
 						<StatStrip>
 							<Stat
@@ -2653,7 +2990,7 @@
 		{/if}
 		{/if}
 
-		{#if dashboardSectionsLayout && dashboardSubscriptionsCount > 0}
+		{#if dashboardTypeSections && dashboardSubscriptionsCount > 0}
 			<TunnelSectionHeader
 				title="Sing-box подписки"
 				count={dashboardSubscriptionsCount}
@@ -2725,7 +3062,7 @@
 							</Button>
 						</div>
 					{:else}
-						{#if !dashboardOn && isTunnelListRenderMode(singboxSubscriptionsRenderMode)}
+						{#if !dashboardOn}
 							<div class="awg-summary-row">
 								<StatStrip>
 									<Stat
@@ -2964,6 +3301,21 @@
 	{/if}
 </PageContainer>
 
+{#if flatDrag.ghostVisible && flatDrag.ghostFromIndex !== null && dashboardRenderItems[flatDrag.ghostFromIndex]}
+	{@const ghostItem = dashboardRenderItems[flatDrag.ghostFromIndex]}
+	<!-- Ghost — компактный токен, а не полная карточка: полный рендер монтировал
+	     графики и стрелял loadHistory/subscribeTraffic на каждый захват. -->
+	<div
+		class="dashboard-drag-ghost"
+		style={`top:${flatDrag.ghostTop}px;left:${flatDrag.ghostLeft}px;width:${flatDrag.ghostWidth}px;`}
+	>
+		<div class="drag-ghost-token">
+			<span class="dashboard-kind-badge">{DASHBOARD_KIND_LABELS[ghostItem.kind]}</span>
+			<span class="dashboard-reorder-name">{ghostItem.name}</span>
+		</div>
+	</div>
+{/if}
+
 <AdoptTunnelDialog
 	interfaceName={adoptingInterface}
 	bind:open={adoptDialogOpen}
@@ -3118,6 +3470,260 @@
 {/if}
 
 <style>
+	/* Комбинированная сводка дашборда (issue #353): липкий блок «тулбар +
+	   сводка» под AppHeader — тот же паттерн, что sticky-header в
+	   TunnelEditHeader.svelte. */
+	.dashboard-sticky {
+		position: sticky;
+		top: 56px;
+		z-index: var(--z-sticky-secondary);
+		background: var(--color-bg-primary);
+		padding-bottom: 0.75rem;
+		border-bottom: 1px solid var(--color-border);
+		margin-bottom: 1rem;
+	}
+
+	.dashboard-sticky .tunnels-toolbar {
+		margin-bottom: 0.75rem;
+	}
+
+	/* На мобильном тулбар складывается в несколько рядов — прилипший блок
+	   съедал бы половину вьюпорта, поэтому ниже 760px он статичен. */
+	@media (max-width: 760px) {
+		.dashboard-sticky {
+			position: static;
+		}
+	}
+
+	/* Обёртка карточки в сплошном/теговом дашборде: карточка + футер
+	   (грип ручного порядка + чипы тегов). */
+	.dashboard-flat-item {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 0.375rem;
+		min-width: 0;
+	}
+
+	.dashboard-item-footer {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		min-width: 0;
+		margin-top: auto;
+	}
+
+	.dashboard-item-grip {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex: 0 0 auto;
+		background: transparent;
+		border: none;
+		padding: 0.125rem;
+		color: var(--color-text-muted);
+		opacity: 0.55;
+		cursor: grab;
+		touch-action: none;
+		border-radius: 4px;
+	}
+
+	.dashboard-item-grip:hover {
+		color: var(--color-text-primary);
+		opacity: 1;
+	}
+
+	.dashboard-item-grip:active {
+		cursor: grabbing;
+	}
+
+	.dashboard-item-grip.is-busy {
+		cursor: wait;
+		opacity: 0.3;
+		pointer-events: none;
+	}
+
+	/* Ручной порядок включён, но dnd заблокирован (поиск/фильтр/загрузка
+	   данных): грип виден, но неактивен — не исчезает молча. */
+	.dashboard-item-grip:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	/* ── D7: drag-reorder (общее pointer-ядро sb-router/reorderDrag).
+	   Движок вертикальный, поэтому на время активного drag сетка
+	   схлопывается в одну колонку — индексы вставки и индикатор
+	   становятся однозначными на любой плотности. ── */
+	.tunnel-grid.dashboard-grid--reordering {
+		--reorder-row-height: 40px;
+		display: flex;
+		flex-direction: column;
+		gap: var(--card-gap, 6px);
+		user-select: none;
+	}
+
+	/* Компактный ряд на время drag и ghost-токен: бейдж вида + имя. */
+	.dashboard-reorder-row,
+	.drag-ghost-token {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		box-sizing: border-box;
+		height: var(--reorder-row-height, 40px);
+		padding: 0 0.75rem;
+		min-width: 0;
+		background: var(--color-bg-secondary);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+	}
+
+	.dashboard-kind-badge {
+		flex: 0 0 auto;
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		line-height: 1.3;
+		color: var(--color-text-muted);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		padding: 1px 6px;
+		white-space: nowrap;
+	}
+
+	.dashboard-reorder-name {
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--color-text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	/* Во время drag строки компактные — слот источника и раскрытый
+	   drop-скелетон ужимаются до высоты ряда, а не исходной карточки
+	   (--drop-height меряется на pointerdown по полной карточке). */
+	.dashboard-grid--reordering .dashboard-flat-item.drag-source-exiting:not(.drag-source-collapsed) {
+		height: var(--reorder-row-height, 40px);
+	}
+
+	.dashboard-grid--reordering .drop-indicator.expanded:not(.collapsing) {
+		height: var(--reorder-row-height, 40px);
+	}
+
+	.dashboard-flat-item.drag-source-exiting {
+		overflow: hidden;
+		height: var(--drop-height);
+		opacity: 1;
+		transition:
+			height var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			opacity var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			margin var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95));
+	}
+
+	.dashboard-flat-item.drag-source-exiting.drag-source-collapsed {
+		height: 0;
+		max-height: 0;
+		opacity: 0;
+		margin-bottom: calc(-1 * var(--card-gap, 6px));
+	}
+
+	.drop-indicator {
+		box-sizing: border-box;
+		overflow: hidden;
+		border: 1px solid transparent;
+		border-radius: 999px;
+		background: var(--color-accent);
+		box-shadow: 0 0 10px color-mix(in srgb, var(--color-accent) 45%, transparent);
+		opacity: 1;
+		pointer-events: none;
+		transition:
+			height var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			margin var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			border-radius calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			background calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			box-shadow calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			border-color calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			opacity calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95));
+	}
+
+	.drop-indicator:not(.expanded):not(.collapsing) {
+		position: absolute;
+		top: -1px;
+		left: 0;
+		right: 0;
+		height: 2px;
+		margin: 0;
+		z-index: 2;
+	}
+
+	.drop-indicator.expanded:not(.collapsing) {
+		position: static;
+		top: auto;
+		height: var(--drop-height);
+		margin: 0 0 var(--card-gap, 6px);
+		border-radius: var(--radius-sm, 6px);
+		background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+		border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+		border-style: dashed;
+		box-shadow: none;
+	}
+
+	.drop-indicator.collapsing {
+		margin: 0 !important;
+		opacity: 0;
+		border-color: transparent;
+		background: transparent;
+		box-shadow: none;
+	}
+
+	.drop-indicator.collapsing.expanded {
+		position: static;
+		height: 0 !important;
+	}
+
+	.drop-indicator.collapsing:not(.expanded) {
+		position: absolute;
+		top: -1px;
+		left: 0;
+		right: 0;
+		height: 2px !important;
+		z-index: 2;
+		transition:
+			opacity var(--drop-line-collapse-ms, 240ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			box-shadow calc(var(--drop-line-collapse-ms, 240ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			background calc(var(--drop-line-collapse-ms, 240ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
+			border-color calc(var(--drop-line-collapse-ms, 240ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95));
+	}
+
+	.drop-indicator-end:not(.expanded):not(.collapsing) {
+		position: relative;
+		top: auto;
+		height: 2px;
+		margin: -1px 0 0;
+	}
+
+	.drop-indicator-end.collapsing:not(.expanded) {
+		position: relative;
+		top: auto;
+		left: auto;
+		right: auto;
+		height: 2px !important;
+		margin: -1px 0 0 !important;
+	}
+
+	.dashboard-drag-ghost {
+		position: fixed;
+		z-index: 10000;
+		pointer-events: none;
+		opacity: 0.96;
+		filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.35));
+	}
+
+	:global(body.reorder-dragging) {
+		user-select: none;
+		cursor: grabbing;
+	}
+
 	/* Toolbar (count + actions row above the tunnel grid) */
 	.tunnels-toolbar {
 		display: flex;

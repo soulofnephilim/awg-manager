@@ -6,7 +6,9 @@
 //   - tunnelDashboardLayout — 'sections' (collapsible per-kind groups) or
 //     'flat' (one merged list, kind→name order)
 //   - tunnelDashboardView   — card density for the dashboard, independent
-//     from the per-tab view modes so switching modes never clobbers them
+//     from the per-tab view modes so switching modes never clobbers them.
+//     Default 'dense': a fresh dashboard shows full AWG cards with traffic
+//     graphs in both layouts (issue: flat layout looked degraded).
 import type { SingboxLayoutMode } from '$lib/constants/singboxLayout';
 import { parseSingboxLayoutMode } from '$lib/constants/singboxLayout';
 import { createPersistedFlag, createPersistedStore } from './persisted';
@@ -42,8 +44,8 @@ export const tunnelDashboardLayout = {
 };
 
 const viewStore = createPersistedStore<SingboxLayoutMode>('awg-manager-tunnel-dashboard-view', {
-	defaultValue: 'compact',
-	deserialize: (raw) => parseSingboxLayoutMode(raw) ?? 'compact',
+	defaultValue: 'dense',
+	deserialize: (raw) => parseSingboxLayoutMode(raw) ?? 'dense',
 	serialize: (mode) => mode,
 });
 

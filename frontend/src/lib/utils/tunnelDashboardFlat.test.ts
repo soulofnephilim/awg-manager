@@ -49,4 +49,33 @@ describe('buildFlatDashboardItems', () => {
 		expect(items[0].name).toBe('Zulu');
 		expect(items[1].name).toBe('Alpha SB');
 	});
+
+	it('gives active and stopped subscriptions the same identity key', () => {
+		const active = buildFlatDashboardItems({
+			awg: [],
+			system: [],
+			external: [],
+			singbox: [],
+			subscriptionsActive: [
+				{
+					subscription: { id: 'sub-1', label: 'My sub' },
+					activeMember: { tag: 'm1' },
+				} as never,
+			],
+			subscriptionsStopped: [],
+		});
+		const stopped = buildFlatDashboardItems({
+			awg: [],
+			system: [],
+			external: [],
+			singbox: [],
+			subscriptionsActive: [],
+			subscriptionsStopped: [{ id: 'sub-1', label: 'My sub' } as never],
+		});
+
+		expect(active[0].kind).toBe('sub-active');
+		expect(stopped[0].kind).toBe('sub-stopped');
+		expect(active[0].key).toBe('sub:sub-1');
+		expect(stopped[0].key).toBe('sub:sub-1');
+	});
 });
