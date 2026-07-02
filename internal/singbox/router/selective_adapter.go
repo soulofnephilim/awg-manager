@@ -89,10 +89,18 @@ func (a *selectiveBuilderAdapter) RefreshCDN(ctx context.Context) error {
 	cfg = a.svc.ruleSetMaterializer().restoreConfig(cfg)
 	singboxDNS := singboxDNSServersFromConfig(cfg)
 
-	if err := a.b.RefreshCDNMatchers(ctx, queries, singboxDNS); err != nil {
+	newRoutes, err := a.b.RefreshCDNMatchers(ctx, queries, singboxDNS)
+	if err != nil {
 		return err
 	}
-	a.syncRoutesAfterRebuild(ctx)
+	// Re-sync the routes slot (and reload sing-box) ONLY when the refresh
+	// actually produced new /32 overlay routes. ipset additions take effect
+	// in the kernel immediately; an unconditional sync here meant a SIGHUP —
+	// or a full stop+start with a tun inbound — every 20 minutes, dropping
+	// all proxied connections even when nothing changed.
+	if newRoutes > 0 {
+		a.syncRoutesAfterRebuild(ctx)
+	}
 	return nil
 }
 

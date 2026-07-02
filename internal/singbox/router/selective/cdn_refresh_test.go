@@ -27,6 +27,41 @@ func TestCDNQueriesFromConfigDir(t *testing.T) {
 	}
 }
 
+func TestMergeRoutesLocked(t *testing.T) {
+	b := &Builder{routes: map[string][]string{
+		"vpn": {"1.1.1.1/32"},
+	}}
+
+	// New IP for an existing outbound + a brand-new outbound → both merged.
+	n := b.mergeRoutesLocked(map[string][]string{
+		"vpn":   {"1.1.1.1/32", "2.2.2.2/32"},
+		"proxy": {"3.3.3.3/32"},
+	})
+	if n != 2 {
+		t.Fatalf("merged = %d, want 2", n)
+	}
+	if got := len(b.routes["vpn"]); got != 2 {
+		t.Fatalf("vpn routes = %d, want 2", got)
+	}
+	if got := len(b.routes["proxy"]); got != 1 {
+		t.Fatalf("proxy routes = %d, want 1", got)
+	}
+
+	// Re-merging the same set is a no-op — the caller must not reload.
+	if n := b.mergeRoutesLocked(map[string][]string{
+		"vpn":   {"2.2.2.2/32"},
+		"proxy": {"3.3.3.3/32"},
+	}); n != 0 {
+		t.Fatalf("re-merge = %d, want 0", n)
+	}
+
+	// Nil map on a builder with no routes stays nil-safe.
+	empty := &Builder{}
+	if n := empty.mergeRoutesLocked(nil); n != 0 {
+		t.Fatalf("nil merge = %d, want 0", n)
+	}
+}
+
 func TestReadSnapshotMatchersPagination(t *testing.T) {
 	dir := t.TempDir()
 	w, err := newSnapshotWriter(dir)
