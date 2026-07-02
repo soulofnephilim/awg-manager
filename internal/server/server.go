@@ -372,18 +372,18 @@ func generateInstanceID() string {
 // Priority: 1) preferred port from settings, 2) default port (2222), 3) fallback range (8080-8090).
 func (s *Server) FindFreePort(preferredPort int) (int, error) {
 	// Try preferred port from settings
-	if preferredPort > 0 && preferredPort <= 65535 && isPortFree(preferredPort) {
+	if preferredPort > 0 && preferredPort <= 65535 && IsPortFree(preferredPort) {
 		return preferredPort, nil
 	}
 
 	// Try default port (2222)
-	if isPortFree(DefaultPort) {
+	if IsPortFree(DefaultPort) {
 		return DefaultPort, nil
 	}
 
 	// Fallback to range 8080-8090
 	for port := FallbackPortStart; port <= FallbackPortEnd; port++ {
-		if isPortFree(port) {
+		if IsPortFree(port) {
 			return port, nil
 		}
 	}
@@ -391,7 +391,8 @@ func (s *Server) FindFreePort(preferredPort int) (int, error) {
 	return 0, fmt.Errorf("no free port: %d occupied, fallback range %d-%d also occupied", DefaultPort, FallbackPortStart, FallbackPortEnd)
 }
 
-func isPortFree(port int) bool {
+// IsPortFree reports whether a TCP port is available for binding.
+func IsPortFree(port int) bool {
 	addr := fmt.Sprintf(":%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

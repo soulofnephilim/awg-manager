@@ -796,9 +796,8 @@ func (h *TunnelsHandler) Traffic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	// Read-only handler reading an in-memory map: tolerate non-AWG ids
@@ -849,9 +848,8 @@ func (h *TunnelsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -1000,9 +998,8 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -1192,9 +1189,8 @@ func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -1265,9 +1261,8 @@ func (h *TunnelsHandler) Export(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -1357,9 +1352,8 @@ func (h *TunnelsHandler) ReplaceConf(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {

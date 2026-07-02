@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
+	"github.com/hoaxisr/awg-manager/internal/sys/netif"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
 	"github.com/hoaxisr/awg-manager/internal/sys/routerclock"
 	"github.com/hoaxisr/awg-manager/internal/sys/routerinfo"
@@ -429,7 +429,7 @@ func (h *SystemHandler) Info(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Router LAN IP (from br0 interface)
-	routerIP := getBr0IP()
+	routerIP := netif.FirstIPv4(storage.DefaultInterface)
 
 	info := h.buildSystemInfo(disableMemorySaving, gcMemLimit, gogc, kernelModuleExists, kernelModuleLoaded, kernelModuleModel, kernelModuleVersion, isAarch64, activeBackendType, routerIP)
 
@@ -635,26 +635,6 @@ func evalNativewg(hasWireguardComponent, supportsASC, awgProxyLoaded bool) (avai
 func nativewgStatus() (available bool, reason string) {
 	_, err := os.Stat("/proc/awg_proxy/version")
 	return evalNativewg(ndmsinfo.HasWireguardComponent(), ndmsinfo.SupportsWireguardASC(), err == nil)
-}
-
-// getBr0IP returns the first IPv4 address of the br0 (Bridge0) interface.
-func getBr0IP() string {
-	iface, err := net.InterfaceByName("br0")
-	if err != nil {
-		return ""
-	}
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return ""
-	}
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok {
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
-				return ip4.String()
-			}
-		}
-	}
-	return ""
 }
 
 // wanInterfaceJSON is the JSON response for a single WAN interface.

@@ -117,9 +117,8 @@ func (h *ClientRouteHandler) HandleUpdate(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	route.ID = id
@@ -149,9 +148,8 @@ func (h *ClientRouteHandler) HandleDelete(w http.ResponseWriter, r *http.Request
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if err := h.svc.Delete(r.Context(), id); err != nil {
@@ -181,9 +179,8 @@ func (h *ClientRouteHandler) HandleToggle(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if err := h.svc.SetEnabled(r.Context(), id, req.Enabled); err != nil {

@@ -9,13 +9,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/sys/netif"
 )
 
 const (
@@ -48,7 +48,7 @@ func NewKeeneticClient() *KeeneticClient {
 // resolveAddr detects router IP (br0) and HTTP port (RCI) once.
 func (c *KeeneticClient) resolveAddr() {
 	c.routerAddrOnce.Do(func() {
-		ip := getBr0IP()
+		ip := netif.FirstIPv4("br0")
 		if ip == "" {
 			ip = "192.168.1.1"
 		}
@@ -88,28 +88,6 @@ func getHTTPPort() int {
 	}
 
 	return 80
-}
-
-// getBr0IP returns the first IPv4 address of br0 interface.
-func getBr0IP() string {
-	iface, err := net.InterfaceByName("br0")
-	if err != nil {
-		return ""
-	}
-
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return ""
-	}
-
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok {
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
-				return ip4.String()
-			}
-		}
-	}
-	return ""
 }
 
 // Authenticate verifies credentials against Keenetic router.
@@ -234,4 +212,3 @@ func (c *KeeneticClient) postAuth(ctx context.Context, authURL, login, hashedPas
 
 	return nil
 }
-

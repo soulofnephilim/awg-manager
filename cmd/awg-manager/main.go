@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -63,6 +62,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/sys/env"
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
+	"github.com/hoaxisr/awg-manager/internal/sys/netif"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
 	"github.com/hoaxisr/awg-manager/internal/terminal"
 	"github.com/hoaxisr/awg-manager/internal/testing"
@@ -1291,7 +1291,7 @@ func main() {
 
 	// Determine bind IP from settings
 	bindIface := settings.Server.Interface
-	ip := getInterfaceIP(bindIface)
+	ip := netif.FirstIPv4(bindIface)
 	if ip == "" {
 		fmt.Fprintf(os.Stderr, "Warning: could not get IP for interface %s, binding to all interfaces\n", bindIface)
 		ip = "0.0.0.0"
@@ -1299,7 +1299,7 @@ func main() {
 
 	// Get port from settings, with fallback logic
 	selectedPort := settings.Server.Port
-	if selectedPort == 0 || !isPortFree(selectedPort) {
+	if selectedPort == 0 || !server.IsPortFree(selectedPort) {
 		var err error
 		selectedPort, err = srv.FindFreePort(settings.Server.Port)
 		if err != nil {
@@ -1720,39 +1720,6 @@ func populateWANModel(ctx context.Context, queries *ndmsquery.Queries, model *wa
 	appLog.Info("populate-wan", "", fmt.Sprintf("WAN model populated, count=%d ifaces=[%s]", len(interfaces), strings.Join(ifaceList, " ")))
 }
 
-// getInterfaceIP returns the first IPv4 address of the given interface.
-func getInterfaceIP(ifaceName string) string {
-	iface, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return ""
-	}
-
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return ""
-	}
-
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok {
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
-				return ip4.String()
-			}
-		}
-	}
-	return ""
-}
-
-// isPortFree checks if a port is available for binding.
-func isPortFree(port int) bool {
-	addr := fmt.Sprintf(":%d", port)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return false
-	}
-	ln.Close()
-	return true
-}
-
 // getUptime reads system uptime in seconds from /proc/uptime.
 // Returns 0 on error (treated as non-boot scenario).
 func getUptime() float64 {
@@ -1967,7 +1934,7 @@ func getServiceEndpoint(dataDir string) (string, int) {
 	}
 
 	// Use br0 (LAN bridge) for display — this is what the user connects from
-	host := getInterfaceIP("br0")
+	host := netif.FirstIPv4(storage.DefaultInterface)
 	if host == "" {
 		host = "192.168.1.1"
 	}

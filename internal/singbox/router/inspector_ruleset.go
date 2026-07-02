@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hoaxisr/awg-manager/internal/sys/httpclient"
 )
 
 // ruleSetCacheTTL is how long a downloaded remote rule-set stays valid in
@@ -78,7 +80,18 @@ func (c *ruleSetCache) urlLock(url string) *sync.Mutex {
 
 // httpClient is package-level so tests can swap it via the unexported
 // ruleSetHTTPClient hook. Do not swap from tests using t.Parallel().
-var ruleSetHTTPClient = &http.Client{Timeout: ruleSetDownloadTimeout}
+// Built on the canonical httpclient base for the pinned HTTP/1.1 ALPN +
+// ForceAttemptHTTP2=false — rule-set mirrors like raw.githubusercontent.com
+// return EOF/malformed h2 otherwise.
+var ruleSetHTTPClient = newRuleSetHTTPClient()
+
+func newRuleSetHTTPClient() *http.Client {
+	c := &http.Client{Timeout: ruleSetDownloadTimeout}
+	if tr, err := httpclient.NewTransport(httpclient.TransportConfig{}); err == nil && tr != nil {
+		c.Transport = tr
+	}
+	return c
+}
 
 // getOrDownload returns the local file path for url, downloading and
 // caching it on first call (or after the TTL expires). Format only

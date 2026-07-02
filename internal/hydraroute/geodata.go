@@ -19,6 +19,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/sys/httpclient"
 	"github.com/hoaxisr/awg-manager/internal/sys/httpdownload"
 )
 
@@ -969,7 +970,16 @@ func downloadFileWithClient(ctx context.Context, client *http.Client, rawURL, de
 	req.Header.Set("User-Agent", "curl/8.7.1")
 
 	if client == nil {
-		client = &http.Client{}
+		// Build the direct-download fallback on the canonical httpclient base
+		// so it inherits the pinned HTTP/1.1 ALPN + ForceAttemptHTTP2=false —
+		// geo mirrors like raw.githubusercontent.com return EOF/malformed h2
+		// otherwise (the failure httpclient exists to prevent).
+		tr, terr := httpclient.NewTransport(httpclient.TransportConfig{})
+		if terr != nil || tr == nil {
+			client = &http.Client{}
+		} else {
+			client = &http.Client{Transport: tr}
+		}
 	}
 
 	resp, err := client.Do(req)

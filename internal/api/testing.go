@@ -114,9 +114,8 @@ func (h *TestingHandler) CheckIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -171,9 +170,8 @@ func (h *TestingHandler) CheckConnectivity(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -225,9 +223,8 @@ func (h *TestingHandler) SpeedTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {

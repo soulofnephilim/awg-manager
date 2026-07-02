@@ -6,6 +6,7 @@
 	import { developFeedbackIncidentPending } from '$lib/stores/developFeedbackIncident';
 	import type { DiagnosticsTargetSeed } from '$lib/stores/diagnostics';
 	import { notifications } from '$lib/stores/notifications';
+	import { copyToClipboard } from '$lib/utils/clipboard';
 	import type { DiagEvent } from '$lib/types';
 	import {
 		ChecksToolbar,
@@ -233,31 +234,8 @@
 		].join('\n');
 	}
 
-	async function copyText(text: string): Promise<boolean> {
-		if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-			try {
-				await navigator.clipboard.writeText(text);
-				return true;
-			} catch {
-				// Fall back to execCommand below.
-			}
-		}
-		if (typeof document === 'undefined') return false;
-		const textarea = document.createElement('textarea');
-		textarea.value = text;
-		textarea.setAttribute('readonly', '');
-		textarea.style.position = 'fixed';
-		textarea.style.left = '-9999px';
-		document.body.appendChild(textarea);
-		textarea.select();
-		let copied = false;
-		try {
-			copied = document.execCommand('copy');
-		} catch {
-			copied = false;
-		}
-		document.body.removeChild(textarea);
-		return copied;
+	function copyText(text: string): Promise<boolean> {
+		return copyToClipboard(text);
 	}
 
 	function openPendingIssueWindow(): Window | null {
