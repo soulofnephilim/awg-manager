@@ -1,9 +1,5 @@
 package orchestrator
 
-import (
-	"github.com/hoaxisr/awg-manager/internal/tunnel"
-)
-
 // ActionType identifies what the executor should do.
 type ActionType int
 
@@ -22,12 +18,6 @@ const (
 	ActionResumeKernel
 	ActionReconcileNativeWG
 
-	// Live config
-	ActionApplyConfig
-	ActionSetMTU
-	ActionSetDefaultRoute
-	ActionRemoveDefaultRoute
-
 	// Monitoring
 	ActionStartMonitoring
 	ActionStopMonitoring
@@ -40,8 +30,6 @@ const (
 	ActionRemoveStaticRoutes
 	ActionApplyClientRoutes
 	ActionRemoveClientRoutes
-	ActionApplySystemClientRoutes
-	ActionRemoveSystemClientRoutes
 	ActionReconcileStaticRoutes
 	ActionReconcileDNSRoutes
 	ActionDeleteDNSRoutes
@@ -51,21 +39,15 @@ const (
 	// Persistence
 	ActionPersistRunning
 	ActionPersistStopped
-	ActionPersistEnabled
 
 	// CRUD
-	ActionCreateKernel
-	ActionCreateNativeWG
 	ActionDeleteKernel
 	ActionDeleteNativeWG
 )
 
 // Action is one step in the execution plan.
 type Action struct {
-	Type    ActionType
-	Tunnel  string
-	Config  *tunnel.Config
-	WAN     string // resolved WAN interface
-	Iface   string // kernel interface name
-	Enabled *bool
+	Type   ActionType
+	Tunnel string
+	Iface  string // kernel interface name
 }

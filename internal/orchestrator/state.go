@@ -19,9 +19,7 @@ type tunnelState struct {
 	ActiveWAN    string
 	NWGIndex     int
 	PingCheck    *storage.TunnelPingCheck
-	DefaultRoute bool
 	ISPInterface string
-	Endpoint     string // peer endpoint (host:port)
 
 	// quiescentUntil: while now < this, a conf=disabled edge for this tunnel
 	// is treated as transient NDMS settling (do not stop). Set on (re)start.
@@ -99,9 +97,7 @@ func tunnelStateFromStored(t *storage.AWGTunnel) *tunnelState {
 		Enabled:      t.Enabled,
 		NWGIndex:     t.NWGIndex,
 		PingCheck:    t.PingCheck,
-		DefaultRoute: t.DefaultRoute,
 		ISPInterface: t.ISPInterface,
-		Endpoint:     t.Peer.Endpoint,
 		ActiveWAN:    t.ActiveWAN,
 	}
 }

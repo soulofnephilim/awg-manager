@@ -466,7 +466,7 @@ func (o *Orchestrator) updateState(action Action) {
 	}
 
 	// Publish SSE event
-	if o.bus != nil && t != nil {
+	if o.bus != nil {
 		switch action.Type {
 		case ActionColdStartKernel, ActionStartNativeWG, ActionReconcileNativeWG, ActionReconcileKernel, ActionResumeKernel:
 			// tunnel:state is still consumed internally by
