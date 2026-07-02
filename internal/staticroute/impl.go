@@ -526,22 +526,6 @@ func (s *ServiceImpl) listsForTunnel(tunnelID string) []storage.StaticRouteList 
 	return result
 }
 
-// SystemTunnelIDs returns unique system tunnel IDs from enabled route lists.
-func (s *ServiceImpl) SystemTunnelIDs() []string {
-	all, err := s.store.ListRouteLists()
-	if err != nil {
-		return nil
-	}
-	seen := make(map[string]bool)
-	var result []string
-	for _, rl := range all {
-		if rl.Enabled && tunnel.IsSystemTunnel(rl.TunnelID) && !seen[rl.TunnelID] {
-			seen[rl.TunnelID] = true
-			result = append(result, rl.TunnelID)
-		}
-	}
-	return result
-}
 
 // validateRouteList checks required fields.
 func validateRouteList(rl storage.StaticRouteList) error {
