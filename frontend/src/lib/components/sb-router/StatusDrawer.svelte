@@ -267,7 +267,7 @@
           <label class="lbl" for="ed-ports-input">Доп. порты</label>
           <PortChipsInput inputId="ed-ports-input" value={cfg.bypassExtraPorts ?? ''} onChange={(v) => void applyPatch({ bypassExtraPorts: v })} />
         </div>
-        <p class="hint">Эти порты пойдут мимо sing-box (прямо в WAN). Полезно для L2TP/NTP/SMB не ломая LAN-сервисы.</p>
+        <p class="hint">Эти порты пойдут мимо sing-box (прямо в WAN). Полезно для L2TP/NTP/SMB не ломая LAN-сервисы. Поддерживаются одиночные порты (<code class="mono">443 TCP</code>) и диапазоны (<code class="mono">5000-5500 UDP</code>).</p>
         <div class="field">
           <label class="lbl" for="ed-subnets-input">Доп. подсети</label>
           <SubnetChipsInput inputId="ed-subnets-input" value={cfg.bypassExtraSubnets ?? ''} onChange={(v) => void applyPatch({ bypassExtraSubnets: v })} />
@@ -412,4 +412,13 @@
   }
   .save-status { align-self: flex-end; font-size: 11px; color: var(--text-muted); }
   .save-status.err { color: var(--color-error, #dc2626); }
+  code.mono {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 3px;
+    color: var(--text-secondary);
+  }
 </style>
