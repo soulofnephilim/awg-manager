@@ -395,8 +395,12 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	// ---- *nat table: TCP via REDIRECT ----
 	// Literal port of `add_redirect_rules` from reference/SKeen/skeen.sh
 	// (hybrid mode, nat table). SKeen's nat chain has ONLY the bypass set
-	// + catch-all `-p tcp -j REDIRECT`; there is no DNS-specific TCP rule
-	// because the catch-all already covers TCP/53.
+	// + catch-all `-p tcp -j REDIRECT`; without selective bypass the
+	// catch-all already covers TCP/53. WITH the selective guard the
+	// catch-all is no longer unconditional, so TCP/53 gets its own
+	// intercept before the guard (see below) — otherwise a truncated-UDP
+	// retry or DNS-over-TCP to a resolver outside the set escapes
+	// hijack-dns and leaks real IPs of proxied domains.
 	b.WriteString("*nat\n")
 	fmt.Fprintf(&b, ":%s - [0:0]\n", RedirectChain)
 
@@ -412,7 +416,13 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	}
 
 	// Selective-bypass guard for TCP: mirrors the mangle guard above.
+	// TCP/53 is intercepted FIRST (mirroring the mangle UDP/53 rule and
+	// honoring the same "DNS must always reach hijack-dns" invariant):
+	// resolver IPs are typically NOT in AWGM-SELECTIVE, so without this
+	// rule the guard would RETURN DNS-over-TCP straight to the upstream.
 	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d\n",
+			RedirectChain, RedirectPort)
 		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
 			RedirectChain, selectiveSetName)
 	}
