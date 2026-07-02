@@ -556,10 +556,16 @@ func TestReconcileInstalled_SelectiveSelfHealWhenFinalNotDirect(t *testing.T) {
 	svc.deps.NetfilterPreflight = func(context.Context) error { return nil }
 	svc.currentSelectiveBypass = true
 
+	// The incompatible config must be APPLIED (not a pending draft): the
+	// self-heal judges only what is actually running.
 	cfg := NewEmptyConfig()
 	cfg.Route.Final = "my-vpn"
 	cfg.Outbounds = append(cfg.Outbounds, Outbound{Tag: "my-vpn", Type: "direct"})
-	if err := svc.persistConfig(context.Background(), cfg); err != nil {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.deps.Orch.SaveSilent(orchestrator.SlotRouter, data); err != nil {
 		t.Fatal(err)
 	}
 
@@ -580,6 +586,61 @@ func TestReconcileInstalled_SelectiveSelfHealWhenFinalNotDirect(t *testing.T) {
 	}
 	if svc.currentSelectiveBypass {
 		t.Error("expected currentSelectiveBypass=false after self-heal reconcile")
+	}
+}
+
+func TestReconcileInstalled_SelectiveSelfHealIgnoresStagedDraft(t *testing.T) {
+	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
+		Enabled:         true,
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		SelectiveBypass: true,
+	})
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	svc, _ := newOrchedTestService(t)
+	svc.deps.Settings = settingsStore
+	svc.deps.Policies = &fakeAccessPolicyProvider{mark: "0xffffaaa"}
+	svc.deps.IPTables = ipt
+	svc.deps.WANIPCollector = &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}}
+	svc.deps.NetfilterPreflight = func(context.Context) error { return nil }
+	svc.currentSelectiveBypass = true
+
+	// APPLIED config is compatible (final=direct)…
+	applied := NewEmptyConfig()
+	appliedData, err := json.Marshal(applied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.deps.Orch.SaveSilent(orchestrator.SlotRouter, appliedData); err != nil {
+		t.Fatal(err)
+	}
+	// …while a still-discardable STAGED draft is not. The self-heal must
+	// not act on the draft — the user may never apply it.
+	draft := NewEmptyConfig()
+	draft.Route.Final = "my-vpn"
+	draft.Outbounds = append(draft.Outbounds, Outbound{Tag: "my-vpn", Type: "direct"})
+	draftData, err := json.Marshal(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.deps.Orch.SaveDraft(orchestrator.SlotRouter, draftData); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.reconcileInstalled(context.Background(), storage.SingboxRouterSettings{
+		Enabled:         true,
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		SelectiveBypass: true,
+	}); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	all, err := settingsStore.Load()
+	if err != nil {
+		t.Fatalf("settingsStore.Load: %v", err)
+	}
+	if !all.SingboxRouter.SelectiveBypass {
+		t.Error("staged draft must not trigger the self-heal: selectiveBypass was disabled")
 	}
 }
 

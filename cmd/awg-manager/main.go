@@ -22,6 +22,7 @@ import (
 
 	"log/slog"
 	"runtime"
+	"runtime/debug"
 
 	"github.com/hoaxisr/awg-manager/frontend"
 	"github.com/hoaxisr/awg-manager/internal/accesspolicy"
@@ -123,14 +124,45 @@ func detectArch() string {
 	return ""
 }
 
+// applyGoMemoryLimits tunes THIS process's GC via runtime/debug. Two things
+// deliberately do NOT happen here:
+//   - no os.Setenv: GOGC/GOMEMLIMIT env vars are read once at runtime init,
+//     so setting them from main() is a no-op for the current process — and
+//     the mutated env would be inherited by the spawned sing-box, overriding
+//     its own deliberate defaults (GOGC=75/GOMEMLIMIT=128MiB, see
+//     internal/singbox/process.go) with the manager's much tighter limits.
+//   - explicit env vars still win: a user-provided GOGC/GOMEMLIMIT was
+//     already applied by the runtime at startup, so we skip that knob.
 func applyGoMemoryLimits(disableMemorySaving bool) {
 	for _, entry := range osdetect.GetGCEnv(disableMemorySaving) {
 		parts := strings.SplitN(entry, "=", 2)
 		if len(parts) != 2 || os.Getenv(parts[0]) != "" {
 			continue
 		}
-		_ = os.Setenv(parts[0], parts[1])
+		switch parts[0] {
+		case "GOGC":
+			if pct, err := strconv.Atoi(parts[1]); err == nil {
+				debug.SetGCPercent(pct)
+			}
+		case "GOMEMLIMIT":
+			if limit, err := parseByteSize(parts[1]); err == nil {
+				debug.SetMemoryLimit(limit)
+			}
+		}
 	}
+}
+
+// parseByteSize parses the GOMEMLIMIT syntax subset osdetect emits ("16MiB").
+func parseByteSize(s string) (int64, error) {
+	n := strings.TrimSuffix(s, "MiB")
+	if n == s {
+		return 0, fmt.Errorf("unsupported byte size %q", s)
+	}
+	mib, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return mib << 20, nil
 }
 
 // deviceproxySubscriptionOutboundsAdapter adapts *subscription.Service to
@@ -1204,9 +1236,6 @@ func main() {
 			p.CachePath = singbox.DefaultCacheDBPath()
 			return p
 		}(),
-		ClashHealthy: func() bool {
-			return singboxOp.Clash().IsHealthy()
-		},
 	})
 	// Wire selective-bypass builder. The adapter wraps selective.Builder with the
 	// router service's live config so reconcileInstalled can trigger an ipset
@@ -1217,12 +1246,12 @@ func main() {
 		selectiveGeo.GeoIP = geoCfg.GeoIPFiles
 	}
 	selectiveBuilder := selective.NewBuilder(selective.BuilderConfig{
-		ConfigDir:         singboxOp.ConfigDir(),
-		DNSSource:         ndmsQueries.DNSProxyStatus,
-		Log:               logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSelective),
-		Bus:               eventBus,
-		Geo:               selectiveGeo,
-		OpenRuleSetJSON:   routerSvc.OpenSelectiveRuleSetJSON,
+		ConfigDir:       singboxOp.ConfigDir(),
+		DNSSource:       ndmsQueries.DNSProxyStatus,
+		Log:             logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSelective),
+		Bus:             eventBus,
+		Geo:             selectiveGeo,
+		OpenRuleSetJSON: routerSvc.OpenSelectiveRuleSetJSON,
 	})
 	selectiveAdapter := router.NewSelectiveBuilderAdapter(routerSvc, selectiveBuilder)
 	routerSvc.SetSelectiveBuilder(selectiveAdapter)
@@ -1248,7 +1277,8 @@ func main() {
 
 	// Exclude interfaces already bound by an existing direct outbound from the
 	// bindable picker (#323). Wired post-construction — needs routerSvc.
-	bindableAdapter.occupiedBinds = func(ctx context.Context) (map[string]bool, error) {		obs, err := routerSvc.ListCompositeOutbounds(ctx)
+	bindableAdapter.occupiedBinds = func(ctx context.Context) (map[string]bool, error) {
+		obs, err := routerSvc.ListCompositeOutbounds(ctx)
 		if err != nil {
 			return nil, err
 		}

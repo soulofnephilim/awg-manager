@@ -2,8 +2,7 @@ package router
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -19,21 +18,44 @@ func routeFinalAllowsSelectiveBypass(final string) bool {
 	return final == "" || final == "direct"
 }
 
+// errSelectiveIncompatible marks a DEFINITIVE incompatibility between the
+// applied settings/config and selective bypass. Only this error justifies
+// the reconcile self-heal persistently flipping SelectiveBypass=false; any
+// other validation error (config unreadable — transient flash I/O, torn
+// state during apply) means "could not check" and must NOT rewrite settings.
+var errSelectiveIncompatible = errors.New("selective bypass incompatible")
+
+// validateSelectiveBypassSettings is the user-facing check (UpdateSettings):
+// it validates against the EFFECTIVE config — including a staged draft — so
+// the UI rejects enabling selective bypass against the route.final the user
+// is currently editing.
 func (s *ServiceImpl) validateSelectiveBypassSettings(ctx context.Context, sr storage.SingboxRouterSettings) error {
+	return s.validateSelectiveBypass(sr, s.loadRouterConfig)
+}
+
+// validateSelectiveBypassAgainstApplied is the reconcile-side check: it
+// judges only the APPLIED config, never the pending draft. A staged (still
+// discardable) draft with route.final != direct must not let the self-heal
+// flip the persisted setting from under the user.
+func (s *ServiceImpl) validateSelectiveBypassAgainstApplied(sr storage.SingboxRouterSettings) error {
+	return s.validateSelectiveBypass(sr, s.loadAppliedRouterConfig)
+}
+
+func (s *ServiceImpl) validateSelectiveBypass(sr storage.SingboxRouterSettings, load func() (*RouterConfig, error)) error {
 	if !sr.SelectiveBypass {
 		return nil
 	}
 	if sr.RoutingMode != "tproxy" {
-		return fmt.Errorf("selectiveBypass only applies to routingMode %q", "tproxy")
+		return fmt.Errorf("%w: selectiveBypass only applies to routingMode %q", errSelectiveIncompatible, "tproxy")
 	}
-	cfg, err := s.loadRouterConfig()
+	cfg, err := load()
 	if err != nil {
 		return fmt.Errorf("selectiveBypass: load router config: %w", err)
 	}
 	if !routeFinalAllowsSelectiveBypass(cfg.Route.Final) {
 		return fmt.Errorf(
-			"selectiveBypass requires route.final %q (current %q): catch-all proxy routing sends all traffic through sing-box and conflicts with selective ipset bypass",
-			"direct", cfg.Route.Final,
+			"%w: selectiveBypass requires route.final %q (current %q): catch-all proxy routing sends all traffic through sing-box and conflicts with selective ipset bypass",
+			errSelectiveIncompatible, "direct", cfg.Route.Final,
 		)
 	}
 	return nil
@@ -77,17 +99,6 @@ type SelectiveBuilder interface {
 // domain resolver fallback path. *ndmsquery.DNSProxyStatusStore satisfies it.
 type SelectiveDNSSource interface {
 	List(ctx context.Context) ([]byte, error)
-}
-
-// rulesHash returns a short SHA-256 hex digest over the JSON serialisation
-// of the route rules and rule sets. Used to detect whether a reconcile
-// needs to trigger an ipset rebuild.
-func rulesHash(rules []Rule, ruleSets []RuleSet) string {
-	h := sha256.New()
-	enc := json.NewEncoder(h)
-	_ = enc.Encode(rules)
-	_ = enc.Encode(ruleSets)
-	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }
 
 // triggerSelectiveRebuild triggers a non-blocking ipset rebuild when
