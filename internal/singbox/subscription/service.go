@@ -1175,10 +1175,21 @@ func (s *Service) PreviewURL(ctx context.Context, url string, headers []Header) 
 	parts := partitionParsedOutbounds("preview", parseRes.Outbounds)
 	out := make([]PreviewMember, 0, len(parts.Valid))
 	keys := chooseKeys(parts.Valid)
+	// Dedupe by exclusion key, mirroring ApplyDiff's SkippedDuplicate: a
+	// byte-identical duplicate in the feed becomes ONE member on refresh, so
+	// the preview must not list it twice either. Issue #428: duplicate keys
+	// also crash the frontend's keyed list (each_key_duplicate) and freeze
+	// the add-subscription wizard on «Загрузка...».
+	seen := make(map[string]struct{}, len(parts.Valid))
 	for i, p := range parts.Valid {
+		key := suffixOf(keys[i])
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
 		mi := toMemberInfo(StableTag("preview00", p), p) // tag игнорируется, берём поля
 		out = append(out, PreviewMember{
-			Key: suffixOf(keys[i]), Label: mi.Label, Protocol: mi.Protocol,
+			Key: key, Label: mi.Label, Protocol: mi.Protocol,
 			Server: mi.Server, Port: mi.Port, SNI: mi.SNI,
 			Transport: mi.Transport, Security: mi.Security,
 		})

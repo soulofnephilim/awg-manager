@@ -203,9 +203,19 @@
 		previewing = true;
 		error = '';
 		try {
-			previewMembers = await api.previewSubscription({
+			const members = await api.previewSubscription({
 				url,
 				headers: parseHeadersText(headersText),
+			});
+			// Дедуп по key обязателен: список рендерится keyed each'ем по
+			// member.key, и дубликат ключа роняет рендер (each_key_duplicate) —
+			// модалка замирает на «Загрузка...» (issue #428). Бэкенд уже
+			// дедуплицирует, это страховка от старых бэкендов и иных источников.
+			const seen = new Set<string>();
+			previewMembers = (members ?? []).filter((m) => {
+				if (seen.has(m.key)) return false;
+				seen.add(m.key);
+				return true;
 			});
 			excludedKeys = new Set();
 			urlStep = 'preview';
