@@ -2,9 +2,9 @@
 	import type { Snippet } from 'svelte';
 	import { SegmentedControl } from '$lib/components/ui';
 	import LayoutViewToggle from '$lib/components/ui/LayoutViewToggle.svelte';
-	import type { LayoutViewMode } from '$lib/components/ui/layoutViewToggle';
-	import TunnelTableSortControls from '$lib/components/tunnels/TunnelTableSortControls.svelte';
+	import TunnelSearchInput from './TunnelSearchInput.svelte';
 	import TunnelCreateMenu from './TunnelCreateMenu.svelte';
+	import type { SingboxLayoutMode } from '$lib/constants/singboxLayout';
 	import {
 		TUNNEL_DASHBOARD_LAYOUT_LABELS,
 		type TunnelDashboardLayout,
@@ -15,8 +15,8 @@
 		onSearchChange: (value: string) => void;
 		layout: TunnelDashboardLayout;
 		onLayoutChange: (layout: TunnelDashboardLayout) => void;
-		viewMode: LayoutViewMode;
-		onViewModeChange: (mode: LayoutViewMode) => void;
+		viewMode: SingboxLayoutMode;
+		onViewModeChange: (mode: SingboxLayoutMode) => void;
 		showViewToggle?: boolean;
 		showListOption?: boolean;
 		showSingboxCreate?: boolean;
@@ -25,6 +25,8 @@
 		onCreateSingboxGroup?: () => void;
 		onCreateSingboxSubscription?: () => void;
 		createIcon: Snippet;
+		/** Дополнительные действия (экспорт, статус) перед меню создания. */
+		actions?: Snippet;
 	}
 
 	let {
@@ -42,6 +44,7 @@
 		onCreateSingboxGroup,
 		onCreateSingboxSubscription,
 		createIcon,
+		actions,
 	}: Props = $props();
 
 	const layoutOptions: Array<{ value: TunnelDashboardLayout; label: string }> = [
@@ -52,17 +55,7 @@
 
 <div class="dashboard-toolbar">
 	<div class="tunnel-toolbar-search">
-		<TunnelTableSortControls
-			{searchQuery}
-			sortKey={null}
-			sortAsc={true}
-			options={[]}
-			showSearch={true}
-			showSort={false}
-			{onSearchChange}
-			onSortChange={() => {}}
-			onToggleDir={() => {}}
-		/>
+		<TunnelSearchInput value={searchQuery} onInput={onSearchChange} />
 	</div>
 
 	<div class="dashboard-toolbar-layout">
@@ -83,6 +76,12 @@
 				ariaLabel="Вид туннелей"
 				onchange={(mode) => onViewModeChange(mode)}
 			/>
+		</div>
+	{/if}
+
+	{#if actions}
+		<div class="dashboard-toolbar-actions">
+			{@render actions()}
 		</div>
 	{/if}
 
@@ -113,11 +112,6 @@
 		max-width: 220px;
 	}
 
-	.tunnel-toolbar-search :global(.tunnel-sort-controls),
-	.tunnel-toolbar-search :global(.tunnel-search) {
-		width: 100%;
-	}
-
 	.dashboard-toolbar-layout {
 		flex: 0 1 auto;
 		min-width: 0;
@@ -131,11 +125,20 @@
 		flex: 0 0 auto;
 	}
 
+	.dashboard-toolbar-actions {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		min-width: 0;
+	}
+
 	.dashboard-toolbar-create {
 		flex: 0 0 auto;
 	}
 
-	/* Mobile: row 1 — layout + view 50/50; row 2 — search then create */
+	/* Mobile: row 1 — layout + view 50/50; row 2 — actions (если есть) на всю ширину;
+	   последняя строка — search then create */
 	@media (max-width: 760px) {
 		.dashboard-toolbar {
 			display: grid;
@@ -160,6 +163,12 @@
 			grid-column: 1 / -1;
 		}
 
+		.dashboard-toolbar-actions {
+			grid-row: 2;
+			grid-column: 1 / -1;
+			width: 100%;
+		}
+
 		.tunnel-toolbar-search {
 			grid-row: 2;
 			grid-column: 1;
@@ -176,6 +185,14 @@
 			min-width: 0;
 		}
 
+		.dashboard-toolbar:has(.dashboard-toolbar-actions) .tunnel-toolbar-search {
+			grid-row: 3;
+		}
+
+		.dashboard-toolbar:has(.dashboard-toolbar-actions) .dashboard-toolbar-create {
+			grid-row: 3;
+		}
+
 		.dashboard-toolbar-layout :global(.segmented-control),
 		.dashboard-toolbar-view :global(.segmented-control) {
 			width: 100%;
@@ -188,17 +205,12 @@
 			min-width: 28px;
 		}
 
-		.tunnel-toolbar-search :global(.tunnel-sort-controls) {
-			display: flex;
-			width: 100%;
-		}
-
-		.dashboard-toolbar-create :global(.tunnel-create-menu) {
+		.dashboard-toolbar-create :global(.dropdown-wrapper) {
 			display: block;
 			width: 100%;
 		}
 
-		.dashboard-toolbar-create :global(.tunnel-create-menu .btn) {
+		.dashboard-toolbar-create :global(.dropdown-wrapper .btn) {
 			width: 100%;
 			justify-content: center;
 			white-space: nowrap;

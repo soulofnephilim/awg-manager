@@ -10,6 +10,7 @@
 	import { serviceLetterIcons } from '$lib/stores/serviceLetterIcons';
 	import { tunnelDashboardMode } from '$lib/stores/tunnelDashboardMode';
 	import { usageLevel } from '$lib/stores/settings';
+	import { isTunnelDashboardAvailable } from '$lib/types/usageLevel';
 	import {
 		theme,
 		THEME_PRESETS,
@@ -40,6 +41,7 @@
 
 	let expanded = $state(false);
 	const compactForced = $derived($usageLevel === 'basic');
+	const dashboardRowVisible = $derived(isTunnelDashboardAvailable($usageLevel));
 	const compactChecked = $derived(compactForced || $compactLayout);
 
 	const currentThemeLabel = $derived.by(() => {
@@ -229,6 +231,7 @@
 			onchange={(enabled) => compactLayout.setEnabled(enabled)}
 		/>
 	</div>
+	{#if dashboardRowVisible}
 	<div class="setting-row dashboard-mode-row">
 		<div class="flex flex-col gap-1">
 			<span class="font-medium">Режим дашборда</span>
@@ -241,6 +244,7 @@
 			onchange={(enabled) => tunnelDashboardMode.setEnabled(enabled)}
 		/>
 	</div>
+	{/if}
 	<div class="setting-row letter-icons-row">
 		<div class="flex flex-col gap-1">
 			<span class="font-medium">Буквенные иконки</span>
