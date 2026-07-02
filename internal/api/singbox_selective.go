@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
@@ -110,9 +111,12 @@ func selectiveMatcherDTOs(in []selective.DomainMatcherRecord) []SelectiveDomainM
 
 // SelectiveHandler serves the /api/singbox/router/selective/* endpoints.
 type SelectiveHandler struct {
-	settings   *storage.SettingsStore
-	configDir  string
-	installing bool
+	settings  *storage.SettingsStore
+	configDir string
+	// installing serializes opkg install runs: CompareAndSwap makes the
+	// check-and-set atomic so two concurrent InstallDeps requests cannot
+	// both slip past the guard and race opkg against itself.
+	installing atomic.Bool
 	builder    SelectiveRebuildTriggerer
 	status     SelectiveStatusProvider
 }
@@ -171,7 +175,7 @@ func (h *SelectiveHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		Available:          selective.IsIPSetAvailable(),
 		XtSetAvailable:     selective.IsXtSetAvailable(),
 		ConntrackAvailable: selective.IsConntrackAvailable(),
-		Installing:         h.installing,
+		Installing:         h.installing.Load(),
 		Enabled:            enabled,
 		EntryCount:         entryCount,
 		LastRebuild:        lastRebuild,
@@ -245,22 +249,21 @@ func (h *SelectiveHandler) InstallDeps(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	if h.installing {
-		response.ErrorWithStatus(w, http.StatusConflict, "ipset installation already in progress", "INSTALLING")
-		return
-	}
 	if selective.IsIPSetAvailable() {
 		// Already installed — just return current status.
 		h.GetStatus(w, r)
 		return
 	}
+	if !h.installing.CompareAndSwap(false, true) {
+		response.ErrorWithStatus(w, http.StatusConflict, "ipset installation already in progress", "INSTALLING")
+		return
+	}
+	defer h.installing.Store(false)
 
-	h.installing = true
-	ctx := r.Context()
-	err := selective.InstallIPSet(ctx, nil) // progress delivered via SSE by the builder
-	h.installing = false
-
-	if err != nil {
+	// Detach cancellation: a client disconnect must not SIGKILL opkg in the
+	// middle of a package transaction (same rationale as Rebuild below).
+	ctx := context.WithoutCancel(r.Context())
+	if err := selective.InstallIPSet(ctx, nil); err != nil { // progress delivered via SSE by the builder
 		response.InternalError(w, "ipset installation failed: "+err.Error())
 		return
 	}
@@ -290,7 +293,14 @@ func (h *SelectiveHandler) InstallConntrack(w http.ResponseWriter, r *http.Reque
 		h.GetStatus(w, r)
 		return
 	}
-	if err := selective.InstallConntrackTools(r.Context(), nil); err != nil {
+	if !h.installing.CompareAndSwap(false, true) {
+		response.ErrorWithStatus(w, http.StatusConflict, "package installation already in progress", "INSTALLING")
+		return
+	}
+	defer h.installing.Store(false)
+
+	// Detach cancellation — see InstallDeps.
+	if err := selective.InstallConntrackTools(context.WithoutCancel(r.Context()), nil); err != nil {
 		response.InternalError(w, "conntrack installation failed: "+err.Error())
 		return
 	}

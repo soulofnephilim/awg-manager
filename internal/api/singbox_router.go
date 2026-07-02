@@ -499,12 +499,16 @@ func (h *SingboxRouterHandler) SwitchMode(w http.ResponseWriter, r *http.Request
 	mode := body.Mode
 	go func() {
 		if err := h.svc.SwitchRoutingMode(context.Background(), mode); err != nil {
-			// Terminal errors are emitted as singbox-router:transition events;
-			// log only for diagnostics.
-			_ = err
+			// Terminal errors are also emitted as singbox-router:transition SSE
+			// events, but the bus silently drops them with zero subscribers —
+			// this log line is the only guaranteed trace of a failed switch.
+			h.log.Warn("mode-switch", mode, "SwitchRoutingMode failed: "+err.Error())
 		}
 	}()
-	response.Success(w, map[string]bool{"accepted": true})
+	// Keep the documented OkResponse shape ({"ok":true}); 200 here means
+	// "transition accepted and started", progress/terminal state arrives via
+	// the singbox-router:transition SSE events.
+	response.Success(w, map[string]bool{"ok": true})
 }
 
 // GetSettings reads singbox-router settings (policy-mode, defaults, etc.).
