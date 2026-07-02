@@ -1034,13 +1034,14 @@ func MigrateLegacyConfigDir(dir string) error {
 	return os.Remove(legacyPath)
 }
 
-// writeJSONFile is the shared atomic-ish JSON writer used by
+// writeJSONFile is the shared atomic JSON writer used by
 // MigrateLegacyConfigDir + ensureBaseConfig. Marshals with indent for
-// human-editable fragments.
+// human-editable fragments. Uses the fsync'ed temp+rename writer so a power
+// loss mid-write cannot leave a truncated config fragment behind.
 func writeJSONFile(path string, data any) error {
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0644)
+	return storage.AtomicWrite(path, raw)
 }
