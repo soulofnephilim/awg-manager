@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 func NewEmptyConfig() *RouterConfig {
@@ -65,11 +67,7 @@ func SaveConfig(path string, cfg *RouterConfig) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".new"
-	if err := os.WriteFile(tmp, raw, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return storage.AtomicWrite(path, raw)
 }
 
 func (c *RouterConfig) AddRuleSet(rs RuleSet) error {

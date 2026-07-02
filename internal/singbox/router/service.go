@@ -1649,7 +1649,7 @@ func (s *ServiceImpl) RenameExternalOutboundTag(ctx context.Context, oldTag, new
 	if data, ok, err := rewriteRouterConfigOutboundRefs(disabledPath, oldTag, newTag); err != nil {
 		return err
 	} else if ok {
-		if err := writeRouterConfigAtomic(disabledPath, data); err != nil {
+		if err := storage.AtomicWrite(disabledPath, data); err != nil {
 			return err
 		}
 		changed = true
@@ -1692,18 +1692,6 @@ func rewriteRouterConfigOutboundRefs(path, oldTag, newTag string) ([]byte, bool,
 		return nil, false, err
 	}
 	return data, true, nil
-}
-
-func writeRouterConfigAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
 }
 
 func (s *ServiceImpl) ListRules(ctx context.Context) ([]Rule, error) {

@@ -2,9 +2,10 @@ package events
 
 import (
 	_ "embed"
-	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 //go:embed hook-script.sh
@@ -57,7 +58,7 @@ func (i *Installer) Install() error {
 			continue
 		}
 
-		if err := writeAtomic(path, []byte(hookScriptContent)); err != nil {
+		if err := storage.AtomicWrite(path, []byte(hookScriptContent)); err != nil {
 			i.Log.Warnf("install hook %s: write: %v", hook, err)
 			if firstErr == nil {
 				firstErr = err
@@ -72,28 +73,4 @@ func (i *Installer) Install() error {
 		}
 	}
 	return firstErr
-}
-
-// writeAtomic writes to a sibling tmp file then renames.
-func writeAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "hook-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("close tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename: %w", err)
-	}
-	return nil
 }
