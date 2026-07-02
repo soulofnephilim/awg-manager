@@ -22,9 +22,16 @@ func TestResolveBypassPorts_L2TPPreset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	sort.Ints(udp)
-	if !reflect.DeepEqual(udp, []int{500, 1701, 4500}) {
-		t.Fatalf("l2tp UDP ports: got %v, want [500 1701 4500]", udp)
+	ports := make([]int, len(udp))
+	for i, pr := range udp {
+		if pr.From != pr.To {
+			t.Fatalf("l2tp preset should produce single ports, got range %v", pr)
+		}
+		ports[i] = pr.From
+	}
+	sort.Ints(ports)
+	if !reflect.DeepEqual(ports, []int{500, 1701, 4500}) {
+		t.Fatalf("l2tp UDP ports: got %v, want [500 1701 4500]", ports)
 	}
 	if len(tcp) != 0 {
 		t.Fatalf("l2tp TCP ports: expected empty, got %v", tcp)
@@ -36,13 +43,21 @@ func TestResolveBypassPorts_NetBiosSMBPreset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	sort.Ints(udp)
-	sort.Ints(tcp)
-	if !reflect.DeepEqual(udp, []int{137, 138}) {
-		t.Fatalf("netbios-smb UDP: got %v", udp)
+	udpPorts := make([]int, len(udp))
+	for i, pr := range udp {
+		udpPorts[i] = pr.From
 	}
-	if !reflect.DeepEqual(tcp, []int{139, 445}) {
-		t.Fatalf("netbios-smb TCP: got %v", tcp)
+	tcpPorts := make([]int, len(tcp))
+	for i, pr := range tcp {
+		tcpPorts[i] = pr.From
+	}
+	sort.Ints(udpPorts)
+	sort.Ints(tcpPorts)
+	if !reflect.DeepEqual(udpPorts, []int{137, 138}) {
+		t.Fatalf("netbios-smb UDP: got %v", udpPorts)
+	}
+	if !reflect.DeepEqual(tcpPorts, []int{139, 445}) {
+		t.Fatalf("netbios-smb TCP: got %v", tcpPorts)
 	}
 }
 
@@ -58,10 +73,10 @@ func TestResolveBypassPorts_ExtraPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual(udp, []int{51820}) {
+	if len(udp) != 1 || udp[0] != (PortRange{51820, 51820}) {
 		t.Fatalf("extra UDP: got %v", udp)
 	}
-	if !reflect.DeepEqual(tcp, []int{1194}) {
+	if len(tcp) != 1 || tcp[0] != (PortRange{1194, 1194}) {
 		t.Fatalf("extra TCP: got %v", tcp)
 	}
 }
@@ -71,10 +86,13 @@ func TestResolveBypassPorts_CombinesPresetsAndExtra(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// ntp gives 123 UDP, extra gives 51820 UDP
-	sort.Ints(udp)
-	if !reflect.DeepEqual(udp, []int{123, 51820}) {
-		t.Fatalf("combined UDP: got %v", udp)
+	ports := make([]int, len(udp))
+	for i, pr := range udp {
+		ports[i] = pr.From
+	}
+	sort.Ints(ports)
+	if !reflect.DeepEqual(ports, []int{123, 51820}) {
+		t.Fatalf("combined UDP: got %v", ports)
 	}
 	if len(tcp) != 0 {
 		t.Fatalf("TCP should be empty, got %v", tcp)
@@ -93,8 +111,40 @@ func TestParseExtraPorts_CaseInsensitive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual(udp, []int{500}) || !reflect.DeepEqual(tcp, []int{1723}) {
-		t.Fatalf("got udp=%v tcp=%v", udp, tcp)
+	if len(udp) != 1 || udp[0] != (PortRange{500, 500}) {
+		t.Fatalf("got udp=%v", udp)
+	}
+	if len(tcp) != 1 || tcp[0] != (PortRange{1723, 1723}) {
+		t.Fatalf("got tcp=%v", tcp)
+	}
+}
+
+func TestParseExtraPorts_Range(t *testing.T) {
+	udp, tcp, err := parseExtraPorts("5000-5500 UDP, 8000-9000 TCP")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(udp) != 1 || udp[0] != (PortRange{5000, 5500}) {
+		t.Fatalf("got udp=%v, want [{5000 5500}]", udp)
+	}
+	if len(tcp) != 1 || tcp[0] != (PortRange{8000, 9000}) {
+		t.Fatalf("got tcp=%v, want [{8000 9000}]", tcp)
+	}
+}
+
+func TestParseExtraPorts_MixedRangeAndSingle(t *testing.T) {
+	udp, tcp, err := parseExtraPorts("51820 UDP, 5000-5500 UDP, 443 TCP")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(udp) != 2 {
+		t.Fatalf("expected 2 UDP entries, got %v", udp)
+	}
+	if udp[0] != (PortRange{51820, 51820}) || udp[1] != (PortRange{5000, 5500}) {
+		t.Fatalf("unexpected UDP ranges: %v", udp)
+	}
+	if len(tcp) != 1 || tcp[0] != (PortRange{443, 443}) {
+		t.Fatalf("got tcp=%v", tcp)
 	}
 }
 
@@ -105,6 +155,8 @@ func TestParseExtraPorts_InvalidFormat(t *testing.T) {
 		"99999 UDP",      // port out of range
 		"0 UDP",          // port 0 invalid
 		"abc UDP",        // non-numeric port
+		"5000-4000 UDP",  // reversed range
+		"5000-99999 UDP", // end port out of range
 	}
 	for _, c := range cases {
 		_, _, err := parseExtraPorts(c)

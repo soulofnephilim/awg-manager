@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { parsePortsString, serializePorts, parseDraftEntries, portKey, type PortEntry } from '$lib/utils/ports';
+  import { parsePortsString, serializePorts, parseDraftEntries, portKey, portLabel, type PortEntry } from '$lib/utils/ports';
 
   interface Props {
     value: string;
@@ -64,7 +64,7 @@
   <div class="chips-box">
     {#each chips as c (portKey(c))}
       <span class="port-chip">
-        {c.port}/{c.proto}
+        {portLabel(c)}
         <button type="button" class="chip-x" onclick={() => remove(c)} aria-label="удалить порт">✕</button>
       </span>
     {/each}
@@ -75,7 +75,7 @@
       bind:value={draft}
       onkeydown={onKeydown}
       oninput={() => (error = '')}
-      placeholder="порт + протокол, напр. 443 TCP"
+      placeholder="443 TCP или 5000-5500 UDP"
     />
   </div>
   {#if error}<div class="port-error">{error}</div>{/if}

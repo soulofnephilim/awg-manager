@@ -65,8 +65,9 @@ type Process struct {
 	lastStderr string
 
 	// For tests
-	startCmd func(bin string, args ...string) (*exec.Cmd, error)
-	signalFn func(pid int, sig syscall.Signal) error
+	startCmd      func(bin string, args ...string) (*exec.Cmd, error)
+	signalFn      func(pid int, sig syscall.Signal) error
+	matchBinaryFn func(pid int) bool // nil = matchesBinary
 }
 
 func NewProcess(binary, configPath, pidPath string) *Process {
@@ -331,7 +332,39 @@ func (p *Process) IsRunning() (bool, int) {
 	if !isAlive(pid) {
 		return false, pid
 	}
+	match := p.matchBinaryFn
+	if match == nil {
+		match = p.matchesBinary
+	}
+	if !match(pid) {
+		return false, pid
+	}
 	return true, pid
+}
+
+// matchesBinary reports whether pid's /proc cmdline actually names our
+// binary. The pid file lives on persistent flash, so after a power loss the
+// recorded pid can belong to an arbitrary recycled process — without this
+// check the watchdog thinks sing-box is up (tunnels stay down) and
+// Stop/Reload would signal an innocent process. It also catches zombies
+// (empty cmdline): a reaper lost to a self-restart exec leaves sing-box as a
+// permanent zombie that still passes kill(pid,0).
+func (p *Process) matchesBinary(pid int) bool {
+	if p.binary == "" {
+		return true // tests construct Process without a binary
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		// Process vanished between the kill(0) probe and the read, or /proc
+		// is unavailable — treat unreadable as not-ours only when the file
+		// is truly gone.
+		return !os.IsNotExist(err)
+	}
+	argv0, _, _ := strings.Cut(string(b), "\x00")
+	if argv0 == "" {
+		return false // zombie: cmdline is empty
+	}
+	return filepath.Base(argv0) == filepath.Base(p.binary)
 }
 
 // cleanupPidIfOurs removes the pid file ONLY if it currently contains the

@@ -91,7 +91,10 @@ func parseEntryItems(br *bufio.Reader, entryLen int, wantTag string, parseItem i
 				return nil, "", fmt.Errorf("entry LD field %d length: %w", fieldNum, err)
 			}
 			remaining -= n
-			if int(length) > remaining {
+			// Compare in uint64 space: on 32-bit MIPS int(length) truncates,
+			// letting a corrupt length >= 2^31 slip past the guard and panic
+			// in make([]byte, length) below.
+			if remaining < 0 || length > uint64(remaining) {
 				return nil, "", fmt.Errorf("entry field %d length %d exceeds remaining %d", fieldNum, length, remaining)
 			}
 
@@ -172,7 +175,8 @@ func parseGeoSiteDomainLine(data []byte) (string, bool, error) {
 				return "", false, err
 			}
 			off += consumed
-			if off+int(length) > len(data) {
+			// uint64 comparison: off+int(length) can wrap negative on 32-bit.
+			if length > uint64(len(data)-off) {
 				return "", false, fmt.Errorf("domain field %d length overflow", fieldNum)
 			}
 			if fieldNum == 2 {
@@ -236,7 +240,8 @@ func parseGeoIPCidrLine(data []byte) (string, bool, error) {
 				return "", false, err
 			}
 			off += consumed
-			if off+int(length) > len(data) {
+			// uint64 comparison: off+int(length) can wrap negative on 32-bit.
+			if length > uint64(len(data)-off) {
 				return "", false, fmt.Errorf("cidr field %d length overflow", fieldNum)
 			}
 			if fieldNum == 1 {
