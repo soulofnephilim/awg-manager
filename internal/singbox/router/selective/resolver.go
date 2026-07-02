@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/sys/httpclient"
@@ -184,10 +183,33 @@ var suffixResolvePrefixes = []string{
 	"mobile.",
 }
 
+// minimalSuffixProbes is the reduced probe set used when a rebuild carries
+// more suffix matchers than fullProbeSuffixBudget. Speculative subdomain
+// probes are the dominant query multiplier: 18 prefixes × thousands of
+// geosite entries × servers × rounds is hundreds of thousands of UDP
+// queries per rebuild. Hand-written rules (few matchers) keep the full set.
+var minimalSuffixProbes = []string{"www."}
+
+// fullProbeSuffixBudget is the max number of suffix matchers in one resolve
+// batch that still get the full suffixResolvePrefixes expansion.
+const fullProbeSuffixBudget = 64
+
+// suffixProbesForBatch picks the probe expansion mode for a query batch.
+func suffixProbesForBatch(queries []DomainQuery) bool {
+	suffixes := 0
+	for _, q := range queries {
+		if q.Kind != KindDomain {
+			suffixes++
+		}
+	}
+	return suffixes <= fullProbeSuffixBudget
+}
+
 // expandQueryHosts returns the hostnames to resolve for a rule matcher.
 // Exact domain rules query only the matcher; suffix rules also probe common
 // CDN / mobile subdomains so more of the site's address pool lands in ipset.
-func expandQueryHosts(matcher string, kind DomainKind) []string {
+// fullProbes selects between the full prefix set and minimalSuffixProbes.
+func expandQueryHosts(matcher string, kind DomainKind, fullProbes bool) []string {
 	matcher = strings.TrimSpace(strings.ToLower(matcher))
 	if matcher == "" {
 		return nil
@@ -211,7 +233,11 @@ func expandQueryHosts(matcher string, kind DomainKind) []string {
 	}
 
 	add(matcher)
-	for _, p := range suffixResolvePrefixes {
+	probes := suffixResolvePrefixes
+	if !fullProbes {
+		probes = minimalSuffixProbes
+	}
+	for _, p := range probes {
 		add(p + matcher)
 	}
 	return out
@@ -223,50 +249,9 @@ type ResolveProgressFn func(done, total int, matcher string)
 // ResolveHostProgressFn is called while resolving expanded hosts inside one matcher.
 type ResolveHostProgressFn func(matcher, host string, hostIndex, hostTotal int)
 
-// ResolveDomainQueries resolves each domain matcher to IPv4 /32 CIDRs and
-// returns structured per-matcher results plus a flat deduplicated IP list.
-func ResolveDomainQueries(ctx context.Context, queries []DomainQuery, dnsServers []string, errFn func(domain, err string), progressFn ResolveProgressFn, hostProgressFn ResolveHostProgressFn) ([]DomainResolveResult, []string) {
-	if len(queries) == 0 {
-		return nil, nil
-	}
-
-	sem := make(chan struct{}, maxConcurrentResolves)
-	results := make([]DomainResolveResult, len(queries))
-	var wg sync.WaitGroup
-	var doneCount atomic.Int32
-	total := len(queries)
-
-	for i, q := range queries {
-		wg.Add(1)
-		go func(idx int, query DomainQuery) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[idx] = resolveOneQuery(ctx, query, dnsServers, errFn, hostProgressFn)
-			if progressFn != nil {
-				n := int(doneCount.Add(1))
-				progressFn(n, total, query.Matcher)
-			}
-		}(i, q)
-	}
-	wg.Wait()
-
-	seen := make(map[string]struct{})
-	var flat []string
-	for _, r := range results {
-		for _, ip := range r.IPs {
-			if _, ok := seen[ip]; !ok {
-				seen[ip] = struct{}{}
-				flat = append(flat, ip)
-			}
-		}
-	}
-	return results, flat
-}
-
-func resolveOneQuery(ctx context.Context, query DomainQuery, dnsServers []string, errFn func(domain, err string), hostProgressFn ResolveHostProgressFn) DomainResolveResult {
+func resolveOneQuery(ctx context.Context, query DomainQuery, dnsServers []string, errFn func(domain, err string), hostProgressFn ResolveHostProgressFn, fullProbes bool) DomainResolveResult {
 	primary, public := partitionDNSServers(dnsServers)
-	hosts := discoverQueryHosts(ctx, query.Matcher, query.Kind, primary)
+	hosts := discoverQueryHosts(ctx, query.Matcher, query.Kind, primary, fullProbes)
 	seen := make(map[string]struct{})
 	var ips []string
 	var ipsMu sync.Mutex
@@ -364,8 +349,8 @@ func resolveOneQuery(ctx context.Context, query DomainQuery, dnsServers []string
 
 // discoverQueryHosts expands suffix probes and appends CNAME targets from the
 // first local resolver only (CNAME discovery is best-effort, not worth N×timeout).
-func discoverQueryHosts(ctx context.Context, matcher string, kind DomainKind, primaryDNS []string) []string {
-	seed := expandQueryHosts(matcher, kind)
+func discoverQueryHosts(ctx context.Context, matcher string, kind DomainKind, primaryDNS []string, fullProbes bool) []string {
+	seed := expandQueryHosts(matcher, kind, fullProbes)
 	seen := make(map[string]struct{}, len(seed))
 	out := make([]string, 0, len(seed))
 	add := func(h string) {
@@ -512,17 +497,6 @@ func resolveHostIPv4Aggressive(ctx context.Context, host string, servers []strin
 		}
 	}
 	return out, nil
-}
-
-// ResolveDomains is a compatibility wrapper that flattens ResolveDomainQueries.
-// Deprecated: prefer ResolveDomainQueries for structured output.
-func ResolveDomains(ctx context.Context, domains []string, dnsServers []string, errFn func(domain, err string)) []string {
-	queries := make([]DomainQuery, len(domains))
-	for i, d := range domains {
-		queries[i] = DomainQuery{Matcher: d, Kind: KindDomainSuffix}
-	}
-	_, flat := ResolveDomainQueries(ctx, queries, dnsServers, errFn, nil, nil)
-	return flat
 }
 
 // extractHost strips port and protocol scheme from a DNS server address,

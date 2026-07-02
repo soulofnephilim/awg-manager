@@ -78,29 +78,6 @@ func DestroySet(ctx context.Context) error {
 	return nil
 }
 
-// FlushSet removes all entries from AWGM-SELECTIVE without deleting the set
-// itself. Idempotent — if the set does not exist, it is created first.
-func FlushSet(ctx context.Context) error {
-	bin, err := ipsetBin()
-	if err != nil {
-		return err
-	}
-	res, err := sysexec.Run(ctx, bin, "flush", SetName)
-	if err != nil {
-		combined := ""
-		if res != nil {
-			combined = res.Stdout + res.Stderr
-		}
-		if strings.Contains(combined, "does not exist") || strings.Contains(combined, "not found") {
-			// Set was not created yet — create it and return; it will be
-			// populated by a subsequent AddEntries call.
-			return CreateSet(ctx)
-		}
-		return sysexec.FormatError(res, fmt.Errorf("ipset flush: %w", err))
-	}
-	return nil
-}
-
 // SetExists reports whether the AWGM-SELECTIVE ipset currently exists in
 // the kernel. Uses `ipset list -name` which is fast (no entry output).
 func SetExists(ctx context.Context) bool {
@@ -148,45 +125,6 @@ func EntryCount(ctx context.Context) int {
 		return n
 	}
 	return 0
-}
-
-// ListEntries returns every member CIDR currently in AWGM-SELECTIVE.
-// Returns nil when the set does not exist.
-func ListEntries(ctx context.Context) ([]string, error) {
-	bin, err := ipsetBin()
-	if err != nil {
-		return nil, err
-	}
-	res, err := sysexec.Run(ctx, bin, "list", SetName)
-	if err != nil || res == nil {
-		return nil, err
-	}
-	var out []string
-	inMembers := false
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "Members:" {
-			inMembers = true
-			continue
-		}
-		if !inMembers || line == "" {
-			continue
-		}
-		if entry := normalizeEntry(line); entry != "" {
-			out = append(out, entry)
-		}
-	}
-	return out, nil
-}
-
-// AddEntries bulk-adds CIDRs/IPs to the AWGM-SELECTIVE set using
-// `ipset restore` piped input for efficiency (one syscall for all entries
-// instead of N `ipset add` calls). Each entry is validated as a CIDR or
-// bare IPv4 before submission; invalid entries are silently skipped.
-//
-// The set must already exist (call CreateSet or FlushSet first).
-func AddEntries(ctx context.Context, cidrs []string) error {
-	return chunkedAddToSet(ctx, SetName, cidrs)
 }
 
 // normalizeEntry canonicalises a CIDR or bare IPv4 address for ipset.

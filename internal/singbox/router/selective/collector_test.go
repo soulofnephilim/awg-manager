@@ -1,6 +1,7 @@
 package selective
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,7 +9,32 @@ import (
 	"testing"
 )
 
-func matchersOf(res CollectResult) []string {
+// collectedResult mirrors the shape the old batch collector returned so the
+// semantic assertions below stay readable. Populated via a collecting sink
+// over StreamCollectFromRules — the ONE production collection path.
+type collectedResult struct {
+	CIDRs         []string
+	DomainQueries []DomainQuery
+	Errors        []error
+}
+
+func collectAll(t *testing.T, rules []RuleJSON, refs []RuleSetRef) collectedResult {
+	t.Helper()
+	var res collectedResult
+	res.Errors = StreamCollectFromRules(context.Background(), rules, refs, GeoPaths{}, nil, CollectSink{
+		OnStaticCIDR: func(cidr string) error {
+			res.CIDRs = append(res.CIDRs, cidr)
+			return nil
+		},
+		OnDomainQuery: func(q DomainQuery) error {
+			res.DomainQueries = append(res.DomainQueries, q)
+			return nil
+		},
+	})
+	return res
+}
+
+func matchersOf(res collectedResult) []string {
 	out := make([]string, 0, len(res.DomainQueries))
 	for _, q := range res.DomainQueries {
 		out = append(out, q.Matcher)
@@ -16,7 +42,7 @@ func matchersOf(res CollectResult) []string {
 	return out
 }
 
-func hasMatcher(res CollectResult, matcher string) bool {
+func hasMatcher(res collectedResult, matcher string) bool {
 	return slices.Contains(matchersOf(res), matcher)
 }
 
@@ -26,6 +52,13 @@ func proxyRule(r RuleJSON) RuleJSON {
 		r.Outbound = "proxy"
 	}
 	return r
+}
+
+// testRuleSetSourceJSON is the on-disk shape of a rule-set source file
+// (sing-box source format) used to write test fixtures.
+type testRuleSetSourceJSON struct {
+	Version int                      `json:"version"`
+	Rules   []map[string]interface{} `json:"rules"`
 }
 
 func mustWriteJSON(t *testing.T, dir, name string, v any) string {
@@ -94,13 +127,13 @@ func TestCleanDomain_Lowercase(t *testing.T) {
 	}
 }
 
-// ── CollectFromRules — direct rules ───────────────────────────────────────────
+// ── StreamCollectFromRules — direct rules ─────────────────────────────────────
 
-func TestCollectFromRules_IPCIDRExtracted(t *testing.T) {
+func TestCollect_IPCIDRExtracted(t *testing.T) {
 	rules := []RuleJSON{
 		proxyRule(RuleJSON{IPCIDR: []string{"1.2.3.0/24", "5.6.7.8"}}),
 	}
-	res := CollectFromRules(rules, nil)
+	res := collectAll(t, rules, nil)
 	if !slices.Contains(res.CIDRs, "1.2.3.0/24") {
 		t.Errorf("missing CIDR 1.2.3.0/24, got %v", res.CIDRs)
 	}
@@ -109,12 +142,12 @@ func TestCollectFromRules_IPCIDRExtracted(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_DomainsExtracted(t *testing.T) {
+func TestCollect_DomainsExtracted(t *testing.T) {
 	rules := []RuleJSON{
 		proxyRule(RuleJSON{DomainSuffix: []string{"example.com", ".foo.com"}}),
 		proxyRule(RuleJSON{Domain: []string{"*.bar.com", "baz.com"}}),
 	}
-	res := CollectFromRules(rules, nil)
+	res := collectAll(t, rules, nil)
 	for _, want := range []string{"example.com", "foo.com", "bar.com", "baz.com"} {
 		if !hasMatcher(res, want) {
 			t.Errorf("missing domain %q, got %v", want, res.DomainQueries)
@@ -122,9 +155,9 @@ func TestCollectFromRules_DomainsExtracted(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_IPv6Skipped(t *testing.T) {
+func TestCollect_IPv6Skipped(t *testing.T) {
 	rules := []RuleJSON{proxyRule(RuleJSON{IPCIDR: []string{"::1/128", "10.0.0.1/32"}})}
-	res := CollectFromRules(rules, nil)
+	res := collectAll(t, rules, nil)
 	if slices.Contains(res.CIDRs, "::1/128") {
 		t.Errorf("IPv6 should be skipped, got %v", res.CIDRs)
 	}
@@ -133,11 +166,11 @@ func TestCollectFromRules_IPv6Skipped(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_DeduplicatesCIDRs(t *testing.T) {
+func TestCollect_DeduplicatesCIDRs(t *testing.T) {
 	rules := []RuleJSON{
 		proxyRule(RuleJSON{IPCIDR: []string{"1.2.3.0/24", "1.2.3.0/24"}}),
 	}
-	res := CollectFromRules(rules, nil)
+	res := collectAll(t, rules, nil)
 	count := 0
 	for _, c := range res.CIDRs {
 		if c == "1.2.3.0/24" {
@@ -149,12 +182,12 @@ func TestCollectFromRules_DeduplicatesCIDRs(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_DeduplicatesDomains(t *testing.T) {
+func TestCollect_DeduplicatesDomains(t *testing.T) {
 	rules := []RuleJSON{
 		proxyRule(RuleJSON{DomainSuffix: []string{"example.com"}}),
 		proxyRule(RuleJSON{DomainSuffix: []string{"example.com"}}),
 	}
-	res := CollectFromRules(rules, nil)
+	res := collectAll(t, rules, nil)
 	count := 0
 	for _, q := range res.DomainQueries {
 		if q.Matcher == "example.com" && q.Kind == KindDomainSuffix {
@@ -166,7 +199,7 @@ func TestCollectFromRules_DeduplicatesDomains(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_NestedLogicalRules(t *testing.T) {
+func TestCollect_NestedLogicalRules(t *testing.T) {
 	rules := []RuleJSON{
 		proxyRule(RuleJSON{
 			Rules: []RuleJSON{
@@ -175,7 +208,7 @@ func TestCollectFromRules_NestedLogicalRules(t *testing.T) {
 			},
 		}),
 	}
-	res := CollectFromRules(rules, nil)
+	res := collectAll(t, rules, nil)
 	if !slices.Contains(res.CIDRs, "10.20.30.0/24") {
 		t.Errorf("nested CIDR not collected, got %v", res.CIDRs)
 	}
@@ -184,17 +217,17 @@ func TestCollectFromRules_NestedLogicalRules(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_DirectRulesSkipped(t *testing.T) {
+func TestCollect_DirectRulesSkipped(t *testing.T) {
 	rules := []RuleJSON{
 		{Action: "route", Outbound: "direct", DomainSuffix: []string{"github.com"}, IPCIDR: []string{"1.1.1.1"}},
 	}
-	res := CollectFromRules(rules, nil)
+	res := collectAll(t, rules, nil)
 	if len(res.CIDRs) != 0 || len(res.DomainQueries) != 0 {
 		t.Fatalf("direct rules must not populate ipset, got %+v", res)
 	}
 }
 
-func TestCollectFromRules_UnreferencedRuleSetsSkipped(t *testing.T) {
+func TestCollect_UnreferencedRuleSetsSkipped(t *testing.T) {
 	refs := []RuleSetRef{
 		{
 			Tag:  "orphan",
@@ -204,22 +237,22 @@ func TestCollectFromRules_UnreferencedRuleSetsSkipped(t *testing.T) {
 			},
 		},
 	}
-	res := CollectFromRules(nil, refs)
+	res := collectAll(t, nil, refs)
 	if len(res.CIDRs) != 0 || len(res.DomainQueries) != 0 {
 		t.Fatalf("unreferenced rule sets must be ignored, got %+v", res)
 	}
 }
 
-func TestCollectFromRules_EmptyRules(t *testing.T) {
-	res := CollectFromRules(nil, nil)
+func TestCollect_EmptyRules(t *testing.T) {
+	res := collectAll(t, nil, nil)
 	if len(res.CIDRs) != 0 || len(res.DomainQueries) != 0 || len(res.Errors) != 0 {
 		t.Errorf("expected empty result, got %+v", res)
 	}
 }
 
-// ── CollectFromRules — inline rule set ────────────────────────────────────────
+// ── StreamCollectFromRules — inline rule set ──────────────────────────────────
 
-func TestCollectFromRules_RuleSetRefInMemoryRules(t *testing.T) {
+func TestCollect_RuleSetRefInMemoryRules(t *testing.T) {
 	refs := []RuleSetRef{
 		{
 			Tag:  "custom-1",
@@ -230,7 +263,7 @@ func TestCollectFromRules_RuleSetRefInMemoryRules(t *testing.T) {
 			},
 		},
 	}
-	res := CollectFromRules([]RuleJSON{
+	res := collectAll(t, []RuleJSON{
 		proxyRule(RuleJSON{RuleSet: []string{"custom-1"}}),
 	}, refs)
 	if !hasMatcher(res, "2ip.ru") {
@@ -242,9 +275,9 @@ func TestCollectFromRules_RuleSetRefInMemoryRules(t *testing.T) {
 }
 
 // When a ref carries in-memory rules, the on-disk JSON is ignored entirely.
-func TestCollectFromRules_RuleSetRefInMemoryRulesIgnoresDisk(t *testing.T) {
+func TestCollect_RuleSetRefInMemoryRulesIgnoresDisk(t *testing.T) {
 	dir := t.TempDir()
-	mustWriteJSON(t, dir, "custom-1.json", ruleSetSourceJSON{
+	mustWriteJSON(t, dir, "custom-1.json", testRuleSetSourceJSON{
 		Version: 1,
 		Rules:   []map[string]interface{}{{"domain_suffix": []interface{}{"from-disk.example"}}},
 	})
@@ -256,7 +289,7 @@ func TestCollectFromRules_RuleSetRefInMemoryRulesIgnoresDisk(t *testing.T) {
 			Rules:     []map[string]interface{}{{"domain_suffix": []interface{}{"from-memory.example"}}},
 		},
 	}
-	res := CollectFromRules([]RuleJSON{
+	res := collectAll(t, []RuleJSON{
 		proxyRule(RuleJSON{RuleSet: []string{"custom-1"}}),
 	}, refs)
 	if !hasMatcher(res, "from-memory.example") {
@@ -267,9 +300,9 @@ func TestCollectFromRules_RuleSetRefInMemoryRulesIgnoresDisk(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_InlineRuleSet(t *testing.T) {
+func TestCollect_InlineRuleSet(t *testing.T) {
 	dir := t.TempDir()
-	src := ruleSetSourceJSON{
+	src := testRuleSetSourceJSON{
 		Version: 5,
 		Rules: []map[string]interface{}{
 			{"ip_cidr": []interface{}{"192.168.100.0/24"}},
@@ -281,7 +314,7 @@ func TestCollectFromRules_InlineRuleSet(t *testing.T) {
 	refs := []RuleSetRef{
 		{Tag: "myset", Type: "inline", InlineDir: dir},
 	}
-	res := CollectFromRules([]RuleJSON{
+	res := collectAll(t, []RuleJSON{
 		proxyRule(RuleJSON{RuleSet: []string{"myset"}}),
 	}, refs)
 	if !slices.Contains(res.CIDRs, "192.168.100.0/24") {
@@ -292,9 +325,9 @@ func TestCollectFromRules_InlineRuleSet(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_LocalRuleSet(t *testing.T) {
+func TestCollect_LocalRuleSet(t *testing.T) {
 	dir := t.TempDir()
-	src := ruleSetSourceJSON{
+	src := testRuleSetSourceJSON{
 		Version: 5,
 		Rules: []map[string]interface{}{
 			{"ip_cidr": []interface{}{"172.16.0.0/12"}},
@@ -306,7 +339,7 @@ func TestCollectFromRules_LocalRuleSet(t *testing.T) {
 	refs := []RuleSetRef{
 		{Tag: "local-set", Type: "local", Path: srsPath},
 	}
-	res := CollectFromRules([]RuleJSON{
+	res := collectAll(t, []RuleJSON{
 		proxyRule(RuleJSON{RuleSet: []string{"local-set"}}),
 	}, refs)
 	if !slices.Contains(res.CIDRs, "172.16.0.0/12") {
@@ -314,11 +347,11 @@ func TestCollectFromRules_LocalRuleSet(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_MissingRuleSetFileSkipped(t *testing.T) {
+func TestCollect_MissingRuleSetFileSkipped(t *testing.T) {
 	refs := []RuleSetRef{
 		{Tag: "nonexistent", Type: "inline", InlineDir: "/tmp/nonexistent-dir-xyz"},
 	}
-	res := CollectFromRules([]RuleJSON{
+	res := collectAll(t, []RuleJSON{
 		proxyRule(RuleJSON{RuleSet: []string{"nonexistent"}}),
 	}, refs)
 	if len(res.Errors) != 0 {
@@ -326,11 +359,11 @@ func TestCollectFromRules_MissingRuleSetFileSkipped(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_RemoteRuleSetNoDir_Skipped(t *testing.T) {
+func TestCollect_RemoteRuleSetNoDir_Skipped(t *testing.T) {
 	refs := []RuleSetRef{
 		{Tag: "google", Type: "remote"},
 	}
-	res := CollectFromRules([]RuleJSON{
+	res := collectAll(t, []RuleJSON{
 		proxyRule(RuleJSON{RuleSet: []string{"google"}}),
 	}, refs)
 	if len(res.Errors) != 0 || len(res.CIDRs) != 0 {
@@ -338,9 +371,9 @@ func TestCollectFromRules_RemoteRuleSetNoDir_Skipped(t *testing.T) {
 	}
 }
 
-func TestCollectFromRules_RuleSetAndProxyRuleCombined(t *testing.T) {
+func TestCollect_RuleSetAndProxyRuleCombined(t *testing.T) {
 	dir := t.TempDir()
-	src := ruleSetSourceJSON{
+	src := testRuleSetSourceJSON{
 		Version: 5,
 		Rules:   []map[string]interface{}{{"ip_cidr": []interface{}{"203.0.113.0/24"}}},
 	}
@@ -351,7 +384,7 @@ func TestCollectFromRules_RuleSetAndProxyRuleCombined(t *testing.T) {
 	}
 	refs := []RuleSetRef{{Tag: "my-set", Type: "inline", InlineDir: dir}}
 
-	res := CollectFromRules(rules, refs)
+	res := collectAll(t, rules, refs)
 	if !slices.Contains(res.CIDRs, "8.8.8.8/32") {
 		t.Errorf("missing proxy rule CIDR, got %v", res.CIDRs)
 	}

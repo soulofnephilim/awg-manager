@@ -158,10 +158,9 @@ func (h *SelectiveHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	entryCount := 0
-	if selective.SetExists(r.Context()) {
-		entryCount = selective.EntryCount(r.Context())
-	}
+	// EntryCount already returns 0 when the set does not exist — no separate
+	// SetExists fork needed on this per-status-request path.
+	entryCount := selective.EntryCount(r.Context())
 
 	lastRebuild, lastError := "", ""
 	var snapshot *selective.RebuildSnapshot

@@ -2,6 +2,7 @@ package selective
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -33,23 +34,67 @@ func ConntrackBinary() string {
 // IsConntrackAvailable reports whether the conntrack binary is present.
 func IsConntrackAvailable() bool { return ConntrackBinary() != "" }
 
+// maxConntrackSweep caps the blind per-candidate sweep used only when the
+// live-flow listing fails. Without the cap a geosite-scale rebuild would
+// fork one conntrack -D per queued /32 — tens of thousands of processes.
+const maxConntrackSweep = 512
+
 // FlushConntrackForCIDRs evicts existing conntrack entries whose destination
 // matches the given CIDRs/IPs so that flows established BEFORE the ipset was
 // populated are re-evaluated against the selective guard immediately.
 //
 // Only /32 host entries are flushed; broader static CIDRs are skipped.
+//
+// Cost model: ONE `conntrack -L` fork lists the live flow destinations, then
+// `-D` runs only for candidates that actually have live flows (typically a
+// handful). The naive alternative — one -D fork per candidate — spawns a
+// process per resolved /32, which a big rebuild turns into tens of thousands
+// of forks on a 128MB MIPS router.
 func FlushConntrackForCIDRs(ctx context.Context, cidrs []string, errFn func(ip, err string)) (flushed int, available bool) {
 	bin := ConntrackBinary()
 	if bin == "" {
 		return 0, false
 	}
+
+	candidates := make([]string, 0, len(cidrs))
+	seen := make(map[string]struct{}, len(cidrs))
 	for _, raw := range cidrs {
 		dest := conntrackDestArg(raw)
 		if dest == "" {
 			continue
 		}
-		// `conntrack -D -d <ip[/mask]>` deletes flows matching the destination.
-		res, err := sysexec.Run(ctx, bin, "-D", "-d", dest)
+		ip := strings.TrimSuffix(dest, "/32")
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		candidates = append(candidates, ip)
+	}
+	if len(candidates) == 0 {
+		return 0, true
+	}
+
+	targets := candidates
+	if live, err := listConntrackDests(ctx, bin); err == nil {
+		targets = targets[:0]
+		for _, ip := range candidates {
+			if _, ok := live[ip]; ok {
+				targets = append(targets, ip)
+			}
+		}
+	} else if len(targets) > maxConntrackSweep {
+		// Listing failed — fall back to a bounded blind sweep so we never
+		// re-introduce the fork-per-/32 storm. Remaining flows expire on
+		// their own; log the truncation instead of hiding it.
+		if errFn != nil {
+			errFn("conntrack -L", fmt.Sprintf("listing failed (%v); sweeping first %d of %d candidates", err, maxConntrackSweep, len(targets)))
+		}
+		targets = targets[:maxConntrackSweep]
+	}
+
+	for _, ip := range targets {
+		// `conntrack -D -d <ip>` deletes flows matching the destination.
+		res, err := sysexec.Run(ctx, bin, "-D", "-d", ip)
 		if err != nil {
 			combined := ""
 			if res != nil {
@@ -61,13 +106,46 @@ func FlushConntrackForCIDRs(ctx context.Context, cidrs []string, errFn func(ip, 
 				continue
 			}
 			if errFn != nil {
-				errFn(dest, err.Error())
+				errFn(ip, err.Error())
 			}
 			continue
 		}
 		flushed++
 	}
 	return flushed, true
+}
+
+// listConntrackDests runs `conntrack -L` once and returns the set of live
+// original-direction destination IPv4s.
+func listConntrackDests(ctx context.Context, bin string) (map[string]struct{}, error) {
+	res, err := sysexec.Run(ctx, bin, "-L")
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, fmt.Errorf("conntrack -L: empty result")
+	}
+	return parseConntrackDests(res.Stdout), nil
+}
+
+// parseConntrackDests extracts the first (original-direction) dst= IPv4 from
+// each `conntrack -L` output line.
+func parseConntrackDests(out string) map[string]struct{} {
+	dests := make(map[string]struct{})
+	for _, line := range strings.Split(out, "\n") {
+		idx := strings.Index(line, "dst=")
+		if idx < 0 {
+			continue
+		}
+		rest := line[idx+4:]
+		if end := strings.IndexByte(rest, ' '); end >= 0 {
+			rest = rest[:end]
+		}
+		if ip := net.ParseIP(strings.TrimSpace(rest)); ip != nil && ip.To4() != nil {
+			dests[ip.To4().String()] = struct{}{}
+		}
+	}
+	return dests
 }
 
 // conntrackDestArg returns the -d argument for conntrack -D: /32 hosts only.

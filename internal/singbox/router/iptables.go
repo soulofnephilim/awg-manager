@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 	sysiptables "github.com/hoaxisr/awg-manager/internal/sys/iptables"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
@@ -75,9 +76,9 @@ var (
 	netfilterRulesPath = "/opt/etc/awg-manager/singbox/router-netfilter.rules"
 )
 
-// selectiveSetName is the ipset name used for selective bypass. Must match
-// selective.SetName in the selective sub-package.
-const selectiveSetName = "AWGM-SELECTIVE"
+// selectiveSetName is the ipset name used for selective bypass — aliased
+// from the selective sub-package so the name has exactly one definition.
+const selectiveSetName = selective.SetName
 
 func kernelModuleName() string { return "xt_TPROXY" }
 

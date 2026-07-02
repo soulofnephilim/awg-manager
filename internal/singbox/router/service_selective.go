@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
-	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 )
 
 // routeFinalAllowsSelectiveBypass reports whether route.final is compatible
@@ -126,6 +123,10 @@ func (s *ServiceImpl) triggerSelectiveRebuild(_ context.Context) {
 // is true so that iptables-restore never references a non-existent set.
 // Returns nil when ipset is not installed — the Install call will fail anyway
 // with a meaningful error from the xt_set module check.
+//
+// Delegates to selective.CreateSet — the ONE place that knows the set's
+// create parameters. A drifted local copy (different maxelem/family) would
+// make selective's staged `ipset swap` fail with "sets have different header".
 func ensureSelectiveSetExists(ctx context.Context) error {
 	// Try to load xt_set kernel module before creating the set — without it
 	// iptables -m set rules will be rejected at COMMIT time.
@@ -134,66 +135,16 @@ func ensureSelectiveSetExists(ctx context.Context) error {
 		_ = err
 	}
 
-	bin := selectiveIPSetBinary()
-	if bin == "" {
+	if selective.IPSetBinary() == "" {
 		return nil // ipset not installed — let IPTables.Install surface the real error
 	}
-	out, err := runIPSet(ctx, bin, "create", selectiveSetName, "hash:net",
-		"maxelem", "262144", "family", "inet")
-	if err != nil {
-		// "set with the same name already exists" → idempotent, not an error
-		if containsAny(out, "already exists") {
-			return nil
-		}
-		return fmt.Errorf("ipset create %s: %w (output: %s)", selectiveSetName, err, out)
-	}
-	return nil
+	return selective.CreateSet(ctx)
 }
 
-// destroySelectiveSet is a thin wrapper that calls ipset destroy without
-// importing the selective sub-package into service.go. It uses the
-// selectiveSetName constant already defined in iptables.go.
+// destroySelectiveSet removes the AWGM-SELECTIVE ipset. Idempotent.
 func destroySelectiveSet(ctx context.Context) error {
-	bin := selectiveIPSetBinary()
-	if bin == "" {
+	if selective.IPSetBinary() == "" {
 		return nil // ipset not installed — nothing to destroy
 	}
-	res, err := runIPSet(ctx, bin, "destroy", selectiveSetName)
-	if err != nil {
-		if res != "" && (containsAny(res, "does not exist", "not found")) {
-			return nil
-		}
-		return fmt.Errorf("ipset destroy %s: %w", selectiveSetName, err)
-	}
-	return nil
-}
-
-// selectiveIPSetBinary returns the path to ipset or "".
-// Mirrors selective.IPSetBinary without importing the sub-package.
-func selectiveIPSetBinary() string {
-	for _, p := range []string{"/opt/sbin/ipset", "/usr/sbin/ipset", "/sbin/ipset"} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
-}
-
-// runIPSet executes ipset with the given args and returns (combined output, error).
-func runIPSet(ctx context.Context, bin string, args ...string) (string, error) {
-	res, err := sysexec.Run(ctx, bin, args...)
-	out := ""
-	if res != nil {
-		out = res.Stdout + res.Stderr
-	}
-	return out, err
-}
-
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
+	return selective.DestroySet(ctx)
 }

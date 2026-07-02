@@ -145,7 +145,7 @@ func TestBuildDNSServers_IncludesNDMSAndPublic(t *testing.T) {
 }
 
 func TestExpandQueryHosts_Suffix(t *testing.T) {
-	hosts := expandQueryHosts("2ip.ru", KindDomainSuffix)
+	hosts := expandQueryHosts("2ip.ru", KindDomainSuffix, true)
 	if !slices.Contains(hosts, "2ip.ru") || !slices.Contains(hosts, "www.2ip.ru") {
 		t.Fatalf("expected apex and www, got %v", hosts)
 	}
@@ -154,10 +154,45 @@ func TestExpandQueryHosts_Suffix(t *testing.T) {
 	}
 }
 
+func TestExpandQueryHosts_SuffixMinimalProbes(t *testing.T) {
+	hosts := expandQueryHosts("2ip.ru", KindDomainSuffix, false)
+	if !slices.Contains(hosts, "2ip.ru") || !slices.Contains(hosts, "www.2ip.ru") {
+		t.Fatalf("expected apex and www, got %v", hosts)
+	}
+	if slices.Contains(hosts, "cdn.2ip.ru") {
+		t.Errorf("minimal mode must not probe cdn., got %v", hosts)
+	}
+	if len(hosts) != 1+len(minimalSuffixProbes) {
+		t.Errorf("expected %d hosts, got %v", 1+len(minimalSuffixProbes), hosts)
+	}
+}
+
 func TestExpandQueryHosts_Exact(t *testing.T) {
-	hosts := expandQueryHosts("www.example.com", KindDomain)
+	hosts := expandQueryHosts("www.example.com", KindDomain, true)
 	if len(hosts) != 1 || hosts[0] != "www.example.com" {
 		t.Fatalf("expected single exact host, got %v", hosts)
+	}
+}
+
+func TestSuffixProbesForBatch(t *testing.T) {
+	small := make([]DomainQuery, fullProbeSuffixBudget)
+	for i := range small {
+		small[i] = DomainQuery{Matcher: "x.example", Kind: KindDomainSuffix}
+	}
+	if !suffixProbesForBatch(small) {
+		t.Error("batch at the budget must keep full probes")
+	}
+	large := append(small, DomainQuery{Matcher: "y.example", Kind: KindDomainSuffix})
+	if suffixProbesForBatch(large) {
+		t.Error("batch over the budget must switch to minimal probes")
+	}
+	// Exact-domain queries do not count against the suffix budget.
+	exacts := make([]DomainQuery, fullProbeSuffixBudget*2)
+	for i := range exacts {
+		exacts[i] = DomainQuery{Matcher: "z.example", Kind: KindDomain}
+	}
+	if !suffixProbesForBatch(exacts) {
+		t.Error("exact-domain queries must not consume the suffix budget")
 	}
 }
 
