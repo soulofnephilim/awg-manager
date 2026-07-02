@@ -34,12 +34,15 @@ func TestMigrateLegacyConfigToConfigD(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Step 1: base migration writes 00-base.json and leaves config.json for
+	// the tunnels migration to consume (it no longer deletes it or splits
+	// tunnels — see MigrateLegacyConfigDir doc).
 	if err := MigrateLegacyConfigDir(dir); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatalf("legacy config.json должен быть удалён, err=%v", err)
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("config.json должен остаться после base-миграции, err=%v", err)
 	}
 
 	baseRaw, err := os.ReadFile(filepath.Join(dir, "config.d", "00-base.json"))
@@ -58,6 +61,14 @@ func TestMigrateLegacyConfigToConfigD(t *testing.T) {
 	}
 	if _, ok := base["inbounds"]; ok {
 		t.Error("base НЕ должен содержать inbounds")
+	}
+
+	// Step 2: tunnels migration (richer filtering) writes 10-tunnels.json and
+	// removes the legacy file.
+	ensureLegacyConfigMigrated(dir)
+
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy config.json должен быть удалён после tunnels-миграции, err=%v", err)
 	}
 
 	tunnelsRaw, err := os.ReadFile(filepath.Join(dir, "config.d", "10-tunnels.json"))
