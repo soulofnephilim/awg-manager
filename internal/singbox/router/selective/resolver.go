@@ -194,15 +194,28 @@ var minimalSuffixProbes = []string{"www."}
 // batch that still get the full suffixResolvePrefixes expansion.
 const fullProbeSuffixBudget = 64
 
-// suffixProbesForBatch picks the probe expansion mode for a query batch.
-func suffixProbesForBatch(queries []DomainQuery) bool {
-	suffixes := 0
-	for _, q := range queries {
-		if q.Kind != KindDomain {
-			suffixes++
+// fullProbeFlags returns the per-query probe mode: the FIRST
+// fullProbeSuffixBudget suffix matchers keep the full expansion, the rest
+// fall back to minimalSuffixProbes. Collection order is rules first, then
+// rule-sets (StreamCollectFromRules), so a geosite import consumes the
+// budget AFTER the user's hand-written rules — importing a huge category
+// does not demote the hand-written matchers to minimal probing.
+// Exact-domain queries always resolve a single host, so the flag is moot
+// for them and they do not consume the budget.
+func fullProbeFlags(queries []DomainQuery) []bool {
+	out := make([]bool, len(queries))
+	budget := fullProbeSuffixBudget
+	for i, q := range queries {
+		if q.Kind == KindDomain {
+			out[i] = true
+			continue
+		}
+		if budget > 0 {
+			out[i] = true
+			budget--
 		}
 	}
-	return suffixes <= fullProbeSuffixBudget
+	return out
 }
 
 // expandQueryHosts returns the hostnames to resolve for a rule matcher.

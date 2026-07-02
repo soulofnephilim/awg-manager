@@ -94,6 +94,22 @@ func addEntriesToSet(ctx context.Context, setName string, cidrs []string) error 
 		ipsetChunkPool.Put(bufPtr)
 	}()
 
+	if writeRestoreLines(b, setName, cidrs) == 0 {
+		return nil
+	}
+	res, err := sysexec.RunWithOptions(ctx, bin, []string{"restore", "-exist"},
+		sysexec.Options{Stdin: b, Timeout: 60e9})
+	if err != nil {
+		return sysexec.FormatError(res, fmt.Errorf("ipset restore: %w", err))
+	}
+	return nil
+}
+
+// writeRestoreLines renders the `ipset restore` input lines for cidrs into b,
+// skipping invalid entries, and returns how many lines were written. Split
+// out of addEntriesToSet so tests can assert the exact piped format without
+// running ipset.
+func writeRestoreLines(b *bytes.Buffer, setName string, cidrs []string) int {
 	valid := 0
 	for _, raw := range cidrs {
 		entry := normalizeEntry(raw)
@@ -103,15 +119,7 @@ func addEntriesToSet(ctx context.Context, setName string, cidrs []string) error 
 		fmt.Fprintf(b, "add %s %s\n", setName, entry)
 		valid++
 	}
-	if valid == 0 {
-		return nil
-	}
-	res, err := sysexec.RunWithOptions(ctx, bin, []string{"restore", "-exist"},
-		sysexec.Options{Stdin: b, Timeout: 60e9})
-	if err != nil {
-		return sysexec.FormatError(res, fmt.Errorf("ipset restore: %w", err))
-	}
-	return nil
+	return valid
 }
 
 func createNamedSet(ctx context.Context, name string) error {
@@ -155,4 +163,3 @@ func flushNamedSet(ctx context.Context, name string) error {
 	}
 	return nil
 }
-

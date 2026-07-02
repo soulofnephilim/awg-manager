@@ -174,25 +174,40 @@ func TestExpandQueryHosts_Exact(t *testing.T) {
 	}
 }
 
-func TestSuffixProbesForBatch(t *testing.T) {
-	small := make([]DomainQuery, fullProbeSuffixBudget)
-	for i := range small {
-		small[i] = DomainQuery{Matcher: "x.example", Kind: KindDomainSuffix}
+func TestFullProbeFlags(t *testing.T) {
+	// A hand-written suffix rule, an exact rule, then a geosite-scale tail:
+	// the first budget's worth of suffix matchers keep full probes, the
+	// tail is minimal, and exact-domain queries neither consume the budget
+	// nor get demoted.
+	queries := []DomainQuery{
+		{Matcher: "hand.example", Kind: KindDomainSuffix},
+		{Matcher: "exact.example", Kind: KindDomain},
 	}
-	if !suffixProbesForBatch(small) {
-		t.Error("batch at the budget must keep full probes")
+	for i := 0; i < fullProbeSuffixBudget+10; i++ {
+		queries = append(queries, DomainQuery{Matcher: "geo.example", Kind: KindDomainSuffix})
 	}
-	large := append(small, DomainQuery{Matcher: "y.example", Kind: KindDomainSuffix})
-	if suffixProbesForBatch(large) {
-		t.Error("batch over the budget must switch to minimal probes")
+	flags := fullProbeFlags(queries)
+	if !flags[0] {
+		t.Error("first (hand-written) suffix matcher must keep full probes")
 	}
-	// Exact-domain queries do not count against the suffix budget.
-	exacts := make([]DomainQuery, fullProbeSuffixBudget*2)
-	for i := range exacts {
-		exacts[i] = DomainQuery{Matcher: "z.example", Kind: KindDomain}
+	if !flags[1] {
+		t.Error("exact-domain query must always be full (single host anyway)")
 	}
-	if !suffixProbesForBatch(exacts) {
-		t.Error("exact-domain queries must not consume the suffix budget")
+	// Budget continues for geosite entries 2..fullProbeSuffixBudget, then stops.
+	if !flags[2] {
+		t.Error("suffix matchers within budget must keep full probes")
+	}
+	if flags[len(flags)-1] {
+		t.Error("suffix matchers past the budget must fall back to minimal probes")
+	}
+	full := 0
+	for i, f := range flags {
+		if f && queries[i].Kind != KindDomain {
+			full++
+		}
+	}
+	if full != fullProbeSuffixBudget {
+		t.Errorf("exactly %d suffix matchers must keep full probes, got %d", fullProbeSuffixBudget, full)
 	}
 }
 

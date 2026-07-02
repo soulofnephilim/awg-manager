@@ -11,9 +11,9 @@
 
 ### 1–5. `internal/singbox/router/selective/`
 - [x] `deps_check.go` — `IsIPSetAvailable`, `IsXtSetAvailable`, `InstallIPSet`, `EnsureXtSetModule`
-- [x] `ipset.go` — `CreateSet`, `DestroySet`, `FlushSet`, `AddEntries`, `SetExists`, `EntryCount`, `SetName`
-- [x] `collector.go` — `CollectFromRules`, `CollectResult`, inline/dat rule-set JSON парсинг
-- [x] `resolver.go` — `ResolveDomains`, `BuildDNSServers` (приоритет singbox→NDMS→system)
+- [x] `ipset.go` — `CreateSet`, `DestroySet`, `SetExists`, `EntryCount`, `SetName` (+ staging: `ChunkedAddStaging`/`ChunkedAddLive`/`SwapWithStaging`)
+- [x] `collector.go`/`collector_stream.go` — `StreamCollectFromRules`, inline/dat rule-set JSON парсинг
+- [x] `resolver.go`/`resolver_pipeline.go` — `ResolveDomainQueriesStream`, `BuildDNSServers` (приоритет singbox→NDMS→system)
 - [x] `builder.go` — `Builder.Rebuild`, `Progress`, `EventPublisher`, SSE публикация
 - [x] `errors.go` — `ErrOpkgNotFound`, `ErrIPSetNotAvailable`, `ErrXtSetNotAvailable`
 

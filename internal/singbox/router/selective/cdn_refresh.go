@@ -61,7 +61,7 @@ func (b *Builder) RefreshCDNMatchers(
 	}
 
 	dnsServers := BuildDNSServers(ctx, singboxDNS, b.cfg.DNSSource)
-	fullProbes := suffixProbesForBatch(queries)
+	fullProbes := fullProbeFlags(queries)
 	var added, addFailed int
 	// Freshly resolved IPs must ALSO reach the routes overlay: the ipset only
 	// decides what is intercepted, while 19-selective-routes.json decides
@@ -70,7 +70,7 @@ func (b *Builder) RefreshCDNMatchers(
 	// exactly the leak this refresh exists to prevent.
 	acc := NewRouteAccumulator()
 
-	for _, q := range queries {
+	for qi, q := range queries {
 		var chunk []string
 		flush := func() {
 			if len(chunk) == 0 {
@@ -92,7 +92,7 @@ func (b *Builder) RefreshCDNMatchers(
 			if len(chunk) >= IpsetChunkSize {
 				flush()
 			}
-		}, nil, fullProbes)
+		}, nil, fullProbes[qi])
 		flush()
 	}
 

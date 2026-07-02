@@ -36,20 +36,21 @@ func ResolveDomainQueriesStream(
 		return
 	}
 
-	// Probe budget: with a handful of hand-written suffix rules the full
-	// subdomain expansion is worth it; a geosite-scale batch gets the
+	// Probe budget: the first fullProbeSuffixBudget suffix matchers (the
+	// user's hand-written rules — collection emits rules before rule-sets)
+	// keep the full subdomain expansion; the geosite-scale tail gets the
 	// minimal set or DNS query volume explodes (matchers × probes ×
 	// servers × rounds).
-	fullProbes := suffixProbesForBatch(queries)
+	fullProbes := fullProbeFlags(queries)
 
 	sem := make(chan struct{}, maxConcurrentResolves)
 	var wg sync.WaitGroup
 	var doneCount atomic.Int32
 	total := len(queries)
 
-	for _, q := range queries {
+	for i, q := range queries {
 		wg.Add(1)
-		go func(query DomainQuery) {
+		go func(query DomainQuery, full bool) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -58,7 +59,7 @@ func ResolveDomainQueriesStream(
 				if sink.OnIP != nil {
 					sink.OnIP(query, cidr)
 				}
-			}, hostProgressFn, fullProbes)
+			}, hostProgressFn, full)
 
 			if sink.OnRecord != nil {
 				sink.OnRecord(query, rec)
@@ -67,7 +68,7 @@ func ResolveDomainQueriesStream(
 				n := int(doneCount.Add(1))
 				progressFn(n, total, query.Matcher)
 			}
-		}(q)
+		}(q, fullProbes[i])
 	}
 	wg.Wait()
 }
@@ -75,7 +76,7 @@ func ResolveDomainQueriesStream(
 // ResolveOneQueryStream resolves a single matcher, invoking onIP for each
 // discovered /32 (or wider static CIDR passed through) without retaining
 // the full IP list in the returned record. fullProbes selects the suffix
-// subdomain expansion mode — batch callers derive it via suffixProbesForBatch.
+// subdomain expansion mode — batch callers derive it via fullProbeFlags.
 func ResolveOneQueryStream(
 	ctx context.Context,
 	query DomainQuery,

@@ -1,6 +1,7 @@
 package selective
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -85,25 +86,18 @@ func TestIPSetBinary_ReturnsEmptyWhenNotFound(t *testing.T) {
 	}
 }
 
-// ── AddEntries — batch input format ──────────────────────────────────────────
-// We can't call the real `ipset` in unit tests, but we can verify the
-// batch restore input that would be piped to it.
+// ── chunkedAddToSet — restore input format ────────────────────────────────────
+// We can't call the real `ipset` in unit tests, but writeRestoreLines is the
+// exact production renderer addEntriesToSet pipes to `ipset restore -exist`.
 
-func buildRestoreInput_AddEntries(cidrs []string) string {
-	// Reproduce the batch format from AddEntries without calling ipset.
-	var sb strings.Builder
-	for _, raw := range cidrs {
-		entry := normalizeEntry(raw)
-		if entry == "" {
-			continue
-		}
-		sb.WriteString("add " + SetName + " " + entry + "\n")
-	}
-	return sb.String()
+func restoreInput(cidrs []string) string {
+	var b bytes.Buffer
+	writeRestoreLines(&b, SetName, cidrs)
+	return b.String()
 }
 
-func TestAddEntries_BatchFormat(t *testing.T) {
-	input := buildRestoreInput_AddEntries([]string{"1.2.3.0/24", "5.6.7.8", "invalid"})
+func TestRestoreInput_BatchFormat(t *testing.T) {
+	input := restoreInput([]string{"1.2.3.0/24", "5.6.7.8", "invalid"})
 	lines := strings.Split(strings.TrimSpace(input), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines (invalid skipped), got %d:\n%s", len(lines), input)
@@ -116,22 +110,22 @@ func TestAddEntries_BatchFormat(t *testing.T) {
 	}
 }
 
-func TestAddEntries_EmptyInput_NoOutput(t *testing.T) {
-	input := buildRestoreInput_AddEntries(nil)
+func TestRestoreInput_EmptyInput_NoOutput(t *testing.T) {
+	input := restoreInput(nil)
 	if input != "" {
 		t.Errorf("expected empty output for nil input, got %q", input)
 	}
 }
 
-func TestAddEntries_AllInvalid_NoOutput(t *testing.T) {
-	input := buildRestoreInput_AddEntries([]string{"::1", "garbage", ""})
+func TestRestoreInput_AllInvalid_NoOutput(t *testing.T) {
+	input := restoreInput([]string{"::1", "garbage", ""})
 	if input != "" {
 		t.Errorf("expected empty output for all-invalid input, got %q", input)
 	}
 }
 
-func TestAddEntries_SetNameInOutput(t *testing.T) {
-	input := buildRestoreInput_AddEntries([]string{"10.0.0.1"})
+func TestRestoreInput_SetNameInOutput(t *testing.T) {
+	input := restoreInput([]string{"10.0.0.1"})
 	if !strings.Contains(input, SetName) {
 		t.Errorf("expected %q in output, got %q", SetName, input)
 	}
