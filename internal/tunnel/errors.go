@@ -71,4 +71,3 @@ func NewOpError(op, tunnelID, component string, err error) *OpError {
 		Err:       err,
 	}
 }
-

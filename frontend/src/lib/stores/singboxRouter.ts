@@ -153,6 +153,18 @@ function createSingboxRouterStore() {
 		}
 	}
 
+	// reloadSettings is the settings counterpart of reloadStatus: a light
+	// primer for consumers that need routingMode before any sing-box tab has
+	// run loadAll (issue #420 — the tab bar mutes the dormant TProxy/FakeIP
+	// chip from `enabled && routingMode`, so both must be primed on page load).
+	async function reloadSettings(): Promise<void> {
+		try {
+			settings.set(await api.singboxRouterGetSettings());
+		} catch {
+			return;
+		}
+	}
+
 	function applyStatus(data: SingboxRouterStatus): void {
 		status.set(data);
 	}
@@ -205,6 +217,7 @@ function createSingboxRouterStore() {
 		error: { subscribe: error.subscribe },
 		loadAll,
 		reloadStatus,
+		reloadSettings,
 		loadStaging,
 		loadRulesSnapshot,
 		applyStatus,

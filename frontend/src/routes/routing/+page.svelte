@@ -52,6 +52,11 @@
         // immediately on page load instead of waiting for the next polling
         // tick after the user actually clicks into the sing-box sub-tab.
         void singboxRouterStore.reloadStatus();
+        // Settings must be primed too (issue #420): the TProxy/FakeIP chip
+        // mute-XOR reads `enabled && routingMode`, and routingMode lives in
+        // settings. Without this the dormant mode's chip rendered as active
+        // until the user first visited a sing-box tab (which runs loadAll).
+        void singboxRouterStore.reloadSettings();
     });
     onDestroy(() => {
         unsubRouting?.();
