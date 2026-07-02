@@ -1555,6 +1555,9 @@ func TestListTunnels_Running_NDMSDisabled_UsesClash(t *testing.T) {
 			op.configPath = configDir
 			op.pidPath = pidPath
 			op.proc = NewProcess(op.binary, configDir, pidPath)
+			// The pid file holds the test process's own PID to fake "running";
+			// bypass the /proc cmdline identity check which would reject it.
+			op.proc.matchBinaryFn = func(int) bool { return true }
 
 			var srvAddr string
 			if tc.clashHandler != nil {

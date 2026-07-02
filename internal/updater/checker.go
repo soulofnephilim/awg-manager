@@ -2,7 +2,10 @@ package updater
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -81,17 +84,30 @@ func checkWithDownloader(ctx context.Context, currentVersion, channel string, dl
 	info.Available = true
 	info.LatestVersion = pkg.Version
 	info.DownloadURL = fmt.Sprintf("%s/%s/%s", base, archDir, pkg.Filename)
+	info.SHA256 = pkg.SHA256
 	return info
 }
 
 // Upgrade downloads the IPK from downloadURL and launches opkg install in a
-// detached process.
-func Upgrade(ctx context.Context, downloadURL string) error {
-	return upgradeWithDownloader(ctx, downloadURL, newDefaultDownloader())
+// detached process. wantSHA256 (from the repo Packages index) is verified
+// before the install; empty = no checksum available, install unverified.
+func Upgrade(ctx context.Context, downloadURL, wantSHA256 string) error {
+	return upgradeWithDownloader(ctx, downloadURL, wantSHA256, newDefaultDownloader())
 }
 
+// upgradeLogPath captures the detached opkg output. The old daemon is
+// stopped by the package prerm mid-install, so this file is the ONLY
+// diagnostic left if opkg fails and the router ends up without awg-manager.
+const upgradeLogPath = "/opt/tmp/awg-manager-upgrade.log"
+
 var startDetachedUpgrade = func(ipkPath string) error {
-	cmd := osexec.Command("sh", "-c", fmt.Sprintf("sleep 2 && opkg install %s && rm -f %s", ipkPath, ipkPath))
+	script := fmt.Sprintf("sleep 2 && opkg install %s && rm -f %s", ipkPath, ipkPath)
+	cmd := osexec.Command("sh", "-c", script)
+	if logf, err := os.OpenFile(upgradeLogPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644); err == nil {
+		cmd.Stdout = logf
+		cmd.Stderr = logf
+		defer logf.Close() // child keeps its own fd after Start
+	}
 	setUpgradeDetachedProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
@@ -100,7 +116,7 @@ var startDetachedUpgrade = func(ipkPath string) error {
 	return nil
 }
 
-func upgradeWithDownloader(ctx context.Context, downloadURL string, dl Downloader) error {
+func upgradeWithDownloader(ctx context.Context, downloadURL, wantSHA256 string, dl Downloader) error {
 	if dl == nil {
 		dl = newDefaultDownloader()
 	}
@@ -126,9 +142,36 @@ func upgradeWithDownloader(ctx context.Context, downloadURL string, dl Downloade
 	if err != nil {
 		return fmt.Errorf("download IPK: %w", err)
 	}
+	if err := verifyFileSHA256(ipkPath, wantSHA256); err != nil {
+		os.Remove(ipkPath)
+		return err
+	}
 	if err := startDetachedUpgrade(ipkPath); err != nil {
 		os.Remove(ipkPath)
 		return err
+	}
+	return nil
+}
+
+// verifyFileSHA256 checks path against the hex digest want. Empty want is
+// accepted (older repo indexes without SHA256sum) — but when the index does
+// provide a digest, a mismatch aborts the root opkg install of the file.
+func verifyFileSHA256(path, want string) error {
+	if want == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("verify IPK: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("verify IPK: %w", err)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("IPK checksum mismatch: got %s, want %s", got, want)
 	}
 	return nil
 }

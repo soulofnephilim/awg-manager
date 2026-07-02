@@ -61,6 +61,10 @@ func (s *AWGTunnelStore) List() ([]AWGTunnel, error) {
 
 		var tunnel AWGTunnel
 		if err := json.Unmarshal(data, &tunnel); err != nil {
+			// Quarantine instead of skipping silently: a skipped file's ID
+			// looks free to NextAvailableID, and the next created tunnel
+			// would overwrite the still-recoverable JSON (with its keys).
+			QuarantineCorrupt(path, err)
 			continue
 		}
 

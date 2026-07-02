@@ -604,12 +604,24 @@ out:
 static int awg_encap_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct awg_proxy *proxy = rcu_dereference_sk_user_data(sk);
+	const struct udphdr *uh;
 
 	if (unlikely(!proxy) || !READ_ONCE(proxy->active))
 		goto drop;
 
 	if (unlikely(!pskb_may_pull(skb, sizeof(struct udphdr))))
 		goto drop;
+
+	/* The socket is unconnected (see create_remote_socket), so ANY host
+	 * that discovers our ephemeral port can inject datagrams: flood the
+	 * rx_queue, skew the counters, or feed forgeries into the
+	 * decrypt-failed-forward-as-is path. Accept only the configured
+	 * server. Both sides are big-endian wire values — no conversion. */
+	uh = (const struct udphdr *)skb->data;
+	if (ip_hdr(skb)->saddr != proxy->cfg.remote_ip ||
+	    uh->source != proxy->cfg.remote_port)
+		goto drop;
+
 	__skb_pull(skb, sizeof(struct udphdr));
 
 	/* Bound the backlog — a stalled drain must not OOM. AWG tolerates loss:
@@ -918,10 +930,16 @@ int awg_proxy_add(const char *config_line)
 	return 0;
 
 out_cleanup:
-	/* Stop encap dispatch before teardown (encap may already be enabled). */
+	/* Stop encap dispatch before teardown (encap may already be enabled).
+	 * Same RCU discipline as proxy_stop: wait out in-flight callbacks
+	 * before the queue purge / slot reuse below. */
 	if (p->remote_sock && p->remote_sock->sk) {
-		udp_sk(p->remote_sock->sk)->encap_type = 0;
-		WRITE_ONCE(udp_sk(p->remote_sock->sk)->encap_rcv, NULL);
+		struct sock *sk = p->remote_sock->sk;
+
+		udp_sk(sk)->encap_type = 0;
+		WRITE_ONCE(udp_sk(sk)->encap_rcv, NULL);
+		rcu_assign_sk_user_data(sk, NULL);
+		synchronize_net();
 	}
 	/* Shutdown sockets first to unblock threads in kernel_recvmsg */
 	if (p->listen_sock)
@@ -971,10 +989,24 @@ static void proxy_stop(struct awg_proxy *p)
 	p->active = false;
 
 	/* Stop encap dispatch first: with encap_type cleared udp_rcv no longer
-	 * calls awg_encap_rcv, so no new skbs get queued during teardown. */
+	 * calls awg_encap_rcv, so no new skbs get queued during teardown.
+	 *
+	 * The plain stores are not enough on SMP: udp_queue_rcv_skb on another
+	 * CPU may have read encap_rcv before the store and still be executing
+	 * the callback (the RX path holds only the RCU read lock — since
+	 * SOCK_RCU_FREE sockets there is no refcount pinning it). Clear
+	 * sk_user_data and synchronize_net() so every in-flight callback has
+	 * finished before we purge rx_queue below and before this slot can be
+	 * memset by a subsequent awg_proxy_add — otherwise a late
+	 * skb_queue_tail runs on a reinitialized spinlock (list corruption) or
+	 * leaks the skb past the purge. Mirrors native WG wg_socket_reinit. */
 	if (p->remote_sock && p->remote_sock->sk) {
-		udp_sk(p->remote_sock->sk)->encap_type = 0;
-		WRITE_ONCE(udp_sk(p->remote_sock->sk)->encap_rcv, NULL);
+		struct sock *sk = p->remote_sock->sk;
+
+		udp_sk(sk)->encap_type = 0;
+		WRITE_ONCE(udp_sk(sk)->encap_rcv, NULL);
+		rcu_assign_sk_user_data(sk, NULL);
+		synchronize_net();
 	}
 
 	/* Closing sockets unblocks kernel_recvmsg in c2s; kthread_stop wakes

@@ -57,8 +57,13 @@ func (s *Scheduler) run() {
 
 	for {
 		if s.shouldRefresh() {
-			s.doRefresh()
-			s.lastRefresh = time.Now()
+			// Stamp only successful runs: on cold boot the clock may still be
+			// at 1970 until NTP syncs, every TLS fetch fails "not yet valid",
+			// and stamping the failure would silently delay the retry by the
+			// full interval instead of the next tick.
+			if s.doRefresh() {
+				s.lastRefresh = time.Now()
+			}
 		}
 
 		select {
@@ -128,13 +133,24 @@ func (s *Scheduler) shouldRefreshDaily(targetTime string) bool {
 	return true
 }
 
-func (s *Scheduler) doRefresh() {
+func (s *Scheduler) doRefresh() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	// Abort the in-flight refresh on Stop(): a restart hook must not block
+	// behind a slow subscription fetch for up to the full timeout.
+	go func() {
+		select {
+		case <-s.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	if err := s.svc.RefreshAllSubscriptions(ctx); err != nil {
 		s.appLog.Warn("auto-refresh", "", err.Error())
-	} else {
-		s.appLog.Info("auto-refresh", "", "completed")
+		return false
 	}
+	s.appLog.Info("auto-refresh", "", "completed")
+	return true
 }
