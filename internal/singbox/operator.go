@@ -2785,7 +2785,6 @@ func (o *Operator) LoadCurrentConfig() (*Config, error) {
 	return cfg, nil
 }
 
-
 // SetSelectorDefault switches a selector's active member live via
 // Clash API. Returns ErrSingboxNotRunning if the daemon is not alive —
 // callers decide whether to treat that as fatal.

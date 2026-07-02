@@ -111,4 +111,3 @@ func parseConnectedField(raw json.RawMessage) string {
 	}
 	return ""
 }
-

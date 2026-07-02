@@ -521,8 +521,8 @@ func (s *Scheduler) collectTunnels(ctx context.Context) []Tunnel {
 					IfaceName: sbt.InterfaceName,
 					// PingcheckTarget / SelfTarget left empty — sing-box
 					// tunnels don't have a per-tunnel restart pingcheck;
-					// matrix row uses BaseTargets only, augmented later
-					// with Clash data.
+					// connectivity targets come from EffectiveTargets,
+					// augmented later with Clash data.
 					Source:       "singbox",
 					SingboxTag:   sbt.Tag,
 					Subscription: sbt.Subscription,

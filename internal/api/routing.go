@@ -121,4 +121,3 @@ func (h *RoutingHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	publishInvalidated(h.bus, ResourceRoutingTunnels, "refresh")
 	response.Success(w, map[string]any{"missing": snap.Missing})
 }
-

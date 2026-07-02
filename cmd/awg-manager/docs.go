@@ -2,7 +2,7 @@
 //
 //	go generate ./cmd/awg-manager
 //
-// In dev, Swagger UI: open the Svelte app at /dev/api-docs (Vite proxies /api to the daemon).
+// In dev, Swagger UI: open the Svelte app at /api-docs (Vite proxies /api to the daemon).
 //
 // Requires Go ≥ module version (see go.mod). Output: internal/openapi/swagger.yaml
 //

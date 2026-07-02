@@ -184,4 +184,3 @@ func TestParseRCIInterfaceResponse_PeerEndpoint(t *testing.T) {
 		t.Errorf("PeerRemotePort = %d, want 51958", state.PeerRemotePort)
 	}
 }
-

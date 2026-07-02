@@ -113,7 +113,8 @@ func (s *Service) SpeedTestStream(ctx context.Context, tunnelID, server string, 
 	return s.runIperf3Stream(ctx, ifaceName, server, port, direction, onInterval)
 }
 
-// SpeedTestStreamByIface is the streaming equivalent of SpeedTestByIface.
+// SpeedTestStreamByIface runs iperf3 bound to the given kernel interface name
+// and streams per-second intervals via onInterval.
 func (s *Service) SpeedTestStreamByIface(ctx context.Context, ifaceName, server string, port int, direction string, onInterval func(SpeedTestInterval)) (*SpeedTestResult, error) {
 	return s.runIperf3Stream(ctx, ifaceName, server, port, direction, onInterval)
 }

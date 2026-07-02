@@ -526,7 +526,6 @@ func (s *ServiceImpl) listsForTunnel(tunnelID string) []storage.StaticRouteList 
 	return result
 }
 
-
 // validateRouteList checks required fields.
 func validateRouteList(rl storage.StaticRouteList) error {
 	if rl.TunnelID == "" {

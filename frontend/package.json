@@ -14,7 +14,6 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "gen:icons": "node scripts/generate-tabler-icons.mjs",
     "gen:qure-icons": "node scripts/generate-qure-icons.mjs",
     "prepare": "svelte-kit sync || echo ''"
   },

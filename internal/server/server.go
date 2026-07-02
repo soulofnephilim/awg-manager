@@ -1352,9 +1352,8 @@ func acceptsGzip(r *http.Request) bool {
 }
 
 // diagLogAdapter adapts logging.Service to diagnostics.LogServiceForDiag.
-// The legacy GetLogs helper still feeds report.Logs from the app bucket;
-// structured journalWarnings uses GetBucketLogs/GetBucketStats to collect
-// both app and sing-box buckets explicitly.
+// The structured journalWarnings report section uses GetBucketLogs/
+// GetBucketStats to collect both app and sing-box buckets explicitly.
 type diagLogAdapter struct {
 	svc *logging.Service
 }
