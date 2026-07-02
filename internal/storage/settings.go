@@ -54,12 +54,27 @@ func (s *SettingsStore) Load() (*Settings, error) {
 		return nil, err
 	}
 
+	restoredFromBackup := false
 	var settings Settings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, err
+		// Corrupt settings file (typically a torn write after power loss).
+		// Quarantine it and fall back to the backup kept by saveUnlocked so
+		// a single bad file does not leave the daemon permanently down.
+		quarantine := s.path + ".corrupt"
+		_ = os.Rename(s.path, quarantine)
+		bak, bakErr := os.ReadFile(s.path + ".bak")
+		if bakErr != nil {
+			return nil, fmt.Errorf("parse %s (quarantined to %s, no usable backup): %w", s.path, quarantine, err)
+		}
+		settings = Settings{}
+		if bakErr := json.Unmarshal(bak, &settings); bakErr != nil {
+			return nil, fmt.Errorf("parse %s (quarantined to %s, backup also corrupt: %v): %w", s.path, quarantine, bakErr, err)
+		}
+		fmt.Fprintf(os.Stderr, "settings: %s was corrupt (%v), quarantined to %s, restored from backup\n", s.path, err, quarantine)
+		restoredFromBackup = true
 	}
 
-	needsSave := false
+	needsSave := restoredFromBackup
 	// Migrate if needed
 	if settings.SchemaVersion < CurrentSchemaVersion {
 		needsSave = true
@@ -862,6 +877,16 @@ func (s *SettingsStore) saveUnlocked(settings *Settings) error {
 	}
 
 	s.settings = settings
+
+	// Keep the previous good file as .bak (hardlink: no data copy, the old
+	// inode survives the rename below). Load() falls back to it if the main
+	// file is ever found corrupt after a power loss.
+	bakPath := s.path + ".bak"
+	if _, err := os.Stat(s.path); err == nil {
+		_ = os.Remove(bakPath)
+		_ = os.Link(s.path, bakPath)
+	}
+
 	return AtomicWrite(s.path, buf.Bytes())
 }
 

@@ -157,6 +157,11 @@ func (s *Store) load() {
 	if err := json.Unmarshal(raw, &cfg); err == nil {
 		s.snapshot = Snapshot{Instances: []Instance{configToDefaultInstance(cfg)}}
 		return
+	} else {
+		// Corrupt (not just legacy) file: set it aside for recovery instead
+		// of silently replacing user instances with the default one — the
+		// next save would otherwise persist the wipe.
+		storage.QuarantineCorrupt(s.path, err)
 	}
 
 	s.snapshot = Snapshot{Instances: []Instance{defaultInstance()}}

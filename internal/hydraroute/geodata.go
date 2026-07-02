@@ -843,6 +843,9 @@ func (s *GeoDataStore) load() error {
 
 	var doc geoDataJSON
 	if err := json.Unmarshal(data, &doc); err != nil {
+		// Quarantine so the next List()→save doesn't persist an empty
+		// catalog over the recoverable file (losing custom source URLs).
+		storage.QuarantineCorrupt(s.storagePath, err)
 		return fmt.Errorf("parse %s: %w", s.storagePath, err)
 	}
 
