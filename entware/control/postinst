@@ -1,6 +1,9 @@
 #!/bin/sh
 
-OLD_VERSION="$2"
+# NOTE: opkg (unlike dpkg) invokes postinst as `postinst configure` with no
+# version argument — there is no way to distinguish upgrade from fresh
+# install here. Upgrade detection via "$2" never worked; the unified message
+# below covers both cases.
 
 # Create directories. /var/run is system tmpfs (always present) and
 # is the new PID-file location since the migration off persistent
@@ -25,13 +28,17 @@ rm -rf /opt/lib/modules/awg_proxy
 rm -rf /opt/share/www/awg-manager
 
 # Start awg-manager
-/opt/etc/init.d/S99awg-manager start
+START_OK=1
+/opt/etc/init.d/S99awg-manager start || START_OK=0
 
 # Wait a moment for settings to be initialized
 sleep 2
 
-# Get the port from settings.json (daemon persists actual port there)
-PORT=$(grep '"port"' /opt/etc/awg-manager/settings.json 2>/dev/null | tr -cd '0-9')
+# Get the port from settings.json (daemon persists actual port there).
+# sed extracts the first "port": N match; the old `grep | tr -cd 0-9`
+# concatenated digits from every matching line and broke on minified JSON.
+PORT=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    /opt/etc/awg-manager/settings.json 2>/dev/null | head -n 1)
 [ -z "$PORT" ] && PORT="2222"
 
 # Get LAN IP from br0 interface (Keenetic bridge) - for display to user
@@ -49,20 +56,19 @@ if [ -z "$ROUTER_IP" ]; then
 fi
 
 echo ""
-if [ -n "$OLD_VERSION" ]; then
-    echo "=========================================="
-    echo "  AWG Manager upgraded successfully!"
-    echo "  (from version $OLD_VERSION)"
-    echo "=========================================="
-    echo ""
-    echo "  Your tunnels and settings are preserved."
-else
+if [ "$START_OK" = "1" ]; then
     echo "=========================================="
     echo "  AWG Manager installed successfully!"
     echo "=========================================="
+    echo ""
+    echo "  Web UI: http://${ROUTER_IP}:${PORT}"
+else
+    echo "=========================================="
+    echo "  AWG Manager installed, but the service"
+    echo "  FAILED to start. Check the log and run:"
+    echo "    /opt/etc/init.d/S99awg-manager start"
+    echo "=========================================="
 fi
-echo ""
-echo "  Web UI: http://${ROUTER_IP}:${PORT}"
 echo ""
 echo "  Commands:"
 echo "    /opt/etc/init.d/S99awg-manager {start|stop|restart|status}"
