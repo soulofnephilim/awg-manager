@@ -60,6 +60,9 @@ func (m *ManagerImpl) Install(ctx context.Context) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, opkgBinary, "install", "ttyd")
+	// opkg spawns wget children; without WaitDelay a child surviving the
+	// timeout kill keeps the output pipe open and CombinedOutput never returns.
+	cmd.WaitDelay = 5 * time.Second
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		m.log.AppLog(logging.LevelWarn, logGroup, logSubgroup, "install", "ttyd", fmt.Sprintf("opkg install failed: %s", string(output)))

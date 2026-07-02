@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 )
@@ -98,6 +99,11 @@ func walkGeoDatEntries(path string, onEntry func(br *bufio.Reader, entryLen int)
 		if err != nil {
 			return fmt.Errorf("%s: submessage length: %w", path, err)
 		}
+		// int(length) below truncates on 32-bit MIPS; reject corrupt lengths
+		// before they turn into a bogus Discard/entryLen.
+		if length > math.MaxInt32 {
+			return fmt.Errorf("%s: submessage length %d too large", path, length)
+		}
 
 		if fieldNum != 1 {
 			// Unknown top-level submessage — discard without parsing.
@@ -175,7 +181,10 @@ func parseEntryStream(br *bufio.Reader, entryLen, ccField, countField int) (GeoT
 				return tag, fmt.Errorf("entry LD field %d length: %w", fieldNum, err)
 			}
 			remaining -= n
-			if int(length) > remaining {
+			// Compare in uint64 space: on 32-bit MIPS int(length) truncates,
+			// letting a corrupt length >= 2^31 slip past the guard and panic
+			// in make([]byte, length) below.
+			if remaining < 0 || length > uint64(remaining) {
 				return tag, fmt.Errorf("entry field %d length %d exceeds remaining %d", fieldNum, length, remaining)
 			}
 
@@ -282,6 +291,9 @@ func skipProtoField(br *bufio.Reader, wireType int) error {
 		length, err := readProtoVarint(br)
 		if err != nil {
 			return err
+		}
+		if length > math.MaxInt32 {
+			return fmt.Errorf("skip field: length %d too large", length)
 		}
 		_, err = br.Discard(int(length))
 		return err

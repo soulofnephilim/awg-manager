@@ -35,8 +35,18 @@ AWG_HOST=$(/opt/sbin/ip -4 addr show br0 2>/dev/null | awk '/inet /{split($2,a,"
 # colon, underscore, hyphen) so no extra encoding is required.
 BODY="type=${HOOK_TYPE}&id=${id}&system_name=${system_name}&layer=${layer}&level=${level}&address=${address}&up=${up}&connected=${connected}"
 
-/bin/wget -qO- --post-data="$BODY" --timeout=3 \
-    "http://${AWG_HOST}:${AWG_PORT}/api/hook/ndms" \
-    >/dev/null 2>&1
+# -T is the portable BusyBox spelling of the timeout (--timeout requires
+# FEATURE_WGET_LONG_OPTIONS, which not every firmware build enables).
+# --post-data has no short form, so if the firmware wget lacks long options
+# the first attempt fails and we fall back to the Entware tools; the extra
+# 127.0.0.1 target covers a daemon bound to a non-br0 interface.
+for AWG_URL in "http://${AWG_HOST}:${AWG_PORT}/api/hook/ndms" \
+               "http://127.0.0.1:${AWG_PORT}/api/hook/ndms"; do
+    /bin/wget -q -O - -T 3 --post-data="$BODY" "$AWG_URL" >/dev/null 2>&1 && exit 0
+    [ -x /opt/bin/wget ] && \
+        /opt/bin/wget -q -O - -T 3 --post-data="$BODY" "$AWG_URL" >/dev/null 2>&1 && exit 0
+    [ -x /opt/bin/curl ] && \
+        /opt/bin/curl -s -m 3 --data "$BODY" "$AWG_URL" >/dev/null 2>&1 && exit 0
+done
 
 exit 0

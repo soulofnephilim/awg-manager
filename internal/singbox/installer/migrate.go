@@ -5,7 +5,13 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// opkgTimeout bounds the opkg calls below: they may run with a background
+// context during boot migration, and a wedged opkg (stale lock, hung wget
+// child holding our pipe) must not hang the migration forever.
+const opkgTimeout = 2 * time.Minute
 
 // Lifecycle is what the installer needs from the running sing-box
 // daemon to perform a migration. *singbox.Operator satisfies this via
@@ -18,7 +24,11 @@ type Lifecycle interface {
 // defaultOpkgListInstalled invokes `opkg list-installed`. Overridable
 // via Installer.opkgListInstalled for tests.
 var defaultOpkgListInstalled = func(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "opkg", "list-installed").Output()
+	ctx, cancel := context.WithTimeout(ctx, opkgTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "opkg", "list-installed")
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
@@ -48,7 +58,11 @@ func (i *Installer) IsLegacyOpkgInstalled(ctx context.Context) bool {
 // defaultOpkgRemove invokes `opkg remove sing-box-naive`. Overridable
 // via Installer.opkgRemove for tests.
 var defaultOpkgRemove = func(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "opkg", "remove", "sing-box-naive").CombinedOutput()
+	ctx, cancel := context.WithTimeout(ctx, opkgTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "opkg", "remove", "sing-box-naive")
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("opkg remove sing-box-naive: %s: %w", string(out), err)
 	}
