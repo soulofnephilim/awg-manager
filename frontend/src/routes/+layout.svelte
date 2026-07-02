@@ -6,6 +6,11 @@
 	import { page } from '$app/stores';
 	import { theme } from '$lib/stores/theme';
 	import { compactLayout, isCompactLayoutActive } from '$lib/stores/compactLayout';
+	import {
+		tunnelDashboardLayout,
+		tunnelDashboardMode,
+		tunnelDashboardView,
+	} from '$lib/stores/tunnelDashboardMode';
 	import { settingsSectionIconMode } from '$lib/stores/settingsSectionIconMode';
 	import { serviceLetterIcons } from '$lib/stores/serviceLetterIcons';
 	import { auth, isAuthenticated, isLoading } from '$lib/stores/auth';
@@ -366,6 +371,9 @@
 		compactLayout.init();
 		settingsSectionIconMode.init();
 		serviceLetterIcons.init();
+		tunnelDashboardMode.init();
+		tunnelDashboardLayout.init();
+		tunnelDashboardView.init();
 		await auth.checkStatus();
 	});
 
