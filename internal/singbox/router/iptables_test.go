@@ -1311,3 +1311,92 @@ func TestBuildRestoreInput_BypassCIDRs(t *testing.T) {
 		t.Errorf("user bypass (%d) must precede DNS intercept (%d) in mangle", bypassIdx, dnsIdx)
 	}
 }
+
+func TestBuildRestoreInput_SelectiveIPSet_AddsGuardRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	mangleGuard := fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", ChainName, selectiveSetName)
+	natGuard := fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", RedirectChain, selectiveSetName)
+
+	if !strings.Contains(out, mangleGuard) {
+		t.Errorf("mangle chain missing selective guard rule\ngot:\n%s", out)
+	}
+	if !strings.Contains(out, natGuard) {
+		t.Errorf("nat chain missing selective guard rule\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_Disabled_NoGuardRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: false,
+	}
+	out := buildRestoreInput(spec)
+
+	if strings.Contains(out, "--match-set") {
+		t.Errorf("unexpected selective guard rule when SelectiveIPSet=false\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_GuardAfterDNS(t *testing.T) {
+	// The selective guard must appear AFTER the DNS intercept rule so that
+	// DNS (port 53) is always intercepted regardless of ipset membership.
+	// This ensures that the hijack-dns action keeps working even when
+	// selective mode is on.
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	dnsIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp --dport 53 -j TPROXY", ChainName))
+	guardIdx := strings.Index(out, fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", ChainName, selectiveSetName))
+	catchAllIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp -j TPROXY", ChainName))
+
+	if dnsIdx == -1 || guardIdx == -1 || catchAllIdx == -1 {
+		t.Fatalf("missing rule(s): dns=%d guard=%d catchAll=%d\n%s", dnsIdx, guardIdx, catchAllIdx, out)
+	}
+	if guardIdx < dnsIdx {
+		t.Errorf("selective guard (%d) must appear AFTER DNS intercept (%d)", guardIdx, dnsIdx)
+	}
+	if guardIdx > catchAllIdx {
+		t.Errorf("selective guard (%d) must appear BEFORE catch-all TPROXY (%d)", guardIdx, catchAllIdx)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_NatTCPDNSBeforeGuard(t *testing.T) {
+	// In the nat chain the TCP/53 REDIRECT must appear BEFORE the selective
+	// guard: resolver IPs are typically not in AWGM-SELECTIVE, so a guard-first
+	// order would RETURN DNS-over-TCP (and truncated-UDP retries) straight to
+	// the real upstream, leaking real IPs of proxied domains past hijack-dns.
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	dnsIdx := strings.Index(out, fmt.Sprintf("-A %s -p tcp --dport 53 -j REDIRECT", RedirectChain))
+	guardIdx := strings.Index(out, fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", RedirectChain, selectiveSetName))
+
+	if dnsIdx == -1 || guardIdx == -1 {
+		t.Fatalf("missing rule(s): tcpDNS=%d guard=%d\n%s", dnsIdx, guardIdx, out)
+	}
+	if dnsIdx > guardIdx {
+		t.Errorf("nat TCP/53 REDIRECT (%d) must appear BEFORE selective guard (%d)", dnsIdx, guardIdx)
+	}
+}
+
+func TestBuildRestoreInput_NoSelective_NoNatTCPDNSRule(t *testing.T) {
+	// Without the selective guard the catch-all REDIRECT covers TCP/53 —
+	// the chain must stay a literal port of SKeen's add_redirect_rules.
+	spec := RestoreInputSpec{PolicyMark: "0xffffaaa"}
+	out := buildRestoreInput(spec)
+
+	if strings.Contains(out, fmt.Sprintf("-A %s -p tcp --dport 53 -j REDIRECT", RedirectChain)) {
+		t.Errorf("unexpected TCP/53 rule without SelectiveIPSet\ngot:\n%s", out)
+	}
+}

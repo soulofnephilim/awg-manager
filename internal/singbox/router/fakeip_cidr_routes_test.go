@@ -347,7 +347,7 @@ func TestEnable_AppliesCIDRRoutes(t *testing.T) {
 	// Seed the fakeip config (21-fakeip.json) with a loop-safe proxy ip_cidr rule.
 	// route.final="direct" is a known built-in outbound so the egress check passes;
 	// a DNS rule keeps fakeIPConfigEmpty false so the seed path leaves our rules be.
-	fcfg := `{"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
+	fcfg := `{"outbounds":[{"tag":"proxy","type":"direct"}],"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
 		`"route":{"final":"direct","rules":[{"action":"route","outbound":"proxy","ip_cidr":["149.154.160.0/20"]}]}}`
 	if err := os.WriteFile(filepath.Join(h.dir, "21-fakeip.json"), []byte(fcfg), 0644); err != nil {
 		t.Fatalf("write 21-fakeip.json: %v", err)
@@ -379,7 +379,7 @@ func TestDisable_RemovesCIDRRoutes(t *testing.T) {
 	captureDrain(t) // capture the async pool-drain so it never runs inline
 
 	// Seed the fakeip config with a loop-safe proxy ip_cidr rule before provisioning.
-	fcfg := `{"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
+	fcfg := `{"outbounds":[{"tag":"proxy","type":"direct"}],"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
 		`"route":{"final":"direct","rules":[{"action":"route","outbound":"proxy","ip_cidr":["149.154.160.0/20"]}]}}`
 	if err := os.WriteFile(filepath.Join(h.dir, "21-fakeip.json"), []byte(fcfg), 0644); err != nil {
 		t.Fatalf("write 21-fakeip.json: %v", err)
@@ -407,7 +407,7 @@ func TestReconcileFakeIPTun_ReaddsCIDRRouteWhenMissing(t *testing.T) {
 
 	// Seed a loop-safe proxy ip_cidr rule before provisioning so loadFakeIPConfig
 	// returns it on reconcile.
-	fcfg := `{"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
+	fcfg := `{"outbounds":[{"tag":"proxy","type":"direct"}],"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
 		`"route":{"final":"direct","rules":[{"action":"route","outbound":"proxy","ip_cidr":["149.154.160.0/20"]}]}}`
 	if err := os.WriteFile(filepath.Join(h.dir, "21-fakeip.json"), []byte(fcfg), 0644); err != nil {
 		t.Fatalf("write 21-fakeip.json: %v", err)
@@ -451,7 +451,7 @@ func TestReconcileFakeIPTun_V6CIDRSelfHealNoV4(t *testing.T) {
 	h := newFakeIPEnableHarness(t, "")
 
 	// Seed a loop-safe proxy rule carrying ONLY a v6 ip_cidr — no v4 CIDR at all.
-	fcfg := `{"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
+	fcfg := `{"outbounds":[{"tag":"proxy","type":"direct"}],"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
 		`"route":{"final":"direct","rules":[{"action":"route","outbound":"proxy","ip_cidr":["2001:b28::/32"]}]}}`
 	if err := os.WriteFile(filepath.Join(h.dir, "21-fakeip.json"), []byte(fcfg), 0644); err != nil {
 		t.Fatalf("write 21-fakeip.json: %v", err)
@@ -492,7 +492,7 @@ func TestReconcileFakeIPTun_V6CIDRGatedOnPresenceProbe(t *testing.T) {
 
 	// Seed a loop-safe proxy rule carrying BOTH a v4 and a v6 ip_cidr so a v6 CIDR
 	// route exists in the desired set.
-	fcfg := `{"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
+	fcfg := `{"outbounds":[{"tag":"proxy","type":"direct"}],"dns":{"rules":[{"action":"route","server":"fakeip","query_type":["A","AAAA"]}]},` +
 		`"route":{"final":"direct","rules":[{"action":"route","outbound":"proxy","ip_cidr":["149.154.160.0/20","2001:b28::/32"]}]}}`
 	if err := os.WriteFile(filepath.Join(h.dir, "21-fakeip.json"), []byte(fcfg), 0644); err != nil {
 		t.Fatalf("write 21-fakeip.json: %v", err)

@@ -119,6 +119,7 @@ type Server struct {
 	singboxFakeIPConfigHandler *api.SingboxFakeIPConfigHandler
 	singboxConfigHandler       *api.SingboxConfigHandler
 	singboxProxiesHandler      *api.SingboxProxiesHandler
+	selectiveHandler           *api.SelectiveHandler
 	awgOutboundsHandler        *api.AWGOutboundsHandler
 	subscriptionHandler        *api.SubscriptionHandler
 	dnsRewritesHandler         *api.DNSRewritesHandler
@@ -345,6 +346,12 @@ func (s *Server) SetSingboxConfigHandler(h *api.SingboxConfigHandler) {
 // (for the upstream URL) are constructed late.
 func (s *Server) SetSingboxProxiesHandler(h *api.SingboxProxiesHandler) {
 	s.singboxProxiesHandler = h
+}
+
+// SetSelectiveHandler wires the selective-bypass handler so
+// /api/singbox/router/selective/* routes can be registered.
+func (s *Server) SetSelectiveHandler(h *api.SelectiveHandler) {
+	s.selectiveHandler = h
 }
 
 // SetSubscriptionHandler wires the VPN subscription CRUD handler so the
@@ -1183,6 +1190,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/api/singbox/router/staging", guarded(rh.GetStaging))
 		mux.HandleFunc("/api/singbox/router/staging/apply", guarded(rh.PostStagingApply))
 		mux.HandleFunc("/api/singbox/router/staging/discard", guarded(rh.PostStagingDiscard))
+	}
+
+	if s.selectiveHandler != nil {
+		sh := s.selectiveHandler
+		mux.HandleFunc("/api/singbox/router/selective/status", guarded(sh.GetStatus))
+		mux.HandleFunc("/api/singbox/router/selective/snapshot/matchers", guarded(sh.GetSnapshotMatchers))
+		mux.HandleFunc("/api/singbox/router/selective/install-deps", guarded(sh.InstallDeps))
+		mux.HandleFunc("/api/singbox/router/selective/install-conntrack", guarded(sh.InstallConntrack))
+		mux.HandleFunc("/api/singbox/router/selective/rebuild", guarded(sh.Rebuild))
 	}
 
 	if s.singboxFakeIPConfigHandler != nil {

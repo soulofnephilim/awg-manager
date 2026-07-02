@@ -66,6 +66,7 @@ type Rule struct {
 	Mode         string   `json:"mode,omitempty"`
 	Rules        []Rule   `json:"rules,omitempty"`
 	DomainSuffix []string `json:"domain_suffix,omitempty"`
+	Domain       []string `json:"domain,omitempty"`
 	IPCIDR       []string `json:"ip_cidr,omitempty"`
 	SourceIPCIDR []string `json:"source_ip_cidr,omitempty"`
 	Port         []int    `json:"port,omitempty"`
@@ -84,6 +85,10 @@ type Rule struct {
 	IPIsPrivate *bool  `json:"ip_is_private,omitempty"`
 	Action      string `json:"action,omitempty"`
 	Outbound    string `json:"outbound,omitempty"`
+	// AwgmManaged marks auto-generated route rules owned by AWG Manager.
+	// "selective-ip" rules map resolved domain IPs to proxy outbounds for
+	// selective TPROXY mode; they are replaced on each ipset rebuild.
+	AwgmManaged string `json:"awgm_managed,omitempty"`
 }
 
 // UnmarshalJSON implements json.Unmarshaler for Rule. It accepts both

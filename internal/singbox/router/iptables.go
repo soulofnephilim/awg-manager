@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 	sysiptables "github.com/hoaxisr/awg-manager/internal/sys/iptables"
@@ -75,6 +76,10 @@ var (
 	netfilterHookPath  = "/opt/etc/ndm/netfilter.d/50-awgm-tproxy.sh"
 	netfilterRulesPath = "/opt/etc/awg-manager/singbox/router-netfilter.rules"
 )
+
+// selectiveSetName is the ipset name used for selective bypass — aliased
+// from the selective sub-package so the name has exactly one definition.
+const selectiveSetName = selective.SetName
 
 func kernelModuleName() string { return "xt_TPROXY" }
 
@@ -246,6 +251,16 @@ type RestoreInputSpec struct {
 	// чей ingress-трафик помечается policy-меткой в mangle PREROUTING до
 	// connmark-jump'а. Пусто / MatchAll / пустой PolicyMark = no-op.
 	IngressInterfaces []string
+
+	// SelectiveIPSet, when true, inserts an iptables -m set guard rule in
+	// both AWGM-TPROXY (mangle) and AWGM-REDIRECT (nat) chains so that
+	// only traffic whose destination IP is listed in AWGM-SELECTIVE reaches
+	// sing-box. All other traffic gets an early RETURN and bypasses sing-box
+	// entirely (going straight to WAN). The guard is placed after user bypass
+	// RETURN rules (port/CIDR exclusions) but before the catch-all TPROXY /
+	// REDIRECT rule, so explicit bypass rules still take precedence.
+	// Only meaningful when the xt_set kernel module is loaded.
+	SelectiveIPSet bool
 }
 
 var bypassCIDRs = []string{
@@ -342,6 +357,15 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	fmt.Fprintf(&b, "-A %s -p udp --dport 53 -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
 		ChainName, TPROXYPort, Fwmark)
 
+	// Selective-bypass guard: only traffic to IPs in AWGM-SELECTIVE reaches
+	// sing-box; everything else returns to PREROUTING and goes to WAN.
+	// Placed after DNS intercept so DNS still reaches sing-box regardless
+	// of ipset membership (DNS must always be intercepted for hijack-dns).
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
+			ChainName, selectiveSetName)
+	}
+
 	// set_chain_rules: bypass set. SKeen uses one ipset rule; we render
 	// the same destinations as discrete CIDR rules (semantically equal).
 	emitBypassReturns(&b, ChainName, spec.WANIPs)
@@ -373,8 +397,12 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	// ---- *nat table: TCP via REDIRECT ----
 	// Literal port of `add_redirect_rules` from reference/SKeen/skeen.sh
 	// (hybrid mode, nat table). SKeen's nat chain has ONLY the bypass set
-	// + catch-all `-p tcp -j REDIRECT`; there is no DNS-specific TCP rule
-	// because the catch-all already covers TCP/53.
+	// + catch-all `-p tcp -j REDIRECT`; without selective bypass the
+	// catch-all already covers TCP/53. WITH the selective guard the
+	// catch-all is no longer unconditional, so TCP/53 gets its own
+	// intercept before the guard (see below) — otherwise a truncated-UDP
+	// retry or DNS-over-TCP to a resolver outside the set escapes
+	// hijack-dns and leaks real IPs of proxied domains.
 	b.WriteString("*nat\n")
 	fmt.Fprintf(&b, ":%s - [0:0]\n", RedirectChain)
 
@@ -387,6 +415,18 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	// Bypass ports: RETURN before catch-all TCP REDIRECT.
 	for _, pr := range spec.BypassTCPPorts {
 		fmt.Fprintf(&b, "-A %s -p tcp --dport %s -j RETURN\n", RedirectChain, pr.String())
+	}
+
+	// Selective-bypass guard for TCP: mirrors the mangle guard above.
+	// TCP/53 is intercepted FIRST (mirroring the mangle UDP/53 rule and
+	// honoring the same "DNS must always reach hijack-dns" invariant):
+	// resolver IPs are typically NOT in AWGM-SELECTIVE, so without this
+	// rule the guard would RETURN DNS-over-TCP straight to the upstream.
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d\n",
+			RedirectChain, RedirectPort)
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
+			RedirectChain, selectiveSetName)
 	}
 
 	// add_redirect_rules: catch-all REDIRECT for TCP.

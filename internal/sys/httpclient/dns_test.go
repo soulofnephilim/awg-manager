@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -29,17 +30,6 @@ func TestEncodeDNSQuery(t *testing.T) {
 	}
 }
 
-func TestParseDNSARecord_directA(t *testing.T) {
-	pkt := buildDNSResponse(1, net.IPv4(1, 2, 3, 4).To4())
-	ip, err := parseDNSARecord(context.Background(), pkt, "1.1.1.1", "", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ip != "1.2.3.4" {
-		t.Fatalf("ip = %q, want 1.2.3.4", ip)
-	}
-}
-
 func buildDNSResponse(rrType uint16, rdata []byte) []byte {
 	q := []byte{7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0}
 	ansName := []byte{0xc0, 0x0c}
@@ -62,4 +52,39 @@ func buildDNSResponse(rrType uint16, rdata []byte) []byte {
 	off += len(ansName)
 	copy(out[off:], ansTail)
 	return out
+}
+
+func TestParseDNSARecord_directA(t *testing.T) {
+	pkt := buildDNSResponse(1, net.IPv4(1, 2, 3, 4).To4())
+	ip, err := parseDNSARecord(context.Background(), pkt, "1.1.1.1", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "1.2.3.4" {
+		t.Fatalf("ip = %q, want 1.2.3.4", ip)
+	}
+}
+
+func buildDNSCNAMEResponse(target string) []byte {
+	return buildDNSResponse(5, encodeDNSNameBytes(target))
+}
+
+func encodeDNSNameBytes(name string) []byte {
+	var out []byte
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		out = append(out, byte(len(label)))
+		out = append(out, label...)
+	}
+	return append(out, 0)
+}
+
+func TestParseDNSCNAMETargets(t *testing.T) {
+	pkt := buildDNSCNAMEResponse("d111111.cloudfront.net")
+	got, err := parseDNSCNAMETargets(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "d111111.cloudfront.net" {
+		t.Fatalf("got %v", got)
+	}
 }

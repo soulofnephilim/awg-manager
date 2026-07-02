@@ -233,6 +233,13 @@ func TestRouterSwitchMode_CallsService(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
 	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.switchTarget == "fakeip-tun" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if svc.switchTarget != "fakeip-tun" {
 		t.Errorf("svc.SwitchRoutingMode target = %q want fakeip-tun", svc.switchTarget)
 	}

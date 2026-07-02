@@ -279,6 +279,9 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	if err = s.persistFakeIPConfig(ctx, fcfg); err != nil {
 		return fmt.Errorf("enable fakeip-tun: persist fakeip config: %w", err)
 	}
+	if err = s.orchestratorApplyNow(); err != nil {
+		return fmt.Errorf("enable fakeip-tun: orchestrator reload: %w", err)
+	}
 
 	// Wait for sing-box to be truly ready (process + tun carrier + live fakeip
 	// DNS). The address flush already ran PRE-start (above), so the tun keeps the

@@ -21,6 +21,7 @@ import (
 
 	"log/slog"
 	"runtime"
+	"runtime/debug"
 
 	"github.com/hoaxisr/awg-manager/frontend"
 	"github.com/hoaxisr/awg-manager/internal/accesspolicy"
@@ -56,6 +57,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
 	"github.com/hoaxisr/awg-manager/internal/staticroute"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -123,6 +125,47 @@ func detectArch() string {
 		return "aarch64-3.10"
 	}
 	return ""
+}
+
+// applyGoMemoryLimits tunes THIS process's GC via runtime/debug. Two things
+// deliberately do NOT happen here:
+//   - no os.Setenv: GOGC/GOMEMLIMIT env vars are read once at runtime init,
+//     so setting them from main() is a no-op for the current process — and
+//     the mutated env would be inherited by the spawned sing-box, overriding
+//     its own deliberate defaults (GOGC=75/GOMEMLIMIT=128MiB, see
+//     internal/singbox/process.go) with the manager's much tighter limits.
+//   - explicit env vars still win: a user-provided GOGC/GOMEMLIMIT was
+//     already applied by the runtime at startup, so we skip that knob.
+func applyGoMemoryLimits(disableMemorySaving bool) {
+	for _, entry := range osdetect.GetGCEnv(disableMemorySaving) {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 || os.Getenv(parts[0]) != "" {
+			continue
+		}
+		switch parts[0] {
+		case "GOGC":
+			if pct, err := strconv.Atoi(parts[1]); err == nil {
+				debug.SetGCPercent(pct)
+			}
+		case "GOMEMLIMIT":
+			if limit, err := parseByteSize(parts[1]); err == nil {
+				debug.SetMemoryLimit(limit)
+			}
+		}
+	}
+}
+
+// parseByteSize parses the GOMEMLIMIT syntax subset osdetect emits ("16MiB").
+func parseByteSize(s string) (int64, error) {
+	n := strings.TrimSuffix(s, "MiB")
+	if n == s {
+		return 0, fmt.Errorf("unsupported byte size %q", s)
+	}
+	mib, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return mib << 20, nil
 }
 
 // deviceproxySubscriptionOutboundsAdapter adapts *subscription.Service to
@@ -289,6 +332,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to load settings: %v\n", err)
 		os.Exit(1)
 	}
+	applyGoMemoryLimits(settings.DisableMemorySaving)
 
 	awgStore := storage.NewAWGTunnelStore(
 		filepath.Join(*dataDir, "tunnels"),
@@ -1196,6 +1240,44 @@ func main() {
 			return p
 		}(),
 	})
+	// Wire selective-bypass builder. The adapter wraps selective.Builder with the
+	// router service's live config so reconcileInstalled can trigger an ipset
+	// rebuild with a single Rebuild(ctx) call.
+	selectiveGeo := selective.GeoPaths{}
+	if geoCfg, err := hydraroute.ReadConfig(); err == nil {
+		selectiveGeo.GeoSite = geoCfg.GeoSiteFiles
+		selectiveGeo.GeoIP = geoCfg.GeoIPFiles
+	}
+	selectiveBuilder := selective.NewBuilder(selective.BuilderConfig{
+		ConfigDir:       singboxOp.ConfigDir(),
+		DNSSource:       ndmsQueries.DNSProxyStatus,
+		Log:             logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSelective),
+		Bus:             eventBus,
+		Geo:             selectiveGeo,
+		OpenRuleSetJSON: routerSvc.OpenSelectiveRuleSetJSON,
+	})
+	selectiveAdapter := router.NewSelectiveBuilderAdapter(routerSvc, selectiveBuilder)
+	routerSvc.SetSelectiveBuilder(selectiveAdapter)
+	srv.SetSelectiveHandler(api.NewSelectiveHandler(
+		settingsStore,
+		singboxOp.ConfigDir(),
+		selectiveAdapter,
+		selectiveBuilder,
+	))
+	selectiveCDNRefresh := selective.StartCDNRefreshLoop(
+		selective.CDNRefreshInterval,
+		func() bool {
+			st, err := settingsStore.Load()
+			if err != nil {
+				return false
+			}
+			return st.SingboxRouter.Enabled && st.SingboxRouter.SelectiveBypass
+		},
+		selectiveAdapter.RefreshCDN,
+		logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSelective),
+	)
+	_ = selectiveCDNRefresh // stopped via process exit; no explicit Stop on shutdown today
+
 	// Exclude interfaces already bound by an existing direct outbound from the
 	// bindable picker (#323). Wired post-construction — needs routerSvc.
 	bindableAdapter.occupiedBinds = func(ctx context.Context) (map[string]bool, error) {

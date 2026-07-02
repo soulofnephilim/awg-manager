@@ -4,7 +4,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/hoaxisr/awg-manager/internal/singbox/heavyop"
 )
+
+// ReloadNow cancels any pending debounced reload and applies the merged
+// config immediately. Enable/Disable call this after SetEnabled+Save so
+// sing-box cold-starts without waiting reloadDebounce — otherwise
+// waitForSingbox burns the whole boot window before the process even
+// starts (stand-found on aarch64 off→tproxy switches).
+func (o *Orchestrator) ReloadNow() error {
+	o.mu.Lock()
+	if o.reloadTimer != nil {
+		o.reloadTimer.Stop()
+		o.reloadTimer = nil
+	}
+	o.mu.Unlock()
+	return o.Reload()
+}
 
 // scheduleReload arms (or re-arms) the debounce timer. Caller MUST
 // hold o.mu. Calling repeatedly within the window coalesces into one
@@ -32,6 +49,9 @@ func (o *Orchestrator) scheduleReload() {
 // the internal debounce timer. Safe for concurrent callers — internally
 // serialized by mu and the reloading flag.
 func (o *Orchestrator) Reload() error {
+	heavyop.Default.Lock()
+	defer heavyop.Default.Unlock()
+
 	o.mu.Lock()
 	if o.reloading {
 		o.mu.Unlock()

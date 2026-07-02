@@ -70,6 +70,33 @@ func (o *Orchestrator) LoadEffective(slot Slot) ([]byte, error) {
 	return data, nil
 }
 
+// LoadApplied returns the bytes of the slot's APPLIED config: active/ when
+// the slot is enabled, otherwise disabled/. Unlike LoadEffective it never
+// reads pending/ — callers that make enforcement decisions (e.g. the
+// reconcile self-heal for selective bypass) must not act on an un-applied
+// draft the user may still discard. Returns (nil, nil) when the slot was
+// never configured.
+func (o *Orchestrator) LoadApplied(slot Slot) ([]byte, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	meta, ok := o.slots[slot]
+	if !ok {
+		return nil, ErrUnknownSlot
+	}
+	data, err := readIfExists(o.activePath(meta))
+	if err != nil {
+		return nil, fmt.Errorf("LoadApplied active %s: %w", slot, err)
+	}
+	if data != nil {
+		return data, nil
+	}
+	data, err = readIfExists(o.disabledPath(meta))
+	if err != nil {
+		return nil, fmt.Errorf("LoadApplied disabled %s: %w", slot, err)
+	}
+	return data, nil
+}
+
 // HasDraft reports whether a pending file exists for the slot.
 // Lock-free presence check internally — acquires only briefly to read
 // the slot meta map.

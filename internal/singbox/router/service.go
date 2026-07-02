@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -17,7 +18,9 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/presets"
+	"github.com/hoaxisr/awg-manager/internal/singbox/heavyop"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
 )
@@ -306,6 +309,17 @@ type Deps struct {
 	// ranges, tun addrs, MTU, DHCP pool). Zero-value in tests; defaults
 	// wired in cmd/awg-manager. Consumed by Slice 1D Enable.
 	FakeIPTun FakeIPTunParams
+
+	// SelectiveBuilder handles ipset population for the selective-bypass
+	// feature. When non-nil and SingboxRouterSettings.SelectiveBypass is
+	// true, reconcileInstalled calls Rebuild after every iptables install
+	// that changes rules/rule-sets. When nil the feature is disabled.
+	SelectiveBuilder SelectiveBuilder
+
+	// NDMSDNSSource provides fallback DNS server addresses (NDMS router
+	// upstreams) for the selective-bypass domain resolver. Optional — nil
+	// means only sing-box DNS servers and the system resolver are used.
+	NDMSDNSSource SelectiveDNSSource
 }
 
 // routerLoggerAdapter narrows *logging.ScopedLogger to the wanLogger
@@ -336,14 +350,17 @@ type ServiceImpl struct {
 	// transitionMu serializes SwitchRoutingMode calls. It is DISTINCT from mu:
 	// Enable/Disable (which SwitchRoutingMode composes) take mu themselves, so
 	// holding mu across the whole switch would self-deadlock.
-	transitionMu            sync.Mutex
-	currentMark             string              // last-installed iptables mark; used by Reconcile to detect change
-	currentWANIPs           []string            // last-collected WAN IPs; used by Reconcile to detect change
-	currentLANBridges       []LANBridgeDNSRedir // last-discovered LAN-bridge (name, ndnproxy port) pairs; reconcile triggers re-install when this changes (e.g. NDMS hotspot reconfigured, bridge added/removed, port reassigned)
-	currentBypassPresets    []string
-	currentBypassExtraPorts   string
-	currentBypassExtraSubnets string
-	currentIngress            []string // last-installed резолвленные ingress kernel-имена
+	transitionMu sync.Mutex
+	// transitionReadinessProgress emits readiness heartbeats during
+	// waitForSingbox while SwitchRoutingMode is in flight (nil otherwise).
+	transitionReadinessProgress func(message string)
+	currentMark                 string              // last-installed iptables mark; used by Reconcile to detect change
+	currentWANIPs               []string            // last-collected WAN IPs; used by Reconcile to detect change
+	currentLANBridges           []LANBridgeDNSRedir // last-discovered LAN-bridge (name, ndnproxy port) pairs; reconcile triggers re-install when this changes (e.g. NDMS hotspot reconfigured, bridge added/removed, port reassigned)
+	currentBypassPresets        []string
+	currentBypassExtraPorts     string
+	currentBypassExtraSubnets   string
+	currentIngress              []string // last-installed резолвленные ingress kernel-имена
 
 	// netfilterStateKnown tracks whether we know for certain that the
 	// installed iptables rules match the current desired state. It starts
@@ -352,6 +369,9 @@ type ServiceImpl struct {
 	// first reconcileInstalled or Enable install forces a full re-install.
 	// After Install succeeds the flag is set to true until Disable resets it.
 	netfilterStateKnown bool
+
+	// selective tracking
+	currentSelectiveBypass bool // last-applied value of SelectiveBypass
 
 	// inspectCache backs the route-inspector's rule_set match path. Lazy
 	// constructed on first Inspect call so dev-machine builds (no
@@ -375,6 +395,12 @@ func NewService(d Deps) *ServiceImpl {
 	// creates it on first Enable.
 	refreshNetfilterHookIfPresent()
 	return &ServiceImpl{deps: d, appLog: appLog}
+}
+
+// SetSelectiveBuilder wires the selective-bypass builder post-construction.
+// Called after NewService because the adapter needs a *ServiceImpl reference.
+func (s *ServiceImpl) SetSelectiveBuilder(b SelectiveBuilder) {
+	s.deps.SelectiveBuilder = b
 }
 
 func (s *ServiceImpl) routerConfigPath() string {
@@ -435,33 +461,7 @@ func (s *ServiceImpl) loadRouterConfig() (*RouterConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load router config: %w", err)
 		}
-		if data == nil {
-			return NewEmptyConfig(), nil
-		}
-		cfg := NewEmptyConfig()
-		if err := json.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parse router config: %w", err)
-		}
-		if cfg.Inbounds == nil {
-			cfg.Inbounds = []Inbound{}
-		}
-		if cfg.Outbounds == nil {
-			cfg.Outbounds = []Outbound{}
-		}
-		if cfg.Route.RuleSet == nil {
-			cfg.Route.RuleSet = []RuleSet{}
-		}
-		if cfg.Route.Rules == nil {
-			cfg.Route.Rules = []Rule{}
-		}
-		if cfg.DNS.Servers == nil {
-			cfg.DNS.Servers = []DNSServer{}
-		}
-		if cfg.DNS.Rules == nil {
-			cfg.DNS.Rules = []DNSRule{}
-		}
-		SanitizeDNSConfig(cfg)
-		return cfg, nil
+		return parseRouterConfigBytes(data)
 	}
 	// Legacy fallback (no orchestrator): read from active path directly.
 	activePath := s.routerConfigPath()
@@ -471,6 +471,54 @@ func (s *ServiceImpl) loadRouterConfig() (*RouterConfig, error) {
 		return nil, statErr
 	}
 	return LoadConfig(activePath) // returns NewEmptyConfig per contract
+}
+
+// loadAppliedRouterConfig returns the APPLIED router config (active/, then
+// disabled/), never the pending draft. Enforcement decisions — the reconcile
+// self-heal that can persistently flip settings — must judge what is actually
+// running, not what the user has staged and may still discard.
+func (s *ServiceImpl) loadAppliedRouterConfig() (*RouterConfig, error) {
+	if s.deps.Orch != nil {
+		data, err := s.deps.Orch.LoadApplied(orchestrator.SlotRouter)
+		if err != nil {
+			return nil, fmt.Errorf("load applied router config: %w", err)
+		}
+		return parseRouterConfigBytes(data)
+	}
+	return s.loadRouterConfig()
+}
+
+// parseRouterConfigBytes unmarshals slot bytes into a RouterConfig with all
+// collection fields normalized to non-nil and DNS sanitized. nil data (slot
+// never configured) yields an empty config.
+func parseRouterConfigBytes(data []byte) (*RouterConfig, error) {
+	if data == nil {
+		return NewEmptyConfig(), nil
+	}
+	cfg := NewEmptyConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse router config: %w", err)
+	}
+	if cfg.Inbounds == nil {
+		cfg.Inbounds = []Inbound{}
+	}
+	if cfg.Outbounds == nil {
+		cfg.Outbounds = []Outbound{}
+	}
+	if cfg.Route.RuleSet == nil {
+		cfg.Route.RuleSet = []RuleSet{}
+	}
+	if cfg.Route.Rules == nil {
+		cfg.Route.Rules = []Rule{}
+	}
+	if cfg.DNS.Servers == nil {
+		cfg.DNS.Servers = []DNSServer{}
+	}
+	if cfg.DNS.Rules == nil {
+		cfg.DNS.Rules = []DNSRule{}
+	}
+	SanitizeDNSConfig(cfg)
+	return cfg, nil
 }
 
 // loadRouterConfigForMode returns the routing config for the active mode:
@@ -519,6 +567,15 @@ func (s *ServiceImpl) persistConfigDirect(ctx context.Context, cfg *RouterConfig
 		return err
 	}
 	return nil
+}
+
+// orchestratorApplyNow flushes any debounced reload and applies config.d to
+// sing-box immediately. No-op when Orch is nil (tests).
+func (s *ServiceImpl) orchestratorApplyNow() error {
+	if s.deps.Orch == nil {
+		return nil
+	}
+	return s.deps.Orch.ReloadNow()
 }
 
 // prepareNetfilter runs the common netfilter preflight: xt_TPROXY module
@@ -723,10 +780,22 @@ func (s *ServiceImpl) waitForSingbox(ctx context.Context, timeout time.Duration)
 	}
 
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	lastHeartbeat := time.Time{}
 	const pollInterval = 100 * time.Millisecond
 	for {
 		if s.singboxReady(ctx, fakeIP) {
 			return nil
+		}
+		if fn := s.transitionReadinessProgress; fn != nil && time.Since(lastHeartbeat) >= 2*time.Second {
+			elapsed := time.Since(start).Round(time.Second)
+			running, _ := s.deps.Singbox.IsRunning()
+			msg := fmt.Sprintf("запуск sing-box… %s", elapsed)
+			if running {
+				msg = fmt.Sprintf("sing-box работает, ожидаем inbounds… %s", elapsed)
+			}
+			fn(msg)
+			lastHeartbeat = time.Now()
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("sing-box did not come up within %s", timeout)
@@ -762,6 +831,12 @@ func (s *ServiceImpl) singboxReady(_ context.Context, fakeIP bool) bool {
 		return false
 	}
 	if !fakeIP {
+		// HARD gate (issue #221): only the procfs socket probe proves the
+		// router-slot TPROXY/REDIRECT inbounds actually bound. A healthy
+		// Clash API is NOT equivalent — the process can be up and serving
+		// Clash while the router inbounds failed to bind (port taken,
+		// rejected hot-reload), and installing iptables in that state
+		// blackholes all policy traffic including DNS:53.
 		return singboxListeningProbe()
 	}
 	// Only iface is needed for the carrier gate; dnsAddr/fakeipNet (which the
@@ -850,7 +925,10 @@ func (s *ServiceImpl) persistConfig(ctx context.Context, cfg *RouterConfig) erro
 		return fmt.Errorf("%s", cleanValidateError(err))
 	}
 	if running, _ := s.deps.Singbox.IsRunning(); running {
-		if err := s.deps.Singbox.Reload(); err != nil {
+		heavyop.Default.Lock()
+		err := s.deps.Singbox.Reload()
+		heavyop.Default.Unlock()
+		if err != nil {
 			return err
 		}
 	}
@@ -988,6 +1066,9 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	if err := s.persistConfigDirect(ctx, cfg); err != nil {
 		return err
 	}
+	if err := s.orchestratorApplyNow(); err != nil {
+		return fmt.Errorf("orchestrator reload after enable: %w", err)
+	}
 
 	// Wait for sing-box to be listening before iptables start redirecting
 	// traffic to its TPROXY/REDIRECT ports. HARD fail (issue #221): if
@@ -1041,6 +1122,16 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 
 	bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
 	bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
+
+	// Pre-create the AWGM-SELECTIVE ipset (empty) before iptables-restore
+	// when selective bypass is enabled. iptables-restore fails immediately
+	// if the set referenced in -m set --match-set doesn't exist yet.
+	if sr.SelectiveBypass {
+		if err := ensureSelectiveSetExists(ctx); err != nil {
+			s.appLog.Warn("selective", "", fmt.Sprintf("pre-create ipset failed: %v", err))
+		}
+	}
+
 	if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
 		PolicyMark:        mark,
 		MatchAll:          !policyMode,
@@ -1050,6 +1141,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 		BypassTCPPorts:    bypassTCP,
 		BypassCIDRs:       bypassSubnets,
 		IngressInterfaces: ingress,
+		SelectiveIPSet:    sr.SelectiveBypass,
 	}); err != nil {
 		// Stop sing-box from listening on the now-orphan TPROXY port,
 		// but DO NOT corrupt the persisted user config. With orchestrator
@@ -1072,11 +1164,20 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	s.currentBypassExtraPorts = sr.BypassExtraPorts
 	s.currentBypassExtraSubnets = sr.BypassExtraSubnets
 	s.currentIngress = ingress
+	s.currentSelectiveBypass = sr.SelectiveBypass
 	s.netfilterStateKnown = true
 
 	settings.SingboxRouter = sr
 	if err := s.deps.Settings.Save(settings); err != nil {
 		return err
+	}
+
+	// Populate the freshly-created (empty) AWGM-SELECTIVE set right away.
+	// Without this, everything between Enable and the first reconcile-driven
+	// rebuild (startup delay + tick, minutes) matches nothing in the guard
+	// and "proxied" traffic leaves via WAN in the clear.
+	if sr.SelectiveBypass {
+		s.triggerSelectiveRebuild(ctx)
 	}
 
 	s.emitStatus(ctx)
@@ -1373,6 +1474,11 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	s.currentBypassExtraPorts = ""
 	s.currentBypassExtraSubnets = ""
 	s.currentIngress = nil
+	// Reset selective tracking too: after Uninstall the guard rules are gone,
+	// so the "currently applied" selective state is false. Leaving this stale
+	// made tproxy→off→tproxy re-enables skip the rebuild (selectiveChanged
+	// stayed false) and run with a permanently empty set.
+	s.currentSelectiveBypass = false
 	s.netfilterStateKnown = false
 
 	if s.deps.Orch != nil {
@@ -1462,6 +1568,28 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	if err != nil {
 		return err
 	}
+	if sr.SelectiveBypass {
+		if err := s.validateSelectiveBypassAgainstApplied(sr); err != nil {
+			if errors.Is(err, errSelectiveIncompatible) {
+				// Definitive conflict with the APPLIED config — self-heal by
+				// persisting the disable so the guard doesn't blackhole traffic.
+				s.appLog.Warn("selective", "", err.Error()+"; disabling selective bypass")
+				settings, loadErr := s.deps.Settings.Load()
+				if loadErr == nil {
+					settings.SingboxRouter.SelectiveBypass = false
+					if saveErr := s.deps.Settings.Save(settings); saveErr != nil {
+						s.appLog.Warn("selective", "", "failed to persist selective bypass disable: "+saveErr.Error())
+					}
+				}
+				sr.SelectiveBypass = false
+			} else {
+				// Could not check (transient I/O, torn state during apply) —
+				// keep the user's setting and retry on the next tick. Flipping
+				// persisted settings on a read hiccup is not self-healing.
+				s.appLog.Warn("selective", "", err.Error()+"; keeping selective bypass, will re-validate")
+			}
+		}
+	}
 	policyMode := sr.DeviceMode == "" || sr.DeviceMode == "policy"
 	mark := ""
 	if policyMode {
@@ -1492,6 +1620,9 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	bypassExtraChanged := s.currentBypassExtraPorts != sr.BypassExtraPorts
 	bypassSubnetsChanged := s.currentBypassExtraSubnets != sr.BypassExtraSubnets
 
+	// Selective-bypass change detection.
+	selectiveChanged := s.currentSelectiveBypass != sr.SelectiveBypass
+
 	// After a daemon restart or upgrade the old awg-manager process died
 	// with no chance to run Uninstall, so stale AWGM chains, ip rules
 	// and ip routes may remain from the old process. netfilterStateKnown
@@ -1507,7 +1638,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// during an NDMS reload must not trigger a needless rebuild.
 	_, jumps, probeErr := s.deps.IPTables.Probe(ctx)
 	jumpsMissing := probeErr == nil && !jumps
-	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged
+	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged
 
 	if needsInstall {
 		if forceInitialSync {
@@ -1518,6 +1649,21 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 
 		if err := s.prepareNetfilter(ctx); err != nil {
 			return err
+		}
+
+		// If selective-bypass is enabled, the ipset MUST exist before
+		// iptables-restore runs — iptables-restore fails with "Set
+		// AWGM-SELECTIVE doesn't exist" if the set was never created.
+		// Create it empty now; it will be populated by the async rebuild
+		// triggered below. An empty set means no traffic is selectively
+		// intercepted yet, which is safe: the engine will fill it shortly.
+		if sr.SelectiveBypass {
+			if err := ensureSelectiveSetExists(ctx); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("pre-create ipset failed: %v", err))
+				// Don't abort — if xt_set is missing, iptables-restore will
+				// surface a clear error; if ipset isn't installed but SelectiveBypass
+				// was somehow set, same. Proceed and let Install fail gracefully.
+			}
 		}
 
 		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
@@ -1532,6 +1678,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 			BypassTCPPorts:    bypassTCP,
 			BypassCIDRs:       bypassSubnets,
 			IngressInterfaces: ingress,
+			SelectiveIPSet:    sr.SelectiveBypass,
 		}); err != nil {
 			s.mu.Unlock()
 			return err
@@ -1543,8 +1690,23 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 		s.currentBypassExtraPorts = sr.BypassExtraPorts
 		s.currentBypassExtraSubnets = sr.BypassExtraSubnets
 		s.currentIngress = ingress
+		s.currentSelectiveBypass = sr.SelectiveBypass
 		s.netfilterStateKnown = true
 		s.mu.Unlock()
+
+		// If selective mode is being disabled, destroy the ipset so it
+		// doesn't linger in kernel memory.
+		if !sr.SelectiveBypass {
+			if err := destroySelectiveSet(ctx); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("destroy ipset after disable: %v", err))
+			}
+			if err := s.disableSelectiveRoutesSlot(); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("disable selective routes slot: %v", err))
+			}
+			if _, err := s.stripLegacySelectiveRulesFromRouter(ctx); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("strip legacy selective rules: %v", err))
+			}
+		}
 	}
 
 	// Self-heal: a previous Install rollback or upgrade hop may
@@ -1552,6 +1714,20 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// it idempotently so sing-box keeps listening on TPROXYPort.
 	if err := s.healTProxyInbound(ctx, sr.UDPTimeout); err != nil {
 		s.appLog.Warn("heal-tproxy", "", err.Error())
+	}
+
+	// Selective-bypass: rebuild on first Enable, when toggled on, or on daemon
+	// start only if the ipset was never populated yet. Rule changes trigger
+	// rebuild explicitly via staging Apply (frontend) — no periodic refresh.
+	if sr.SelectiveBypass && s.deps.SelectiveBuilder != nil {
+		configDir := ""
+		if s.deps.Singbox != nil {
+			configDir = s.deps.Singbox.ConfigDir()
+		}
+		needsInitialBuild := selective.NeedsPopulation(ctx, configDir)
+		if selectiveChanged || (forceInitialSync && needsInitialBuild) {
+			s.triggerSelectiveRebuild(ctx)
+		}
 	}
 	return nil
 }
@@ -1699,7 +1875,9 @@ func (s *ServiceImpl) ListRules(ctx context.Context) ([]Rule, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.ruleSetMaterializer().restoreConfig(cfg).Route.Rules, nil
+	rules := s.ruleSetMaterializer().restoreConfig(cfg).Route.Rules
+	filtered, _ := stripSelectiveManagedRules(rules)
+	return filtered, nil
 }
 
 func (s *ServiceImpl) AddRule(ctx context.Context, r Rule) error {
@@ -1719,12 +1897,18 @@ func (s *ServiceImpl) MoveRule(ctx context.Context, from, to int) error {
 }
 
 func (s *ServiceImpl) SetRouteFinal(ctx context.Context, tag string) error {
-	return s.withConfig(ctx, "route", func(c *RouterConfig) error {
+	if err := s.withConfig(ctx, "route", func(c *RouterConfig) error {
 		if !s.isKnownOutboundTag(ctx, tag, c) {
 			return fmt.Errorf("unknown outbound tag %q for route.final", tag)
 		}
 		return c.SetRouteFinal(tag)
-	})
+	}); err != nil {
+		return err
+	}
+	if tag != "direct" {
+		return s.disableSelectiveBypassIfEnabled(ctx)
+	}
+	return nil
 }
 
 // isKnownOutboundTag returns true if tag is a sing-box built-in or matches
@@ -1887,6 +2071,9 @@ func (s *ServiceImpl) GetSettings(ctx context.Context) (storage.SingboxRouterSet
 func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRouterSettings) error {
 	normalized, err := NormalizeSingboxRouterSettings(sr)
 	if err != nil {
+		return err
+	}
+	if err := s.validateSelectiveBypassSettings(ctx, normalized); err != nil {
 		return err
 	}
 	settings, err := s.deps.Settings.Load()
@@ -2465,6 +2652,7 @@ func (s *ServiceImpl) StagingStatus(ctx context.Context) StagingStatus {
 // success it emits "singbox.router.staging" + "singbox.router.rules" SSE
 // invalidations.
 func (s *ServiceImpl) ApplyStaging(ctx context.Context) (orchestrator.ValidationResult, error) {
+	_ = s.healLegacySelectiveRoutesSlotIfNeeded(ctx)
 	res, err := s.deps.Orch.ApplyDraft(orchestrator.SlotRouter)
 	if err == nil && res.Ok() {
 		s.emitStagingEvent("applied")

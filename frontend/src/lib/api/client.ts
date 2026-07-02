@@ -99,6 +99,7 @@ import type {
 	RestoreOptions,
 	DnsProxyInfo,
 	CatalogPreset,
+	SelectiveStatus,
 } from '$lib/types';
 import { sanitizeDnsServerForApi } from '$lib/utils/dnsServerDetour';
 import { isMockDevMode as envIsMockDevMode } from '$lib/env';
@@ -174,12 +175,22 @@ class ApiClient {
 			throw new Error('Сессия истекла');
 		}
 
-		// Handle 503 Service Unavailable
+		const contentType = response.headers.get('content-type') || '';
+
+		// Handle 503 Service Unavailable — preserve server message when present.
 		if (response.status === 503) {
-			throw new Error('Сервер временно недоступен');
+			let message = 'Сервер временно недоступен';
+			if (contentType.includes('application/json')) {
+				try {
+					const body = (await response.json()) as ApiResponse<unknown>;
+					if (body.message) message = body.message;
+				} catch {
+					// keep default
+				}
+			}
+			throw new Error(message);
 		}
 
-		const contentType = response.headers.get('content-type') || '';
 		if (!contentType.includes('application/json')) {
 			const text = await response.text();
 			throw new Error(`Ошибка сервера (${response.status}): ${text.substring(0, 100)}`);
@@ -2198,6 +2209,38 @@ class ApiClient {
 			method: 'POST',
 		});
 	}
+
+	// #endregion
+
+	// ─────────────────────────────────────────────
+	// #region Selective Bypass
+	// ─────────────────────────────────────────────
+
+	async singboxRouterSelectiveStatus(): Promise<SelectiveStatus> {
+		return this.request('/singbox/router/selective/status');
+	}
+
+	async singboxRouterSelectiveInstallDeps(): Promise<SelectiveStatus> {
+		return this.request('/singbox/router/selective/install-deps', { method: 'POST' });
+	}
+
+	async singboxRouterSelectiveInstallConntrack(): Promise<SelectiveStatus> {
+		return this.request('/singbox/router/selective/install-conntrack', { method: 'POST' });
+	}
+
+	async singboxRouterSelectiveRebuild(): Promise<SelectiveStatus> {
+		return this.request('/singbox/router/selective/rebuild', { method: 'POST' });
+	}
+
+	async singboxRouterSelectiveSnapshotMatchers(
+		offset = 0,
+		limit = 100,
+	): Promise<{ matchers: import('$lib/types').SelectiveDomainMatcherRecord[]; total: number }> {
+		const q = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+		return this.request(`/singbox/router/selective/snapshot/matchers?${q}`);
+	}
+
+	// #endregion
 
 	// #region FakeIP config CRUD
 

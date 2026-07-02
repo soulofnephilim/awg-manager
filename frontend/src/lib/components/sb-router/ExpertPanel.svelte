@@ -15,6 +15,7 @@
 
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { subscriptionsStore } from '$lib/stores/subscriptions';
   import { singboxProxies } from '$lib/stores/singboxProxies';
@@ -117,10 +118,14 @@
 
   async function saveRouteFinal() {
     if (!routeFinalDirty || routeFinalBusy) return;
+    const wasSelective = get(singboxRouterStore.settings)?.selectiveBypass ?? false;
     routeFinalBusy = true;
     try {
       await api.singboxRouterPutRouteFinal(draftRouteFinal);
       await singboxRouterStore.loadAll();
+      if (draftRouteFinal !== 'direct' && wasSelective) {
+        notifications.info('Селективный перехват выключен: несовместим с route.final ≠ direct');
+      }
     } catch (e) {
       notifications.error(e instanceof Error ? e.message : String(e));
     } finally {

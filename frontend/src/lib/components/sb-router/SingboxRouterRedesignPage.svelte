@@ -23,6 +23,31 @@
     type RouterMode,
   } from '$lib/components/sb-router';
 
+  import SelectiveRebuildModal from './SelectiveRebuildModal.svelte';
+  import { selectiveBypass } from '$lib/stores/selectiveBypass';
+
+  const { progress: globalSelectiveProgress, modalRequested: selectiveModalRequested } = selectiveBypass;
+
+  let globalRebuildOpen = $state(false);
+
+  // Open only when explicitly requested (Apply button or engine enable).
+  $effect(() => {
+    if ($selectiveModalRequested) {
+      globalRebuildOpen = true;
+    }
+  });
+
+  function minimizeGlobalRebuild() {
+    globalRebuildOpen = false;
+    selectiveBypass.clearModalRequest();
+  }
+
+  function dismissGlobalRebuild() {
+    globalRebuildOpen = false;
+    selectiveBypass.clearModalRequest();
+    selectiveBypass.resetProgress();
+  }
+
   let activeSingboxSub = $derived($page.url.searchParams.get('sub'));
   let inspectorOpen = $state(false);
   let jsonOpen = $state(false);
@@ -134,6 +159,13 @@
 
 <RouteInspector open={inspectorOpen} onClose={() => (inspectorOpen = false)} />
 <JsonConfigDrawer open={jsonOpen} onClose={() => (jsonOpen = false)} />
+
+<SelectiveRebuildModal
+  open={globalRebuildOpen}
+  progress={$globalSelectiveProgress}
+  onMinimize={minimizeGlobalRebuild}
+  onDismiss={dismissGlobalRebuild}
+/>
 
 <style>
   .sub-back {

@@ -134,6 +134,12 @@ export interface SSEEventHandlers {
 
 	// Monitoring matrix snapshot (every scheduler tick).
 	onMonitoringMatrixUpdate?: (data: MonitoringSnapshot) => void;
+
+	// Selective-bypass: ipset rebuild progress (singbox-router:selective-progress).
+	onSingboxRouterSelectiveProgress?: (data: import('$lib/types').SelectiveProgress) => void;
+
+	// Selective-bypass: status update after rebuild or install (singbox-router:selective-status).
+	onSingboxRouterSelectiveStatus?: (data: import('$lib/types').SelectiveStatus) => void;
 }
 
 export function parseConnectedEvent(data: string): { ok?: boolean; instanceId?: string } | undefined {
@@ -199,6 +205,10 @@ export function connectSSE(handlers: SSEEventHandlers): () => void {
 
 	// Monitoring matrix snapshots
 	handle('monitoring:matrix-update', handlers.onMonitoringMatrixUpdate);
+
+	// Selective-bypass progress and status
+	handle('singbox-router:selective-progress', handlers.onSingboxRouterSelectiveProgress);
+	handle('singbox-router:selective-status', handlers.onSingboxRouterSelectiveStatus);
 
 	// Server sends "connected" event immediately on stream start
 	es.addEventListener('connected', ((e: MessageEvent) => {

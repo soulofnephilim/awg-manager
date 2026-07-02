@@ -206,7 +206,7 @@ func TestSwitch_OffToFakeIP(t *testing.T) {
 		t.Fatalf("persisted = %q/%v want fakeip-tun/true", mode, enabled)
 	}
 	// No teardown (source=off): start → provision → readiness → ready.
-	want := []string{"start:current", "provision:current", "readiness:done", "ready:done"}
+	want := []string{"start:current", "provision:current", "provision:done", "readiness:done", "ready:done"}
 	assertSteps(t, h.steps(), want)
 	term, _ := h.terminal()
 	if term.FinalState != stateFakeIPTun {
@@ -229,7 +229,7 @@ func TestSwitch_TproxyToFakeIP(t *testing.T) {
 		t.Fatalf("persisted = %q/%v want fakeip-tun/true", mode, enabled)
 	}
 	// Teardown tproxy THEN provision fakeip.
-	want := []string{"start:current", "teardown:current", "teardown:done", "provision:current", "readiness:done", "ready:done"}
+	want := []string{"start:current", "teardown:current", "teardown:done", "provision:current", "provision:done", "readiness:done", "ready:done"}
 	assertSteps(t, h.steps(), want)
 }
 
@@ -251,7 +251,7 @@ func TestSwitch_FakeIPToTproxy(t *testing.T) {
 	if mode != stateTProxy || !enabled {
 		t.Fatalf("persisted = %q/%v want tproxy/true", mode, enabled)
 	}
-	want := []string{"start:current", "teardown:current", "teardown:done", "provision:current", "readiness:done", "ready:done"}
+	want := []string{"start:current", "teardown:current", "teardown:done", "readiness:current", "provision:done", "readiness:done", "ready:done"}
 	assertSteps(t, h.steps(), want)
 }
 

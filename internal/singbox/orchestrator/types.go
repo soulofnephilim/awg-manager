@@ -20,6 +20,7 @@ const (
 	SlotTunnels       Slot = "tunnels"       // 10-tunnels.json
 	SlotAwg           Slot = "awg"           // 15-awg.json
 	SlotDNSRewrites   Slot = "dns-rewrites"  // 17-dns-rewrites.json
+	SlotSelectiveRoutes Slot = "selective-routes" // 19-selective-routes.json
 	SlotRouter        Slot = "router"        // 20-router.json
 	SlotFakeIP        Slot = "fakeip"        // 21-fakeip.json
 	SlotDeviceProxy   Slot = "deviceproxy"   // 30-deviceproxy.json
@@ -67,6 +68,7 @@ func KnownSlots() []SlotMeta {
 		{Slot: SlotTunnels, Filename: "10-tunnels.json", AlwaysOn: true},
 		{Slot: SlotAwg, Filename: "15-awg.json", AlwaysOn: true},
 		{Slot: SlotDNSRewrites, Filename: "17-dns-rewrites.json"},
+		{Slot: SlotSelectiveRoutes, Filename: "19-selective-routes.json"},
 		{Slot: SlotRouter, Filename: "20-router.json"},
 		{Slot: SlotFakeIP, Filename: "21-fakeip.json"},
 		{Slot: SlotDeviceProxy, Filename: "30-deviceproxy.json"},

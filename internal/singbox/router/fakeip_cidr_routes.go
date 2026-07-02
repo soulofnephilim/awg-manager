@@ -30,8 +30,9 @@ func isProxyRoute(r Rule) bool {
 func loopSafeProxyRule(r Rule) bool {
 	return isProxyRoute(r) &&
 		r.Type == "" && r.Mode == "" && len(r.Rules) == 0 &&
-		len(r.DomainSuffix) == 0 && len(r.SourceIPCIDR) == 0 &&
-		len(r.Port) == 0 && r.Protocol == "" && r.IPIsPrivate == nil
+		len(r.DomainSuffix) == 0 && len(r.Domain) == 0 && len(r.SourceIPCIDR) == 0 &&
+		len(r.Port) == 0 && r.Protocol == "" && r.IPIsPrivate == nil &&
+		r.AwgmManaged == ""
 }
 
 // cgnat is RFC 6598 shared address space (100.64.0.0/10) — never a valid proxy

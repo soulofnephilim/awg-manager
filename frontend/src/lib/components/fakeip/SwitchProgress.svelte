@@ -11,22 +11,22 @@
 
 	interface Props {
 		open: boolean;
-		state: FakeIPTransitionState | null;
+		transitionState: FakeIPTransitionState | null;
 		onClose: () => void;
 	}
 
-	let { open, state, onClose }: Props = $props();
+	let { open, transitionState, onClose }: Props = $props();
 
-	const done = $derived(state?.done ?? false);
-	const succeeded = $derived(done && state != null && state.finalState === state.to);
+	const done = $derived(transitionState?.done ?? false);
+	const succeeded = $derived(done && transitionState != null && transitionState.finalState === transitionState.to);
 	const failed = $derived(done && !succeeded);
 
-	const fromMode = $derived((state?.from ?? 'tproxy') as FakeIPMode);
-	const toMode = $derived((state?.to ?? 'fakeip-tun') as FakeIPMode);
+	const fromMode = $derived((transitionState?.from ?? 'tproxy') as FakeIPMode);
+	const toMode = $derived((transitionState?.to ?? 'fakeip-tun') as FakeIPMode);
 	const title = $derived(`Переключение: ${humanLabel(fromMode)} → ${humanLabel(toMode)}`);
 
-	const rows = $derived(deriveSteps(fromMode, toMode, state?.steps ?? [], { failed }));
-	const finalLabel = $derived(humanLabel((state?.finalState as FakeIPMode) ?? fromMode));
+	const rows = $derived(deriveSteps(fromMode, toMode, transitionState?.steps ?? [], { failed }));
+	const finalLabel = $derived(humanLabel((transitionState?.finalState as FakeIPMode) ?? fromMode));
 	const failedRow = $derived(rows.find((r) => r.state === 'error') ?? null);
 </script>
 
@@ -42,7 +42,11 @@
 				</span>
 				<span class="text">
 					<span class="title">{row.title}</span>
-					{#if row.detail}<span class="detail">{row.detail}</span>{/if}
+					{#if row.state === 'current' && row.liveMessage}
+						<span class="detail">{row.liveMessage}</span>
+					{:else if row.detail}
+						<span class="detail">{row.detail}</span>
+					{/if}
 				</span>
 			</li>
 		{/each}
@@ -52,7 +56,7 @@
 		<p class="result ok">✓ Режим «{finalLabel}» активен.</p>
 	{:else if failed}
 		<p class="result err">
-			✕ Откат в «{finalLabel}».{#if failedRow}&nbsp;Упавший шаг: {failedRow.title}.{/if}{#if state?.error}&nbsp;{state.error}{/if}
+			✕ Откат в «{finalLabel}».{#if failedRow}&nbsp;Упавший шаг: {failedRow.title}.{/if}{#if transitionState?.error}&nbsp;{transitionState.error}{/if}
 		</p>
 	{/if}
 
