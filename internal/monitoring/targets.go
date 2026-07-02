@@ -61,11 +61,6 @@ type Tunnel struct {
 	UrltestGroup string `json:"urltestGroup,omitempty"`
 }
 
-// BaseTargets is empty: cross-target probing (Cloudflare/Google/Quad9 against
-// every tunnel) was removed together with the matrix UI. The scheduler now
-// probes only each tunnel's self-check cell.
-var BaseTargets = []Target{}
-
 // EffectiveTargets returns one connectivity-check (self) target per unique
 // SelfTarget host. Cross-target probing was removed with the matrix UI;
 // only the self-check cell feeds the per-tunnel connectivity indicator.
