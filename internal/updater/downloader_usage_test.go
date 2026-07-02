@@ -266,7 +266,7 @@ func TestUpgradeWithDownloader_UsesFileRequest(t *testing.T) {
 	t.Cleanup(func() { startDetachedUpgrade = oldStart })
 
 	url := "http://repo.local/aarch64-k3.10/awg-manager_2.12.0_aarch64-3.10-kn.ipk?token=x"
-	if err := upgradeWithDownloader(context.Background(), url, dl); err != nil {
+	if err := upgradeWithDownloader(context.Background(), url, "", dl); err != nil {
 		t.Fatalf("upgradeWithDownloader: %v", err)
 	}
 	if seen.Request.Purpose != "awgm-update-ipk" {

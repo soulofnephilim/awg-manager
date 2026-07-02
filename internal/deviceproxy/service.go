@@ -42,7 +42,6 @@ type AWGOutboundsCatalog interface {
 type AWGTagInfo struct {
 	Tag   string
 	Label string
-	Kind  string
 	Iface string
 }
 

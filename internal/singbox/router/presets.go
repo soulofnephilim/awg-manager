@@ -3,7 +3,6 @@ package router
 import (
 	"fmt"
 	"net"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -39,17 +38,6 @@ var knownPresets = map[string]portSet{
 	"l2tp":        {UDP: []int{500, 4500, 1701}},
 	"ntp":         {UDP: []int{123}},
 	"netbios-smb": {UDP: []int{137, 138}, TCP: []int{139, 445}},
-}
-
-// KnownPresetNames returns the sorted list of valid preset names.
-// Used by ValidateSingboxRouterSettings.
-func KnownPresetNames() []string {
-	names := make([]string, 0, len(knownPresets))
-	for k := range knownPresets {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // resolveBypassPorts collects the final UDP and TCP port/range lists from

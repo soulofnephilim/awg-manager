@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 // Paths are package-level vars so tests can override them via t.TempDir().
@@ -88,13 +90,5 @@ func WriteWholeFile(filePath, content string) error {
 }
 
 func atomicWrite(filePath, content string) error {
-	tmpPath := filePath + ".awgm.tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("hydraroute: write tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("hydraroute: rename tmp: %w", err)
-	}
-	return nil
+	return storage.AtomicWrite(filePath, []byte(content))
 }

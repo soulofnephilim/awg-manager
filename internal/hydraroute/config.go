@@ -316,10 +316,6 @@ func patchSingleScalarKey(lowerKey string, value string) error {
 	return atomicWrite(hrConfPath, out.String())
 }
 
-func patchMultiValueKey(lowerKey string, values []string) error {
-	return patchMultiValueKeys([]string{lowerKey}, map[string][]string{lowerKey: values})
-}
-
 func patchMultiValueKeys(order []string, updates map[string][]string) error {
 	for k := range updates {
 		found := false

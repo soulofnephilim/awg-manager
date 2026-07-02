@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/hoaxisr/awg-manager/internal/sys/netif"
 )
 
 type fakeNDMS struct {
@@ -108,7 +110,7 @@ func TestCreateIPHost_InvalidatesCacheOnSuccess(t *testing.T) {
 // must NOT issue a create POST — that's what triggered NDMS to log
 // 'Core::Configurator: not found: "ip/host/awgm-dnscheck.test"'.
 func TestEnsureIPHost_SkipsPostWhenAlreadyCorrect(t *testing.T) {
-	routerIP := getBr0IP()
+	routerIP := netif.FirstIPv4("br0")
 	if routerIP == "" {
 		t.Skip("no br0 IP on this test host")
 	}

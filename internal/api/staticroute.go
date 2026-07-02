@@ -170,9 +170,8 @@ func (h *StaticRouteHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "Missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 
@@ -205,9 +204,8 @@ func (h *StaticRouteHandler) SetEnabled(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "Missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 

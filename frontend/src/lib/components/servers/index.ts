@@ -2,7 +2,6 @@ export { default as ServerCard } from './ServerCard.svelte';
 export { default as PeerTableSortHeader } from './PeerTableSortHeader.svelte';
 export { default as PeerSortControls } from './PeerSortControls.svelte';
 export { default as ConfGeneratorModal } from './ConfGeneratorModal.svelte';
-export { default as AddServerModal } from './AddServerModal.svelte';
 export { default as ManagedServerCard } from './ManagedServerCard.svelte';
 export { default as ManagedPeerTable } from './ManagedPeerTable.svelte';
 export { default as ManagedPeerRow } from './ManagedPeerRow.svelte';

@@ -63,6 +63,7 @@
 		Power,
 	} from "lucide-svelte";
 	import { downloadErrorToText } from "$lib/utils/downloadError";
+	import { copyToClipboard } from "$lib/utils/clipboard";
 
 	const expandUsageLevel = $derived($page.url.searchParams.has('mode'));
 	const highlightFeedbackFab = $derived($page.url.searchParams.has('feedbackFab'));
@@ -367,42 +368,7 @@ $effect(() => {
 			notifications.info("Сначала сгенерируйте API ключ");
 			return;
 		}
-		const fallbackCopy = (text: string): boolean => {
-			try {
-				const textarea = document.createElement("textarea");
-				textarea.value = text;
-				textarea.setAttribute("readonly", "");
-				textarea.style.position = "fixed";
-				textarea.style.top = "-1000px";
-				textarea.style.left = "-1000px";
-				textarea.style.opacity = "0";
-				document.body.appendChild(textarea);
-				textarea.focus();
-				textarea.select();
-				textarea.setSelectionRange(0, textarea.value.length);
-				const copied = document.execCommand("copy");
-				document.body.removeChild(textarea);
-				return copied;
-			} catch {
-				return false;
-			}
-		};
-
-		let copied = false;
-		try {
-			if (navigator.clipboard?.writeText) {
-				await navigator.clipboard.writeText(key);
-				copied = true;
-			}
-		} catch {
-			copied = false;
-		}
-
-		if (!copied) {
-			copied = fallbackCopy(key);
-		}
-
-		if (copied) {
+		if (await copyToClipboard(key)) {
 			notifications.success("API ключ скопирован в буфер обмена");
 		} else {
 			notifications.error("Не удалось скопировать API ключ");

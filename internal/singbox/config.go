@@ -937,10 +937,6 @@ func (c *Config) pruneAWGOutbounds(keep map[string]string) {
 	c.setOutbounds(out)
 }
 
-func (c *Config) ensureDeviceProxyRouteRule() {
-	c.ensureDeviceProxyInstanceRouteRule(deviceProxyInboundTag, deviceProxySelectorTag)
-}
-
 func (c *Config) ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag string) {
 	rule := map[string]any{
 		"inbound":  inboundTag,
@@ -960,10 +956,6 @@ func (c *Config) ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag stri
 		filtered = append(filtered, v)
 	}
 	c.setRouteRules(append([]any{rule}, filtered...))
-}
-
-func (c *Config) removeDeviceProxyRouteRule() {
-	c.removeDeviceProxyInstanceRouteRule(deviceProxyInboundTag)
 }
 
 func (c *Config) removeDeviceProxyInstanceRouteRule(inboundTag string) {
@@ -987,6 +979,16 @@ func (c *Config) removeDeviceProxyInstanceRouteRule(inboundTag string) {
 // new config.d/ layout (00-base.json + 10-tunnels.json) on first run.
 // No-op when config.d already exists. Used by Operator.New to handle
 // upgrades from pre-router-engine builds.
+//
+// It splits AND deletes config.json in one pass: doing the tunnels split
+// here (not delegating to ensureLegacyConfigMigrated) keeps the two
+// migration paths mutually exclusive. Delegating the tunnels half while
+// leaving config.json behind makes ensureLegacyConfigMigrated ALSO run and
+// copy the legacy dns block into 10-tunnels.json, colliding with the dns
+// block this function writes into 00-base.json (configmerge rejects
+// duplicate dns.servers tags → sing-box dead after upgrade). It also
+// narrows route to {rules} only, dropping route.final/rule_set. Keep the
+// blind full-split here.
 func MigrateLegacyConfigDir(dir string) error {
 	configDir := filepath.Join(dir, "config.d")
 	if _, err := os.Stat(configDir); err == nil {
@@ -1034,13 +1036,14 @@ func MigrateLegacyConfigDir(dir string) error {
 	return os.Remove(legacyPath)
 }
 
-// writeJSONFile is the shared atomic-ish JSON writer used by
+// writeJSONFile is the shared atomic JSON writer used by
 // MigrateLegacyConfigDir + ensureBaseConfig. Marshals with indent for
-// human-editable fragments.
+// human-editable fragments. Uses the fsync'ed temp+rename writer so a power
+// loss mid-write cannot leave a truncated config fragment behind.
 func writeJSONFile(path string, data any) error {
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0644)
+	return storage.AtomicWrite(path, raw)
 }

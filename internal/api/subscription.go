@@ -652,9 +652,8 @@ func (h *SubscriptionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	sub, err := h.svc.Get(id)
@@ -684,7 +683,10 @@ func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
+	id, ok := requireQueryID(w, r)
+	if !ok {
+		return
+	}
 	var req UpdateSubscriptionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
@@ -739,9 +741,8 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.BadRequest(w, "id required")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if sub, err := h.svc.Get(id); err == nil {
@@ -811,7 +812,10 @@ func (h *SubscriptionHandler) ActiveMember(w http.ResponseWriter, r *http.Reques
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
+	id, ok := requireQueryID(w, r)
+	if !ok {
+		return
+	}
 	h.log.Info("subscription-active-member", id, "requested via API")
 	var req ActiveMemberRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -851,9 +855,8 @@ func (h *SubscriptionHandler) ActiveNow(w http.ResponseWriter, r *http.Request) 
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	h.log.Info("subscription-active-now", id, "requested via API")
@@ -888,9 +891,8 @@ func (h *SubscriptionHandler) GetStream(w http.ResponseWriter, r *http.Request) 
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 
@@ -960,7 +962,10 @@ func (h *SubscriptionHandler) OrphansDelete(w http.ResponseWriter, r *http.Reque
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
+	id, ok := requireQueryID(w, r)
+	if !ok {
+		return
+	}
 	h.log.Info("subscription-orphans-delete", id, "requested via API")
 	if err := h.svc.DeleteOrphans(r.Context(), id); err != nil {
 		response.InternalError(w, err.Error())
@@ -977,9 +982,8 @@ func (h *SubscriptionHandler) RejectedToInfo(w http.ResponseWriter, r *http.Requ
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	var req MoveRejectedToInfoRequest
@@ -1012,9 +1016,8 @@ func (h *SubscriptionHandler) InfoRemove(w http.ResponseWriter, r *http.Request)
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	var req RemoveInfoItemRequest
@@ -1059,9 +1062,8 @@ func (h *SubscriptionHandler) AddMember(w http.ResponseWriter, r *http.Request) 
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	h.log.Info("subscription-member-add", id, "requested via API")
@@ -1110,9 +1112,8 @@ func (h *SubscriptionHandler) RemoveMember(w http.ResponseWriter, r *http.Reques
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	h.log.Info("subscription-member-remove", id, "requested via API")
@@ -1164,9 +1165,8 @@ func (h *SubscriptionHandler) ExcludeMembers(w http.ResponseWriter, r *http.Requ
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	h.log.Info("subscription-member-exclude", id, "requested via API")
@@ -1204,9 +1204,8 @@ func (h *SubscriptionHandler) RestoreMembers(w http.ResponseWriter, r *http.Requ
 		response.MethodNotAllowed(w)
 		return
 	}
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	h.log.Info("subscription-member-restore", id, "requested via API")

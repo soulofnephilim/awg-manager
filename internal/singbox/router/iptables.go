@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 	sysiptables "github.com/hoaxisr/awg-manager/internal/sys/iptables"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
@@ -564,18 +565,16 @@ func (it *IPTables) Install(ctx context.Context, spec RestoreInputSpec) error {
 	return nil
 }
 
+// Both files are consumed by OTHER software at arbitrary times (NDMS executes
+// the hook on every firewall reload; the hook feeds the rules file to
+// iptables-restore), so they must never be observable half-written — use the
+// fsync'ed temp-file+rename writer, not a truncate-in-place WriteFile.
 func writeNetfilterRulesFile(input string) error {
-	if err := os.MkdirAll(filepath.Dir(netfilterRulesPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(netfilterRulesPath, []byte(input), 0644)
+	return storage.AtomicWritePerm(netfilterRulesPath, []byte(input), 0644)
 }
 
 func writeNetfilterHook() error {
-	if err := os.MkdirAll(filepath.Dir(netfilterHookPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(netfilterHookPath, []byte(netfilterHookScript()), 0755)
+	return storage.AtomicWritePerm(netfilterHookPath, []byte(netfilterHookScript()), 0755)
 }
 
 // netfilterHookScript renders the netfilter.d hook with all placeholders

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/ndms/types"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
@@ -452,15 +451,6 @@ func extractRouteGetVia(output string) string {
 		}
 	}
 	return ""
-}
-
-func (r *Runner) collectLogs() []logging.LogEntry {
-	if r.deps.LogService == nil {
-		return nil
-	}
-	// Diagnostics report keeps only warn/error-level journal entries.
-	// logging.LevelWarn includes both WARN and ERROR via IsVisible().
-	return r.deps.LogService.GetLogs("", string(logging.LevelWarn))
 }
 
 // --- Helpers ---

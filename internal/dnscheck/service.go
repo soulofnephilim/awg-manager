@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/sys/netif"
 )
 
 const probeDomain = "awgm-dnscheck.test"
@@ -93,7 +93,7 @@ func NewService(
 // 'Core::Configurator: not found: "ip/host/awgm-dnscheck.test"' because
 // it resolved the leaf path before creating.
 func (s *Service) EnsureIPHost(ctx context.Context) {
-	routerIP := getBr0IP()
+	routerIP := netif.FirstIPv4("br0")
 	if routerIP == "" {
 		s.appLog.Warn("ensure-ip-host", probeDomain, "br0 has no IPv4, skipping")
 		return
@@ -318,29 +318,4 @@ func (s *Service) resolveHostname(ctx context.Context, ip string) string {
 		}
 	}
 	return ip
-}
-
-// getBr0IP returns the first IPv4 address of the br0 interface.
-func getBr0IP() string {
-	iface, err := net.InterfaceByName("br0")
-	if err != nil {
-		return ""
-	}
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return ""
-	}
-	for _, addr := range addrs {
-		var ip net.IP
-		switch v := addr.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		}
-		if ip != nil && ip.To4() != nil {
-			return ip.To4().String()
-		}
-	}
-	return ""
 }

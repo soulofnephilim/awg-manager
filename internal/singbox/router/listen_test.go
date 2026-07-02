@@ -1,6 +1,8 @@
 package router
 
 import (
+	"encoding/binary"
+	"fmt"
 	"net/netip"
 	"testing"
 )
@@ -88,22 +90,29 @@ func TestFakeIPPoolRoutePresent_RejectsInvalidInputs(t *testing.T) {
 	}
 }
 
+// procRouteHex renders a big-endian address the way the kernel prints it in
+// /proc/net/route: %08X of the __be32, i.e. in host byte order.
+func procRouteHex(addr [4]byte) string {
+	return fmt.Sprintf("%08X", binary.NativeEndian.Uint32(addr[:]))
+}
+
 func TestParseProcRouteHex(t *testing.T) {
-	// /proc/net/route stores 10.128.0.0 as little-endian "0000800A".
-	got, ok := parseProcRouteHex("0000800A")
+	// /proc/net/route stores 10.128.0.0 in host order: "0000800A" on
+	// little-endian, "0A800000" on big-endian.
+	got, ok := parseProcRouteHex(procRouteHex([4]byte{10, 128, 0, 0}))
 	if !ok {
 		t.Fatal("parse failed for valid 8-char hex")
 	}
 	if want := [4]byte{10, 128, 0, 0}; got != want {
-		t.Fatalf("parseProcRouteHex(0000800A) = %v, want %v", got, want)
+		t.Fatalf("parseProcRouteHex(10.128.0.0) = %v, want %v", got, want)
 	}
-	// Mask /10 = 255.192.0.0 stored little-endian as "0000C0FF".
-	gotMask, ok := parseProcRouteHex("0000C0FF")
+	// Mask /10 = 255.192.0.0.
+	gotMask, ok := parseProcRouteHex(procRouteHex([4]byte{255, 192, 0, 0}))
 	if !ok {
 		t.Fatal("parse failed for mask hex")
 	}
 	if want := [4]byte{255, 192, 0, 0}; gotMask != want {
-		t.Fatalf("parseProcRouteHex(0000C0FF) = %v, want %v", gotMask, want)
+		t.Fatalf("parseProcRouteHex(255.192.0.0) = %v, want %v", gotMask, want)
 	}
 	if _, ok := parseProcRouteHex("short"); ok {
 		t.Error("must reject non-8-char input")

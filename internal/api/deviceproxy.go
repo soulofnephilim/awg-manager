@@ -375,9 +375,8 @@ func (h *DeviceProxyHandler) GetInstanceRuntime(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 
@@ -409,9 +408,8 @@ func (h *DeviceProxyHandler) SelectInstanceRuntime(w http.ResponseWriter, r *htt
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 
@@ -481,9 +479,8 @@ func (h *DeviceProxyHandler) GetInstance(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 
@@ -558,9 +555,8 @@ func (h *DeviceProxyHandler) DeleteInstance(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	applied, err := h.svc.DeleteInstance(r.Context(), id)
@@ -619,9 +615,8 @@ func (h *DeviceProxyHandler) CheckInstanceExternalIP(w http.ResponseWriter, r *h
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	service := r.URL.Query().Get("service")

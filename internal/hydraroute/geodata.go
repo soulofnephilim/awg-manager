@@ -19,6 +19,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/sys/httpclient"
 	"github.com/hoaxisr/awg-manager/internal/sys/httpdownload"
 )
 
@@ -843,6 +844,9 @@ func (s *GeoDataStore) load() error {
 
 	var doc geoDataJSON
 	if err := json.Unmarshal(data, &doc); err != nil {
+		// Quarantine so the next List()→save doesn't persist an empty
+		// catalog over the recoverable file (losing custom source URLs).
+		storage.QuarantineCorrupt(s.storagePath, err)
 		return fmt.Errorf("parse %s: %w", s.storagePath, err)
 	}
 
@@ -944,13 +948,6 @@ const maxGeoFileSize = 200 << 20 // 200 MB
 // without letting a runaway request hang forever.
 const downloadTimeout = 15 * time.Minute
 
-// downloadFile downloads rawURL to dest with a generous overall timeout and a
-// hard size cap. Uses atomic write: downloads to a temp file, then renames.
-// onProgress (optional) receives streaming byte counters during the copy.
-func downloadFile(rawURL, dest string, onProgress ProgressFn) (size int64, err error) {
-	return downloadFileWithClient(context.Background(), nil, rawURL, dest, onProgress)
-}
-
 func downloadFileWithClient(ctx context.Context, client *http.Client, rawURL, dest string, onProgress ProgressFn) (size int64, err error) {
 	// Defense-in-depth: re-validate scheme before making the request.
 	if u, parseErr := url.Parse(rawURL); parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") {
@@ -973,7 +970,16 @@ func downloadFileWithClient(ctx context.Context, client *http.Client, rawURL, de
 	req.Header.Set("User-Agent", "curl/8.7.1")
 
 	if client == nil {
-		client = &http.Client{}
+		// Build the direct-download fallback on the canonical httpclient base
+		// so it inherits the pinned HTTP/1.1 ALPN + ForceAttemptHTTP2=false —
+		// geo mirrors like raw.githubusercontent.com return EOF/malformed h2
+		// otherwise (the failure httpclient exists to prevent).
+		tr, terr := httpclient.NewTransport(httpclient.TransportConfig{})
+		if terr != nil || tr == nil {
+			client = &http.Client{}
+		} else {
+			client = &http.Client{Transport: tr}
+		}
 	}
 
 	resp, err := client.Do(req)

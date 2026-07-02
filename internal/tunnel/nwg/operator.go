@@ -787,10 +787,9 @@ func (o *OperatorNativeWG) ResolveActiveWAN(ctx context.Context, stored *storage
 	return sysName
 }
 
-// nextFreeIndex finds the next available Wireguard index via cached InterfaceStore.
-// Раньше делал direct GetRaw + parseRCIInterfaceList; теперь идёт через
-// query.InterfaceStore.List() который кэширует bootstrap. Cold path (only
-// at tunnel creation) — миграция нужна для чистой архитектуры, не perf.
+// nextFreeIndex finds the next available Wireguard index via cached
+// InterfaceStore.List() (bootstrap-cached). Cold path — only at tunnel
+// creation.
 func (o *OperatorNativeWG) nextFreeIndex(ctx context.Context) (int, error) {
 	ifaces, err := o.queries.Interfaces.List(ctx)
 	if err != nil {

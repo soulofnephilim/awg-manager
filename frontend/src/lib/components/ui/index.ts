@@ -1,7 +1,6 @@
 export { default as FormToggle } from './FormToggle.svelte';
 export { default as Modal } from './Modal.svelte';
 export { default as ConfirmModal } from './ConfirmModal.svelte';
-export { default as SaveStatusIndicator } from './SaveStatusIndicator.svelte';
 export { default as SpeedGauge } from './SpeedGauge.svelte';
 export { default as StoreStatusBadge } from './StoreStatusBadge.svelte';
 export { default as Toggle } from './Toggle.svelte';
@@ -34,8 +33,6 @@ export { default as VersionBadge } from './VersionBadge.svelte';
 export type { VersionBadgeKind, BackendValue, AwgValue } from './VersionBadge.svelte';
 export { default as PukhososSprite } from './PukhososSprite.svelte';
 export type { PukhososAnimation } from './PukhososSprite.svelte';
-export { default as StatRow } from './StatRow.svelte';
-export type { StatTile, StatTileAccent } from './StatRow.svelte';
 export { default as LatencySparkline } from './LatencySparkline.svelte';
 export { default as PingButton } from './PingButton.svelte';
 export { default as TunnelListActions } from './TunnelListActions.svelte';

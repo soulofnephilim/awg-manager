@@ -80,9 +80,19 @@ start_service() {
 }
 
 # --- Проверка работоспособности ---
+# curl не входит в зависимости пакета и на свежем Entware его обычно нет —
+# без fallback на busybox wget проверка всегда «падала» с ложным warning.
+probe_health() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -sf "$1" >/dev/null 2>&1
+    else
+        wget -q -O /dev/null "$1" 2>/dev/null
+    fi
+}
+
 health_check() {
     PORT=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-        /opt/etc/awg-manager/settings.json 2>/dev/null)
+        /opt/etc/awg-manager/settings.json 2>/dev/null | head -n 1)
     [ -z "$PORT" ] && PORT=2222
 
     info "Проверяю работоспособность (порт $PORT)..."
@@ -91,7 +101,7 @@ health_check() {
     max_attempts=3
     while [ "$attempts" -lt "$max_attempts" ]; do
         attempts=$((attempts + 1))
-        if curl -sf "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+        if probe_health "http://127.0.0.1:${PORT}/api/health"; then
             info "Сервис работает!"
             return 0
         fi

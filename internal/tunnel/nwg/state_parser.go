@@ -111,21 +111,3 @@ func parseConnectedField(raw json.RawMessage) string {
 	}
 	return ""
 }
-
-// parseRCIInterfaceList parses the raw RCI JSON response from /show/interface/
-// which returns a map of interface objects keyed by interface ID.
-// It filters by type == "Wireguard" and returns matching interface names.
-func parseRCIInterfaceList(data []byte) ([]string, error) {
-	var allIfaces map[string]types.WGInterface
-	if err := json.Unmarshal(data, &allIfaces); err != nil {
-		return nil, fmt.Errorf("decode rci interface list: %w", err)
-	}
-
-	var names []string
-	for _, iface := range allIfaces {
-		if strings.EqualFold(iface.Type, "Wireguard") {
-			names = append(names, iface.ID)
-		}
-	}
-	return names, nil
-}

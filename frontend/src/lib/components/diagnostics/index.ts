@@ -1,4 +1,3 @@
-export { default as DiagnosticsTestList } from './DiagnosticsTestList.svelte';
 export { default as DiagnosticsTestItem } from './DiagnosticsTestItem.svelte';
 export { default as LogsLiveIndicator } from './LogsLiveIndicator.svelte';
 export { default as LogRow } from './LogRow.svelte';

@@ -173,7 +173,6 @@ func (h *ServersHandler) SetNAT(w http.ResponseWriter, r *http.Request, name str
 		return
 	}
 	if err := h.settings.UpdateServerInterfaceMeta(name, func(m *storage.ServerInterfaceMeta) error {
-		m.NATMode = mode
 		if mode == "internet-only" {
 			m.NATStaticWAN = wan
 		} else {

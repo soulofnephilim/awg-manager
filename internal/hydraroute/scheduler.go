@@ -67,8 +67,13 @@ func (s *GeoRefreshScheduler) run() {
 	}
 	for {
 		if s.shouldRefresh() {
-			s.doRefresh(ctx)
-			s.lastRefresh = time.Now()
+			// Stamp only successful runs: on cold boot the clock may still be
+			// at 1970 until NTP syncs, every TLS fetch fails "not yet valid",
+			// and stamping the failure would silently delay the retry by the
+			// full interval instead of the next tick.
+			if s.doRefresh(ctx) {
+				s.lastRefresh = time.Now()
+			}
 		}
 		select {
 		case <-time.After(geoSchedulerTick):
@@ -120,29 +125,34 @@ func (s *GeoRefreshScheduler) shouldRefreshDaily(targetTime string) bool {
 	return true
 }
 
-func (s *GeoRefreshScheduler) doRefresh(parent context.Context) {
+func (s *GeoRefreshScheduler) doRefresh(parent context.Context) bool {
 	ctx, cancel := context.WithTimeout(parent, geoRefreshTimeout)
 	defer cancel()
 
 	gds := s.svc.GetGeoData()
 	if gds == nil {
-		return
+		return false
 	}
 	client, label, closeFn, err := s.resolve(ctx)
 	if err != nil {
 		// Stale/removed route: log and skip — do NOT silently fall back to direct.
 		s.appLog.Warn("geo-auto-refresh", "", "resolve download route: "+err.Error())
-		return
+		return false
 	}
 	defer closeFn()
 
+	ok := true
 	if _, err := gds.UpdateAllWithClientVia(ctx, client, label); err != nil {
 		s.appLog.Warn("geo-auto-refresh", "", "update via "+label+": "+err.Error())
+		ok = false
 		// fall through — still sync whatever succeeded
 	}
 	if err := s.svc.SyncGeoFilesToConfig(); err != nil {
 		s.appLog.Warn("geo-auto-refresh", "", "sync config: "+err.Error())
-		return
+		return false
 	}
-	s.appLog.Info("geo-auto-refresh", "", "completed via "+label)
+	if ok {
+		s.appLog.Info("geo-auto-refresh", "", "completed via "+label)
+	}
+	return ok
 }

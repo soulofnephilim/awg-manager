@@ -184,12 +184,6 @@ func (s *Service) checkHandshake(tunnelID string) (*ConnectivityResult, error) {
 	return &ConnectivityResult{Connected: false, Reason: "no handshake info"}, nil
 }
 
-// CheckConnectivityByInterface performs connectivity test using a kernel interface name directly.
-// Used for system tunnels where we don't have a managed tunnel ID.
-func CheckConnectivityByInterface(ctx context.Context, ifaceName string) *ConnectivityResult {
-	return CheckConnectivityByInterfaceURL(ctx, ifaceName, storage.DefaultConnectivityCheckURL)
-}
-
 // CheckConnectivityByInterfaceURL performs connectivity test using a kernel
 // interface name directly and the supplied HTTP check URL.
 func CheckConnectivityByInterfaceURL(ctx context.Context, ifaceName string, checkURL string) *ConnectivityResult {

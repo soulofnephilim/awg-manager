@@ -181,9 +181,10 @@ func (s *Service) ApplyUpgrade(ctx context.Context) error {
 		return ErrUpgradeInProgress
 	}
 
-	var downloadURL string
+	var downloadURL, wantSHA256 string
 	if s.cached != nil {
 		downloadURL = s.cached.DownloadURL
+		wantSHA256 = s.cached.SHA256
 	}
 	if downloadURL == "" {
 		s.mu.Unlock()
@@ -191,12 +192,22 @@ func (s *Service) ApplyUpgrade(ctx context.Context) error {
 	}
 	s.upgrading = true
 	s.mu.Unlock()
-	if err := upgradeWithDownloader(ctx, downloadURL, s.downloader); err != nil {
+	if err := upgradeWithDownloader(ctx, downloadURL, wantSHA256, s.downloader); err != nil {
 		s.mu.Lock()
 		s.upgrading = false
 		s.mu.Unlock()
 		return err
 	}
+	// On success opkg restarts this daemon, so the flag never needs manual
+	// clearing. But if the detached install fails silently (opkg lock, disk
+	// full), the flag would otherwise stay set forever and every later apply
+	// would return ErrUpgradeInProgress until a manual restart. Give the
+	// install a generous window, then re-allow retries.
+	time.AfterFunc(10*time.Minute, func() {
+		s.mu.Lock()
+		s.upgrading = false
+		s.mu.Unlock()
+	})
 	return nil
 }
 
@@ -209,17 +220,6 @@ func (s *Service) GetChangelog(ctx context.Context, fromVer, toVer string) ([]En
 		return nil, err
 	}
 	return Slice(entries, fromVer, toVer), nil
-}
-
-// GetChangelogSingle fetches the monolithic CHANGELOG.md and returns
-// only the entry that exactly matches version, or nil if there is no
-// such entry.
-func (s *Service) GetChangelogSingle(ctx context.Context, version string) (*Entry, error) {
-	entries, err := s.changelog.Fetch(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return Single(entries, version), nil
 }
 
 // GetChangelogMinor returns all CHANGELOG entries for the same major.minor

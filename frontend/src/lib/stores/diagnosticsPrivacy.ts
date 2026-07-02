@@ -1,40 +1,15 @@
-import { writable } from 'svelte/store';
+import { createPersistedFlag } from './persisted';
 
-const STORAGE_KEY = 'awgm.diagnostics.sanitizeLogs';
+const store = createPersistedFlag('awgm.diagnostics.sanitizeLogs', true);
 
-function readInitial(): boolean {
-  if (typeof localStorage === 'undefined') return true;
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw === null) return true;
-  return raw !== '0';
-}
-
-function persist(value: boolean) {
-  if (typeof localStorage === 'undefined') return;
-  localStorage.setItem(STORAGE_KEY, value ? '1' : '0');
-}
-
-function createDiagnosticsSanitized() {
-  const { subscribe, set, update } = writable<boolean>(readInitial());
-
-  return {
-    subscribe,
-    set(value: boolean) {
-      persist(value);
-      set(value);
-    },
-    toggle() {
-      update((value) => {
-        const next = !value;
-        persist(next);
-        return next;
-      });
-    },
-  };
-}
-
-export const diagnosticsSanitized = createDiagnosticsSanitized();
+export const diagnosticsSanitized = {
+	subscribe: store.subscribe,
+	set: store.set,
+	toggle() {
+		store.update((value) => !value);
+	},
+};
 
 export function toggleDiagnosticsSanitized() {
-  diagnosticsSanitized.toggle();
+	diagnosticsSanitized.toggle();
 }

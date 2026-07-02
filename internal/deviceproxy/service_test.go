@@ -198,7 +198,7 @@ func TestService_ListOutbounds_IncludesSystemTunnels(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
 	awgCatalog := &fakeAWGOutboundsCatalog{
 		tags: []AWGTagInfo{
-			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Kind: "system", Iface: "nwg0"},
+			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Iface: "nwg0"},
 		},
 	}
 	s := NewService(Deps{Store: store, AWGOutbounds: awgCatalog})
@@ -276,7 +276,7 @@ func TestService_SaveConfig_AppliesToSingbox_SystemTunnels(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
 	awgCatalog := &fakeAWGOutboundsCatalog{
 		tags: []AWGTagInfo{
-			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Kind: "system", Iface: "nwg0"},
+			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Iface: "nwg0"},
 		},
 	}
 	s := NewService(Deps{Store: store, Singbox: sb, NDMSQuery: ndms, AWGOutbounds: awgCatalog})

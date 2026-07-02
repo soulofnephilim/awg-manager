@@ -199,7 +199,7 @@ func (a *SingboxAdapter) TunnelOutbounds() []TunnelOutboundInfo {
 }
 
 func (a *SingboxAdapter) IsRunning() bool {
-	running, _ := a.op.IsRunningPublic()
+	running, _ := a.op.IsRunning()
 	return running
 }
 

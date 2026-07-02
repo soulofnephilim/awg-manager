@@ -15,6 +15,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
+	"github.com/hoaxisr/awg-manager/internal/sys/httpclient"
 )
 
 const amneziaCPOrigin = "https://cp.amnezia.org"
@@ -49,16 +50,27 @@ func configureAmneziaCPTransport(tr *http.Transport) {
 	applyAmneziaCPTimeouts(tr)
 }
 
+// newAmneziaCPTransport builds the direct-WAN fallback transport on the
+// canonical httpclient base so it inherits the pinned HTTP/1.1 ALPN and the
+// ForceAttemptHTTP2=false guard (cp.amnezia.org's Fastly front returns
+// EOF/"malformed HTTP response" on h2 — the exact failure httpclient exists
+// to prevent). Env proxy + amnezia dialer/timeouts are layered on top.
+func newAmneziaCPTransport() *http.Transport {
+	tr, err := httpclient.NewTransport(httpclient.TransportConfig{})
+	if err != nil || tr == nil {
+		tr = &http.Transport{}
+	}
+	tr.Proxy = http.ProxyFromEnvironment
+	configureAmneziaCPTransport(tr)
+	return tr
+}
+
 // Dedicated HTTP client for cp.amnezia.org: disable connection reuse — idle TLS sessions
 // behind CDN occasionally stall until DefaultTransport idle timeout / Client.Timeout (~45s),
 // which matches user-visible "every paste hangs ~40s after warm-up".
 func newAmneziaCPHTTPClient() *http.Client {
-	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-	}
-	configureAmneziaCPTransport(tr)
 	return &http.Client{
-		Transport: tr,
+		Transport: newAmneziaCPTransport(),
 		Timeout:   45 * time.Second,
 	}
 }
@@ -111,9 +123,7 @@ func (h *AmneziaCPHandler) downloadClient(ctx context.Context) (*downloader.Leas
 		// Preserve the lease's bind dialer + ALPN pin; only adjust timeouts.
 		applyAmneziaCPTimeouts(tr)
 	} else if client.Transport == nil {
-		tr := &http.Transport{Proxy: http.ProxyFromEnvironment}
-		configureAmneziaCPTransport(tr)
-		client.Transport = tr
+		client.Transport = newAmneziaCPTransport()
 	}
 
 	return lease, client, lease.Route, nil

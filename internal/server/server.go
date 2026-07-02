@@ -379,18 +379,18 @@ func generateInstanceID() string {
 // Priority: 1) preferred port from settings, 2) default port (2222), 3) fallback range (8080-8090).
 func (s *Server) FindFreePort(preferredPort int) (int, error) {
 	// Try preferred port from settings
-	if preferredPort > 0 && preferredPort <= 65535 && isPortFree(preferredPort) {
+	if preferredPort > 0 && preferredPort <= 65535 && IsPortFree(preferredPort) {
 		return preferredPort, nil
 	}
 
 	// Try default port (2222)
-	if isPortFree(DefaultPort) {
+	if IsPortFree(DefaultPort) {
 		return DefaultPort, nil
 	}
 
 	// Fallback to range 8080-8090
 	for port := FallbackPortStart; port <= FallbackPortEnd; port++ {
-		if isPortFree(port) {
+		if IsPortFree(port) {
 			return port, nil
 		}
 	}
@@ -398,7 +398,8 @@ func (s *Server) FindFreePort(preferredPort int) (int, error) {
 	return 0, fmt.Errorf("no free port: %d occupied, fallback range %d-%d also occupied", DefaultPort, FallbackPortStart, FallbackPortEnd)
 }
 
-func isPortFree(port int) bool {
+// IsPortFree reports whether a TCP port is available for binding.
+func IsPortFree(port int) bool {
 	addr := fmt.Sprintf(":%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -555,7 +556,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	controlHandler.SetOrchestrator(s.orch)
 	controlHandler.SetTunnelsHandler(tunnelsHandler)
 	controlHandler.SetEventBus(s.bus)
-	controlHandler.SetCatalog(s.catalog)
 	testingHandler := api.NewTestingHandler(s.testingService)
 	systemHandler := api.NewSystemHandler(s.config.Version)
 	systemHandler.SetSettingsStore(s.settings)
@@ -1369,18 +1369,10 @@ func acceptsGzip(r *http.Request) bool {
 }
 
 // diagLogAdapter adapts logging.Service to diagnostics.LogServiceForDiag.
-// The legacy GetLogs helper still feeds report.Logs from the app bucket;
-// structured journalWarnings uses GetBucketLogs/GetBucketStats to collect
-// both app and sing-box buckets explicitly.
+// The structured journalWarnings report section uses GetBucketLogs/
+// GetBucketStats to collect both app and sing-box buckets explicitly.
 type diagLogAdapter struct {
 	svc *logging.Service
-}
-
-func (a *diagLogAdapter) GetLogs(category, level string) []logging.LogEntry {
-	// For diagnostics, category maps to app-bucket group (empty = all).
-	// Kept for the legacy report.Logs section.
-	logs, _ := a.svc.GetLogs(logging.BucketApp, category, "", level, time.Time{}, 10000, 0)
-	return logs
 }
 
 func (a *diagLogAdapter) GetBucketLogs(bucket logging.Bucket, group, subgroup, level string, limit, offset int) ([]logging.LogEntry, int) {

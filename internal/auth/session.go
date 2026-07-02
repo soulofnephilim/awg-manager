@@ -22,17 +22,11 @@ type Session struct {
 	LastSeen  time.Time
 }
 
-// SessionLogger provides logging for session events.
-type SessionLogger interface {
-	Warnf(format string, args ...interface{})
-}
-
 // SessionStore manages user sessions in memory.
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	stopCh   chan struct{}
-	log      SessionLogger
 }
 
 // NewSessionStore creates a new session store and starts cleanup goroutine.
@@ -43,13 +37,6 @@ func NewSessionStore() *SessionStore {
 	}
 	go s.cleanupLoop()
 	return s
-}
-
-// SetLogger sets the logger for session events.
-func (s *SessionStore) SetLogger(log SessionLogger) {
-	s.mu.Lock()
-	s.log = log
-	s.mu.Unlock()
 }
 
 // Create creates a new session for the given login and returns the token.
@@ -87,9 +74,6 @@ func (s *SessionStore) Get(token string) *Session {
 
 	// Check if expired
 	if time.Since(session.LastSeen) > SessionTTL {
-		if s.log != nil {
-			s.log.Warnf("Session expired for user %q (inactive %s)", session.Login, time.Since(session.LastSeen).Truncate(time.Second))
-		}
 		delete(s.sessions, token)
 		return nil
 	}
@@ -134,9 +118,6 @@ func (s *SessionStore) cleanup() {
 	now := time.Now()
 	for token, session := range s.sessions {
 		if now.Sub(session.LastSeen) > SessionTTL {
-			if s.log != nil {
-				s.log.Warnf("Session expired for user %q (inactive %s, cleanup)", session.Login, now.Sub(session.LastSeen).Truncate(time.Second))
-			}
 			delete(s.sessions, token)
 		}
 	}

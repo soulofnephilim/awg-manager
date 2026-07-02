@@ -56,6 +56,11 @@ func RunWithOptions(ctx context.Context, name string, args []string, opts Option
 	// Create new process group for proper cleanup (platform-specific).
 	setCommandProcessGroup(cmd)
 
+	// Even after Cancel kills the group, a detached descendant (double-fork
+	// daemon) can keep the output pipes open. WaitDelay forces Wait to give
+	// up on the pipes instead of blocking Run forever.
+	cmd.WaitDelay = 5 * time.Second
+
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
@@ -90,6 +95,13 @@ func RunWithOptions(ctx context.Context, name string, args []string, opts Option
 		// Kill the process group to clean up any children (platform-specific).
 		killCommandProcessGroup(cmd)
 		return result, ErrTimeout
+	}
+
+	// The command itself exited successfully but a detached descendant still
+	// holds the output pipes past WaitDelay (typical for init-script wrappers
+	// that leave a daemon running). Treat as success; output may be truncated.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
 	}
 
 	if err != nil {

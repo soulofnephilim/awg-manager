@@ -6,8 +6,6 @@ export { default as ConnectivitySettingsModal } from './ConnectivitySettingsModa
 export { default as DefaultRouteBadge } from './DefaultRouteBadge.svelte';
 export { default as TunnelCard } from './TunnelCard.svelte';
 export { default as TunnelDelaySparkBars } from './TunnelDelaySparkBars.svelte';
-export { default as TunnelFieldLabel } from './TunnelFieldLabel.svelte';
-export { default as TunnelListColumnHeader } from './TunnelListColumnHeader.svelte';
 export { default as TunnelListEndpointLine } from './TunnelListEndpointLine.svelte';
 export { default as TunnelListTrafficCell } from './TunnelListTrafficCell.svelte';
 export { default as TunnelMetaText } from './TunnelMetaText.svelte';
@@ -20,6 +18,5 @@ export { default as TunnelEditHeader } from './TunnelEditHeader.svelte';
 export { default as ExternalTunnelCard } from './ExternalTunnelCard.svelte';
 export { default as AdoptTunnelDialog } from './AdoptTunnelDialog.svelte';
 export { default as ReplaceTunnelConfigModal } from './ReplaceTunnelConfigModal.svelte';
-export { default as SpeedTestCard } from './SpeedTestCard.svelte';
 export { default as SystemTunnelCard } from './SystemTunnelCard.svelte';
 export { default as TunnelReferencedModal } from './TunnelReferencedModal.svelte';
