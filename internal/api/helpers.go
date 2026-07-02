@@ -71,6 +71,21 @@ func parseJSON[T any](w http.ResponseWriter, r *http.Request, method string) (T,
 	return dst, true
 }
 
+// requireQueryID reads the "id" query parameter. When it is absent it writes
+// the canonical 400 MISSING_ID response and returns ("", false); callers bail
+// out on false. Centralising this makes a missing id a consistent 400 across
+// every handler that requires one — several previously forgot the guard and
+// passed an empty id straight to the service, which surfaced as a 500 (or a
+// 200 with the wrong scope) instead.
+func requireQueryID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		response.Error(w, "missing id parameter", "MISSING_ID")
+		return "", false
+	}
+	return id, true
+}
+
 // decodeBody reads and JSON-decodes the request body into dst for handlers
 // that write their own error responses (they typically map the returned
 // error to response.BadRequest). It shares readJSONBody with parseJSON, so
