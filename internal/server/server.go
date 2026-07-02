@@ -548,7 +548,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	controlHandler.SetOrchestrator(s.orch)
 	controlHandler.SetTunnelsHandler(tunnelsHandler)
 	controlHandler.SetEventBus(s.bus)
-	controlHandler.SetCatalog(s.catalog)
 	testingHandler := api.NewTestingHandler(s.testingService)
 	systemHandler := api.NewSystemHandler(s.config.Version)
 	systemHandler.SetSettingsStore(s.settings)
