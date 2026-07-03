@@ -7,6 +7,10 @@
 	let password = $state('');
 	let submitting = $state(false);
 
+	// Бэкенд с Entware-авторизацией сообщает об этом в /auth/status
+	// (auth.checkStatus); на легаси-бэкендах флага нет → false.
+	const entwareAuthEnabled = $derived($auth.entwareAuthEnabled);
+
 	async function handleSubmit() {
 		if (!login || !password) return;
 
@@ -29,7 +33,11 @@
 				<BrandLogoMark dimension={52} />
 			</div>
 			<h1>AWG Manager</h1>
-			<p class="login-subtitle">Введите данные от входа в админ-панель роутера</p>
+			<p class="login-subtitle">
+				{entwareAuthEnabled
+					? 'Данные роутера или учётной записи Entware'
+					: 'Введите данные от входа в админ-панель роутера'}
+			</p>
 		</div>
 
 		{#if $auth.error}
@@ -83,7 +91,9 @@
 		</form>
 
 	<p class="login-hint">
-		Используйте логин и пароль администратора роутера
+		{entwareAuthEnabled
+			? 'Используйте логин и пароль администратора роутера или учётной записи Entware'
+			: 'Используйте логин и пароль администратора роутера'}
 	</p>
 
 	<p class="login-hint" style="margin-top: 0.2rem;">

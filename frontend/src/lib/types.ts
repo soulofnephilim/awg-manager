@@ -728,6 +728,17 @@ export interface GeoFileSettings {
 export interface Settings {
 	schemaVersion?: number;
 	authEnabled: boolean;
+	/**
+	 * Session idle lifetime in hours (1..720, default 24). Optional —
+	 * legacy backends omit it; UI falls back to 24.
+	 */
+	sessionTtlHours?: number;
+	/**
+	 * Allow login with Entware credentials (/opt/etc/shadow) in addition
+	 * to router admin credentials. Optional — legacy backends omit it;
+	 * UI treats absence as false.
+	 */
+	entwareAuthEnabled?: boolean;
 	apiKey?: string;
 	server: ServerSettings;
 	pingCheck: PingCheckSettings;
@@ -754,6 +765,11 @@ export interface AuthStatus {
 	authDisabled?: boolean;
 	login?: string;
 	expiresIn?: number;
+	/**
+	 * True when login via Entware credentials (/opt/etc/shadow) is enabled.
+	 * Present regardless of auth state; optional — legacy backends omit it.
+	 */
+	entwareAuthEnabled?: boolean;
 }
 
 export interface LoginResult {

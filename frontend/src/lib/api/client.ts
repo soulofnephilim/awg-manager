@@ -669,9 +669,20 @@ class ApiClient {
 			body: JSON.stringify({ login, password })
 		});
 
-		const data = await response.json();
-		if (!response.ok || data.error) {
-			throw new Error(data.message || 'Ошибка авторизации');
+		let data: (LoginResult & { error?: unknown; message?: string }) | null = null;
+		try {
+			data = await response.json();
+		} catch {
+			// Non-JSON body (gateway page etc.) — fall through to status-based message.
+		}
+		if (!response.ok || !data || data.error) {
+			// Показываем сообщение бэкенда как есть (401 «неверный логин…»,
+			// 429 «слишком много попыток…»), не подменяя его generic-текстом.
+			const fallback =
+				response.status === 429
+					? 'Слишком много попыток входа. Попробуйте позже.'
+					: 'Ошибка авторизации';
+			throw new Error(data?.message || fallback);
 		}
 		return data;
 	}

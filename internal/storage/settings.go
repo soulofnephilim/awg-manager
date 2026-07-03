@@ -9,14 +9,24 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
-	CurrentSchemaVersion        = 28
+	CurrentSchemaVersion        = 29
 	DefaultPort                 = 2222
 	DefaultInterface            = "br0"
 	DefaultPingCheckTarget      = "8.8.8.8"
 	DefaultConnectivityCheckURL = "http://connectivitycheck.gstatic.com/generate_204"
+	// DefaultSessionTTLHours is the fallback auth session lifetime — the
+	// historical fixed value before SessionTtlHours became configurable.
+	DefaultSessionTTLHours = 24
+	// MinSessionTTLHours / MaxSessionTTLHours bound the configurable auth
+	// session lifetime. Shared by the /settings/update validation, the
+	// load-time self-heal and GetSessionTTL, so a stored out-of-range value
+	// can never silently exceed the documented cap.
+	MinSessionTTLHours = 1
+	MaxSessionTTLHours = 720
 )
 
 // SettingsStore manages application settings.
@@ -161,11 +171,27 @@ func (s *SettingsStore) Load() (*Settings, error) {
 		if settings.SchemaVersion < 28 {
 			s.migrateToV28(&settings)
 		}
+		if settings.SchemaVersion < 29 {
+			s.migrateToV29(&settings)
+		}
 	}
 
 	// Self-heal duplicated managed servers — see dedupManagedServers comment.
 	if deduped, removed := dedupManagedServers(settings.ManagedServers); removed > 0 {
 		settings.ManagedServers = deduped
+		needsSave = true
+	}
+
+	// Self-heal an out-of-range session TTL unconditionally (mirrors the
+	// dedup self-heal above). migrateToV29 only backfills the default when
+	// the file is below v29; a downgrade that rewrote settings.json AT v29
+	// without the field leaves a stored 0 that migration never revisits,
+	// and a hand-edited over-range value would otherwise let sessions
+	// silently outlive the documented MaxSessionTTLHours cap forever
+	// (/settings/update only validates the field when a patch carries it).
+	// Heal here so the effective and persisted values converge.
+	if settings.SessionTtlHours < MinSessionTTLHours || settings.SessionTtlHours > MaxSessionTTLHours {
+		settings.SessionTtlHours = DefaultSessionTTLHours
 		needsSave = true
 	}
 
@@ -182,9 +208,10 @@ func (s *SettingsStore) Load() (*Settings, error) {
 // defaultSettings returns settings with default values.
 func (s *SettingsStore) defaultSettings() *Settings {
 	return &Settings{
-		SchemaVersion: CurrentSchemaVersion,
-		AuthEnabled:   false,
-		UsageLevel:    UsageLevelBasic,
+		SchemaVersion:   CurrentSchemaVersion,
+		AuthEnabled:     false,
+		SessionTtlHours: DefaultSessionTTLHours,
+		UsageLevel:      UsageLevelBasic,
 		Server: ServerSettings{
 			Port:      DefaultPort,
 			Interface: DefaultInterface,
@@ -503,6 +530,17 @@ func (s *SettingsStore) migrateToV28(settings *Settings) {
 		settings.Logging.SingboxLogLevel = "info"
 	}
 	settings.SchemaVersion = 28
+}
+
+// migrateToV29 introduces SessionTtlHours (issue #441), defaulting to the
+// historical fixed 24h session lifetime, and EntwareAuthEnabled, whose zero
+// value (false — keep NDMS-only login) is the intended default so no
+// explicit action is needed beyond the version stamp.
+func (s *SettingsStore) migrateToV29(settings *Settings) {
+	if settings.SessionTtlHours == 0 {
+		settings.SessionTtlHours = DefaultSessionTTLHours
+	}
+	settings.SchemaVersion = 29
 }
 
 // dedupManagedServers returns servers with duplicate InterfaceName entries
@@ -925,6 +963,27 @@ func (s *SettingsStore) IsAuthEnabled() bool {
 		return true // Default to auth enabled on error
 	}
 	return settings.AuthEnabled
+}
+
+// GetSessionTTL returns the configured auth session lifetime. Falls back
+// to the historical 24h default on load error or an unset/out-of-range
+// value (defense in depth — Load already self-heals the stored field).
+func (s *SettingsStore) GetSessionTTL() time.Duration {
+	settings, err := s.Get()
+	if err != nil || settings.SessionTtlHours < MinSessionTTLHours || settings.SessionTtlHours > MaxSessionTTLHours {
+		return DefaultSessionTTLHours * time.Hour
+	}
+	return time.Duration(settings.SessionTtlHours) * time.Hour
+}
+
+// IsEntwareAuthEnabled returns whether login via Entware system
+// credentials (/opt/etc/shadow) is enabled. Defaults to false on error.
+func (s *SettingsStore) IsEntwareAuthEnabled() bool {
+	settings, err := s.Get()
+	if err != nil {
+		return false
+	}
+	return settings.EntwareAuthEnabled
 }
 
 // GetApiKey returns the configured API key, or empty string if none.
