@@ -885,6 +885,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	serverHandler := api.NewServersHandler(s.ndmsQueries, s.settings, s.tunnels, appLog)
 	serverHandler.SetCommands(s.ndmsCommands)
 	serverHandler.SetEventBus(s.bus)
+	if s.singboxConnsHandler != nil {
+		// System WG-server peer names for the connections monitor (issue
+		// #435). Backed by the WGServers list cache (5m TTL + hook
+		// invalidation), so per-request cost is an in-memory read.
+		s.singboxConnsHandler.SetWGServers(serverHandler)
+	}
 	mux.HandleFunc("/api/servers", guarded(serverHandler.List))
 	mux.HandleFunc("/api/servers/all", guarded(serverHandler.GetAll))
 	mux.HandleFunc("/api/servers/get", guarded(serverHandler.Get))
