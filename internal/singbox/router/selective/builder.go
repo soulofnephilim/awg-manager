@@ -59,12 +59,73 @@ type BuilderConfig struct {
 type Builder struct {
 	cfg BuilderConfig
 
-	mu          sync.Mutex
-	opMu        sync.Mutex
+	mu sync.Mutex
+	// opCh is a 1-slot semaphore serializing Rebuild vs RefreshCDNMatchers.
+	// Channel-backed (lazy-init via opOnce so &Builder{} in tests still works)
+	// because acquisition must be boundable by a context — see acquireOp.
+	opOnce      sync.Once
+	opCh        chan struct{}
+	rebuilding  atomic.Bool
 	lastRebuild time.Time
 	lastError   string
 	summary     *SnapshotSummary
 	routes      map[string][]string
+}
+
+func (b *Builder) opSem() chan struct{} {
+	b.opOnce.Do(func() { b.opCh = make(chan struct{}, 1) })
+	return b.opCh
+}
+
+// acquireOp takes the builder op slot, giving up when ctx ends.
+func (b *Builder) acquireOp(ctx context.Context) error {
+	select {
+	case b.opSem() <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// tryAcquireOp takes the builder op slot without blocking.
+func (b *Builder) tryAcquireOp() bool {
+	select {
+	case b.opSem() <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Builder) releaseOp() {
+	select {
+	case <-b.opSem():
+	default:
+		panic("selective: releaseOp without matching acquire")
+	}
+}
+
+// Rebuilding reports whether a full Rebuild is currently in flight
+// (including waiting on the heavy-op gate).
+func (b *Builder) Rebuilding() bool {
+	return b.rebuilding.Load()
+}
+
+// TryBeginRun marks a rebuild run as in flight, returning false when another
+// run already owns the flag. Callers that do expensive pre-work before
+// Rebuild proper (the router adapter loads config and materializes rule sets
+// for seconds) must mark the run at THEIR entry so both the API handler's
+// duplicate check (Rebuilding) and the builder's own dedupe see it from the
+// start — otherwise a user POST in that window launches a second full run.
+// A successful TryBeginRun must be paired with EndRun and the actual work
+// routed through RebuildOwnedRun.
+func (b *Builder) TryBeginRun() bool {
+	return b.rebuilding.CompareAndSwap(false, true)
+}
+
+// EndRun clears the in-flight marker taken by TryBeginRun.
+func (b *Builder) EndRun() {
+	b.rebuilding.Store(false)
 }
 
 // NewBuilder constructs a Builder with the given configuration.
@@ -144,6 +205,8 @@ func summaryToLegacyAPI(s *SnapshotSummary) *RebuildSnapshot {
 }
 
 // Rebuild streams matchers → DNS → staging ipset → atomic swap.
+// It begins its own run; callers that already marked the run via TryBeginRun
+// (the router adapter) must call RebuildOwnedRun instead.
 func (b *Builder) Rebuild(
 	ctx context.Context,
 	rules []RuleJSON,
@@ -151,19 +214,40 @@ func (b *Builder) Rebuild(
 	singboxDNS []SingboxDNSServer,
 	fn ProgressFn,
 ) error {
-	heavyop.Default.Lock()
-	defer heavyop.Default.Unlock()
-	b.opMu.Lock()
-	defer b.opMu.Unlock()
-
-	emit := func(p Progress) {
-		if fn != nil {
-			fn(p)
-		}
-		if b.cfg.Bus != nil {
-			b.cfg.Bus.Publish("singbox-router:selective-progress", p)
-		}
+	if !b.TryBeginRun() {
+		return b.fail(ctx, b.emitter(fn), fmt.Errorf("selective: %w", ErrBusy))
 	}
+	defer b.EndRun()
+	return b.RebuildOwnedRun(ctx, rules, ruleSetRefs, singboxDNS, fn)
+}
+
+// RebuildOwnedRun is Rebuild for a caller that already owns the run marker
+// (TryBeginRun returned true). The caller is responsible for EndRun.
+func (b *Builder) RebuildOwnedRun(
+	ctx context.Context,
+	rules []RuleJSON,
+	ruleSetRefs []RuleSetRef,
+	singboxDNS []SingboxDNSServer,
+	fn ProgressFn,
+) error {
+	emit := b.emitter(fn)
+
+	// Gate acquisition rides on the RUN's own context (the API background run
+	// caps it at 10 minutes, the boot auto-rebuild likewise): at boot the
+	// orchestrator can legitimately hold the gate 60+ seconds (sing-box cold
+	// start readiness floor), and a short hard sub-timeout here made the
+	// one-shot boot rebuild give up — leaving a reboot-emptied ipset
+	// unpopulated (silent WAN leak). Fast-fail UX for manual rebuilds is
+	// provided by the API handler's TryLock pre-check; in-run waiting can be
+	// patient.
+	if err := heavyop.Default.LockWithContext(ctx); err != nil {
+		return b.fail(ctx, emit, fmt.Errorf("selective: %w", ErrBusy))
+	}
+	defer heavyop.Default.Unlock()
+	if err := b.acquireOp(ctx); err != nil {
+		return b.fail(ctx, emit, fmt.Errorf("selective: %w", ErrBusy))
+	}
+	defer b.releaseOp()
 
 	emit(Progress{Phase: PhaseCollecting, Message: "Сбор IP-адресов и доменов из правил маршрутизации…"})
 
@@ -331,6 +415,26 @@ func (b *Builder) Rebuild(
 	emit(Progress{Phase: PhaseDone, Message: doneMsg, Current: entryCount, Total: entryCount})
 	b.publishStatus(true, entryCount)
 	return nil
+}
+
+// emitter wraps the optional per-call ProgressFn with the SSE bus publish.
+func (b *Builder) emitter(fn ProgressFn) func(Progress) {
+	return func(p Progress) {
+		if fn != nil {
+			fn(p)
+		}
+		if b.cfg.Bus != nil {
+			b.cfg.Bus.Publish("singbox-router:selective-progress", p)
+		}
+	}
+}
+
+// FailRebuild records err as the last rebuild error and emits the terminal
+// progress + status events. For wrappers that fail before Rebuild proper runs
+// (config load, rule-set restore) — the UI must still see a final event to
+// close its progress view.
+func (b *Builder) FailRebuild(ctx context.Context, err error) error {
+	return b.fail(ctx, b.emitter(nil), err)
 }
 
 func (b *Builder) fail(ctx context.Context, emit func(Progress), err error) error {

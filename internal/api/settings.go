@@ -46,7 +46,7 @@ type LoggingSettingsDTO struct {
 	Enabled           bool   `json:"enabled" example:"true"`
 	MaxAge            int    `json:"maxAge" example:"2"`
 	LogLevel          string `json:"logLevel" example:"info"`
-	SingboxLogLevel   string `json:"singboxLogLevel" example:"trace" enums:"trace,debug,info,warn,error,fatal,panic"`
+	SingboxLogLevel   string `json:"singboxLogLevel" example:"info" enums:"trace,debug,info,warn,error,fatal,panic"`
 	AppMaxEntries     int    `json:"appMaxEntries" example:"5000"`
 	SingboxMaxEntries int    `json:"singboxMaxEntries" example:"5000"`
 }

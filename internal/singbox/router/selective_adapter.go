@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 )
@@ -15,19 +16,41 @@ import (
 type selectiveBuilderAdapter struct {
 	svc *ServiceImpl
 	b   *selective.Builder
+	// applyNow applies config.d to sing-box (svc.orchestratorApplyNow);
+	// injectable for tests.
+	applyNow func() error
+	// lastApplyFailed remembers a failed applyNow: disk state ≠ running
+	// sing-box after a failed apply, so the next rebuild must re-apply even
+	// when the routes slot is byte-identical — otherwise a retry rebuild
+	// becomes a no-op forever and loses its self-heal role.
+	lastApplyFailed atomic.Bool
 }
 
 // NewSelectiveBuilderAdapter constructs a SelectiveBuilder backed by svc and b.
 func NewSelectiveBuilderAdapter(svc *ServiceImpl, b *selective.Builder) SelectiveBuilder {
-	return &selectiveBuilderAdapter{svc: svc, b: b}
+	return &selectiveBuilderAdapter{svc: svc, b: b, applyNow: svc.orchestratorApplyNow}
 }
 
 // Rebuild loads the current router config from disk, derives rule-set JSON
-// paths, and calls the underlying Builder.Rebuild.
+// paths, and calls the underlying Builder.RebuildOwnedRun.
 func (a *selectiveBuilderAdapter) Rebuild(ctx context.Context) error {
+	// Mark the run BEFORE the config pre-work below (seconds of disk I/O and
+	// rule-set materialization): both the API handler's duplicate check
+	// (status.Rebuilding) and the builder's own dedupe must see this run from
+	// adapter entry, or a user POST in that window starts a second full run
+	// that dies with a spurious ErrBusy SSE error.
+	if !a.b.TryBeginRun() {
+		a.svc.appLog.Info("selective-rebuild", "", "rebuild already in flight — skipping duplicate run")
+		return nil
+	}
+	defer a.b.EndRun()
+
 	cfg, err := a.svc.loadRouterConfig()
 	if err != nil {
-		return err
+		// FailRebuild publishes the terminal progress/status SSE events —
+		// the rebuild API responds 202 before the work runs, so an early
+		// failure here is otherwise invisible to the UI.
+		return a.b.FailRebuild(ctx, fmt.Errorf("selective: load router config: %w", err))
 	}
 	cfg = a.svc.ruleSetMaterializer().restoreConfig(cfg)
 
@@ -45,7 +68,7 @@ func (a *selectiveBuilderAdapter) Rebuild(ctx context.Context) error {
 			len(rules), len(refs), len(singboxDNS)),
 	)
 
-	if err := a.b.Rebuild(ctx, rules, refs, singboxDNS, nil); err != nil {
+	if err := a.b.RebuildOwnedRun(ctx, rules, refs, singboxDNS, nil); err != nil {
 		return err
 	}
 	a.syncRoutesAfterRebuild(ctx)
@@ -62,13 +85,30 @@ func (a *selectiveBuilderAdapter) syncRoutesAfterRebuild(ctx context.Context) {
 		a.svc.appLog.Warn("selective-rebuild", "routes",
 			fmt.Sprintf("ipset has %d entries but no /32 overlay routes — traffic may reach sing-box yet exit via route.final", entryCount))
 	}
-	if err := a.svc.syncSelectiveRoutesSlot(ctx, routes); err != nil {
+	changed, err := a.svc.syncSelectiveRoutesSlot(ctx, routes)
+	if err != nil {
 		a.svc.appLog.Warn("selective-rebuild", "routes", err.Error())
 		return
 	}
-	if err := a.svc.orchestratorApplyNow(); err != nil {
-		a.svc.appLog.Warn("selective-rebuild", "routes", err.Error())
+	a.applyRoutesSlot(changed)
+}
+
+// applyRoutesSlot reloads sing-box when the routes slot changed OR the
+// previous apply failed (byte-equal slot on disk says nothing about the
+// running process in that case).
+func (a *selectiveBuilderAdapter) applyRoutesSlot(changed bool) {
+	if !changed && !a.lastApplyFailed.Load() {
+		// Routes overlay identical to what sing-box already runs — a SIGHUP
+		// here would only drop live proxied connections for nothing.
+		a.svc.appLog.Info("selective-rebuild", "routes", "overlay routes unchanged — skipping sing-box reload")
+		return
 	}
+	if err := a.applyNow(); err != nil {
+		a.lastApplyFailed.Store(true)
+		a.svc.appLog.Warn("selective-rebuild", "routes", err.Error())
+		return
+	}
+	a.lastApplyFailed.Store(false)
 }
 
 // RefreshCDN incrementally refreshes ipset entries for CDN-flagged domain matchers.

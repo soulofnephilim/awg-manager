@@ -1,6 +1,7 @@
 package selective
 
 import (
+	"sort"
 	"sync"
 )
 
@@ -35,7 +36,10 @@ func (a *RouteAccumulator) Add(outbound, cidr string) {
 	set[cidr] = struct{}{}
 }
 
-// RulesByOutbound returns outbound → deduplicated /32 CIDR lists.
+// RulesByOutbound returns outbound → deduplicated /32 CIDR lists. Each list
+// is sorted so the marshalled routes slot is byte-stable across rebuilds —
+// the caller diffs slot bytes to decide whether sing-box needs a reload, and
+// random map order would report «changed» on every identical rebuild.
 func (a *RouteAccumulator) RulesByOutbound() map[string][]string {
 	if a == nil {
 		return nil
@@ -48,6 +52,7 @@ func (a *RouteAccumulator) RulesByOutbound() map[string][]string {
 		for c := range set {
 			list = append(list, c)
 		}
+		sort.Strings(list)
 		out[ob] = list
 	}
 	return out

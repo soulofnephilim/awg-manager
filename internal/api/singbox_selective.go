@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/response"
+	"github.com/hoaxisr/awg-manager/internal/singbox/heavyop"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -26,6 +28,10 @@ type SelectiveStatusData struct {
 	ConntrackAvailable bool `json:"conntrackAvailable"`
 	// Installing is true while opkg install ipset is running.
 	Installing bool `json:"installing"`
+	// Rebuilding is true while an ipset rebuild is in flight (POST /rebuild
+	// responds 202 and runs the rebuild in the background; completion is
+	// delivered via the singbox-router:selective-status SSE event).
+	Rebuilding bool `json:"rebuilding"`
 	// Enabled mirrors SingboxRouterSettings.SelectiveBypass.
 	Enabled bool `json:"enabled"`
 	// EntryCount is the current number of entries in the AWGM-SELECTIVE ipset.
@@ -117,9 +123,19 @@ type SelectiveHandler struct {
 	// check-and-set atomic so two concurrent InstallDeps requests cannot
 	// both slip past the guard and race opkg against itself.
 	installing atomic.Bool
+	// rebuilding serializes handler-launched ipset rebuilds the same way:
+	// a concurrent POST /rebuild (nginx retry after 504, second tab) gets
+	// 202 + rebuilding:true instead of a duplicate background run.
+	rebuilding atomic.Bool
 	builder    SelectiveRebuildTriggerer
 	status     SelectiveStatusProvider
 }
+
+// rebuildTimeout is the overall backstop for one background ipset rebuild.
+const rebuildTimeout = 10 * time.Minute
+
+// installTimeout is the overall backstop for one opkg install run.
+const installTimeout = 10 * time.Minute
 
 // SelectiveRebuildTriggerer is the narrow interface the handler needs from
 // the router service to force an ipset rebuild. Implemented by a wrapper
@@ -134,6 +150,9 @@ type SelectiveStatusProvider interface {
 	LastRebuild() string
 	LastError() string
 	LastSnapshot() *selective.RebuildSnapshot
+	// Rebuilding reports a rebuild in flight regardless of who started it
+	// (this handler or the boot/reconcile auto-rebuild).
+	Rebuilding() bool
 }
 
 // NewSelectiveHandler creates a new handler. configDir is the sing-box config.d
@@ -151,6 +170,12 @@ func NewSelectiveHandler(settings *storage.SettingsStore, configDir string, buil
 //	@Success		200	{object}	SelectiveStatusData
 //	@Router			/singbox/router/selective/status [get]
 func (h *SelectiveHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
+	response.Success(w, h.statusData(r.Context()))
+}
+
+// statusData assembles the SelectiveStatusData payload shared by GetStatus
+// and the 202 responses of Rebuild/InstallDeps.
+func (h *SelectiveHandler) statusData(ctx context.Context) SelectiveStatusData {
 	enabled := false
 	if h.settings != nil {
 		if settings, err := h.settings.Get(); err == nil {
@@ -160,27 +185,30 @@ func (h *SelectiveHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 
 	// EntryCount already returns 0 when the set does not exist — no separate
 	// SetExists fork needed on this per-status-request path.
-	entryCount := selective.EntryCount(r.Context())
+	entryCount := selective.EntryCount(ctx)
 
 	lastRebuild, lastError := "", ""
+	rebuilding := h.rebuilding.Load()
 	var snapshot *selective.RebuildSnapshot
 	if h.status != nil {
 		lastRebuild = h.status.LastRebuild()
 		lastError = h.status.LastError()
 		snapshot = h.status.LastSnapshot()
+		rebuilding = rebuilding || h.status.Rebuilding()
 	}
 
-	response.Success(w, SelectiveStatusData{
+	return SelectiveStatusData{
 		Available:          selective.IsIPSetAvailable(),
 		XtSetAvailable:     selective.IsXtSetAvailable(),
 		ConntrackAvailable: selective.IsConntrackAvailable(),
 		Installing:         h.installing.Load(),
+		Rebuilding:         rebuilding,
 		Enabled:            enabled,
 		EntryCount:         entryCount,
 		LastRebuild:        lastRebuild,
 		LastError:          lastError,
 		Snapshot:           selectiveSnapshotDTO(snapshot),
-	})
+	}
 }
 
 // SelectiveSnapshotMatchersData is the payload for GET .../snapshot/matchers.
@@ -261,7 +289,10 @@ func (h *SelectiveHandler) InstallDeps(w http.ResponseWriter, r *http.Request) {
 
 	// Detach cancellation: a client disconnect must not SIGKILL opkg in the
 	// middle of a package transaction (same rationale as Rebuild below).
-	ctx := context.WithoutCancel(r.Context())
+	// The timeout backstops a wedged opkg (dead mirror) so the request —
+	// still synchronous — cannot hang forever.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), installTimeout)
+	defer cancel()
 	if err := selective.InstallIPSet(ctx, nil); err != nil { // progress delivered via SSE by the builder
 		response.InternalError(w, "ipset installation failed: "+err.Error())
 		return
@@ -298,8 +329,10 @@ func (h *SelectiveHandler) InstallConntrack(w http.ResponseWriter, r *http.Reque
 	}
 	defer h.installing.Store(false)
 
-	// Detach cancellation — see InstallDeps.
-	if err := selective.InstallConntrackTools(context.WithoutCancel(r.Context()), nil); err != nil {
+	// Detach cancellation + backstop — see InstallDeps.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), installTimeout)
+	defer cancel()
+	if err := selective.InstallConntrackTools(ctx, nil); err != nil {
 		response.InternalError(w, "conntrack installation failed: "+err.Error())
 		return
 	}
@@ -307,13 +340,20 @@ func (h *SelectiveHandler) InstallConntrack(w http.ResponseWriter, r *http.Reque
 }
 
 // Rebuild handles POST /api/singbox/router/selective/rebuild.
-// Forces an immediate ipset rebuild from current rules.
+// Starts an ipset rebuild in the background and responds 202 immediately:
+// a full rebuild (DNS resolve over thousands of matchers) easily exceeds the
+// ~60s proxy_read_timeout of the Keenetic nginx reverse proxy, and a
+// synchronous handler handed the browser nginx's stock 504 page while the
+// rebuild kept running. Progress/completion reach the UI via the
+// singbox-router:selective-progress / selective-status SSE events.
 //
-//	@Summary		Force ipset rebuild
+//	@Summary		Force ipset rebuild (asynchronous)
 //	@Tags			singbox-router
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Success		200	{object}	SelectiveStatusData
+//	@Success		202	{object}	SelectiveStatusData	"rebuild started (or already running); rebuilding reflects live state"
+//	@Failure		409	{object}	APIErrorEnvelope	"sing-box config apply in progress"
+//	@Failure		503	{object}	APIErrorEnvelope	"builder not configured"
 //	@Router			/singbox/router/selective/rebuild [post]
 func (h *SelectiveHandler) Rebuild(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -324,13 +364,61 @@ func (h *SelectiveHandler) Rebuild(w http.ResponseWriter, r *http.Request) {
 		response.ErrorWithStatus(w, http.StatusServiceUnavailable, "selective builder not configured", "NOT_CONFIGURED")
 		return
 	}
-	// Detach cancellation: a client disconnecting mid-rebuild must not abort
-	// the populate (a partial ipset is worse than a stale one). We still wait
-	// synchronously so the response carries the fresh status.
-	ctx := context.WithoutCancel(r.Context())
-	if err := h.builder.Rebuild(ctx); err != nil {
-		response.InternalError(w, "ipset rebuild failed: "+err.Error())
-		return
+	// Pre-checks run BEFORE the CAS so the guard flips only at the point of
+	// no return: flipping first and then bailing (already-rebuilding, gate
+	// held) would let a concurrent request see the flag, answer 202
+	// «rebuilding» and piggyback on a run that never starts.
+	for {
+		if h.status != nil && h.status.Rebuilding() {
+			// A rebuild is already in flight (boot/reconcile auto-rebuild or
+			// one launched via the adapter) — it serves the same intent.
+			h.respondRebuildAccepted(w, r)
+			return
+		}
+		if !heavyop.Default.TryLock() {
+			// A sing-box config apply holds the heavy-op gate: fail fast with
+			// an honest 409 instead of accepting work that would only queue
+			// behind the apply.
+			response.ErrorWithStatus(w, http.StatusConflict, selective.ErrBusy.Error(), "OPERATION_IN_PROGRESS")
+			return
+		}
+		heavyop.Default.Unlock()
+		if h.rebuilding.CompareAndSwap(false, true) {
+			break
+		}
+		if h.rebuilding.Load() {
+			// Concurrent POST (nginx retry, second tab) owns a live run — it
+			// already serves the user's intent, don't start a second one.
+			h.respondRebuildAccepted(w, r)
+			return
+		}
+		// The concurrent run ended between the CAS and the Load — re-run the
+		// pre-checks and try to own a fresh run.
 	}
-	h.GetStatus(w, r)
+
+	// Point of no return: the flag is ours and the goroutine below is the
+	// only thing that clears it.
+	// Detach cancellation: a client disconnecting mid-rebuild must not abort
+	// the populate (a partial ipset is worse than a stale one). The timeout
+	// backstops a wedged rebuild so the flag cannot stay latched forever.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), rebuildTimeout)
+	go func() {
+		defer cancel()
+		defer h.rebuilding.Store(false)
+		// Errors are already surfaced by the builder: terminal
+		// selective-progress/selective-status SSE events plus lastError in
+		// the status payload.
+		_ = h.builder.Rebuild(ctx)
+	}()
+
+	h.respondRebuildAccepted(w, r)
+}
+
+// respondRebuildAccepted writes the 202 payload with the LIVE rebuilding
+// flag: on the launch path h.rebuilding is already set, and on the piggyback
+// paths the live value is the honest one — forcing true here could overwrite
+// a terminal state the UI already received via SSE (an instantly-failed run
+// would otherwise leave the button stuck at «Пересборка…»).
+func (h *SelectiveHandler) respondRebuildAccepted(w http.ResponseWriter, r *http.Request) {
+	response.Accepted(w, h.statusData(r.Context()))
 }

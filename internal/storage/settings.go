@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion        = 27
+	CurrentSchemaVersion        = 28
 	DefaultPort                 = 2222
 	DefaultInterface            = "br0"
 	DefaultPingCheckTarget      = "8.8.8.8"
@@ -157,6 +157,9 @@ func (s *SettingsStore) Load() (*Settings, error) {
 		}
 		if settings.SchemaVersion < 27 {
 			s.migrateToV27(&settings)
+		}
+		if settings.SchemaVersion < 28 {
+			s.migrateToV28(&settings)
 		}
 	}
 
@@ -487,6 +490,19 @@ func (s *SettingsStore) migrateToV27(settings *Settings) {
 		settings.SingboxRouter.RoutingMode = "tproxy"
 	}
 	settings.SchemaVersion = 27
+}
+
+// migrateToV28 remaps Logging.SingboxLogLevel "trace" → "info" one-time.
+// migrateToV21 stamped the then-default "trace" on every existing install, so
+// on upgrade "trace" is overwhelmingly the old default, not a user choice —
+// it self-inflicted hundreds of journal lines per minute on low-RAM routers.
+// The rare user who deliberately picked trace has to re-enable it once;
+// levels chosen after v21 (debug, warn, …) are left untouched.
+func (s *SettingsStore) migrateToV28(settings *Settings) {
+	if settings.Logging.SingboxLogLevel == "trace" {
+		settings.Logging.SingboxLogLevel = "info"
+	}
+	settings.SchemaVersion = 28
 }
 
 // dedupManagedServers returns servers with duplicate InterfaceName entries

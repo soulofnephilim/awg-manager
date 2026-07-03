@@ -221,7 +221,7 @@ func (c *Client) PostBatch(ctx context.Context, commands []any) ([]json.RawMessa
 func (c *Client) postJSON(ctx context.Context, payload any) (json.RawMessage, error) {
 	start := time.Now()
 	defer c.recordPerf(start, "POST", "/")
-	if err := c.sem.Acquire(ctx); err != nil {
+	if err := c.sem.acquireWithBackstop(ctx); err != nil {
 		c.appLog.Error("POST", "/", fmt.Sprintf("semaphore: %v", err))
 		return nil, fmt.Errorf("rci POST: %w", err)
 	}
@@ -313,7 +313,7 @@ func bypassBatch(path string) bool {
 func (c *Client) getRawDirect(ctx context.Context, path string) ([]byte, error) {
 	start := time.Now()
 	defer c.recordPerf(start, "GET", path)
-	if err := c.sem.Acquire(ctx); err != nil {
+	if err := c.sem.acquireWithBackstop(ctx); err != nil {
 		c.appLog.Error("GET", path, fmt.Sprintf("semaphore: %v", err))
 		return nil, fmt.Errorf("rci GET %s: %w", path, err)
 	}
@@ -348,7 +348,7 @@ func (c *Client) getRawDirect(ctx context.Context, path string) ([]byte, error) 
 // Use instead of GetRaw when the caller immediately decodes the body (e.g.
 // json.NewDecoder) and does not need to retain the raw bytes.
 func (c *Client) GetStream(ctx context.Context, path string, fn func(io.Reader) error) error {
-	if err := c.sem.Acquire(ctx); err != nil {
+	if err := c.sem.acquireWithBackstop(ctx); err != nil {
 		c.appLog.Error("GET", path, fmt.Sprintf("semaphore: %v", err))
 		return fmt.Errorf("rci GET %s: %w", path, err)
 	}

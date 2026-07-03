@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -106,17 +107,27 @@ type SelectiveDNSSource interface {
 // Note: uses context.Background() so the rebuild is NOT cancelled when the
 // parent reconcile/enable context finishes. The rebuild can outlive the
 // reconcile call (DNS resolution, ipset populate) and must not be cancelled
-// mid-way — a partial ipset is worse than none.
+// mid-way — a partial ipset is worse than none. The generous timeout both
+// backstops a wedged run and lets the in-run heavy-op gate acquire wait out
+// a boot-time orchestrator apply (60+ s sing-box cold-start readiness floor)
+// instead of giving up and leaving a reboot-emptied ipset unpopulated.
 func (s *ServiceImpl) triggerSelectiveRebuild(_ context.Context) {
 	if s.deps.SelectiveBuilder == nil {
 		return
 	}
 	go func() {
-		if err := s.deps.SelectiveBuilder.Rebuild(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), selectiveRebuildTimeout)
+		defer cancel()
+		if err := s.deps.SelectiveBuilder.Rebuild(ctx); err != nil {
 			s.appLog.Warn("selective-rebuild", "", fmt.Sprintf("ipset rebuild failed: %v", err))
 		}
 	}()
 }
+
+// selectiveRebuildTimeout is the overall backstop for one auto-triggered
+// ipset rebuild (boot/reconcile path). Mirrors the API handler's
+// rebuildTimeout.
+const selectiveRebuildTimeout = 10 * time.Minute
 
 // ensureSelectiveSetExists creates the AWGM-SELECTIVE ipset (empty) if it
 // does not already exist. Called before IPTables.Install when SelectiveBypass

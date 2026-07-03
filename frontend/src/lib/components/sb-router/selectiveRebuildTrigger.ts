@@ -14,8 +14,11 @@ import { selectiveBypass } from '$lib/stores/selectiveBypass';
 
 /**
  * Trigger an ipset rebuild if the router settings have selectiveBypass enabled.
- * Errors are silently swallowed — a stale ipset is preferable to surfacing an
- * extra error notification after a successful rule save.
+ * The POST is async: the backend answers 202 immediately (status with
+ * rebuilding: true) and completion arrives via SSE. Errors — including gateway
+ * timeouts (ApiGatewayError), after which the rebuild keeps running server-side
+ * — are silently swallowed: a stale ipset is preferable to surfacing an extra
+ * error notification after a successful rule save.
  */
 export async function triggerSelectiveRebuildIfEnabled(): Promise<void> {
   const settings = get(singboxRouter.settings);
