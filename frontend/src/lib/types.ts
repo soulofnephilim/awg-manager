@@ -2066,6 +2066,10 @@ export interface SelectiveStatus {
 	installing: boolean;
 	/** Mirrors SingboxRouterSettings.selectiveBypass. */
 	enabled: boolean;
+	/** True while an ipset rebuild is running. POST /selective/rebuild отвечает
+	 *  202 сразу (data = статус с rebuilding: true); завершение приходит по SSE
+	 *  singbox-router:selective-progress / selective-status. */
+	rebuilding?: boolean;
 	/** Current number of entries in AWGM-SELECTIVE ipset. 0 when set doesn't exist. */
 	entryCount: number;
 	/** RFC3339 timestamp of the last successful rebuild. Empty if never rebuilt. */

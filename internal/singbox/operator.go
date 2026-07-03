@@ -128,7 +128,7 @@ func normalizeSingboxLogLevel(v string) string {
 	if _, ok := singboxAllowedLogLevels[normalized]; ok {
 		return normalized
 	}
-	return "trace"
+	return "info"
 }
 
 // Operator is the high-level facade for sing-box integration.
@@ -265,7 +265,7 @@ type OperatorDeps struct {
 	// that pre-date this field).
 	IsNDMSProxyEnabled func() bool
 	// SingboxLogLevel returns desired sing-box log.level from settings.
-	// Optional; defaults to "trace".
+	// Optional; defaults to "info".
 	SingboxLogLevel func() string
 }
 
@@ -286,7 +286,7 @@ func NewOperator(d OperatorDeps) *Operator {
 	if err := MigrateLegacyConfigDir(dir); err != nil {
 		log.Warn("singbox config.d migration", "err", err)
 	}
-	desiredSingboxLogLevel := normalizeSingboxLogLevel("trace")
+	desiredSingboxLogLevel := normalizeSingboxLogLevel("info")
 	if d.SingboxLogLevel != nil {
 		desiredSingboxLogLevel = normalizeSingboxLogLevel(d.SingboxLogLevel())
 	}
@@ -527,7 +527,7 @@ func (o *Operator) tunnelsFile() string {
 // clashAPIAddr's 9099), which silently broke our LogForwarder /
 // DelayChecker on existing installs.
 func ensureBaseConfig(configDir string, loggers ...*slog.Logger) {
-	ensureBaseConfigWithLogLevel(configDir, "trace", loggers...)
+	ensureBaseConfigWithLogLevel(configDir, "info", loggers...)
 }
 
 func ensureBaseConfigWithLogLevel(configDir, desiredLogLevel string, loggers ...*slog.Logger) {
@@ -1205,7 +1205,7 @@ func patchTunnelsSlotEnsureNaiveUDPOverTCP(tunnelsPath string) {
 // freshBaseConfig returns the canonical base sing-box config. Single
 // source of truth for ensureBaseConfig (initial write + self-heal path).
 func freshBaseConfig() map[string]any {
-	return freshBaseConfigWithLogLevel("trace")
+	return freshBaseConfigWithLogLevel("info")
 }
 
 func freshBaseConfigWithLogLevel(logLevel string) map[string]any {

@@ -12,13 +12,21 @@ function createSelectiveBypassStore() {
 	// Set to true by explicit triggers (Apply button, engine enable) to request
 	// the global modal open. The modal clears this on close.
 	const modalRequested = writable(false);
+	// Monotonic counter bumped on every applyStatus. Lets callers detect that
+	// a NEWER status (e.g. a terminal SSE event) landed while their request
+	// was in flight, so they can skip applying a stale response body.
+	let epoch = 0;
 
 	return {
 		status,
 		progress,
 		modalRequested,
 		applyStatus(data: SelectiveStatus) {
+			epoch++;
 			status.set(data);
+		},
+		statusEpoch(): number {
+			return epoch;
 		},
 		applyProgress(data: SelectiveProgress) {
 			progress.set(data);

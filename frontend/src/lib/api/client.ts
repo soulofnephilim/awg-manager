@@ -125,6 +125,28 @@ interface ApiResponse<T> {
 	code?: string;
 }
 
+/**
+ * Ошибка уровня шлюза (nginx перед awg-manager): 502/503/504 без JSON-тела.
+ * Отдельный класс, чтобы вызывающие могли отличить «шлюз не дождался ответа»
+ * (операция может продолжаться в фоне) от настоящей ошибки приложения.
+ */
+export class ApiGatewayError extends Error {
+	readonly code = 'GATEWAY_ERROR';
+	readonly status: number;
+
+	constructor(message: string, status: number) {
+		super(message);
+		this.name = 'ApiGatewayError';
+		this.status = status;
+	}
+}
+
+const GATEWAY_MESSAGES: Record<number, string> = {
+	502: 'Шлюз не смог получить ответ от роутера (502). Операция может продолжаться в фоне.',
+	503: 'Сервер временно недоступен (503). Операция может продолжаться в фоне.',
+	504: 'Шлюз не дождался ответа от роутера (504). Операция может продолжаться в фоне.',
+};
+
 class ApiClient {
 	private baseUrl = '/api';
 	private onUnauthorized?: () => void;
@@ -179,20 +201,32 @@ class ApiClient {
 
 		// Handle 503 Service Unavailable — preserve server message when present.
 		if (response.status === 503) {
-			let message = 'Сервер временно недоступен';
 			if (contentType.includes('application/json')) {
+				let message = 'Сервер временно недоступен';
 				try {
 					const body = (await response.json()) as ApiResponse<unknown>;
 					if (body.message) message = body.message;
 				} catch {
 					// keep default
 				}
+				throw new Error(message);
 			}
-			throw new Error(message);
+			// Non-JSON 503 — страница шлюза (nginx), разметку не показываем.
+			throw new ApiGatewayError(GATEWAY_MESSAGES[503], 503);
 		}
 
 		if (!contentType.includes('application/json')) {
 			const text = await response.text();
+			// Gateway-ошибки (nginx перед awg-manager) отдают HTML-страницы —
+			// классифицируем по статусу и никогда не показываем разметку.
+			if (response.status in GATEWAY_MESSAGES) {
+				throw new ApiGatewayError(GATEWAY_MESSAGES[response.status], response.status);
+			}
+			const looksLikeHtml =
+				contentType.includes('text/html') || text.trimStart().startsWith('<');
+			if (looksLikeHtml) {
+				throw new Error(`Ошибка сервера (${response.status})`);
+			}
 			throw new Error(`Ошибка сервера (${response.status}): ${text.substring(0, 100)}`);
 		}
 
@@ -2228,6 +2262,13 @@ class ApiClient {
 		return this.request('/singbox/router/selective/install-conntrack', { method: 'POST' });
 	}
 
+	/**
+	 * Запускает пересборку ipset. Бэкенд отвечает 202 Accepted сразу —
+	 * data это текущий статус с rebuilding: true («запущено», не «завершено»);
+	 * реальное завершение приходит по SSE singbox-router:selective-progress /
+	 * selective-status. Повторный POST во время пересборки тоже вернёт 202,
+	 * не запуская вторую.
+	 */
 	async singboxRouterSelectiveRebuild(): Promise<SelectiveStatus> {
 		return this.request('/singbox/router/selective/rebuild', { method: 'POST' });
 	}

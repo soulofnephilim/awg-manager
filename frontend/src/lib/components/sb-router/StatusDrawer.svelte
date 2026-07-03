@@ -5,7 +5,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SideDrawer, Toggle, Button, Badge, StatusDot, Modal } from '$lib/components/ui';
-  import { api } from '$lib/api/client';
+  import { api, ApiGatewayError } from '$lib/api/client';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { modeSwitch, modeSwitchBusy } from '$lib/stores/modeSwitch';
   import { singboxStatus } from '$lib/stores/singbox';
@@ -168,6 +168,10 @@
 
   let selectiveStatus = $derived($selectiveBypassStatus);
   let selectiveStatusLoaded = $derived(selectiveStatus !== null);
+  // Пересборка в процессе: локальный флаг покрывает HTTP round-trip (202),
+  // status.rebuilding — фон после ответа и «страница открыта во время пересборки».
+  // Сбрасывается по SSE selective-status с rebuilding: false.
+  let rebuildInFlight = $derived(rebuilding || (selectiveStatus?.rebuilding ?? false));
   let selectiveIpsetOk = $derived(selectiveStatus?.available ?? false);
   let selectiveSnapshot = $derived(selectiveStatus?.snapshot ?? null);
   let hasSnapshot = $derived(
@@ -200,11 +204,31 @@
     rebuilding = true;
     selectiveBypass.resetProgress();
     selectiveBypass.requestModal();
+    const epochBefore = selectiveBypass.statusEpoch();
     try {
+      // 202 Accepted = «запущено», не «завершено»: статус приходит с
+      // rebuilding: true, а завершение доскажут SSE-события
+      // selective-progress / selective-status (модалка закрывается по ним).
       const status = await api.singboxRouterSelectiveRebuild();
-      selectiveBypass.applyStatus(status);
+      // Мгновенно упавшая пересборка публикует терминальный SSE
+      // selective-status РАНЬШЕ, чем разрешится 202 — не затираем более
+      // свежее состояние устаревшим телом ответа (иначе кнопка залипает
+      // в «Пересборка…»).
+      if (selectiveBypass.statusEpoch() === epochBefore) {
+        selectiveBypass.applyStatus(status);
+      }
     } catch (e) {
-      notifications.error('Не удалось пересобрать ipset: ' + (e instanceof Error ? e.message : String(e)));
+      if (e instanceof ApiGatewayError) {
+        // Шлюз (nginx) не дождался ответа, но пересборка продолжается на
+        // сервере — без тоста об ошибке, прогресс доедет по SSE.
+        console.warn('selective rebuild: gateway error, rebuild continues in background', e);
+      } else if ((e as { body?: { code?: string } })?.body?.code === 'OPERATION_IN_PROGRESS') {
+        // 409: сейчас применяется конфигурация sing-box — честный тост
+        // вместо сырого «занято: …».
+        notifications.error('Пересборка недоступна: применяется конфигурация sing-box. Повторите позже.');
+      } else {
+        notifications.error('Не удалось пересобрать ipset: ' + (e instanceof Error ? e.message : String(e)));
+      }
     } finally {
       rebuilding = false;
     }
@@ -396,8 +420,8 @@
             </Button>
           {/if}
 
-          <Button variant="ghost" size="sm" fullWidth loading={rebuilding} onclick={triggerRebuild}>
-            {rebuilding ? 'Пересборка…' : 'Пересобрать ipset'}
+          <Button variant="ghost" size="sm" fullWidth loading={rebuildInFlight} onclick={triggerRebuild}>
+            {rebuildInFlight ? 'Пересборка…' : 'Пересобрать ipset'}
           </Button>
         {:else}
           <!-- Доступно, но выключено -->

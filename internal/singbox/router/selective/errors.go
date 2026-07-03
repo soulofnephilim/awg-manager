@@ -12,3 +12,8 @@ var ErrIPSetNotAvailable = errors.New("ipset binary not found: install the ipset
 // ErrXtSetNotAvailable is returned when xt_set kernel module is absent,
 // meaning iptables -m set rules cannot be applied.
 var ErrXtSetNotAvailable = errors.New("kernel module xt_set not found: iptables ipset matching unavailable")
+
+// ErrBusy is returned when the heavy-op gate (sing-box config apply / another
+// rebuild) could not be acquired within the bounded wait. The API maps it to
+// an OPERATION_IN_PROGRESS conflict instead of hanging the request.
+var ErrBusy = errors.New("занято: применяется конфигурация sing-box")

@@ -41,28 +41,16 @@ func (b *Builder) RefreshCDNMatchers(
 	if len(queries) == 0 {
 		return 0, nil
 	}
-	if !heavyop.Default.TryLock() {
-		if b.cfg.Log != nil {
-			b.cfg.Log.Info("selective-cdn-refresh", "", "skipped: sing-box apply or rebuild in progress")
-		}
-		return 0, nil
-	}
-	defer heavyop.Default.Unlock()
-	if !b.opMu.TryLock() {
+	if !b.tryAcquireOp() {
 		if b.cfg.Log != nil {
 			b.cfg.Log.Info("selective-cdn-refresh", "", "skipped: full rebuild in progress")
 		}
 		return 0, nil
 	}
-	defer b.opMu.Unlock()
-
-	if err := CreateSet(ctx); err != nil {
-		return 0, fmt.Errorf("selective cdn refresh: create set: %w", err)
-	}
+	defer b.releaseOp()
 
 	dnsServers := BuildDNSServers(ctx, singboxDNS, b.cfg.DNSSource)
 	fullProbes := fullProbeFlags(queries)
-	var added, addFailed int
 	// Freshly resolved IPs must ALSO reach the routes overlay: the ipset only
 	// decides what is intercepted, while 19-selective-routes.json decides
 	// where it goes. An IP present in the set but absent from the overlay is
@@ -70,30 +58,56 @@ func (b *Builder) RefreshCDNMatchers(
 	// exactly the leak this refresh exists to prevent.
 	acc := NewRouteAccumulator()
 
+	// Resolve phase — DNS I/O and in-memory buffering only, NO heavy-op gate:
+	// holding the gate across this multi-minute loop made the rebuild API's
+	// TryLock pre-check answer every manual rebuild with a misleading 409
+	// «применяется конфигурация sing-box».
+	type matcherCIDRs struct {
+		matcher string
+		cidrs   []string
+	}
+	var pending []matcherCIDRs
 	for qi, q := range queries {
-		var chunk []string
-		flush := func() {
-			if len(chunk) == 0 {
-				return
-			}
-			if err := ChunkedAddLive(ctx, chunk); err != nil {
-				addFailed += len(chunk)
-				if b.cfg.Log != nil {
-					b.cfg.Log.Warn("selective-cdn-refresh", q.Matcher, err.Error())
-				}
-			} else {
-				added += len(chunk)
-			}
-			chunk = chunk[:0]
-		}
+		var cidrs []string
 		ResolveOneQueryStream(ctx, q, dnsServers, func(cidr string) {
-			chunk = append(chunk, cidr)
+			cidrs = append(cidrs, cidr)
 			acc.Add(q.Outbound, cidr)
-			if len(chunk) >= IpsetChunkSize {
-				flush()
-			}
 		}, nil, fullProbes[qi])
-		flush()
+		if len(cidrs) > 0 {
+			pending = append(pending, matcherCIDRs{matcher: q.Matcher, cidrs: cidrs})
+		}
+	}
+
+	// Mutation phase — the heavy-op gate is held ONLY around the ipset writes.
+	var added, addFailed int
+	if len(pending) > 0 {
+		if !heavyop.Default.TryLock() {
+			if b.cfg.Log != nil {
+				b.cfg.Log.Info("selective-cdn-refresh", "", "skipped ipset update: sing-box apply or rebuild in progress")
+			}
+			return 0, nil
+		}
+		err := func() error {
+			defer heavyop.Default.Unlock()
+			if err := CreateSet(ctx); err != nil {
+				return fmt.Errorf("selective cdn refresh: create set: %w", err)
+			}
+			for _, p := range pending {
+				// ChunkedAddLive batches internally (IpsetChunkSize per restore).
+				if err := ChunkedAddLive(ctx, p.cidrs); err != nil {
+					addFailed += len(p.cidrs)
+					if b.cfg.Log != nil {
+						b.cfg.Log.Warn("selective-cdn-refresh", p.matcher, err.Error())
+					}
+				} else {
+					added += len(p.cidrs)
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	entries := EntryCount(ctx)

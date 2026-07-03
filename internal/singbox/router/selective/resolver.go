@@ -92,7 +92,12 @@ func BuildDNSServers(ctx context.Context, singboxDNSServers []SingboxDNSServer, 
 	}
 
 	if ndmsSource != nil {
-		raw, err := ndmsSource.List(ctx)
+		// Best-effort: NDMS RCI can stall on a loaded router (cold boot). The
+		// discovery only widens the resolver union — bound it so a hung
+		// /show/dns-proxy call cannot delay the whole rebuild.
+		ndmsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		raw, err := ndmsSource.List(ndmsCtx)
+		cancel()
 		if err == nil && len(raw) > 0 {
 			seeds = append(seeds, parseNDMSUpstreamAddresses(raw)...)
 		}

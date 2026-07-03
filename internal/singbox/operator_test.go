@@ -239,11 +239,11 @@ func TestEnsureBaseConfig_Idempotent(t *testing.T) {
 	if string(first) != string(second) {
 		t.Errorf("ensureBaseConfig not idempotent: first=%s second=%s", first, second)
 	}
-	// Default desired sing-box level is trace (when not explicitly provided).
+	// Default desired sing-box level is info (when not explicitly provided).
 	var m map[string]any
 	_ = json.Unmarshal(second, &m)
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level must be patched to trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level must be patched to info, got %v", m["log"])
 	}
 }
 
@@ -267,9 +267,9 @@ func TestEnsureBaseConfig_PatchesStaleClashPort(t *testing.T) {
 	if clash["external_controller"] != "127.0.0.1:9099" {
 		t.Errorf("expected port 9099, got %v", clash["external_controller"])
 	}
-	// Desired level defaults to trace.
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	// Desired level defaults to info.
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 	if m["dns"].(map[string]any)["final"] != "my-dns" {
 		t.Errorf("dns.final lost: %v", m["dns"])
@@ -302,8 +302,8 @@ func TestEnsureBaseConfig_NoClashApiBlockUntouched(t *testing.T) {
 	if _, has := m["experimental"]; has {
 		t.Errorf("experimental block must NOT be re-added, got %s", raw)
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 	route, ok := m["route"].(map[string]any)
 	if !ok {
@@ -318,7 +318,7 @@ func TestEnsureBaseConfig_PatchesStaleLogLevel(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config.d")
 	_ = os.MkdirAll(configDir, 0755)
-	stale := `{"log":{"level":"info","timestamp":true},"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
+	stale := `{"log":{"level":"debug","timestamp":true},"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
 	basePath := filepath.Join(configDir, "00-base.json")
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
@@ -329,8 +329,8 @@ func TestEnsureBaseConfig_PatchesStaleLogLevel(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level should be heal-patched to trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level should be heal-patched to info, got %v", m["log"])
 	}
 }
 
@@ -338,7 +338,9 @@ func TestEnsureBaseConfig_DefaultDesiredLevelOverridesDebug(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config.d")
 	_ = os.MkdirAll(configDir, 0755)
-	// User-chosen debug — heal must NOT reduce verbosity.
+	// ensureBaseConfig force-syncs log.level to the desired default; the
+	// settings-driven wiring (NewOperator + SingboxLogLevel) preserves an
+	// explicit user choice, this legacy path always applies the default.
 	custom := `{"log":{"level":"debug","timestamp":true},"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
 	basePath := filepath.Join(configDir, "00-base.json")
 	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
@@ -348,8 +350,8 @@ func TestEnsureBaseConfig_DefaultDesiredLevelOverridesDebug(t *testing.T) {
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 }
 
@@ -564,7 +566,7 @@ func TestEnsureBaseConfig_MaterialisesMissingRouteBlock(t *testing.T) {
 	if m["dns"].(map[string]any)["strategy"] != "prefer_ipv4" {
 		t.Errorf("dns.strategy must be migrated ipv4_only→prefer_ipv4: %v", m["dns"])
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
+	if m["log"].(map[string]any)["level"] != "info" {
 		t.Errorf("log.level lost: %v", m["log"])
 	}
 }
@@ -737,8 +739,8 @@ func TestEnsureBaseConfig_PatchesRelativeCachePath(t *testing.T) {
 	if cf["path"] != defaultCacheDBPath {
 		t.Errorf("expected %s, got %v", defaultCacheDBPath, cf["path"])
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 }
 

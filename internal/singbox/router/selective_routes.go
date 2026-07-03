@@ -1,11 +1,13 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
@@ -29,12 +31,22 @@ func marshalSelectiveRoutesSlot(rules []Rule) ([]byte, error) {
 }
 
 // buildSelectiveIPRules builds ip_cidr route rules from outbound-grouped /32 lists.
+// Output is canonical (sorted outbounds, sorted CIDRs): syncSelectiveRoutesSlot
+// byte-compares the marshalled slot to skip the sing-box reload, so identical
+// inputs must always marshal identically regardless of map iteration order.
 func buildSelectiveIPRules(byOutbound map[string][]string) []Rule {
 	if len(byOutbound) == 0 {
 		return nil
 	}
-	out := make([]Rule, 0, len(byOutbound))
-	for ob, cidrs := range byOutbound {
+	outbounds := make([]string, 0, len(byOutbound))
+	for ob := range byOutbound {
+		outbounds = append(outbounds, ob)
+	}
+	sort.Strings(outbounds)
+	out := make([]Rule, 0, len(outbounds))
+	for _, ob := range outbounds {
+		cidrs := append([]string(nil), byOutbound[ob]...)
+		sort.Strings(cidrs)
 		out = append(out, Rule{
 			Action:   "route",
 			Outbound: ob,
@@ -87,22 +99,42 @@ func (s *ServiceImpl) stripLegacySelectiveRulesFromRouter(ctx context.Context) (
 // syncSelectiveRoutesSlot writes ip_cidr overlay rules into 19-selective-routes.json
 // (merged by sing-box, invisible in the rules UI). Uses SaveSilent so no staging
 // draft / «Применить» banner appears after ipset rebuild.
-func (s *ServiceImpl) syncSelectiveRoutesSlot(ctx context.Context, byOutbound map[string][]string) error {
+//
+// Returns changed=false when the merged config is already in the target shape
+// (byte-equal active slot, same enabled state — mirrors the 20-router.json
+// diff in persistConfigDirect) so the caller can skip the sing-box reload: an
+// unconditional SIGHUP after every manual rebuild drops all proxied
+// connections even when zero routes changed.
+func (s *ServiceImpl) syncSelectiveRoutesSlot(ctx context.Context, byOutbound map[string][]string) (bool, error) {
 	if s.deps.Orch == nil {
-		return nil
+		return false, nil
 	}
 	rules := buildSelectiveIPRules(byOutbound)
 	enable := len(rules) > 0
 	data, err := marshalSelectiveRoutesSlot(rules)
 	if err != nil {
-		return err
+		return false, err
+	}
+	// The merged config only sees the ACTIVE file: enabled ⇒ byte-equal active
+	// file is a no-op; disabled ⇒ absent active file is a no-op regardless of
+	// any parked disabled/ copy.
+	activePath := filepath.Join(s.deps.Orch.ConfigDir(), "19-selective-routes.json")
+	existing, readErr := os.ReadFile(activePath)
+	var unchanged bool
+	if enable {
+		unchanged = readErr == nil && bytes.Equal(existing, data)
+	} else {
+		unchanged = os.IsNotExist(readErr)
 	}
 	// Always rewrite the slot file so a legacy build's `"outbounds": null`
 	// cannot keep breaking sing-box check after rules are cleared.
 	if err := s.deps.Orch.SaveSilent(orchestrator.SlotSelectiveRoutes, data); err != nil {
-		return err
+		return false, err
 	}
-	return s.deps.Orch.SetEnabledSilent(orchestrator.SlotSelectiveRoutes, enable)
+	if err := s.deps.Orch.SetEnabledSilent(orchestrator.SlotSelectiveRoutes, enable); err != nil {
+		return false, err
+	}
+	return !unchanged, nil
 }
 
 // healLegacySelectiveRoutesSlotIfNeeded rewrites 19-selective-routes.json when an
@@ -123,7 +155,8 @@ func (s *ServiceImpl) healLegacySelectiveRoutesSlotIfNeeded(ctx context.Context)
 	if err := json.Unmarshal(data, &slot); err != nil {
 		var legacy RouterConfig
 		if err2 := json.Unmarshal(data, &legacy); err2 != nil {
-			return s.syncSelectiveRoutesSlot(ctx, nil)
+			_, err3 := s.syncSelectiveRoutesSlot(ctx, nil)
+			return err3
 		}
 		slot.Route.Rules = legacy.Route.Rules
 	}

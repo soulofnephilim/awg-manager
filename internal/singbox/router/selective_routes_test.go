@@ -1,14 +1,17 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 )
 
 func TestBuildSelectiveIPRules_GroupsByOutbound(t *testing.T) {
@@ -20,6 +23,32 @@ func TestBuildSelectiveIPRules_GroupsByOutbound(t *testing.T) {
 	}
 	if rules[0].Outbound != "awg-tunnel" || rules[0].IPCIDR[0] != "188.40.167.82/32" {
 		t.Fatalf("unexpected rule: %+v", rules[0])
+	}
+}
+
+// TestBuildSelectiveIPRules_DeterministicBytes guards the changed/unchanged
+// byte-compare in syncSelectiveRoutesSlot: marshalling the same accumulator
+// twice must be byte-identical, or every identical rebuild reports «changed»
+// and the skip-SIGHUP optimisation never fires.
+func TestBuildSelectiveIPRules_DeterministicBytes(t *testing.T) {
+	acc := selective.NewRouteAccumulator()
+	for i := 0; i < 60; i++ {
+		acc.Add("awg-a", fmt.Sprintf("10.0.%d.%d/32", i%7, i))
+		acc.Add("awg-b", fmt.Sprintf("172.16.%d.%d/32", i%5, i))
+		acc.Add("awg-c", fmt.Sprintf("192.168.%d.%d/32", i%3, i))
+	}
+	first, err := marshalSelectiveRoutesSlot(buildSelectiveIPRules(acc.RulesByOutbound()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		again, err := marshalSelectiveRoutesSlot(buildSelectiveIPRules(acc.RulesByOutbound()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(first, again) {
+			t.Fatalf("marshal %d differs from first:\n%s\nvs\n%s", i, first, again)
+		}
 	}
 }
 
@@ -47,6 +76,63 @@ func TestMarshalSelectiveRoutesSlot_RouteOnly(t *testing.T) {
 		if _, ok := m[forbidden]; ok {
 			t.Fatalf("slot JSON must not contain %q: %s", forbidden, string(data))
 		}
+	}
+}
+
+func TestSyncSelectiveRoutesSlot_ReportsChangedOnlyOnDiff(t *testing.T) {
+	dir := t.TempDir()
+	orch := orchestrator.New(dir, nil)
+	_ = orch.Register(orchestrator.SlotMeta{Slot: orchestrator.SlotSelectiveRoutes, Filename: "19-selective-routes.json"})
+
+	svc := &ServiceImpl{deps: Deps{Orch: orch}}
+	ctx := context.Background()
+	routes := map[string][]string{"tun": {"1.2.3.4/32"}}
+
+	changed, err := svc.syncSelectiveRoutesSlot(ctx, routes)
+	if err != nil || !changed {
+		t.Fatalf("first sync: changed=%v err=%v", changed, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "19-selective-routes.json")); err != nil {
+		t.Fatalf("active slot file missing: %v", err)
+	}
+
+	// Identical routes → byte-equal slot → no reload needed.
+	changed, err = svc.syncSelectiveRoutesSlot(ctx, routes)
+	if err != nil || changed {
+		t.Fatalf("no-op sync must report changed=false, got changed=%v err=%v", changed, err)
+	}
+
+	// Different routes → changed again.
+	changed, err = svc.syncSelectiveRoutesSlot(ctx, map[string][]string{"tun": {"5.6.7.8/32"}})
+	if err != nil || !changed {
+		t.Fatalf("diff sync: changed=%v err=%v", changed, err)
+	}
+}
+
+func TestSyncSelectiveRoutesSlot_EmptyRoutes(t *testing.T) {
+	dir := t.TempDir()
+	orch := orchestrator.New(dir, nil)
+	_ = orch.Register(orchestrator.SlotMeta{Slot: orchestrator.SlotSelectiveRoutes, Filename: "19-selective-routes.json"})
+
+	svc := &ServiceImpl{deps: Deps{Orch: orch}}
+	ctx := context.Background()
+
+	// Never-enabled slot + zero routes: already in target shape, no reload.
+	changed, err := svc.syncSelectiveRoutesSlot(ctx, nil)
+	if err != nil || changed {
+		t.Fatalf("empty sync on empty slot: changed=%v err=%v", changed, err)
+	}
+
+	// Enable with routes, then clear them: slot disable IS a config change.
+	if changed, err = svc.syncSelectiveRoutesSlot(ctx, map[string][]string{"tun": {"1.2.3.4/32"}}); err != nil || !changed {
+		t.Fatalf("populate: changed=%v err=%v", changed, err)
+	}
+	if changed, err = svc.syncSelectiveRoutesSlot(ctx, nil); err != nil || !changed {
+		t.Fatalf("clear: changed=%v err=%v", changed, err)
+	}
+	// And clearing again is a no-op.
+	if changed, err = svc.syncSelectiveRoutesSlot(ctx, nil); err != nil || changed {
+		t.Fatalf("second clear: changed=%v err=%v", changed, err)
 	}
 }
 
