@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,17 +31,32 @@ type mockRouterSvc struct {
 	applyRes      orchestrator.ValidationResult
 	discardErr    error
 	datFileErr    error
-	switchTarget  string
-	switchErr     error
-	settings      storage.SingboxRouterSettings
+	// switchTarget is written from the handler's async goroutine (SwitchMode
+	// responds 202-style before the service call) and polled by the test —
+	// guard it or `go test -race` trips.
+	switchMu     sync.Mutex
+	switchTarget string
+	switchErr    error
+	settings     storage.SingboxRouterSettings
+	// updateSettingsErr, when set, is returned by UpdateSettings so handler
+	// error-mapping (e.g. QOS_CLASSES_INVALID → 400) can be asserted.
+	updateSettingsErr error
 }
 
 func (m *mockRouterSvc) Enable(ctx context.Context) error    { return m.enableErr }
 func (m *mockRouterSvc) Disable(ctx context.Context) error   { return nil }
 func (m *mockRouterSvc) Reconcile(ctx context.Context) error { return nil }
 func (m *mockRouterSvc) SwitchRoutingMode(ctx context.Context, target string) error {
+	m.switchMu.Lock()
 	m.switchTarget = target
+	m.switchMu.Unlock()
 	return m.switchErr
+}
+
+func (m *mockRouterSvc) switchedTarget() string {
+	m.switchMu.Lock()
+	defer m.switchMu.Unlock()
+	return m.switchTarget
 }
 func (m *mockRouterSvc) GetStatus(ctx context.Context) (router.Status, error) {
 	return router.Status{}, nil
@@ -48,6 +65,9 @@ func (m *mockRouterSvc) GetSettings(ctx context.Context) (storage.SingboxRouterS
 	return m.settings, nil
 }
 func (m *mockRouterSvc) UpdateSettings(ctx context.Context, s storage.SingboxRouterSettings) error {
+	if m.updateSettingsErr != nil {
+		return m.updateSettingsErr
+	}
 	m.settings = s
 	return nil
 }
@@ -130,7 +150,7 @@ func (m *mockRouterSvc) UpdateDNSServer(ctx context.Context, tag string, s route
 func (m *mockRouterSvc) DeleteDNSServer(ctx context.Context, tag string, force bool) error {
 	return nil
 }
-func (m *mockRouterSvc) MoveDNSServer(ctx context.Context, from, to int) error { return nil }
+func (m *mockRouterSvc) MoveDNSServer(ctx context.Context, from, to int) error      { return nil }
 func (m *mockRouterSvc) ListDNSRules(ctx context.Context) ([]router.DNSRule, error) { return nil, nil }
 func (m *mockRouterSvc) AddDNSRule(ctx context.Context, r router.DNSRule) error     { return nil }
 func (m *mockRouterSvc) UpdateDNSRule(ctx context.Context, index int, r router.DNSRule) error {
@@ -223,6 +243,43 @@ func TestRouterEnable_PolicyMissing_Returns400(t *testing.T) {
 	}
 }
 
+func TestRouterPutSettings_QoSClassesInvalid_Returns400(t *testing.T) {
+	svc := &mockRouterSvc{updateSettingsErr: fmt.Errorf("%w: qosClasses[0]: DSCP должен быть 0-63 (получено 99)", router.ErrQoSClassesInvalid)}
+	h := newMockRouterHandler(svc)
+	req := httptest.NewRequest(http.MethodPut, "/api/singbox/router/settings",
+		strings.NewReader(`{"qosClasses":[{"dscp":99,"outbound":"vpn","enabled":true}]}`))
+	rr := httptest.NewRecorder()
+	h.PutSettings(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "QOS_CLASSES_INVALID") {
+		t.Errorf("want code QOS_CLASSES_INVALID in body: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "DSCP") {
+		t.Errorf("want detailed DSCP message in body: %s", rr.Body.String())
+	}
+}
+
+func TestRouterPutSettings_RoundTripsQoSClasses(t *testing.T) {
+	svc := &mockRouterSvc{}
+	h := newMockRouterHandler(svc)
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/settings",
+		strings.NewReader(`{"enabled":true,"wanAutoDetect":true,"qosClasses":[{"dscp":46,"name":"VoIP","outbound":"vpn-a","enabled":true}]}`))
+	rr := httptest.NewRecorder()
+	h.PutSettings(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if len(svc.settings.QoSClasses) != 1 {
+		t.Fatalf("qosClasses not decoded: %+v", svc.settings)
+	}
+	got := svc.settings.QoSClasses[0]
+	if got.DSCP != 46 || got.Name != "VoIP" || got.Outbound != "vpn-a" || !got.Enabled {
+		t.Errorf("qos class round-trip mismatch: %+v", got)
+	}
+}
+
 func TestRouterSwitchMode_CallsService(t *testing.T) {
 	svc := &mockRouterSvc{}
 	h := newMockRouterHandler(svc)
@@ -235,13 +292,13 @@ func TestRouterSwitchMode_CallsService(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if svc.switchTarget == "fakeip-tun" {
+		if svc.switchedTarget() == "fakeip-tun" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if svc.switchTarget != "fakeip-tun" {
-		t.Errorf("svc.SwitchRoutingMode target = %q want fakeip-tun", svc.switchTarget)
+	if got := svc.switchedTarget(); got != "fakeip-tun" {
+		t.Errorf("svc.SwitchRoutingMode target = %q want fakeip-tun", got)
 	}
 }
 
@@ -255,8 +312,8 @@ func TestRouterSwitchMode_BadMode_Returns400(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("want 400, got %d (body: %s)", rr.Code, rr.Body.String())
 	}
-	if svc.switchTarget != "" {
-		t.Errorf("service should not be called for bad mode, got target=%q", svc.switchTarget)
+	if got := svc.switchedTarget(); got != "" {
+		t.Errorf("service should not be called for bad mode, got target=%q", got)
 	}
 }
 

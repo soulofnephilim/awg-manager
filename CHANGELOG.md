@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Новые возможности
+
+- **QoS-классы по DSCP в sb-router** ([#371](https://github.com/hoaxisr/awg-manager/issues/371)) — трафик, помеченный DSCP-кодами (0-63, до 8 классов), направляется в отдельные выходы sing-box: классификация через iptables `-m dscp` в цепочках AWGM (per-class TPROXY/REDIRECT-порты 51281+/51301+), пары inbound'ов `tproxy-qos-N`/`redirect-qos-N` и управляемые правила маршрутизации по `inbound`. Классы редактируются в настройках sb-router (`qosClasses`); доступность xt_dscp отражается в статусе (`xtDscpAvailable`), при отсутствии модуля ядра или расширения iptables функция мягко отключается, не ломая движок.
+
 ## [2.15.1] - 2026-06-26
 
 ### Исправления

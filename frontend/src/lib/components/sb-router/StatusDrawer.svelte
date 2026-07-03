@@ -19,6 +19,7 @@
   import SubnetChipsInput from './SubnetChipsInput.svelte';
   import TrafficSourceSettings from './TrafficSourceSettings.svelte';
   import SelectiveIpsetSnapshot from './SelectiveIpsetSnapshot.svelte';
+  import QosSettingsCard from './QosSettingsCard.svelte';
   import { deriveDeps, deriveIssues } from './drawerData';
   import { mergeAndSaveSettings, BYPASS_PRESETS } from './settingsActions';
   import { resolveWanAuto, planToggleAutoDetect, planSelectWanInterface, type WanAutoOverride } from './wanMode';
@@ -30,6 +31,7 @@
 
   const status = singboxRouterStore.status;
   const storeSettings = singboxRouterStore.settings;
+  const storeOptions = singboxRouterStore.options;
 
   let open = $derived($drawerOpen);
   let s = $derived($status);
@@ -432,6 +434,15 @@
           </p>
         {/if}
       </section>
+
+      <!-- QoS-маршрутизация (DSCP): onPatch возвращает Promise — карточка
+           сериализует свои PUT-ы и ресинкается со стором после дренажа очереди. -->
+      <QosSettingsCard
+        {cfg}
+        status={s}
+        outboundOptions={$storeOptions}
+        onPatch={(patch) => applyPatch(patch)}
+      />
 
       <!-- Исключения портов -->
       <section class="sec">

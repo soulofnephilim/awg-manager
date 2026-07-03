@@ -154,6 +154,36 @@ type SingboxRouterSettings struct {
 	// all active router rules and their rule sets. Only meaningful when
 	// RoutingMode == "tproxy" and ipset + xt_set are available on the router.
 	SelectiveBypass bool `json:"selectiveBypass,omitempty"`
+	// QoSClasses lists DSCP-based QoS traffic classes (issue #371). Each
+	// enabled class gets its own iptables `-m dscp` dispatch (mangle TPROXY +
+	// nat REDIRECT), a dedicated pair of sing-box inbounds and a managed route
+	// rule sending the class to Outbound. Only meaningful when RoutingMode ==
+	// "tproxy". Validated by router.NormalizeSingboxRouterSettings: at most 8
+	// classes, DSCP 0-63 unique across classes, Name ≤ 32 chars, Outbound
+	// non-empty. Empty slice = feature off; no schema migration needed (the
+	// zero value is the correct default, same as BypassPresets).
+	QoSClasses []SingboxQoSClass `json:"qosClasses,omitempty"`
+}
+
+// SingboxQoSClass is one DSCP-based QoS traffic class routed to a dedicated
+// sing-box outbound (issue #371). DSCP is the 6-bit codepoint matched by
+// iptables `-m dscp --dscp N`; Name is a user-facing label; Outbound is the
+// sing-box outbound tag the class routes to; Enabled toggles the class
+// without losing its configuration.
+type SingboxQoSClass struct {
+	DSCP     int    `json:"dscp"`
+	Name     string `json:"name,omitempty"`
+	Outbound string `json:"outbound"`
+	Enabled  bool   `json:"enabled"`
+	// Slot is the persisted 0-based listen-port slot (0..MaxQoSClasses-1)
+	// the class's inbound pair derives from (router.QoSClassPorts). It is
+	// backend-owned: the UI contract stays {dscp,name,outbound,enabled} —
+	// clients PUT classes without slots and router.UpdateSettings
+	// re-associates each incoming class with its stored slot by DSCP (the
+	// unique key), so disabling or removing one class never shifts another
+	// class's ports (a shift would RST/blackhole untouched flows). Brand-new
+	// DSCPs get the first free slot.
+	Slot int `json:"slot"`
 }
 
 // ManagedServer represents the user-created WireGuard server interface.

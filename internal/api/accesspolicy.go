@@ -146,6 +146,7 @@ func NewAccessPolicyHandler(svc accesspolicy.Service) *AccessPolicyHandler {
 //	@Success		200		{object}	AccessPoliciesListResponse
 //	@Failure		500		{object}	APIErrorEnvelope
 //	@Router			/access-policies [get]
+//	@Router			/routing/access-policies [get]
 func (h *AccessPolicyHandler) List(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.MethodNotAllowed(w)
@@ -480,6 +481,7 @@ func (h *AccessPolicyHandler) ListDevices(w http.ResponseWriter, r *http.Request
 //	@Success		200	{object}	PolicyInterfacesListResponse
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/access-policies/interfaces [get]
+//	@Router			/routing/policy-interfaces [get]
 func (h *AccessPolicyHandler) ListGlobalInterfaces(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.MethodNotAllowed(w)

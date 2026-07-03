@@ -30,12 +30,16 @@ type SingboxRouterIssueDTO struct {
 
 // SingboxRouterStatusData mirrors router.Status.
 type SingboxRouterStatusData struct {
-	Enabled                bool                    `json:"enabled" example:"true"`
-	Installed              bool                    `json:"installed" example:"true"`
-	Active                 bool                    `json:"active" example:"true"`
-	NetfilterAvailable     bool                    `json:"netfilterAvailable" example:"true"`
-	NetfilterComponentName string                  `json:"netfilterComponentName,omitempty" example:"iptables-mod-tproxy"`
-	TProxyTargetAvailable  bool                    `json:"tproxyTargetAvailable" example:"true"`
+	Enabled                bool   `json:"enabled" example:"true"`
+	Installed              bool   `json:"installed" example:"true"`
+	Active                 bool   `json:"active" example:"true"`
+	NetfilterAvailable     bool   `json:"netfilterAvailable" example:"true"`
+	NetfilterComponentName string `json:"netfilterComponentName,omitempty" example:"iptables-mod-tproxy"`
+	TProxyTargetAvailable  bool   `json:"tproxyTargetAvailable" example:"true"`
+	// XtDscpAvailable reports whether iptables DSCP matching is usable
+	// (xt_dscp kernel module present AND iptables `-m dscp` extension works).
+	// The QoS-DSCP settings UI keys its "supported" badge on this field.
+	XtDscpAvailable        bool                    `json:"xtDscpAvailable" example:"true"`
 	PolicyName             string                  `json:"policyName" example:"awgm-router"`
 	PolicyMark             string                  `json:"policyMark,omitempty" example:"0xffffaaa"`
 	PolicyExists           bool                    `json:"policyExists" example:"true"`
@@ -103,6 +107,27 @@ type SingboxRouterSettingsData struct {
 	// Increase to prevent long-quiet UDP applications (games, etc.) from
 	// having their sessions silently dropped mid-game.
 	UDPTimeout string `json:"udpTimeout,omitempty" example:"10m0s"`
+	// QoSClasses lists DSCP-based QoS traffic classes routed to dedicated
+	// outbounds. At most 8 classes; DSCP must be 0-63 and unique across
+	// classes; outbound is required; name is limited to 32 characters.
+	// Only effective when routingMode is "tproxy" and xt_dscp is available
+	// (see status.xtDscpAvailable). Empty = feature off.
+	QoSClasses []SingboxRouterQoSClassDTO `json:"qosClasses,omitempty"`
+}
+
+// SingboxRouterQoSClassDTO mirrors storage.SingboxQoSClass — one DSCP-based
+// QoS traffic class.
+type SingboxRouterQoSClassDTO struct {
+	DSCP     int    `json:"dscp" example:"46" minimum:"0" maximum:"63"`
+	Name     string `json:"name,omitempty" example:"VoIP" maxLength:"32"`
+	Outbound string `json:"outbound" example:"my-selector"`
+	Enabled  bool   `json:"enabled" example:"true"`
+	// Slot is the backend-assigned stable listen-port slot (0-7). Read-only:
+	// clients send classes without it and the backend re-associates each
+	// class with its persisted slot by DSCP, so a class keeps its ports when
+	// other classes are edited, disabled or removed. Any value sent by a
+	// client is ignored.
+	Slot int `json:"slot" example:"0" minimum:"0" maximum:"7" readonly:"true"`
 }
 
 // SingboxRouterSettingsResponse is the envelope for GET /singbox/router/settings.
@@ -119,8 +144,12 @@ type SingboxRouterRuleDTO struct {
 	Port         []int    `json:"port,omitempty" example:"443"`
 	RuleSet      []string `json:"rule_set,omitempty" example:"geosite-cn"`
 	Protocol     string   `json:"protocol,omitempty" example:"tcp"`
-	Action       string   `json:"action" example:"route"`
-	Outbound     string   `json:"outbound,omitempty" example:"selector"`
+	// Inbound matches sing-box listener tags the connection entered through.
+	// Managed QoS-DSCP rules use the reserved tproxy-qos-N / redirect-qos-N
+	// tag pair (N = DSCP codepoint).
+	Inbound  []string `json:"inbound,omitempty" example:"tproxy-qos-46"`
+	Action   string   `json:"action" example:"route"`
+	Outbound string   `json:"outbound,omitempty" example:"selector"`
 }
 
 // SingboxRouterRulesListResponse is the envelope for GET /singbox/router/rules/list.
@@ -1554,6 +1583,14 @@ func (h *SingboxRouterHandler) handleErr(w http.ResponseWriter, action string, e
 	case errors.Is(err, router.ErrInvalidMatchers),
 		errors.Is(err, router.ErrDNSInvalidServer):
 		response.Error(w, err.Error(), "INVALID_MATCHERS")
+	case errors.Is(err, router.ErrQoSClassesInvalid):
+		// 400 with the detailed Russian message (DSCP range/duplicate/limit/
+		// outbound) intact so the settings UI can surface it verbatim.
+		response.Error(w, err.Error(), "QOS_CLASSES_INVALID")
+	case errors.Is(err, router.ErrReservedInboundTag):
+		// 400: user rules must not claim the reserved qos-* inbound namespace
+		// (they'd be inert shadow rules — the managed slot merges first).
+		response.Error(w, err.Error(), "RESERVED_INBOUND_TAG")
 	default:
 		response.InternalError(w, err.Error())
 	}

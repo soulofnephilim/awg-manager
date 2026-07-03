@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1006,16 +1005,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	ndmsHandler := api.NewNDMSHandler(s.ndmsSaveCoord)
 	mux.HandleFunc("/api/ndms/save-status", guarded(ndmsHandler.GetSaveStatus))
 
-	// Boot status (public - frontend uses instanceId for restart detection)
-	mux.HandleFunc("/api/boot-status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"initializing":     false,
-			"remainingSeconds": 0,
-			"phase":            "ready",
-			"instanceId":       s.instanceID,
-		})
-	})
+	// Boot status (public - frontend uses instanceId for restart detection).
+	// Dedicated api.BootStatusHandler so the endpoint keeps its swagger
+	// annotations (@Router /boot-status) — an inline closure here is
+	// invisible to `swag init` and silently drops the path from the spec.
+	mux.HandleFunc("/api/boot-status", api.NewBootStatusHandler(s.instanceID).Get)
 
 	// Wire event bus to CRUD handlers for SSE publishing
 	tunnelsHandler.SetEventBus(s.bus)
