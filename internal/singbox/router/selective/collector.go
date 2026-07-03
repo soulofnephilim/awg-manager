@@ -151,21 +151,39 @@ func safeFilename(tag string) string {
 	return result
 }
 
-// deduplicator tracks seen CIDRs and domain queries to avoid duplicates.
-type deduplicator struct {
-	cidrs         map[string]struct{}
-	domainQueries map[string]string // key → outbound
-}
+// maxSelectiveMatchers caps how many unique domain matchers one rebuild
+// accepts (same budget style as maxHostsPerMatcher / fullProbeSuffixBudget).
+// Each accepted matcher costs a dedupe entry, a resolve work item and DNS
+// query volume; importing a full geosite dump (500k+ entries) must degrade
+// to a truncated — and loudly reported — list, not an OOM-killed daemon.
+// 100k matchers keep the dedupe map in the tens of MB, the practical ceiling
+// for the 256–512MB router class this daemon targets.
+const maxSelectiveMatchers = 100_000
 
-func (d *deduplicator) addCIDR(s string) bool {
-	if d.cidrs == nil {
-		d.cidrs = make(map[string]struct{})
-	}
-	if _, ok := d.cidrs[s]; ok {
-		return false
-	}
-	d.cidrs[s] = struct{}{}
-	return true
+// deduplicator tracks seen domain queries to avoid duplicate resolve work.
+//
+// Static CIDRs are deliberately NOT deduplicated in-process: geoip imports
+// carry hundreds of thousands of CIDRs, so any exact dedupe structure is the
+// one unbounded allocation left in the collect path (~tens of MB at 1M CIDRs
+// — fatal under the 96MiB GOMEMLIMIT tier), and a hash-only set risks a
+// collision silently OMITTING a distinct subnet from the ipset (a routing
+// gap). Duplicate lines are harmless instead: `ipset restore` runs with
+// -exist, and the kernel set dedupes entries itself. The only cost is that
+// StaticCIDRCount counts collected lines, not unique subnets — its consumers
+// (NeedsPopulation's zero-vs-nonzero check, the UI's informational counter)
+// tolerate that; the authoritative entry count always comes from ipset
+// EntryCount.
+type deduplicator struct {
+	// domainQueries deliberately keeps FULL string keys: its value (outbound)
+	// drives routing, so a hash collision here could silently mis-dedupe a
+	// matcher onto the wrong outbound. The map is bounded by
+	// maxSelectiveMatchers.
+	domainQueries map[string]string // kind+matcher → outbound
+	// droppedMatchers counts matcher sightings rejected after the
+	// maxSelectiveMatchers budget was exhausted. Repeats of an already
+	// dropped matcher count again — it is a warning metric, not an exact
+	// unique count.
+	droppedMatchers int
 }
 
 func (d *deduplicator) addDomainQuery(matcher string, kind DomainKind, outbound string) bool {
@@ -177,6 +195,10 @@ func (d *deduplicator) addDomainQuery(matcher string, kind DomainKind, outbound 
 		if ob == "" && outbound != "" {
 			d.domainQueries[key] = outbound
 		}
+		return false
+	}
+	if len(d.domainQueries) >= maxSelectiveMatchers {
+		d.droppedMatchers++
 		return false
 	}
 	d.domainQueries[key] = outbound

@@ -2,7 +2,6 @@ package selective
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
@@ -24,6 +23,13 @@ type GeoPaths struct {
 // cleanup must be called when done (may be noop).
 type RuleSetJSONOpener func(ctx context.Context, ref RuleSetRef) (path string, cleanup func(), err error)
 
+// CollectStats summarizes budget enforcement during one collection pass.
+type CollectStats struct {
+	// DroppedMatchers counts matcher sightings rejected because the
+	// maxSelectiveMatchers budget was exhausted (see deduplicator).
+	DroppedMatchers int
+}
+
 // StreamCollectFromRules walks proxy rules and rule sets, invoking sink callbacks
 // without accumulating full CollectResult slices in memory.
 func StreamCollectFromRules(
@@ -33,7 +39,7 @@ func StreamCollectFromRules(
 	geo GeoPaths,
 	openJSON RuleSetJSONOpener,
 	sink CollectSink,
-) []error {
+) (CollectStats, []error) {
 	var errs []error
 	seen := &deduplicator{}
 	proxySetTags := make(map[string]string)
@@ -42,7 +48,7 @@ func StreamCollectFromRules(
 		collectFromRuleStream(&rules[i], "", seen, sink, proxySetTags)
 	}
 	if len(proxySetTags) == 0 {
-		return errs
+		return CollectStats{DroppedMatchers: seen.droppedMatchers}, errs
 	}
 
 	refsByTag := make(map[string]RuleSetRef, len(ruleSetRefs))
@@ -58,14 +64,14 @@ func StreamCollectFromRules(
 			errs = append(errs, err)
 		}
 	}
-	return errs
+	return CollectStats{DroppedMatchers: seen.droppedMatchers}, errs
 }
 
 func collectFromRuleStream(r *RuleJSON, parentOutbound string, seen *deduplicator, sink CollectSink, proxySetTags map[string]string) {
 	outbound := effectiveOutbound(r, parentOutbound)
 	if isProxyRoute(r, outbound) {
 		for _, cidr := range r.IPCIDR {
-			if c := normalizeCIDR(cidr); c != "" && seen.addCIDR(c) {
+			if c := normalizeCIDR(cidr); c != "" {
 				_ = sink.OnStaticCIDR(c)
 			}
 		}
@@ -106,16 +112,12 @@ func streamRuleSetRef(
 		return streamDatRuleSet(ref.DatKind, ref.DatTags, outbound, geo, seen, sink)
 	}
 	if len(ref.Rules) > 0 {
+		// Walk each in-memory rule map directly. The previous implementation
+		// re-marshalled every rule to JSON and decoded it again into a
+		// map[string]json.RawMessage — for an inline rule-set with a huge
+		// domain_suffix array that duplicated the whole list twice per rule.
 		for _, ruleMap := range ref.Rules {
-			raw, err := json.Marshal(ruleMap)
-			if err != nil {
-				continue
-			}
-			var m map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &m); err != nil {
-				continue
-			}
-			if err := streamExtractFromRuleMap(m, outbound, seen, sink); err != nil {
+			if err := streamExtractFromRuleValueMap(ruleMap, outbound, seen, sink); err != nil {
 				return err
 			}
 		}
@@ -160,7 +162,7 @@ func streamDatRuleSet(kind string, tags []string, outbound string, geo GeoPaths,
 		for _, path := range geo.GeoIP {
 			for _, tag := range tags {
 				if err := hydraroute.StreamGeoIPTagLines(path, tag, func(line string) error {
-					if c := normalizeCIDR(line); c != "" && seen.addCIDR(c) {
+					if c := normalizeCIDR(line); c != "" {
 						return sink.OnStaticCIDR(c)
 					}
 					return nil

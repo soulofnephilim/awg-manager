@@ -3,6 +3,7 @@ package selective
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -69,7 +70,11 @@ type Builder struct {
 	lastRebuild time.Time
 	lastError   string
 	summary     *SnapshotSummary
-	routes      map[string][]string
+	// routes is the resident /32 overlay (outbound → host addresses). Stored
+	// as netip.Addr sets — it stays alive between rebuilds (see
+	// LastIPRulesByOutbound / mergeRoutesLocked) and the former
+	// map[string][]string of "/32" strings cost several times the bytes.
+	routes map[string]map[netip.Addr]struct{}
 }
 
 func (b *Builder) opSem() chan struct{} {
@@ -176,6 +181,8 @@ func (b *Builder) LastSummary() *SnapshotSummary {
 }
 
 // LastIPRulesByOutbound returns /32 overlay rules for 19-selective-routes.json.
+// Lists are rendered sorted (see renderHostRoutes) so the marshalled routes
+// slot stays byte-stable across identical rebuilds.
 func (b *Builder) LastIPRulesByOutbound() map[string][]string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -183,8 +190,13 @@ func (b *Builder) LastIPRulesByOutbound() map[string][]string {
 		return nil
 	}
 	out := make(map[string][]string, len(b.routes))
-	for k, v := range b.routes {
-		out[k] = append([]string(nil), v...)
+	for k, set := range b.routes {
+		if len(set) == 0 {
+			// Defensive: an empty list becomes a condition-less rule in
+			// buildSelectiveIPRules — see RouteAccumulator.Add.
+			continue
+		}
+		out[k] = renderHostRoutes(set)
 	}
 	return out
 }
@@ -298,80 +310,124 @@ func (b *Builder) RebuildOwnedRun(
 		return ChunkedAddStaging(ctx, chunk)
 	}
 
+	// staticCount counts collected static-CIDR lines, not unique subnets:
+	// in-process CIDR dedupe was removed (unbounded at geoip scale; ipset
+	// restore -exist makes duplicates harmless), so a CIDR repeated across
+	// rules/rule-sets counts once per sighting. Consumers only need
+	// zero-vs-nonzero (NeedsPopulation) or an informational figure (UI);
+	// the authoritative entry count is ipset EntryCount.
 	var staticCount atomic.Int32
 	var domainCount atomic.Int32
 	dnsServers := BuildDNSServers(ctx, singboxDNS, b.cfg.DNSSource)
 
-	var queries []DomainQuery
-	sink := CollectSink{
-		OnStaticCIDR: func(cidr string) error {
+	// Collect and resolve run as ONE streaming pipeline: collected matchers
+	// flow through a bounded channel straight into the fixed resolve pool
+	// instead of first materializing a geosite-scale []DomainQuery (plus its
+	// parallel probe flags). The exact matcher total is therefore only known
+	// once collection finishes — so progress stays in the collecting phase
+	// (its total still growing) until the collector returns, and only then
+	// flips to resolving with a final total. Flipping immediately made the
+	// modal mark «Сбор правил» done at t=0 and its bar regress as the moving
+	// total grew.
+	var queuedDomains atomic.Int32
+	var collectDone atomic.Bool
+	resolvePhase := func() Phase {
+		if collectDone.Load() {
+			return PhaseResolving
+		}
+		return PhaseCollecting
+	}
+	// Host-level events are suppressed for bulk runs; the latch keeps the
+	// decision sticky for the whole run (see hostProgressFn below).
+	var suppressHostEvents atomic.Bool
+	stats, collectErrs := collectResolveStream(ctx, rules, ruleSetRefs, b.cfg.Geo, b.cfg.OpenRuleSetJSON, dnsServers,
+		func(cidr string) error {
 			staticCount.Add(1)
 			return addStaging(cidr)
 		},
-		OnDomainQuery: func(q DomainQuery) error {
-			queries = append(queries, q)
-			return nil
+		DomainQueryStreamSink{
+			OnIP: func(q DomainQuery, cidr string) {
+				_ = addStaging(cidr)
+				routes.Add(q.Outbound, cidr)
+				if conntrackDestArg(cidr) != "" {
+					ctQueue.Add(cidr)
+				}
+			},
+			OnRecord: func(q DomainQuery, rec MatcherRecord) {
+				if rec.Error != "" && b.cfg.Log != nil {
+					b.cfg.Log.Warn("selective-rebuild", q.Matcher, rec.Error)
+				}
+				_ = snapW.WriteRecord(DomainMatcherRecord{
+					Matcher:    rec.Matcher,
+					Kind:       string(rec.Kind),
+					QueryHosts: rec.QueryHosts,
+					CDN:        rec.CDN,
+					Outbound:   rec.Outbound,
+					Error:      rec.Error,
+				})
+				domainCount.Add(1)
+			},
 		},
-	}
-
-	collectErrs := StreamCollectFromRules(ctx, rules, ruleSetRefs, b.cfg.Geo, b.cfg.OpenRuleSetJSON, sink)
+		&queuedDomains,
+		func() {
+			// Collection finished — the queued count is final from here on.
+			collectDone.Store(true)
+			emit(Progress{
+				Phase:   PhaseResolving,
+				Message: "DNS-резолв доменных правил…",
+				Total:   int(queuedDomains.Load()),
+			})
+		},
+		func(done, total int, matcher string) {
+			emit(Progress{
+				Phase:   resolvePhase(),
+				Message: fmt.Sprintf("Резолвинг: %s", matcher),
+				Matcher: matcher,
+				Current: done,
+				Total:   total,
+			})
+		}, func(matcher, host string, hostIndex, hostTotal int) {
+			// Host-level SSE only for small lists — avoid flooding during bulk
+			// geosite. Once the queued count passes the threshold, suppression
+			// latches ON for the rest of the run; and while collection is still
+			// streaming (the count could yet grow past the threshold) host
+			// events are withheld entirely — so a bulk import cannot leak an
+			// initial burst of mismatched-scale events.
+			if suppressHostEvents.Load() {
+				return
+			}
+			if queuedDomains.Load() > 200 {
+				suppressHostEvents.Store(true)
+				return
+			}
+			if !collectDone.Load() {
+				return
+			}
+			emit(Progress{
+				Phase:     PhaseResolving,
+				Message:   fmt.Sprintf("Резолвинг: %s — %s (%d/%d)", matcher, host, hostIndex, hostTotal),
+				Matcher:   matcher,
+				QueryHost: host,
+				Current:   hostIndex,
+				Total:     hostTotal,
+			})
+		})
 	for _, e := range collectErrs {
 		if b.cfg.Log != nil {
 			b.cfg.Log.Warn("selective-rebuild", "collect", e.Error())
 		}
 	}
-
-	totalDomains := len(queries)
-	emit(Progress{
-		Phase:   PhaseResolving,
-		Message: fmt.Sprintf("DNS-резолв %d доменных правил…", totalDomains),
-		Total:   totalDomains,
-	})
-
-	ResolveDomainQueriesStream(ctx, queries, dnsServers, DomainQueryStreamSink{
-		OnIP: func(q DomainQuery, cidr string) {
-			_ = addStaging(cidr)
-			routes.Add(q.Outbound, cidr)
-			if conntrackDestArg(cidr) != "" {
-				ctQueue.Add(cidr)
-			}
-		},
-		OnRecord: func(q DomainQuery, rec MatcherRecord) {
-			if rec.Error != "" && b.cfg.Log != nil {
-				b.cfg.Log.Warn("selective-rebuild", q.Matcher, rec.Error)
-			}
-			_ = snapW.WriteRecord(DomainMatcherRecord{
-				Matcher:    rec.Matcher,
-				Kind:       string(rec.Kind),
-				QueryHosts: rec.QueryHosts,
-				CDN:        rec.CDN,
-				Outbound:   rec.Outbound,
-				Error:      rec.Error,
-			})
-			domainCount.Add(1)
-		},
-	}, func(done, total int, matcher string) {
-		emit(Progress{
-			Phase:   PhaseResolving,
-			Message: fmt.Sprintf("Резолвинг: %s", matcher),
-			Matcher: matcher,
-			Current: done,
-			Total:   total,
-		})
-	}, func(matcher, host string, hostIndex, hostTotal int) {
-		// Host-level SSE only for small lists — avoid flooding during bulk geosite.
-		if totalDomains > 200 {
-			return
+	routesDropped := routes.Dropped()
+	if b.cfg.Log != nil {
+		if stats.DroppedMatchers > 0 {
+			b.cfg.Log.Warn("selective-rebuild", "budget",
+				fmt.Sprintf("matcher list truncated: limit %d exceeded, %d dropped", maxSelectiveMatchers, stats.DroppedMatchers))
 		}
-		emit(Progress{
-			Phase:     PhaseResolving,
-			Message:   fmt.Sprintf("Резолвинг: %s — %s (%d/%d)", matcher, host, hostIndex, hostTotal),
-			Matcher:   matcher,
-			QueryHost: host,
-			Current:   hostIndex,
-			Total:     hostTotal,
-		})
-	})
+		if routesDropped > 0 {
+			b.cfg.Log.Warn("selective-rebuild", "budget",
+				fmt.Sprintf("overlay routes truncated: limit %d exceeded, %d dropped", maxSelectiveRoutes, routesDropped))
+		}
+	}
 
 	emit(Progress{
 		Phase:   PhasePopulating,
@@ -390,7 +446,7 @@ func (b *Builder) RebuildOwnedRun(
 	entryCount := EntryCount(ctx)
 	b.setSuccess()
 	b.mu.Lock()
-	b.routes = routes.RulesByOutbound()
+	b.routes = routes.AddrsByOutbound()
 	b.mu.Unlock()
 
 	summary := SnapshotSummary{
@@ -398,6 +454,8 @@ func (b *Builder) RebuildOwnedRun(
 		EntryCount:         entryCount,
 		StaticCIDRCount:    int(staticCount.Load()),
 		DomainMatcherCount: int(domainCount.Load()),
+		TruncatedMatchers:  stats.DroppedMatchers,
+		TruncatedRoutes:    routesDropped,
 	}
 	if err := snapW.CloseAndCommit(summary); err != nil {
 		return b.fail(ctx, emit, fmt.Errorf("selective: commit snapshot: %w", err))
@@ -412,9 +470,83 @@ func (b *Builder) RebuildOwnedRun(
 	if entryCount == 0 {
 		doneMsg = "ipset пустой — правил с IP/доменами нет. Весь трафик идёт в WAN мимо sing-box."
 	}
+	if stats.DroppedMatchers > 0 {
+		doneMsg += fmt.Sprintf("; список усечён: превышен лимит матчеров %d (отброшено %d)", maxSelectiveMatchers, stats.DroppedMatchers)
+	}
+	if routesDropped > 0 {
+		doneMsg += fmt.Sprintf("; маршруты усечены: превышен лимит %d (отброшено %d)", maxSelectiveRoutes, routesDropped)
+	}
 	emit(Progress{Phase: PhaseDone, Message: doneMsg, Current: entryCount, Total: entryCount})
 	b.publishStatus(true, entryCount)
 	return nil
+}
+
+// collectResolveStream runs the collect stage and the DNS resolve worker pool
+// as one streaming pipeline: every collected DomainQuery flows through a
+// bounded channel (resolveQueueDepth) straight into the fixed pool of
+// maxConcurrentResolves workers, so at no point does a geosite-scale query
+// list exist in memory. queued is incremented per enqueued matcher and doubles
+// as the moving progress total. onCollected (optional) fires once the collect
+// stage has finished — i.e. queued is final — while resolves may still be in
+// flight. Returns once BOTH stages have finished.
+func collectResolveStream(
+	ctx context.Context,
+	rules []RuleJSON,
+	ruleSetRefs []RuleSetRef,
+	geo GeoPaths,
+	openJSON RuleSetJSONOpener,
+	dnsServers []string,
+	onStaticCIDR func(cidr string) error,
+	resolveSink DomainQueryStreamSink,
+	queued *atomic.Int32,
+	onCollected func(),
+	progressFn ResolveProgressFn,
+	hostProgressFn ResolveHostProgressFn,
+) (CollectStats, []error) {
+	work := make(chan resolveWorkItem, resolveQueueDepth)
+	resolveDone := make(chan struct{})
+	go func() {
+		defer close(resolveDone)
+		resolveWorkers(ctx, work, dnsServers, resolveSink, progressFn, func() int {
+			return int(queued.Load())
+		}, hostProgressFn)
+	}()
+
+	// Streaming variant of fullProbeFlags: the first fullProbeSuffixBudget
+	// suffix matchers — in collection order, i.e. hand-written rules before
+	// rule-sets, exactly like the batch flags — keep the full subdomain
+	// expansion; the tail gets minimalSuffixProbes. Deciding at enqueue time
+	// in the single-goroutine collector reproduces the batch semantics
+	// without knowing the total count up front (exact-domain queries resolve
+	// one host anyway and never consume the budget).
+	budget := fullProbeSuffixBudget
+	sink := CollectSink{
+		OnStaticCIDR: onStaticCIDR,
+		OnDomainQuery: func(q DomainQuery) error {
+			full := q.Kind == KindDomain
+			if !full && budget > 0 {
+				full = true
+				budget--
+			}
+			queued.Add(1)
+			// Workers drain the channel even after cancellation (resolves
+			// fail fast on a dead ctx), so this send cannot block forever;
+			// the ctx branch just lets collection abort early.
+			select {
+			case work <- resolveWorkItem{query: q, fullProbes: full}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+	stats, errs := StreamCollectFromRules(ctx, rules, ruleSetRefs, geo, openJSON, sink)
+	close(work)
+	if onCollected != nil {
+		onCollected()
+	}
+	<-resolveDone
+	return stats, errs
 }
 
 // emitter wraps the optional per-call ProgressFn with the SSE bus publish.

@@ -65,7 +65,7 @@ func streamRuleSetJSONFile(path string, outbound string, seen *deduplicator, sin
 func streamExtractFromRuleMap(rule map[string]json.RawMessage, outbound string, seen *deduplicator, sink *CollectSink) error {
 	if raw, ok := rule["ip_cidr"]; ok {
 		if err := streamStringArray(raw, func(s string) error {
-			if c := normalizeCIDR(s); c != "" && seen.addCIDR(c) {
+			if c := normalizeCIDR(s); c != "" {
 				return sink.OnStaticCIDR(c)
 			}
 			return nil
@@ -89,6 +89,67 @@ func streamExtractFromRuleMap(rule map[string]json.RawMessage, outbound string, 
 			return nil
 		}); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// streamExtractFromRuleValueMap mirrors streamExtractFromRuleMap for rules
+// already decoded as map[string]interface{} (in-memory rule-sets restored by
+// the router materializer), reading the values in place instead of paying a
+// JSON marshal→unmarshal round-trip per rule.
+func streamExtractFromRuleValueMap(rule map[string]interface{}, outbound string, seen *deduplicator, sink *CollectSink) error {
+	if v, ok := rule["ip_cidr"]; ok {
+		if err := forEachRuleString(v, func(s string) error {
+			if c := normalizeCIDR(s); c != "" {
+				return sink.OnStaticCIDR(c)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	for _, key := range []string{"domain_suffix", "domain"} {
+		v, ok := rule[key]
+		if !ok {
+			continue
+		}
+		kind := KindDomain
+		if key == "domain_suffix" {
+			kind = KindDomainSuffix
+		}
+		if err := forEachRuleString(v, func(s string) error {
+			if d := cleanDomain(s); d != "" && seen.addDomainQuery(d, kind, outbound) {
+				return sink.OnDomainQuery(DomainQuery{Matcher: d, Kind: kind, Outbound: outbound})
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// forEachRuleString invokes fn for a scalar string or a string array value —
+// both shapes appear in sing-box rule-set source rules. JSON-decoded maps
+// carry []interface{}; programmatically built refs may carry []string.
+func forEachRuleString(v interface{}, fn func(string) error) error {
+	switch t := v.(type) {
+	case string:
+		return fn(t)
+	case []interface{}:
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				if err := fn(s); err != nil {
+					return err
+				}
+			}
+		}
+	case []string:
+		for _, s := range t {
+			if err := fn(s); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

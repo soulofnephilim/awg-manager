@@ -22,8 +22,33 @@ type DomainQueryStreamSink struct {
 	OnRecord func(query DomainQuery, rec MatcherRecord)
 }
 
-// ResolveDomainQueriesStream resolves matchers concurrently (same parallelism as
-// ResolveDomainQueries) but streams each /32 to onIP instead of retaining all IPs.
+// resolveWorkItem is one matcher queued for the resolve worker pool, with the
+// probe mode decided by the producer (fullProbeFlags for batch callers, the
+// streaming budget in the builder's collect sink).
+type resolveWorkItem struct {
+	query      DomainQuery
+	fullProbes bool
+}
+
+// resolveQueueDepth bounds the collect→resolve handoff channel. Collection
+// (local file streaming) is far faster than DNS, so without a bound the
+// channel would buffer the whole query list and re-create the memory spike
+// the streaming pipeline exists to avoid.
+const resolveQueueDepth = 256
+
+// resolveOneQueryFn is the resolver seam; tests stub it to exercise the
+// pipeline without network I/O.
+var resolveOneQueryFn = resolveOneQuery
+
+// ResolveDomainQueriesStream resolves matchers concurrently (fixed pool of
+// maxConcurrentResolves workers) and streams each /32 to sink.OnIP instead of
+// retaining all IPs.
+//
+// A fixed worker pool — NOT goroutine-per-query: the previous implementation
+// launched len(queries) goroutines up front, all parked on a semaphore. At
+// geosite scale (hundreds of thousands of matchers) those idle ~8KB stacks
+// alone accounted for gigabytes of total-vm and OOM-killed the daemon on
+// 256–512MB routers.
 func ResolveDomainQueriesStream(
 	ctx context.Context,
 	queries []DomainQuery,
@@ -42,33 +67,63 @@ func ResolveDomainQueriesStream(
 	// minimal set or DNS query volume explodes (matchers × probes ×
 	// servers × rounds).
 	fullProbes := fullProbeFlags(queries)
-
-	sem := make(chan struct{}, maxConcurrentResolves)
-	var wg sync.WaitGroup
-	var doneCount atomic.Int32
 	total := len(queries)
 
-	for i, q := range queries {
+	work := make(chan resolveWorkItem, resolveQueueDepth)
+	go func() {
+		defer close(work)
+		for i := range queries {
+			work <- resolveWorkItem{query: queries[i], fullProbes: fullProbes[i]}
+		}
+	}()
+	resolveWorkers(ctx, work, dnsServers, sink, progressFn, func() int { return total }, hostProgressFn)
+}
+
+// resolveWorkers runs the fixed pool of maxConcurrentResolves workers until
+// work is closed and drained. Workers keep consuming after ctx cancellation —
+// resolveOneQuery fails fast on a dead context and still yields a per-matcher
+// record, matching the pre-pool semantics — so the feeding goroutine can
+// never leak blocked on send. totalFn supplies the (possibly still growing)
+// total for progress reporting; done may briefly exceed a stale total, so the
+// reported total is clamped to at least done.
+func resolveWorkers(
+	ctx context.Context,
+	work <-chan resolveWorkItem,
+	dnsServers []string,
+	sink DomainQueryStreamSink,
+	progressFn ResolveProgressFn,
+	totalFn func() int,
+	hostProgressFn ResolveHostProgressFn,
+) {
+	var wg sync.WaitGroup
+	var doneCount atomic.Int32
+	for w := 0; w < maxConcurrentResolves; w++ {
 		wg.Add(1)
-		go func(query DomainQuery, full bool) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			for item := range work {
+				query := item.query
+				rec := ResolveOneQueryStream(ctx, query, dnsServers, func(cidr string) {
+					if sink.OnIP != nil {
+						sink.OnIP(query, cidr)
+					}
+				}, hostProgressFn, item.fullProbes)
 
-			rec := ResolveOneQueryStream(ctx, query, dnsServers, func(cidr string) {
-				if sink.OnIP != nil {
-					sink.OnIP(query, cidr)
+				if sink.OnRecord != nil {
+					sink.OnRecord(query, rec)
 				}
-			}, hostProgressFn, full)
-
-			if sink.OnRecord != nil {
-				sink.OnRecord(query, rec)
+				if progressFn != nil {
+					n := int(doneCount.Add(1))
+					total := n
+					if totalFn != nil {
+						if t := totalFn(); t > total {
+							total = t
+						}
+					}
+					progressFn(n, total, query.Matcher)
+				}
 			}
-			if progressFn != nil {
-				n := int(doneCount.Add(1))
-				progressFn(n, total, query.Matcher)
-			}
-		}(q, fullProbes[i])
+		}()
 	}
 	wg.Wait()
 }
@@ -93,7 +148,7 @@ func ResolveOneQueryStream(
 			onIP(ip)
 		}
 	}
-	full := resolveOneQuery(ctx, query, dnsServers, nil, hostProgressFn, fullProbes)
+	full := resolveOneQueryFn(ctx, query, dnsServers, nil, hostProgressFn, fullProbes)
 	ipsSink(full.IPs)
 	return MatcherRecord{
 		Matcher:    full.Matcher,

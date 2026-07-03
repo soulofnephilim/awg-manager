@@ -23,11 +23,23 @@ type DomainMatcherRecord struct {
 
 // SnapshotSummary is the in-memory + on-disk metadata for the last rebuild.
 type SnapshotSummary struct {
-	RebuiltAt          string `json:"rebuiltAt"`
-	EntryCount         int    `json:"entryCount"`
+	RebuiltAt  string `json:"rebuiltAt"`
+	EntryCount int    `json:"entryCount"`
+	// StaticCIDRCount counts collected static-CIDR lines, not unique subnets
+	// (in-process CIDR dedupe was removed — see deduplicator). Consumers use
+	// it as zero-vs-nonzero (NeedsPopulation) or an informational counter.
 	StaticCIDRCount    int    `json:"staticCidrCount"`
 	DomainMatcherCount int    `json:"domainMatcherCount"`
 	LastCDNRefresh     string `json:"lastCDNRefresh,omitempty"`
+	// TruncatedMatchers / TruncatedRoutes record how many matcher sightings /
+	// host routes the maxSelectiveMatchers / maxSelectiveRoutes budgets
+	// dropped (0 = no truncation). TruncatedRoutes also accumulates drops
+	// from background CDN refreshes; the next full rebuild resets it.
+	// Deliberately NOT part of the NeedsPopulation intentional-empty
+	// decision: a truncated rebuild still carries non-zero matcher/entry
+	// counts, so boot repopulation logic is unaffected.
+	TruncatedMatchers int `json:"truncatedMatchers,omitempty"`
+	TruncatedRoutes   int `json:"truncatedRoutes,omitempty"`
 }
 
 const (

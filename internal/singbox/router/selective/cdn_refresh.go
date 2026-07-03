@@ -3,6 +3,7 @@ package selective
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -62,25 +63,22 @@ func (b *Builder) RefreshCDNMatchers(
 	// holding the gate across this multi-minute loop made the rebuild API's
 	// TryLock pre-check answer every manual rebuild with a misleading 409
 	// «применяется конфигурация sing-box».
-	type matcherCIDRs struct {
-		matcher string
-		cidrs   []string
-	}
-	var pending []matcherCIDRs
 	for qi, q := range queries {
-		var cidrs []string
 		ResolveOneQueryStream(ctx, q, dnsServers, func(cidr string) {
-			cidrs = append(cidrs, cidr)
 			acc.Add(q.Outbound, cidr)
 		}, nil, fullProbes[qi])
-		if len(cidrs) > 0 {
-			pending = append(pending, matcherCIDRs{matcher: q.Matcher, cidrs: cidrs})
-		}
 	}
 
-	// Mutation phase — the heavy-op gate is held ONLY around the ipset writes.
+	// Mutation phase — the heavy-op gate is held ONLY around the overlay merge
+	// + ipset writes. The overlay budget check runs FIRST and only addresses it
+	// accepts reach ChunkedAddLive: adding resolved IPs to the live set before
+	// the merge meant that, with the overlay at maxSelectiveRoutes, the new
+	// entries were intercepted but matched no overlay rule and left via
+	// route.final=direct — silently recreating the PR424 leak.
+	fresh := acc.AddrsByOutbound()
+	dropped := acc.Dropped()
 	var added, addFailed int
-	if len(pending) > 0 {
+	if len(fresh) > 0 {
 		if !heavyop.Default.TryLock() {
 			if b.cfg.Log != nil {
 				b.cfg.Log.Info("selective-cdn-refresh", "", "skipped ipset update: sing-box apply or rebuild in progress")
@@ -89,19 +87,25 @@ func (b *Builder) RefreshCDNMatchers(
 		}
 		err := func() error {
 			defer heavyop.Default.Unlock()
+			b.mu.Lock()
+			merged, accepted, mergeDropped := b.mergeRoutesLocked(fresh)
+			b.mu.Unlock()
+			newRoutes = merged
+			dropped += mergeDropped
+			if len(accepted) == 0 {
+				return nil
+			}
 			if err := CreateSet(ctx); err != nil {
 				return fmt.Errorf("selective cdn refresh: create set: %w", err)
 			}
-			for _, p := range pending {
-				// ChunkedAddLive batches internally (IpsetChunkSize per restore).
-				if err := ChunkedAddLive(ctx, p.cidrs); err != nil {
-					addFailed += len(p.cidrs)
-					if b.cfg.Log != nil {
-						b.cfg.Log.Warn("selective-cdn-refresh", p.matcher, err.Error())
-					}
-				} else {
-					added += len(p.cidrs)
+			// ChunkedAddLive batches internally (IpsetChunkSize per restore).
+			if err := ChunkedAddLive(ctx, accepted); err != nil {
+				addFailed = len(accepted)
+				if b.cfg.Log != nil {
+					b.cfg.Log.Warn("selective-cdn-refresh", "", err.Error())
 				}
+			} else {
+				added = len(accepted)
 			}
 			return nil
 		}()
@@ -113,20 +117,31 @@ func (b *Builder) RefreshCDNMatchers(
 	entries := EntryCount(ctx)
 
 	b.mu.Lock()
-	newRoutes = b.mergeRoutesLocked(acc.RulesByOutbound())
-	if b.summary != nil && addFailed == 0 {
+	if b.summary != nil && (dropped > 0 || addFailed == 0) {
 		cp := *b.summary
-		cp.EntryCount = entries
-		cp.LastCDNRefresh = time.Now().UTC().Format(time.RFC3339)
+		if dropped > 0 {
+			// Surface refresh-time truncation the same way a rebuild does: the
+			// persisted snapshot summary is what the status API / UI reads.
+			// Accumulates across refreshes; the next full rebuild resets it.
+			cp.TruncatedRoutes += dropped
+		}
+		if addFailed == 0 {
+			cp.EntryCount = entries
+			cp.LastCDNRefresh = time.Now().UTC().Format(time.RFC3339)
+		}
 		b.summary = &cp
 		writeSnapshotMeta(b.cfg.ConfigDir, cp)
 	}
 	b.mu.Unlock()
 
+	if dropped > 0 && b.cfg.Log != nil {
+		b.cfg.Log.Warn("selective-cdn-refresh", "budget",
+			fmt.Sprintf("overlay routes truncated: limit %d reached, %d dropped (not added to ipset)", maxSelectiveRoutes, dropped))
+	}
 	if b.cfg.Log != nil {
 		b.cfg.Log.Info("selective-cdn-refresh", "",
-			fmt.Sprintf("CDN refresh: %d matchers, ~%d adds, %d failed, %d new routes (ipset now %d entries)",
-				len(queries), added, addFailed, newRoutes, entries))
+			fmt.Sprintf("CDN refresh: %d matchers, ~%d adds, %d failed, %d new routes, %d budget-dropped (ipset now %d entries)",
+				len(queries), added, addFailed, newRoutes, dropped, entries))
 	}
 	if addFailed > 0 {
 		b.publishStatus(false, entries)
@@ -136,31 +151,59 @@ func (b *Builder) RefreshCDNMatchers(
 	return newRoutes, nil
 }
 
-// mergeRoutesLocked merges freshly resolved per-outbound /32 routes into
-// b.routes and reports how many were not present before. Caller holds b.mu.
-func (b *Builder) mergeRoutesLocked(fresh map[string][]string) int {
+// mergeRoutesLocked merges freshly resolved per-outbound host routes into
+// b.routes under the maxSelectiveRoutes budget — periodic CDN refreshes must
+// not grow the resident overlay unbounded. Caller holds b.mu.
+//
+// Returns:
+//   - merged: how many addresses were newly added to the overlay (the caller
+//     re-syncs the routes slot only when > 0);
+//   - accepted: every fresh address that IS present in the overlay after the
+//     merge (newly added or already resident), rendered as "/32" CIDRs. These
+//     are the ONLY addresses the caller may add to the live ipset — an ipset
+//     entry without a matching overlay rule is intercepted, matches no ip_cidr
+//     rule and leaves via route.final=direct (the PR424 leak);
+//   - dropped: how many fresh addresses the budget rejected.
+func (b *Builder) mergeRoutesLocked(fresh map[string]map[netip.Addr]struct{}) (merged int, accepted []string, dropped int) {
 	if len(fresh) == 0 {
-		return 0
+		return 0, nil, 0
 	}
 	if b.routes == nil {
-		b.routes = make(map[string][]string, len(fresh))
+		b.routes = make(map[string]map[netip.Addr]struct{}, len(fresh))
 	}
-	merged := 0
-	for outbound, cidrs := range fresh {
-		existing := make(map[string]struct{}, len(b.routes[outbound]))
-		for _, c := range b.routes[outbound] {
-			existing[c] = struct{}{}
-		}
-		for _, c := range cidrs {
-			if _, ok := existing[c]; ok {
+	total := 0
+	for _, set := range b.routes {
+		total += len(set)
+	}
+	for outbound, set := range fresh {
+		dst := b.routes[outbound]
+		for addr := range set {
+			if dst != nil {
+				if _, ok := dst[addr]; ok {
+					// Already routed — safe to (re-)add to the ipset.
+					accepted = append(accepted, addr.String()+"/32")
+					continue
+				}
+			}
+			if total >= maxSelectiveRoutes {
+				dropped++
 				continue
 			}
-			b.routes[outbound] = append(b.routes[outbound], c)
-			existing[c] = struct{}{}
+			if dst == nil {
+				// Create the per-outbound map only after the budget check
+				// passes — an empty leftover map would render an empty ip_cidr
+				// list and buildSelectiveIPRules would emit a condition-less
+				// rule (see RouteAccumulator.Add).
+				dst = make(map[netip.Addr]struct{}, len(set))
+				b.routes[outbound] = dst
+			}
+			dst[addr] = struct{}{}
+			total++
 			merged++
+			accepted = append(accepted, addr.String()+"/32")
 		}
 	}
-	return merged
+	return merged, accepted, dropped
 }
 
 // CDNRefreshLoop runs periodic CDN-only ipset refresh until stop is closed.
