@@ -45,6 +45,13 @@ func buildSelectiveIPRules(byOutbound map[string][]string) []Rule {
 	sort.Strings(outbounds)
 	out := make([]Rule, 0, len(outbounds))
 	for _, ob := range outbounds {
+		if len(byOutbound[ob]) == 0 {
+			// A rule with an empty ip_cidr list is condition-less: sing-box
+			// either rejects the config or match-alls the outbound. Upstream
+			// accumulators never emit empty lists; keep the guard here as the
+			// last line of defence before marshalling.
+			continue
+		}
 		cidrs := append([]string(nil), byOutbound[ob]...)
 		sort.Strings(cidrs)
 		out = append(out, Rule{

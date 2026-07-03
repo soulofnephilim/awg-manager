@@ -3,6 +3,7 @@ package selective
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,12 +17,13 @@ type collectedResult struct {
 	CIDRs         []string
 	DomainQueries []DomainQuery
 	Errors        []error
+	Stats         CollectStats
 }
 
 func collectAll(t *testing.T, rules []RuleJSON, refs []RuleSetRef) collectedResult {
 	t.Helper()
 	var res collectedResult
-	res.Errors = StreamCollectFromRules(context.Background(), rules, refs, GeoPaths{}, nil, CollectSink{
+	res.Stats, res.Errors = StreamCollectFromRules(context.Background(), rules, refs, GeoPaths{}, nil, CollectSink{
 		OnStaticCIDR: func(cidr string) error {
 			res.CIDRs = append(res.CIDRs, cidr)
 			return nil
@@ -166,7 +168,11 @@ func TestCollect_IPv6Skipped(t *testing.T) {
 	}
 }
 
-func TestCollect_DeduplicatesCIDRs(t *testing.T) {
+// TestCollect_DuplicateCIDRsPassThrough pins the intentional absence of
+// in-process CIDR dedupe: duplicates flow through to the sink (harmless —
+// `ipset restore` runs with -exist and the kernel set dedupes entries) instead
+// of feeding an unbounded dedupe structure at geoip scale. See deduplicator.
+func TestCollect_DuplicateCIDRsPassThrough(t *testing.T) {
 	rules := []RuleJSON{
 		proxyRule(RuleJSON{IPCIDR: []string{"1.2.3.0/24", "1.2.3.0/24"}}),
 	}
@@ -177,8 +183,8 @@ func TestCollect_DeduplicatesCIDRs(t *testing.T) {
 			count++
 		}
 	}
-	if count != 1 {
-		t.Errorf("expected 1 occurrence of 1.2.3.0/24, got %d", count)
+	if count != 2 {
+		t.Errorf("expected duplicates to pass through (2 occurrences), got %d", count)
 	}
 }
 
@@ -240,6 +246,31 @@ func TestCollect_UnreferencedRuleSetsSkipped(t *testing.T) {
 	res := collectAll(t, nil, refs)
 	if len(res.CIDRs) != 0 || len(res.DomainQueries) != 0 {
 		t.Fatalf("unreferenced rule sets must be ignored, got %+v", res)
+	}
+}
+
+// TestCollect_MatcherBudgetTruncates guards the maxSelectiveMatchers budget:
+// collection stops ACCEPTING unique matchers beyond the cap (so neither the
+// dedupe map nor the resolve queue grows unbounded) and reports the overflow
+// via CollectStats. The []string value shape also exercises the direct
+// in-memory rule conversion (no JSON round-trip).
+func TestCollect_MatcherBudgetTruncates(t *testing.T) {
+	const extra = 10
+	domains := make([]string, maxSelectiveMatchers+extra)
+	for i := range domains {
+		domains[i] = fmt.Sprintf("d%d.example", i)
+	}
+	refs := []RuleSetRef{{
+		Tag:   "big",
+		Type:  "inline",
+		Rules: []map[string]interface{}{{"domain_suffix": domains}},
+	}}
+	res := collectAll(t, []RuleJSON{proxyRule(RuleJSON{RuleSet: []string{"big"}})}, refs)
+	if len(res.DomainQueries) != maxSelectiveMatchers {
+		t.Fatalf("accepted matchers = %d, want %d", len(res.DomainQueries), maxSelectiveMatchers)
+	}
+	if res.Stats.DroppedMatchers != extra {
+		t.Fatalf("dropped = %d, want %d", res.Stats.DroppedMatchers, extra)
 	}
 }
 

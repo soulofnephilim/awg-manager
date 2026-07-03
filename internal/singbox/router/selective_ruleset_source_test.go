@@ -65,7 +65,7 @@ func TestOpenSelectiveRuleSetJSON_RemoteSRSStream(t *testing.T) {
 		Type: "remote",
 		URL:  "https://example.com/geosite-example.srs",
 	}}
-	errs := selective.StreamCollectFromRules(context.Background(),
+	_, errs := selective.StreamCollectFromRules(context.Background(),
 		[]selective.RuleJSON{{Action: "route", Outbound: "proxy", RuleSet: []string{"geosite-example"}}},
 		refs, selective.GeoPaths{}, s.OpenSelectiveRuleSetJSON, sink)
 	if len(errs) > 0 {

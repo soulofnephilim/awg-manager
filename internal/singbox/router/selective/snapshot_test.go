@@ -58,6 +58,9 @@ func TestNeedsPopulationForExistingSet(t *testing.T) {
 		{"0-entry build with domain matchers", 0, now, &SnapshotSummary{EntryCount: 0, DomainMatcherCount: 12}, true},
 		{"0-entry build with static cidrs", 0, now, &SnapshotSummary{EntryCount: 0, StaticCIDRCount: 3}, true},
 		{"0-entry build with both configured", 0, now, &SnapshotSummary{EntryCount: 0, StaticCIDRCount: 3, DomainMatcherCount: 12}, true},
+		// Budget truncation is metadata only — a truncated but populated
+		// rebuild must not confuse the intentional-empty logic.
+		{"truncated build with entries", 500, now, &SnapshotSummary{EntryCount: 500, DomainMatcherCount: 100000, TruncatedMatchers: 7, TruncatedRoutes: 3}, false},
 	}
 	for _, tc := range cases {
 		if got := needsPopulationForExistingSet(tc.entryCount, tc.lastRebuild, tc.summary); got != tc.want {

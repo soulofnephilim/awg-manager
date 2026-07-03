@@ -12,9 +12,16 @@ import (
 // Routers with 256MB RAM report ~248MB, so we use 200MB to avoid false positives.
 const LowMemoryThresholdMB = 200
 
+// MidMemoryThresholdMB is the upper bound of the mid-memory GC tier.
+// Keenetic devices with 256MB (~248 reported) and 512MB (~500 reported) RAM
+// fall into 200..700MB and get a soft GOMEMLIMIT; 1GB models report ~950MB+
+// and stay untuned. 700 leaves a wide margin above real 512MB readings
+// without catching 1GB devices.
+const MidMemoryThresholdMB = 700
+
 var (
-	totalMemoryMB     int
-	totalMemoryOnce   sync.Once
+	totalMemoryMB   int
+	totalMemoryOnce sync.Once
 )
 
 // GetTotalMemoryMB returns total system RAM in megabytes.
@@ -35,18 +42,34 @@ func IsLowMemoryDevice() bool {
 
 // GetGCEnv returns environment variables for Go GC tuning.
 // If disableMemorySaving is true, returns soft mode (GOGC=100 only).
-// If disableMemorySaving is false (default), applies auto mode for low-memory devices.
-// Returns nil for devices with sufficient RAM (>= 200MB) in auto mode.
+// If disableMemorySaving is false (default), applies the auto tier table.
+// Returns nil for devices with sufficient RAM (>= MidMemoryThresholdMB) in
+// auto mode.
 func GetGCEnv(disableMemorySaving bool) []string {
 	if disableMemorySaving {
 		return []string{"GOGC=100"}
 	}
+	return gcEnvForTotalMemoryMB(GetTotalMemoryMB())
+}
 
-	if !IsLowMemoryDevice() {
+// gcEnvForTotalMemoryMB is the GC tier table, split from GetGCEnv so it is
+// testable without faking /proc/meminfo.
+//
+// The <200MB tiers are the historical ones (unchanged). The 200–700MB tier
+// exists because 256–512MB routers previously ran with GOGC=100 and NO
+// GOMEMLIMIT at all: a selective-ipset rebuild over a huge rule list could
+// balloon the heap until the kernel OOM killer fired (observed in the field:
+// anon-rss 311MB on a 512MB device). GOMEMLIMIT=96MiB is a SOFT limit chosen
+// well above the daemon's ~30-60MB idle heap — normal operation never
+// GC-thrashes — while forcing aggressive collection during rebuild spikes
+// instead of unbounded growth. GOGC=50 keeps steady-state growth modest
+// between spikes. Explicit GOGC/GOMEMLIMIT environment variables always win:
+// applyGoMemoryLimits (cmd/awg-manager) skips any knob already present in
+// the environment.
+func gcEnvForTotalMemoryMB(mem int) []string {
+	if mem <= 0 || mem >= MidMemoryThresholdMB {
 		return nil
 	}
-
-	mem := GetTotalMemoryMB()
 
 	var memLimit string
 	switch {
@@ -54,8 +77,10 @@ func GetGCEnv(disableMemorySaving bool) []string {
 		memLimit = "16MiB"
 	case mem < 100:
 		memLimit = "24MiB"
-	default:
+	case mem < LowMemoryThresholdMB:
 		memLimit = "32MiB"
+	default:
+		memLimit = "96MiB"
 	}
 
 	return []string{
@@ -88,4 +113,3 @@ func detectTotalMemory() int {
 	}
 	return 0
 }
-

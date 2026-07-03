@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { api } from '$lib/api/client';
 	import type { SelectiveDomainMatcherRecord, SelectiveProgress } from '$lib/types';
 	import SelectiveMatcherTable from './SelectiveMatcherTable.svelte';
@@ -47,11 +48,37 @@
 		return 'pending';
 	}
 
-	const pct = $derived(
-		progress && progress.total > 0
-			? Math.min(100, Math.round((progress.current / progress.total) * 100))
-			: 0,
-	);
+	// With the streaming pipeline the total grows while collection is still
+	// running, so raw done/total can move backwards. Render a per-run
+	// monotonic percentage instead: clamp to the maximum seen, resetting when
+	// a fresh run starts (transition from idle/terminal to an active phase).
+	let maxPct = $state(0);
+	let prevPhase = '';
+
+	$effect(() => {
+		const p = progress;
+		untrack(() => {
+			const phase = p?.phase ?? '';
+			const active = phase !== '' && phase !== 'done' && phase !== 'error';
+			const wasIdle = prevPhase === '' || prevPhase === 'done' || prevPhase === 'error';
+			if (!p) {
+				maxPct = 0;
+			} else if (active && wasIdle) {
+				maxPct = 0; // new run
+			}
+			if (p && active && p.total > 0) {
+				const raw = Math.min(100, Math.round((p.current / p.total) * 100));
+				if (raw > maxPct) maxPct = raw;
+			}
+			prevPhase = phase;
+		});
+	});
+
+	const pct = $derived(maxPct);
+
+	// While collection still streams, the total is a moving lower bound —
+	// mark it with a tilde in the counter.
+	const totalIsGrowing = $derived(progress?.phase === 'collecting');
 
 	const finished = $derived(progress?.phase === 'done' || progress?.phase === 'error');
 
@@ -137,7 +164,7 @@
 					<div class="bar-wrap">
 						<div class="bar" style="width: {pct}%"></div>
 					</div>
-					<p class="counter">{progress.current} / {progress.total}</p>
+					<p class="counter">{progress.current} / {totalIsGrowing ? '~' : ''}{progress.total}</p>
 				{/if}
 				{#if progress.matcher && progress.phase !== 'done'}
 					<p class="detail mono">
