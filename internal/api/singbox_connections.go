@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/response"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 // HotspotLister is the narrow contract this handler needs from the NDMS
@@ -14,6 +17,20 @@ import (
 // internal/ndms/query directly — fake-friendly.
 type HotspotLister interface {
 	List(ctx context.Context) ([]ndms.Device, error)
+}
+
+// WGServerPeersLister is the narrow contract this handler needs from the
+// system WG-servers view (ServersHandler.ListServers): the filtered server
+// list whose peers carry Description + AllowedIPs. Fake-friendly.
+type WGServerPeersLister interface {
+	ListServers(ctx context.Context) ([]ndms.WireguardServer, error)
+}
+
+// ManagedServersLister is the narrow contract this handler needs from the
+// managed WG-server service (managed.Service.List): stored servers whose
+// peers carry Description + TunnelIP. Fake-friendly.
+type ManagedServersLister interface {
+	List() []storage.ManagedServer
 }
 
 // SingboxConnectionsClientsData mirrors frontend ClientsByIP map.
@@ -31,6 +48,10 @@ type SingboxConnectionsClientsResponse struct {
 // by the Connections monitor sub-tab to enrich Clash connection rows.
 type SingboxConnectionsHandler struct {
 	hotspot HotspotLister
+	// Optional WG peer-name sources (issue #435). Either may stay nil —
+	// the endpoint then degrades to the hotspot-only behavior.
+	wgServers WGServerPeersLister
+	managed   ManagedServersLister
 }
 
 // NewSingboxConnectionsHandler builds the handler. hotspot may be nil
@@ -39,10 +60,21 @@ func NewSingboxConnectionsHandler(hotspot HotspotLister) *SingboxConnectionsHand
 	return &SingboxConnectionsHandler{hotspot: hotspot}
 }
 
-// Clients returns IP→display-name from the NDMS hotspot cache.
+// SetWGServers wires the system WG-servers peer-name source (optional).
+func (h *SingboxConnectionsHandler) SetWGServers(l WGServerPeersLister) {
+	h.wgServers = l
+}
+
+// SetManagedServers wires the managed WG-servers peer-name source (optional).
+func (h *SingboxConnectionsHandler) SetManagedServers(l ManagedServersLister) {
+	h.managed = l
+}
+
+// Clients returns IP→display-name from the NDMS hotspot cache, merged with
+// WireGuard-server peer names so tunnel clients render like LAN devices.
 //
 //	@Summary		IP → display-name map for sing-box connections
-//	@Description	Returns the current NDMS hotspot mapping of source IPs to device display names. Cached upstream (TTL 30s). On any error returns 200 with an empty map (best-effort) so the UI keeps working with raw IPs.
+//	@Description	Returns the current mapping of source IPs to display names: NDMS hotspot devices (cached upstream, TTL 30s) merged with WireGuard-server peer names — both system/NDMS VPN servers (peer description keyed by the /32 allowed IP) and awg-manager managed servers (peer description keyed by the tunnel IP). Hotspot names win on collision. On any error returns 200 with whatever subset resolved (best-effort) so the UI keeps working with raw IPs.
 //	@Tags			singbox
 //	@Produce		json
 //	@Security		CookieAuth
@@ -61,6 +93,10 @@ func (h *SingboxConnectionsHandler) Clients(w http.ResponseWriter, r *http.Reque
 	}
 	devs, err := h.hotspot.List(r.Context())
 	out := make(map[string]string, len(devs))
+	// WG peer names go in first; hotspot names below overwrite on
+	// collision — the LAN table stays authoritative for LAN IPs.
+	h.addWGServerPeers(r.Context(), out)
+	h.addManagedPeers(out)
 	if err == nil {
 		for _, d := range devs {
 			name := d.Name
@@ -74,4 +110,73 @@ func (h *SingboxConnectionsHandler) Clients(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	response.Success(w, SingboxConnectionsClientsData{ClientsByIP: out})
+}
+
+// addWGServerPeers merges system (NDMS) WG-server peer names into out,
+// keyed by each peer's single-host allowed IP. Best-effort: a nil source
+// or list error leaves the map untouched.
+func (h *SingboxConnectionsHandler) addWGServerPeers(ctx context.Context, out map[string]string) {
+	if h.wgServers == nil {
+		return
+	}
+	servers, err := h.wgServers.ListServers(ctx)
+	if err != nil {
+		slog.Default().Warn("singbox-connections: skipping wg server peer names", "error", err)
+		return
+	}
+	for _, srv := range servers {
+		for _, p := range srv.Peers {
+			if p.Description == "" {
+				continue
+			}
+			// Первая host-запись (/32|/128): у site-to-site пиров впереди
+			// могут стоять маршрутизируемые подсети или 0.0.0.0/0.
+			for _, entry := range p.AllowedIPs {
+				if ip := peerHostIP(entry); ip != "" {
+					out[ip] = p.Description
+					break
+				}
+			}
+		}
+	}
+}
+
+// addManagedPeers merges managed WG-server peer names into out, keyed by
+// each peer's tunnel IP. Best-effort: nil source is a no-op.
+func (h *SingboxConnectionsHandler) addManagedPeers(out map[string]string) {
+	if h.managed == nil {
+		return
+	}
+	for _, srv := range h.managed.List() {
+		for _, p := range srv.Peers {
+			if p.Description == "" {
+				continue
+			}
+			if ip := peerHostIP(p.TunnelIP); ip != "" {
+				out[ip] = p.Description
+			}
+		}
+	}
+}
+
+// peerHostIP normalizes a single-host peer address ("10.0.0.2/32",
+// "fd00::2/128" or bare "10.0.0.2") to the lowercased bare-IP map key the
+// frontend looks up by. Returns "" for anything that is not a single host
+// (e.g. "10.0.0.0/24") or not a valid IP.
+func peerHostIP(entry string) string {
+	entry = strings.TrimSpace(entry)
+	host := entry
+	if i := strings.IndexByte(entry, '/'); i >= 0 {
+		if m := entry[i+1:]; m != "32" && m != "128" {
+			return ""
+		}
+		host = entry[:i]
+	}
+	parsed := net.ParseIP(host)
+	if parsed == nil {
+		return ""
+	}
+	// Каноническая форма: user-typed IPv6 ("fd00:0:0::2") должен совпасть
+	// со source IP из Clash API ("fd00::2").
+	return strings.ToLower(parsed.String())
 }

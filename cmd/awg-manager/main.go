@@ -949,6 +949,12 @@ func main() {
 	singboxHandler.SetNDMSProxyMigrator(singboxMigrator, settingsStore)
 	clashProxy := api.NewClashProxy(singboxOp)
 	singboxConnsHandler := api.NewSingboxConnectionsHandler(ndmsQueries.Hotspot)
+	// Managed WG-server peer names for the connections monitor (issue
+	// #435): in-memory store read, no NDMS round-trip. The system-server
+	// source is wired in server.go once ServersHandler exists.
+	if managedService != nil {
+		singboxConnsHandler.SetManagedServers(managedService)
+	}
 
 	// Watchdog: runs an immediate reconcile (replacing the old one-shot
 	// startup reconcile) and keeps checking every 30s. If sing-box crashes

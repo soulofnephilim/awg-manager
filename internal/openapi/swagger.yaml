@@ -9611,9 +9611,12 @@ paths:
       - singbox
   /singbox/connections/clients:
     get:
-      description: Returns the current NDMS hotspot mapping of source IPs to device
-        display names. Cached upstream (TTL 30s). On any error returns 200 with an
-        empty map (best-effort) so the UI keeps working with raw IPs.
+      description: 'Returns the current mapping of source IPs to display names: NDMS
+        hotspot devices (cached upstream, TTL 30s) merged with WireGuard-server peer
+        names — both system/NDMS VPN servers (peer description keyed by the /32 allowed
+        IP) and awg-manager managed servers (peer description keyed by the tunnel
+        IP). Hotspot names win on collision. On any error returns 200 with whatever
+        subset resolved (best-effort) so the UI keeps working with raw IPs.'
       produces:
       - application/json
       responses:
