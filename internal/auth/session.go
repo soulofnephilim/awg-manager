@@ -8,10 +8,12 @@ import (
 )
 
 const (
-	SessionTTL      = 24 * time.Hour
-	SessionCookie   = "awg_session"
-	tokenLength     = 32
-	cleanupInterval = 5 * time.Minute
+	// defaultSessionTTL is used when no TTL getter is wired (nil) or the
+	// getter returns a non-positive duration.
+	defaultSessionTTL = 24 * time.Hour
+	SessionCookie     = "awg_session"
+	tokenLength       = 32
+	cleanupInterval   = 5 * time.Minute
 )
 
 // Session represents an authenticated user session.
@@ -27,16 +29,35 @@ type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	stopCh   chan struct{}
+	// ttl returns the configured session lifetime. Read LIVE on every
+	// expiry check, so a shortened TTL takes effect immediately for
+	// already-issued sessions (the server-side check is authoritative;
+	// the browser cookie Max-Age catches up on the next login).
+	ttl func() time.Duration
 }
 
 // NewSessionStore creates a new session store and starts cleanup goroutine.
-func NewSessionStore() *SessionStore {
+// ttl supplies the session lifetime (wired to the settings store); nil or
+// a non-positive result falls back to the 24h default.
+func NewSessionStore(ttl func() time.Duration) *SessionStore {
 	s := &SessionStore{
 		sessions: make(map[string]*Session),
 		stopCh:   make(chan struct{}),
+		ttl:      ttl,
 	}
 	go s.cleanupLoop()
 	return s
+}
+
+// TTL returns the current session lifetime — used for the expiry checks,
+// the login cookie Max-Age and the /auth/status expiresIn field.
+func (s *SessionStore) TTL() time.Duration {
+	if s.ttl != nil {
+		if d := s.ttl(); d > 0 {
+			return d
+		}
+	}
+	return defaultSessionTTL
 }
 
 // Create creates a new session for the given login and returns the token.
@@ -72,8 +93,8 @@ func (s *SessionStore) Get(token string) *Session {
 		return nil
 	}
 
-	// Check if expired
-	if time.Since(session.LastSeen) > SessionTTL {
+	// Check if expired (TTL read live — settings changes apply immediately)
+	if time.Since(session.LastSeen) > s.TTL() {
 		delete(s.sessions, token)
 		return nil
 	}
@@ -116,8 +137,9 @@ func (s *SessionStore) cleanup() {
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	ttl := s.TTL()
 	for token, session := range s.sessions {
-		if now.Sub(session.LastSeen) > SessionTTL {
+		if now.Sub(session.LastSeen) > ttl {
 			delete(s.sessions, token)
 		}
 	}

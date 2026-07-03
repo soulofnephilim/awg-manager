@@ -567,9 +567,11 @@ func main() {
 	// so the matrix can include Keenetic-native tunnels.
 	var monitoringService *monitoring.Service
 
-	// Auth components
+	// Auth components. Session TTL is read live from settings on every
+	// expiry check, so sessionTtlHours changes apply immediately to
+	// existing sessions.
 	keeneticClient := auth.NewKeeneticClient()
-	sessionStore := auth.NewSessionStore()
+	sessionStore := auth.NewSessionStore(settingsStore.GetSessionTTL)
 	defer sessionStore.Stop()
 
 	operator.SetAppLogger(loggingService)

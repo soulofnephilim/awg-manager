@@ -10,7 +10,19 @@ type Settings struct {
 	// `Authorization: Bearer <key>` header. Empty disables key-based access
 	// (session is still required when AuthEnabled). Generated client-side
 	// via crypto.randomUUID(); the server treats it as opaque.
-	ApiKey               string            `json:"apiKey,omitempty"`
+	ApiKey string `json:"apiKey,omitempty"`
+	// SessionTtlHours is the auth session lifetime in hours (sliding
+	// window, extended on activity). Valid range 1..720, default 24
+	// (migrateToV29). Read live by the session store, so shortening it
+	// takes effect immediately for existing sessions; the browser cookie
+	// Max-Age of already-issued sessions updates on next login (the
+	// server-side expiry check is authoritative either way).
+	SessionTtlHours int `json:"sessionTtlHours"`
+	// EntwareAuthEnabled allows login with Entware system credentials
+	// (/opt/etc/shadow) verified locally, without the NDMS /auth call
+	// that generates router-side notifications. When the local check
+	// fails for any reason, login falls back to the Keenetic path.
+	EntwareAuthEnabled   bool              `json:"entwareAuthEnabled"`
 	Server               ServerSettings    `json:"server"`
 	PingCheck            PingCheckSettings `json:"pingCheck"`
 	Logging              LoggingSettings   `json:"logging"`

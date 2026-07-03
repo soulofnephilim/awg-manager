@@ -25,7 +25,7 @@ func (l *fakeAuthLogger) Warnf(format string, args ...interface{}) {
 }
 
 func TestRequireAuth_Disabled_NoCookie_Passes(t *testing.T) {
-	sessions := NewSessionStore()
+	sessions := NewSessionStore(nil)
 	t.Cleanup(sessions.Stop)
 
 	log := &fakeAuthLogger{}
@@ -50,7 +50,7 @@ func TestRequireAuth_Disabled_NoCookie_Passes(t *testing.T) {
 }
 
 func TestRequireAuth_ValidBearer_NoCookie_Passes(t *testing.T) {
-	sessions := NewSessionStore()
+	sessions := NewSessionStore(nil)
 	t.Cleanup(sessions.Stop)
 
 	m := NewMiddleware(sessions, fakeAuthChecker{enabled: true, apiKey: "secret"}, &fakeAuthLogger{})
@@ -74,7 +74,7 @@ func TestRequireAuth_ValidBearer_NoCookie_Passes(t *testing.T) {
 }
 
 func TestRequireAuth_EmptyConfiguredAPIKey_RejectsBearer(t *testing.T) {
-	sessions := NewSessionStore()
+	sessions := NewSessionStore(nil)
 	t.Cleanup(sessions.Stop)
 
 	m := NewMiddleware(sessions, fakeAuthChecker{enabled: true, apiKey: ""}, &fakeAuthLogger{})
@@ -102,7 +102,7 @@ func TestRequireAuth_EmptyConfiguredAPIKey_RejectsBearer(t *testing.T) {
 }
 
 func TestRequireAuth_MissingCookie_AuthRequired(t *testing.T) {
-	sessions := NewSessionStore()
+	sessions := NewSessionStore(nil)
 	t.Cleanup(sessions.Stop)
 
 	m := NewMiddleware(sessions, fakeAuthChecker{enabled: true, apiKey: "secret"}, &fakeAuthLogger{})
@@ -132,7 +132,7 @@ func TestRequireAuth_MissingCookie_AuthRequired(t *testing.T) {
 }
 
 func TestRequireAuth_InvalidSession_SessionExpired(t *testing.T) {
-	sessions := NewSessionStore()
+	sessions := NewSessionStore(nil)
 	t.Cleanup(sessions.Stop)
 
 	m := NewMiddleware(sessions, fakeAuthChecker{enabled: true}, &fakeAuthLogger{})
@@ -160,7 +160,7 @@ func TestRequireAuth_InvalidSession_SessionExpired(t *testing.T) {
 }
 
 func TestRequireAuth_ValidSession_Passes(t *testing.T) {
-	sessions := NewSessionStore()
+	sessions := NewSessionStore(nil)
 	t.Cleanup(sessions.Stop)
 
 	token, err := sessions.Create("admin")

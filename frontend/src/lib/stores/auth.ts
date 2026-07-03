@@ -5,6 +5,8 @@ import { api } from '$lib/api/client';
 interface AuthState {
 	authenticated: boolean;
 	authDisabled: boolean;
+	/** Вход по учётным данным Entware (/opt/etc/shadow) включён на бэкенде. */
+	entwareAuthEnabled: boolean;
 	login: string | null;
 	loading: boolean;
 	error: string | null;
@@ -14,6 +16,7 @@ function createAuthStore() {
 	const { subscribe, set, update } = writable<AuthState>({
 		authenticated: false,
 		authDisabled: false,
+		entwareAuthEnabled: false,
 		login: null,
 		loading: true,
 		error: null
@@ -29,6 +32,7 @@ function createAuthStore() {
 				return {
 					authenticated: false,
 					authDisabled: false,
+					entwareAuthEnabled: s.entwareAuthEnabled,
 					login: null,
 					loading: false,
 					error: 'Сессия истекла'
@@ -48,6 +52,7 @@ function createAuthStore() {
 				set({
 					authenticated: true,
 					authDisabled: false,
+					entwareAuthEnabled: false,
 					login: 'dev',
 					loading: false,
 					error: null
@@ -62,18 +67,21 @@ function createAuthStore() {
 				set({
 					authenticated: status.authenticated,
 					authDisabled: status.authDisabled ?? false,
+					// Legacy backends omit the field → treat as disabled.
+					entwareAuthEnabled: status.entwareAuthEnabled ?? false,
 					login: status.login || null,
 					loading: false,
 					error: null
 				});
 			} catch (e) {
-				set({
+				update((s) => ({
+					...s,
 					authenticated: false,
 					authDisabled: false,
 					login: null,
 					loading: false,
 					error: null
-				});
+				}));
 			}
 		},
 
@@ -82,13 +90,14 @@ function createAuthStore() {
 
 			try {
 				const result = await api.login(login, password);
-				set({
+				update((s) => ({
+					...s,
 					authenticated: true,
 					authDisabled: false,
 					login: result.login,
 					loading: false,
 					error: null
-				});
+				}));
 				return true;
 			} catch (e) {
 				update((s) => ({
@@ -107,13 +116,16 @@ function createAuthStore() {
 			} catch {
 				// Ignore logout errors
 			}
-			set({
+			// entwareAuthEnabled сохраняем — форма логина показывает правильную
+			// подсказку сразу после выхода, без повторного /auth/status.
+			update((s) => ({
+				...s,
 				authenticated: false,
 				authDisabled: false,
 				login: null,
 				loading: false,
 				error: null
-			});
+			}));
 		},
 
 		clearError() {

@@ -80,8 +80,15 @@ type GeoFileSettingsDTO struct {
 
 // SettingsData is the payload for GET /settings/get.
 type SettingsData struct {
-	SchemaVersion             int                  `json:"schemaVersion" example:"16"`
-	AuthEnabled               bool                 `json:"authEnabled" example:"false"`
+	SchemaVersion int  `json:"schemaVersion" example:"16"`
+	AuthEnabled   bool `json:"authEnabled" example:"false"`
+	// SessionTtlHours is the auth session lifetime in hours (1..720,
+	// sliding window; server-side expiry applies immediately, browser
+	// cookie Max-Age of existing sessions updates on next login).
+	SessionTtlHours int `json:"sessionTtlHours" example:"24" minimum:"1" maximum:"720"`
+	// EntwareAuthEnabled allows login with Entware system credentials
+	// (/opt/etc/shadow) verified locally, without the NDMS /auth call.
+	EntwareAuthEnabled        bool                 `json:"entwareAuthEnabled" example:"false"`
 	Server                    ServerSettingsDTO    `json:"server"`
 	PingCheck                 PingCheckSettingsDTO `json:"pingCheck"`
 	Logging                   LoggingSettingsDTO   `json:"logging"`
@@ -285,6 +292,19 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		merged.Download.RouteKind = strings.TrimSpace(info.Kind)
 	}
 
+	// Validate session TTL ONLY when the client explicitly sends it. An
+	// unrelated save must never fail on a pre-existing zero — e.g. a downgrade
+	// rewrote settings.json at the current schemaVersion without the field, so
+	// migrateToV29 never re-ran; the stored value self-heals to the default in
+	// SettingsStore.Load. When the patch omits the field, merged.SessionTtlHours
+	// carries the (healed) existing value and needs no re-validation.
+	if patch.SessionTtlHours != nil && (merged.SessionTtlHours < storage.MinSessionTTLHours || merged.SessionTtlHours > storage.MaxSessionTTLHours) {
+		response.ErrorWithStatus(w, http.StatusBadRequest,
+			"время жизни сессии должно быть от 1 до 720 часов",
+			"INVALID_SESSION_TTL")
+		return
+	}
+
 	// Validate usageLevel after merge. Empty merged.UsageLevel is
 	// impossible because oldSettings always carries a value (default
 	// settings populate it; migration v15 backfills it), so we only
@@ -398,6 +418,16 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.log.Warn("auth", "", "Authentication disabled")
 		}
+	}
+	if oldSettings.EntwareAuthEnabled != merged.EntwareAuthEnabled {
+		if merged.EntwareAuthEnabled {
+			h.log.Info("auth", "", "Entware authentication enabled")
+		} else {
+			h.log.Info("auth", "", "Entware authentication disabled")
+		}
+	}
+	if oldSettings.SessionTtlHours != merged.SessionTtlHours {
+		h.log.Info("auth", "", fmt.Sprintf("Session TTL changed: %dh -> %dh", oldSettings.SessionTtlHours, merged.SessionTtlHours))
 	}
 	if oldSettings.DisableMemorySaving != merged.DisableMemorySaving {
 		if merged.DisableMemorySaving {
