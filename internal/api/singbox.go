@@ -381,6 +381,18 @@ func (h *SingboxHandler) Control(w http.ResponseWriter, r *http.Request) {
 
 // ListTunnels handles GET /api/singbox/tunnels.
 // Returns all tunnels enriched with per-tunnel connectivity from the Clash API.
+// (server.go routes GET with ?tag= to GetTunnel — same path/method, so the
+// single-tunnel variant is documented here via the optional tag parameter.)
+//
+//	@Summary		List or get sing-box tunnel(s)
+//	@Tags			singbox
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			tag	query		string	false	"When set, returns single tunnel"
+//	@Success		200	{object}	SingboxTunnelsResponse
+//	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		500	{object}	APIErrorEnvelope
+//	@Router			/singbox/tunnels [get]
 func (h *SingboxHandler) ListTunnels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.MethodNotAllowed(w)

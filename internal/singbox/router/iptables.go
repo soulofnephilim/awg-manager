@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -200,6 +201,104 @@ func IsTProxyTargetAvailable(ctx context.Context) bool {
 	return ok
 }
 
+// EnsureXtDscpModule best-effort loads xt_dscp so the QoS `-m dscp` dispatch
+// rules can be accepted at iptables-restore COMMIT time. Same soft-fail
+// contract as EnsureCommentModule: an absent .ko (possibly built-in kernel
+// support) returns nil and lets iptables-restore surface the real verdict.
+func EnsureXtDscpModule(ctx context.Context) error {
+	err := ensureKernelModuleFn(ctx, "xt_dscp")
+	if errors.Is(err, ErrNetfilterComponentMissing) {
+		return nil
+	}
+	return err
+}
+
+var (
+	xtDscpMu        sync.Mutex
+	xtDscpModuleOK  bool
+	xtDscpMatchOK   bool
+	xtDscpCheckedAt time.Time
+	// xtDscpAvailabilityFn is the indirection point tests use to count/stub
+	// raw probes; production always runs the real XtDscpAvailability.
+	xtDscpAvailabilityFn = XtDscpAvailability
+)
+
+// xtDscpNegativeTTL bounds how long a NEGATIVE xt_dscp probe result is
+// served from cache. The probe execs `iptables -m dscp -h` — running it on
+// every reconcile tick forever while the module stays missing is pure waste,
+// but installing the missing piece must still be picked up without a daemon
+// restart, hence the re-probe after the TTL. Positive results are cached
+// forever (availability never degrades within one daemon lifetime).
+const xtDscpNegativeTTL = 10 * time.Minute
+
+// XtDscpAvailability probes the two independent halves of `-m dscp` support
+// separately so status/diagnostics can tell the failure causes apart:
+//
+//   - moduleOK: the xt_dscp KERNEL module is loaded (/proc/modules) or its
+//     .ko exists at the standard /lib/modules/<uname -r>/xt_dscp.ko path —
+//     the exact pattern ensureKernelModule targets. Keenetic ships the .ko
+//     there even on 4.9-ndm kernels. (Some third-party setups also carry
+//     modules under /opt/lib/modules or /opt/lib/system-modules/<uname -r>
+//     — XKeen issue #94 — but AWGM's whole module stack, xt_TPROXY
+//     included, keys on the single standard path; keep parity here.)
+//   - matchOK: the iptables USERSPACE extension parses `-m dscp` (runtime
+//     `iptables -m dscp -h` probe, mirroring IsTProxyTargetAvailable). This
+//     is the realistic gap on some Entware arches — the kernel module can be
+//     present while the iptables build lacks the extension.
+func XtDscpAvailability(ctx context.Context) (moduleOK, matchOK bool) {
+	moduleOK = isModuleLoaded("xt_dscp")
+	if !moduleOK {
+		if kernel := osdetect.KernelRelease(); kernel != "" {
+			_, err := os.Stat(filepath.Join("/lib/modules", kernel, "xt_dscp.ko"))
+			moduleOK = err == nil
+		}
+	}
+	res, err := sysexec.Run(ctx, sysiptables.Binary, "-m", "dscp", "-h")
+	matchOK = err == nil && res != nil &&
+		strings.Contains(strings.ToLower(res.Stdout+res.Stderr), "dscp")
+	return moduleOK, matchOK
+}
+
+// cachedXtDscpAvailability returns the (moduleOK, matchOK) pair through the
+// probe cache: a fully-positive result is cached forever, anything else for
+// xtDscpNegativeTTL (see the const above). All availability consumers
+// (IsXtDscpAvailable, GetStatus diagnostics) go through this so a missing
+// module costs at most one `iptables -m dscp -h` exec per TTL window instead
+// of one per reconcile tick / status poll.
+func cachedXtDscpAvailability(ctx context.Context) (moduleOK, matchOK bool) {
+	xtDscpMu.Lock()
+	if xtDscpModuleOK && xtDscpMatchOK {
+		xtDscpMu.Unlock()
+		return true, true
+	}
+	if !xtDscpCheckedAt.IsZero() && time.Since(xtDscpCheckedAt) < xtDscpNegativeTTL {
+		m, x := xtDscpModuleOK, xtDscpMatchOK
+		xtDscpMu.Unlock()
+		return m, x
+	}
+	probe := xtDscpAvailabilityFn
+	xtDscpMu.Unlock()
+
+	m, x := probe(ctx)
+	xtDscpMu.Lock()
+	xtDscpModuleOK, xtDscpMatchOK = m, x
+	xtDscpCheckedAt = time.Now()
+	xtDscpMu.Unlock()
+	return m, x
+}
+
+// IsXtDscpAvailable reports whether DSCP matching is usable end-to-end: BOTH
+// the kernel module (loaded or .ko on disk) AND the iptables extension must
+// pass. Positive results are cached forever (availability never degrades
+// within one daemon lifetime); negative results are cached for
+// xtDscpNegativeTTL and then re-probed so installing the missing piece is
+// picked up without a restart. Surfaced to the UI as the status field
+// `xtDscpAvailable`.
+func IsXtDscpAvailable(ctx context.Context) bool {
+	moduleOK, matchOK := cachedXtDscpAvailability(ctx)
+	return moduleOK && matchOK
+}
+
 type RestoreInputSpec struct {
 	// PolicyMark is the NDMS-assigned mark (hex, e.g. "0xffffaaa") that
 	// NDMS sets on connections from devices bound to the chosen access
@@ -261,6 +360,25 @@ type RestoreInputSpec struct {
 	// REDIRECT rule, so explicit bypass rules still take precedence.
 	// Only meaningful when the xt_set kernel module is loaded.
 	SelectiveIPSet bool
+
+	// QoSClasses lists the active DSCP QoS classes (issue #371). Each entry
+	// yields one `-m dscp --dscp N` dispatch rule per chain (mangle UDP
+	// TPROXY --on-port TProxyPort, nat TCP REDIRECT --to-ports RedirectPort)
+	// inserted immediately before the catch-all — see the emission sites in
+	// buildRestoreInput for the full ordering rationale. Empty = feature off.
+	// Requires the xt_dscp kernel module (preloaded by the netfilter.d hook
+	// and EnsureRouterNetfilterModules).
+	QoSClasses []QoSClassSpec
+}
+
+// QoSClassSpec is the iptables projection of one active QoS class: the DSCP
+// codepoint to match and the per-class sing-box listen ports to dispatch to.
+// Ports come from QoSClassPorts so iptables and inbound generation share one
+// source of truth. Comparable — reconcile change-detection uses slices.Equal.
+type QoSClassSpec struct {
+	DSCP         int
+	TProxyPort   int
+	RedirectPort int
 }
 
 var bypassCIDRs = []string{
@@ -370,6 +488,26 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	// the same destinations as discrete CIDR rules (semantically equal).
 	emitBypassReturns(&b, ChainName, spec.WANIPs)
 
+	// QoS-by-DSCP dispatch (issue #371): per-class TPROXY onto the class
+	// port, immediately BEFORE the catch-all. Ordering rationale:
+	//   - AFTER the DNS intercept: UDP/53 must keep landing on the MAIN
+	//     tproxy port regardless of DSCP marks — hijack-dns lives there, so
+	//     DNS handling never depends on the managed QoS route rules (the nat
+	//     chain mirrors this with its own TCP/53 carve-out before the class
+	//     rules).
+	//   - AFTER user/builtin bypass RETURNs and WAN-IP exclusions: an
+	//     explicit bypass always wins; DSCP marks must not re-capture
+	//     traffic the user excluded (or loop router-WAN-IP traffic back in).
+	//   - AFTER the selective guard: in selective mode only ipset-listed
+	//     destinations enter sing-box at all; QoS classifies within that
+	//     scope, it does not widen it.
+	//   - BEFORE the catch-all: otherwise the unconditional TPROXY eats the
+	//     packet first and the class rule is dead.
+	for _, q := range spec.QoSClasses {
+		fmt.Fprintf(&b, "-A %s -p udp -m dscp --dscp %d -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
+			ChainName, q.DSCP, q.TProxyPort, Fwmark)
+	}
+
 	// add_tproxy_rules: catch-all TPROXY for UDP.
 	fmt.Fprintf(&b, "-A %s -p udp -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
 		ChainName, TPROXYPort, Fwmark)
@@ -402,7 +540,10 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	// catch-all is no longer unconditional, so TCP/53 gets its own
 	// intercept before the guard (see below) — otherwise a truncated-UDP
 	// retry or DNS-over-TCP to a resolver outside the set escapes
-	// hijack-dns and leaks real IPs of proxied domains.
+	// hijack-dns and leaks real IPs of proxied domains. The QoS DSCP
+	// dispatch needs the same carve-out (a class REDIRECT would otherwise
+	// swallow marked TCP/53 onto a class port), emitted with the class
+	// rules below when the selective intercept isn't already present.
 	b.WriteString("*nat\n")
 	fmt.Fprintf(&b, ":%s - [0:0]\n", RedirectChain)
 
@@ -427,6 +568,27 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 			RedirectChain, RedirectPort)
 		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
 			RedirectChain, selectiveSetName)
+	}
+
+	// QoS-by-DSCP dispatch for TCP — mirrors the mangle block above (same
+	// ordering rationale: after bypasses and the selective guard, before the
+	// catch-all). DNS carve-out first: without it, DSCP-marked DNS-over-TCP
+	// (or a truncated-UDP retry) would land on a CLASS redirect inbound and
+	// only get hijacked if the managed route rules happened to order right —
+	// intercepting TCP/53 onto the MAIN redirect port here kills that whole
+	// leak class at the netfilter level, exactly like the mangle chain's
+	// unconditional UDP/53 intercept above the UDP class rules. Skipped when
+	// the selective guard already emitted the identical intercept earlier in
+	// this chain.
+	if len(spec.QoSClasses) > 0 {
+		if !spec.SelectiveIPSet {
+			fmt.Fprintf(&b, "-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d\n",
+				RedirectChain, RedirectPort)
+		}
+		for _, q := range spec.QoSClasses {
+			fmt.Fprintf(&b, "-A %s -p tcp -m dscp --dscp %d -j REDIRECT --to-ports %d\n",
+				RedirectChain, q.DSCP, q.RedirectPort)
+		}
 	}
 
 	// add_redirect_rules: catch-all REDIRECT for TCP.
@@ -594,7 +756,7 @@ pidof sing-box >/dev/null 2>&1 || exit 0
 # Best-effort kernel module preload. Absent .ko or built-in modules are
 # silently skipped — iptables-restore will surface the final verdict anyway.
 KREL="$(uname -r)"
-for mod in xt_TPROXY xt_comment xt_mark xt_connmark xt_conntrack xt_pkttype; do
+for mod in xt_TPROXY xt_comment xt_mark xt_connmark xt_conntrack xt_pkttype xt_dscp; do
   grep -q "^${mod} " /proc/modules 2>/dev/null && continue
   [ -f "/lib/modules/${KREL}/${mod}.ko" ] && insmod "/lib/modules/${KREL}/${mod}.ko" 2>/dev/null || true
 done
@@ -750,7 +912,7 @@ func (it *IPTables) removeSourceHooksFromTable(ctx context.Context, table, chain
 
 // EnsureRouterNetfilterModules best-effort preloads the remaining xt_*
 // modules that our iptables rules reference but that TPROXY preflight
-// does not cover: comment, mark, connmark, conntrack, pkttype.
+// does not cover: comment, mark, connmark, conntrack, pkttype, dscp.
 // ErrNetfilterComponentMissing (module absent or built-in) is silently
 // skipped. All other insmod errors are collected and returned without
 // blocking — a hard failure here would prevent a working install on
@@ -764,6 +926,7 @@ func EnsureRouterNetfilterModules(ctx context.Context) []error {
 		"xt_connmark",
 		"xt_conntrack",
 		"xt_pkttype",
+		"xt_dscp",
 	} {
 		err := ensureKernelModuleFn(ctx, name)
 		if err == nil || errors.Is(err, ErrNetfilterComponentMissing) {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/events"
@@ -292,7 +293,13 @@ type Deps struct {
 	// xt_connmark, xt_conntrack, xt_pkttype via
 	// EnsureRouterNetfilterModules). Tests set this to avoid real syscalls.
 	NetfilterPreflight func(context.Context) error
-	GeoData            GeoTagExpander
+	// XtDscpProbe is an optional override for the xt_dscp availability
+	// check (kernel module + iptables `-m dscp` extension) that gates the
+	// QoS-DSCP dispatch rules and the status field xtDscpAvailable. When
+	// nil, the real IsXtDscpAvailable probe runs. Tests set this to avoid
+	// exec'ing iptables.
+	XtDscpProbe func(context.Context) bool
+	GeoData     GeoTagExpander
 	// OpkgTun provisions the fakeip-tun kernel interface via NDMS.
 	// Optional — nil in tests; wired in cmd/awg-manager to
 	// *ndmscommand.InterfaceCommands. Consumed by Slice 1D Enable.
@@ -372,6 +379,22 @@ type ServiceImpl struct {
 
 	// selective tracking
 	currentSelectiveBypass bool // last-applied value of SelectiveBypass
+
+	// currentQoSClasses is the last-installed QoS-DSCP dispatch set (DSCP +
+	// ports only — the class outbound lives in sing-box config, not in
+	// iptables). Reconcile re-Installs when it drifts from settings.
+	currentQoSClasses []QoSClassSpec
+
+	// qosApplyFailed remembers a failed sing-box apply of the QoS routes
+	// slot so the next heal re-applies even when disk state is byte-equal.
+	// See applyQoSRoutesSlot (mirrors selectiveBuilderAdapter.lastApplyFailed).
+	qosApplyFailed atomic.Bool
+
+	// xtDscpState tracks the last observed xt_dscp availability for
+	// transition-only logging (0 = unknown, 1 = available, 2 = unavailable):
+	// the reconcile loop must not Warn every tick while the module stays
+	// missing — only when availability actually flips.
+	xtDscpState atomic.Int32
 
 	// inspectCache backs the route-inspector's rule_set match path. Lazy
 	// constructed on first Inspect call so dev-machine builds (no
@@ -576,6 +599,34 @@ func (s *ServiceImpl) orchestratorApplyNow() error {
 		return nil
 	}
 	return s.deps.Orch.ReloadNow()
+}
+
+// xtDscpUsable reports whether iptables `-m dscp` matching is usable,
+// honouring the test seam (Deps.XtDscpProbe) when set. Availability changes
+// are logged on TRANSITIONS only (available↔unavailable), never per call —
+// the reconcile loop hits this every tick and a missing optional module must
+// not spam two Warn lines per tick forever (negative probe results are
+// additionally TTL-cached inside IsXtDscpAvailable).
+func (s *ServiceImpl) xtDscpUsable(ctx context.Context) bool {
+	ok := false
+	if s.deps.XtDscpProbe != nil {
+		ok = s.deps.XtDscpProbe(ctx)
+	} else {
+		ok = IsXtDscpAvailable(ctx)
+	}
+	state := int32(2)
+	if ok {
+		state = 1
+	}
+	if prev := s.xtDscpState.Swap(state); prev != state {
+		switch {
+		case !ok:
+			s.appLog.Warn("qos-dscp", "", "xt_dscp недоступен — классы QoS пропущены (см. статус xtDscpAvailable)")
+		case prev == 2:
+			s.appLog.Info("qos-dscp", "", "xt_dscp снова доступен — классы QoS будут применены")
+		}
+	}
+	return ok
 }
 
 // prepareNetfilter runs the common netfilter preflight: xt_TPROXY module
@@ -1034,6 +1085,13 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, sr.UDPTimeout)
 	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds)
 	cfg.EnsureSystemRules(sr.SnifferEnabled)
+	// QoS-by-DSCP (issue #371): per-class inbound pairs, derived from the
+	// same settings snapshot the iptables spec below uses so ports/classes
+	// cannot drift between the two. The managed route rules live in their
+	// own slot (18-qos-routes.json) and are synced after the config write
+	// below — see qos_routes.go for why they must not live in 20-router.json.
+	qosClasses := activeQoSClasses(sr.QoSClasses)
+	cfg.Inbounds, _ = ensureQoSInbounds(cfg.Inbounds, qosClasses, sr.UDPTimeout)
 	// Settings was already loaded above; revalidate here in case the
 	// store is corrupted or hand-edited around a schema migration. We
 	// fail Enable rather than apply a half-broken config — the user
@@ -1065,6 +1123,12 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	// "Несохранённые правки" banner that used to follow every reboot.
 	if err := s.persistConfigDirect(ctx, cfg); err != nil {
 		return err
+	}
+	// Managed QoS route rules → 18-qos-routes.json. Runs AFTER the router
+	// slot write so outbound resolution sees the applied config; the
+	// orchestratorApplyNow below covers both slots in one reload.
+	if _, err := s.syncQoSRoutesSlot(ctx, qosClasses); err != nil {
+		return fmt.Errorf("sync qos routes slot: %w", err)
 	}
 	if err := s.orchestratorApplyNow(); err != nil {
 		return fmt.Errorf("orchestrator reload after enable: %w", err)
@@ -1132,6 +1196,23 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 		}
 	}
 
+	// QoS iptables dispatch — graceful degradation: when xt_dscp support is
+	// missing the DSCP rules are skipped (feature-off) with a warning, NEVER
+	// failing Enable — otherwise a missing optional module would take down
+	// the whole interception path at iptables-restore COMMIT (XKeen shipped
+	// the same policy). EnsureXtDscpModule first: prepareNetfilter already
+	// tried, this is the belt-and-suspenders retry closest to Install.
+	qosSpecs := qosIPTablesSpecs(qosClasses)
+	if len(qosSpecs) > 0 {
+		if err := EnsureXtDscpModule(ctx); err != nil {
+			s.appLog.Warn("ensure-xt-dscp", "", err.Error())
+		}
+		if !s.xtDscpUsable(ctx) {
+			s.appLog.Warn("qos-dscp", "", "xt_dscp недоступен — классы QoS пропущены (см. статус xtDscpAvailable)")
+			qosSpecs = nil
+		}
+	}
+
 	if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
 		PolicyMark:        mark,
 		MatchAll:          !policyMode,
@@ -1142,6 +1223,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 		BypassCIDRs:       bypassSubnets,
 		IngressInterfaces: ingress,
 		SelectiveIPSet:    sr.SelectiveBypass,
+		QoSClasses:        qosSpecs,
 	}); err != nil {
 		// Stop sing-box from listening on the now-orphan TPROXY port,
 		// but DO NOT corrupt the persisted user config. With orchestrator
@@ -1151,6 +1233,9 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 		// (legacy fallback) the only recourse is to strip the inbound.
 		if s.deps.Orch != nil {
 			_ = s.deps.Orch.SetEnabled(orchestrator.SlotRouter, false)
+			// The QoS overlay references qos-* inbounds that just got
+			// parked with the router slot — park it too.
+			_ = s.disableQoSRoutesSlot()
 		} else {
 			cfg.Inbounds = filterTProxyInbound(cfg.Inbounds)
 			_ = s.persistConfigDirect(ctx, cfg)
@@ -1165,6 +1250,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	s.currentBypassExtraSubnets = sr.BypassExtraSubnets
 	s.currentIngress = ingress
 	s.currentSelectiveBypass = sr.SelectiveBypass
+	s.currentQoSClasses = qosSpecs
 	s.netfilterStateKnown = true
 
 	settings.SingboxRouter = sr
@@ -1401,6 +1487,43 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 		lastError = s.deps.Singbox.LastError()
 	}
 	issues := s.computeIssues(cfg)
+	// QoS-DSCP support: xtDscpAvailable is always reported (the UI keys the
+	// feature's "supported" state on it). When classes are actually
+	// configured but the support probe fails, additionally surface an issue
+	// that distinguishes the two causes (kernel module vs iptables
+	// extension) so diagnostics can tell them apart. The detailed check on
+	// the failure path is served from the same TTL-bounded probe cache as
+	// the availability flag, so status polling never execs iptables per poll.
+	qosActive := activeQoSClasses(sr.QoSClasses)
+	// A class whose outbound no longer resolves is skipped at emit time
+	// (syncQoSRoutesSlot) — surface WHY the class is inert so the user can
+	// re-point or disable it.
+	if sr.RoutingMode != "fakeip-tun" {
+		for _, c := range qosActive {
+			if !s.isKnownOutboundTag(ctx, c.Outbound, cfg) {
+				issues = append(issues, Issue{
+					Severity: "warning",
+					Kind:     "qos-outbound-missing",
+					Tag:      c.Outbound,
+					Message:  fmt.Sprintf("класс QoS (DSCP %d) ссылается на несуществующий outbound %q — класс не применяется", c.DSCP, c.Outbound),
+				})
+			}
+		}
+	}
+	xtDscpAvailable := s.xtDscpUsable(ctx)
+	if !xtDscpAvailable && sr.RoutingMode != "fakeip-tun" && len(qosActive) > 0 {
+		moduleOK, matchOK := cachedXtDscpAvailability(ctx)
+		var msg string
+		switch {
+		case !moduleOK && !matchOK:
+			msg = "QoS DSCP: модуль ядра xt_dscp не найден и расширение iptables «dscp» недоступно — классы QoS не будут применены"
+		case !moduleOK:
+			msg = "QoS DSCP: модуль ядра xt_dscp не найден (/lib/modules) — классы QoS не будут применены"
+		default:
+			msg = "QoS DSCP: расширение iptables «dscp» недоступно — классы QoS не будут применены"
+		}
+		issues = append(issues, Issue{Severity: "warning", Kind: "qos-xt-dscp", Message: msg})
+	}
 	// fakeip-tun active iface: surface the provisioned kernel iface name
 	// ("opkgtun<idx>") so the UI can show it in the engine-settings panel. Only
 	// when in fakeip-tun mode AND actually provisioned (persisted FakeIPState);
@@ -1425,6 +1548,7 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 		NetfilterAvailable:     IsNetfilterAvailable(),
 		NetfilterComponentName: "Модули ядра подсистемы сетевой фильтрации",
 		TProxyTargetAvailable:  IsTProxyTargetAvailable(ctx),
+		XtDscpAvailable:        xtDscpAvailable,
 		PolicyName:             sr.PolicyName,
 		PolicyMark:             policyMark,
 		PolicyExists:           policyExists,
@@ -1479,6 +1603,7 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	// made tproxy→off→tproxy re-enables skip the rebuild (selectiveChanged
 	// stayed false) and run with a permanently empty set.
 	s.currentSelectiveBypass = false
+	s.currentQoSClasses = nil
 	s.netfilterStateKnown = false
 
 	if s.deps.Orch != nil {
@@ -1488,6 +1613,11 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 		// all disappear from the merged config in one atomic rename.
 		if err := s.deps.Orch.SetEnabled(orchestrator.SlotRouter, false); err != nil {
 			s.appLog.Warn("orch-disable", "", err.Error())
+		}
+		// Park the QoS routes overlay with it: its rules reference qos-*
+		// inbound tags that only exist while 20-router.json is active.
+		if err := s.disableQoSRoutesSlot(); err != nil {
+			s.appLog.Warn("orch-disable", "qos-routes", err.Error())
 		}
 	} else {
 		// Legacy fallback: strip the tproxy inbound in place so
@@ -1623,6 +1753,59 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// Selective-bypass change detection.
 	selectiveChanged := s.currentSelectiveBypass != sr.SelectiveBypass
 
+	// QoS-DSCP change detection: only the iptables-relevant projection
+	// (DSCP + ports). An outbound-only change does not need an iptables
+	// re-Install — the healQoSConfig call below converges the sing-box side.
+	// Graceful degradation happens HERE, before change detection: when
+	// xt_dscp support is missing the desired dispatch set degrades to empty
+	// (feature-off; xtDscpUsable logs availability transitions) — gating
+	// later would leave desired≠installed forever and re-Install on every
+	// tick. When the module/extension shows up, the (TTL-bounded) probe
+	// flips and qosChanged triggers one re-Install with rules.
+	qosClasses := activeQoSClasses(sr.QoSClasses)
+	qosSpecs := qosIPTablesSpecs(qosClasses)
+	if len(qosSpecs) > 0 {
+		if err := EnsureXtDscpModule(ctx); err != nil {
+			s.appLog.Warn("ensure-xt-dscp", "", err.Error())
+		}
+		if !s.xtDscpUsable(ctx) {
+			qosSpecs = nil
+		}
+	}
+	qosChanged := !slices.Equal(s.currentQoSClasses, qosSpecs)
+
+	// Self-heal the sing-box side BEFORE any iptables change — same safe
+	// order as Enable (config → wait → Install). Installing new per-class
+	// dispatch ports first would blackhole class traffic onto ports nothing
+	// listens on until the debounced reload lands.
+	//
+	// healTProxyInbound: a previous Install rollback or upgrade hop may have
+	// left 20-router.json without the tproxy-in inbound — re-add it
+	// idempotently so sing-box keeps listening on TPROXYPort.
+	if err := s.healTProxyInbound(ctx, sr.UDPTimeout); err != nil {
+		s.appLog.Warn("heal-tproxy", "", err.Error())
+	}
+	// healQoSConfig: per-class inbound pairs (20-router.json) + managed route
+	// rules (18-qos-routes.json). Converges class add/remove/disable and
+	// outbound edits applied through UpdateSettings→Reconcile, and cleans
+	// stale qos-* artifacts. No-op (no write, no reload) when converged.
+	qosHealed := false
+	if healed, err := s.healQoSConfig(ctx, sr); err != nil {
+		s.appLog.Warn("heal-qos", "", err.Error())
+	} else {
+		qosHealed = healed
+	}
+	// The heal rewrote the QoS sing-box config AND the iptables port set is
+	// about to change: wait for sing-box to come back up on its inbounds
+	// before Install redirects traffic to the new per-class ports. Soft
+	// deadline — on timeout we proceed and accept the brief race rather
+	// than blocking the reconcile loop behind a dead engine forever.
+	if qosHealed && qosChanged {
+		if err := s.waitForSingbox(ctx, qosReloadWait); err != nil {
+			s.appLog.Warn("qos-dscp", "", fmt.Sprintf("sing-box not ready after QoS config heal: %v — installing anyway", err))
+		}
+	}
+
 	// After a daemon restart or upgrade the old awg-manager process died
 	// with no chance to run Uninstall, so stale AWGM chains, ip rules
 	// and ip routes may remain from the old process. netfilterStateKnown
@@ -1638,7 +1821,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// during an NDMS reload must not trigger a needless rebuild.
 	_, jumps, probeErr := s.deps.IPTables.Probe(ctx)
 	jumpsMissing := probeErr == nil && !jumps
-	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged
+	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged || qosChanged
 
 	if needsInstall {
 		if forceInitialSync {
@@ -1679,6 +1862,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 			BypassCIDRs:       bypassSubnets,
 			IngressInterfaces: ingress,
 			SelectiveIPSet:    sr.SelectiveBypass,
+			QoSClasses:        qosSpecs,
 		}); err != nil {
 			s.mu.Unlock()
 			return err
@@ -1691,6 +1875,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 		s.currentBypassExtraSubnets = sr.BypassExtraSubnets
 		s.currentIngress = ingress
 		s.currentSelectiveBypass = sr.SelectiveBypass
+		s.currentQoSClasses = qosSpecs
 		s.netfilterStateKnown = true
 		s.mu.Unlock()
 
@@ -1707,13 +1892,6 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 				s.appLog.Warn("selective", "", fmt.Sprintf("strip legacy selective rules: %v", err))
 			}
 		}
-	}
-
-	// Self-heal: a previous Install rollback or upgrade hop may
-	// have left 20-router.json without the tproxy-in inbound. Re-add
-	// it idempotently so sing-box keeps listening on TPROXYPort.
-	if err := s.healTProxyInbound(ctx, sr.UDPTimeout); err != nil {
-		s.appLog.Warn("heal-tproxy", "", err.Error())
 	}
 
 	// Selective-bypass: rebuild on first Enable, when toggled on, or on daemon
@@ -1800,6 +1978,11 @@ func (s *ServiceImpl) RenameExternalOutboundTag(ctx context.Context, oldTag, new
 	newTag = strings.TrimSpace(newTag)
 	if oldTag == "" || newTag == "" || oldTag == newTag {
 		return nil
+	}
+	// Settings-side references: QoS classes route to outbound tags too and
+	// must follow the rename (config-side rewrites below don't see them).
+	if err := s.renameQoSClassOutbound(oldTag, newTag); err != nil {
+		return err
 	}
 	if s.deps.Orch == nil {
 		return s.withConfig(ctx, "all", func(c *RouterConfig) error {
@@ -2039,11 +2222,38 @@ func (s *ServiceImpl) UpdateCompositeOutbound(ctx context.Context, tag string, o
 			return err
 		}
 	}
-	return s.withConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.UpdateCompositeOutbound(tag, o) })
+	if err := s.withConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.UpdateCompositeOutbound(tag, o) }); err != nil {
+		return err
+	}
+	// A rename rewrites config references (renameOutboundReferences inside
+	// UpdateCompositeOutbound); mirror it for the settings-side QoS classes.
+	if newTag := strings.TrimSpace(o.Tag); newTag != "" && newTag != tag {
+		if err := s.renameQoSClassOutbound(tag, newTag); err != nil {
+			s.appLog.Warn("qos-classes", tag, "rename outbound in QoS classes: "+err.Error())
+		}
+	}
+	return nil
 }
 
 func (s *ServiceImpl) DeleteCompositeOutbound(ctx context.Context, tag string, force bool) error {
-	return s.withConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.DeleteCompositeOutbound(tag, force) })
+	// QoS classes reference outbounds from settings, invisible to the config's
+	// own reference scan — guard them the same way route rules are guarded.
+	if !force {
+		if refs := s.qosClassesReferencing(tag); len(refs) > 0 {
+			return fmt.Errorf("%w: %q referenced by %s", ErrOutboundReferenced, tag, strings.Join(refs, ", "))
+		}
+	}
+	if err := s.withConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.DeleteCompositeOutbound(tag, force) }); err != nil {
+		return err
+	}
+	if force {
+		// Force-delete DISABLES (not deletes) referencing classes so the UI
+		// shows them off instead of silently losing user configuration.
+		if err := s.disableQoSClassesForOutbound(tag); err != nil {
+			s.appLog.Warn("qos-classes", tag, "disable QoS classes after outbound delete: "+err.Error())
+		}
+	}
+	return nil
 }
 
 func (s *ServiceImpl) ListPresets() ([]Preset, error) {
@@ -2076,15 +2286,53 @@ func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRout
 	if err := s.validateSelectiveBypassSettings(ctx, normalized); err != nil {
 		return err
 	}
+	// QoS classes must route to outbounds that actually exist — an unknown
+	// tag would either be skipped at emit time (class silently inert) or,
+	// unguarded, take the whole merged config down at sing-box load. Checked
+	// here (not in the pure Normalize) because outbound catalogs are deps.
+	if err := s.validateQoSClassOutbounds(ctx, normalized.QoSClasses); err != nil {
+		return err
+	}
 	settings, err := s.deps.Settings.Load()
 	if err != nil {
 		return err
 	}
+	// Port-slot stability: the UI contract carries no slot field, so incoming
+	// classes are re-associated with their persisted slots by DSCP before the
+	// save — otherwise every PUT would re-deal ports positionally and RST
+	// untouched classes' flows.
+	normalized.QoSClasses = reassociateQoSSlots(normalized.QoSClasses, settings.SingboxRouter.QoSClasses)
 	settings.SingboxRouter = normalized
 	if err := s.deps.Settings.Save(settings); err != nil {
 		return err
 	}
 	return s.Reconcile(ctx)
+}
+
+// validateQoSClassOutbounds rejects ENABLED QoS classes whose Outbound does
+// not resolve against any known catalog (router composites, subscription
+// composites, AWG tags, sing-box tunnel tags, built-ins). Disabled classes
+// are deliberately exempt: outbound force-delete keeps the class around in a
+// disabled state (see disableQoSClassesForOutbound), and a later settings
+// PUT carrying that class verbatim must not 400. Wraps ErrQoSClassesInvalid
+// so the API maps it to 400 QOS_CLASSES_INVALID.
+func (s *ServiceImpl) validateQoSClassOutbounds(ctx context.Context, classes []storage.SingboxQoSClass) error {
+	if len(classes) == 0 {
+		return nil
+	}
+	cfg, err := s.loadRouterConfig()
+	if err != nil {
+		cfg = NewEmptyConfig()
+	}
+	for i, c := range classes {
+		if !c.Enabled {
+			continue
+		}
+		if !s.isKnownOutboundTag(ctx, c.Outbound, cfg) {
+			return fmt.Errorf("%w: qosClasses[%d]: неизвестный outbound %q", ErrQoSClassesInvalid, i, c.Outbound)
+		}
+	}
+	return nil
 }
 
 // ValidateSingboxRouterSettings enforces the WAN-binding discriminator:
@@ -2140,6 +2388,10 @@ func NormalizeSingboxRouterSettings(sr storage.SingboxRouterSettings) (storage.S
 			return sr, fmt.Errorf("udpTimeout: invalid duration %q: %w", sr.UDPTimeout, err)
 		}
 	}
+	if err := validateQoSClasses(sr.QoSClasses); err != nil {
+		return sr, err
+	}
+	sr.QoSClasses = normalizeQoSClasses(sr.QoSClasses)
 	return sr, nil
 }
 

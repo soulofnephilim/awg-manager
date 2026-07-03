@@ -1323,6 +1323,25 @@ export interface SingboxRouterSettings {
 	 * Requires ipset binary and xt_set kernel module on the router.
 	 */
 	selectiveBypass?: boolean;
+	/**
+	 * QoS/DSCP routing classes (issue #371). Traffic marked with class DSCP is
+	 * routed to the class outbound, trumping other route rules. Works only in
+	 * routingMode 'tproxy' (not fakeip-tun). Max 8 classes; dscp 0–63 unique;
+	 * name ≤ 32 chars; outbound = any valid outbound tag. Omitempty on the
+	 * wire → absent on legacy/mock payloads (treat undefined as []).
+	 */
+	qosClasses?: SingboxQosClass[];
+}
+
+/** One QoS/DSCP routing class (SingboxRouterSettings.qosClasses entry). */
+export interface SingboxQosClass {
+	/** DSCP mark 0–63, unique within the list. */
+	dscp: number;
+	/** Display name, ≤ 32 chars. */
+	name: string;
+	/** Outbound tag the marked traffic is routed to. */
+	outbound: string;
+	enabled: boolean;
 }
 
 // WAN interface for the sing-box router WAN-binding picker. `name` is
@@ -1382,6 +1401,12 @@ export interface SingboxRouterStatus {
 	issues?: SingboxRouterIssue[];
 	/** Последняя fatal-причина sing-box; непусто только при «СБОЙ» (enabled && !active). */
 	lastError?: string;
+	/**
+	 * xt_dscp kernel module is available for DSCP matching (issue #371 QoS).
+	 * Strict `false` → QoS classes cannot be applied (UI shows a warning).
+	 * Optional: absent on legacy/mock payloads → treated as unknown, no warning.
+	 */
+	xtDscpAvailable?: boolean;
 }
 
 export interface SingboxRouterTransitionStep {

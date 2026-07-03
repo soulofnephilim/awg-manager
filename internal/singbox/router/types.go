@@ -18,6 +18,10 @@ type Status struct {
 	NetfilterAvailable     bool   `json:"netfilterAvailable"`
 	NetfilterComponentName string `json:"netfilterComponentName,omitempty"`
 	TProxyTargetAvailable  bool   `json:"tproxyTargetAvailable"`
+	// XtDscpAvailable reports whether iptables `-m dscp` matching is usable
+	// (xt_dscp kernel module loaded/on-disk AND iptables extension present).
+	// The QoS-DSCP settings UI keys its "supported" state on this field.
+	XtDscpAvailable        bool   `json:"xtDscpAvailable"`
 	PolicyName             string `json:"policyName"`
 	PolicyMark             string `json:"policyMark,omitempty"`
 	PolicyExists           bool   `json:"policyExists"`
@@ -72,6 +76,11 @@ type Rule struct {
 	Port         []int    `json:"port,omitempty"`
 	RuleSet      []string `json:"rule_set,omitempty"`
 	Protocol     string   `json:"protocol,omitempty"`
+	// Inbound matches the sing-box listener tag the connection entered
+	// through (native sing-box route-rule field). Managed QoS-DSCP rules use
+	// it to bind a per-class inbound pair (tproxy-qos-N / redirect-qos-N) to
+	// the class outbound; user rules may use it too.
+	Inbound []string `json:"inbound,omitempty"`
 	// IPIsPrivate, when set, matches packets whose destination is an
 	// RFC1918/loopback/link-local/CGNAT/multicast address. Pointer so
 	// the zero value (unset) stays out of JSON — `{"ip_is_private":false}`

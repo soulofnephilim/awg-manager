@@ -1518,7 +1518,7 @@ definitions:
         - error
         - fatal
         - panic
-        example: trace
+        example: info
         type: string
       singboxMaxEntries:
         example: 5000
@@ -2606,6 +2606,12 @@ definitions:
           LastRebuild is the RFC3339 timestamp of the last successful rebuild, or
           empty string if no rebuild has run yet.
         type: string
+      rebuilding:
+        description: |-
+          Rebuilding is true while an ipset rebuild is in flight (POST /rebuild
+          responds 202 and runs the rebuild in the background; completion is
+          delivered via the singbox-router:selective-status SSE event).
+        type: boolean
       snapshot:
         allOf:
         - $ref: '#/definitions/api.SelectiveRebuildSnapshotDTO'
@@ -3563,6 +3569,36 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.SingboxRouterQoSClassDTO:
+    properties:
+      dscp:
+        example: 46
+        maximum: 63
+        minimum: 0
+        type: integer
+      enabled:
+        example: true
+        type: boolean
+      name:
+        example: VoIP
+        maxLength: 32
+        type: string
+      outbound:
+        example: my-selector
+        type: string
+      slot:
+        description: |-
+          Slot is the backend-assigned stable listen-port slot (0-7). Read-only:
+          clients send classes without it and the backend re-associates each
+          class with its persisted slot by DSCP, so a class keeps its ports when
+          other classes are edited, disabled or removed. Any value sent by a
+          client is ignored.
+        example: 0
+        maximum: 7
+        minimum: 0
+        readOnly: true
+        type: integer
+    type: object
   api.SingboxRouterRouteFinalRequest:
     properties:
       final:
@@ -3577,6 +3613,16 @@ definitions:
       domain_suffix:
         example:
         - .example.com
+        items:
+          type: string
+        type: array
+      inbound:
+        description: |-
+          Inbound matches sing-box listener tags the connection entered through.
+          Managed QoS-DSCP rules use the reserved tproxy-qos-N / redirect-qos-N
+          tag pair (N = DSCP codepoint).
+        example:
+        - tproxy-qos-46
         items:
           type: string
         type: array
@@ -3770,6 +3816,16 @@ definitions:
       policyName:
         example: awgm-router
         type: string
+      qosClasses:
+        description: |-
+          QoSClasses lists DSCP-based QoS traffic classes routed to dedicated
+          outbounds. At most 8 classes; DSCP must be 0-63 and unique across
+          classes; outbound is required; name is limited to 32 characters.
+          Only effective when routingMode is "tproxy" and xt_dscp is available
+          (see status.xtDscpAvailable). Empty = feature off.
+        items:
+          $ref: '#/definitions/api.SingboxRouterQoSClassDTO'
+        type: array
       routingMode:
         enum:
         - tproxy
@@ -3880,6 +3936,13 @@ definitions:
         example: true
         type: boolean
       tproxyTargetAvailable:
+        example: true
+        type: boolean
+      xtDscpAvailable:
+        description: |-
+          XtDscpAvailable reports whether iptables DSCP matching is usable
+          (xt_dscp kernel module present AND iptables `-m dscp` extension works).
+          The QoS-DSCP settings UI keys its "supported" badge on this field.
         example: true
         type: boolean
     type: object
@@ -8726,7 +8789,12 @@ paths:
       - device-proxy
   /routing/access-policies:
     get:
-      description: Always {"data":[]}. Real data on KeeneticOS 5 only.
+      description: KeeneticOS 5 only when route is registered.
+      parameters:
+      - description: Pass 'true' to bypass NDMS cache
+        in: query
+        name: refresh
+        type: string
       produces:
       - application/json
       responses:
@@ -8734,19 +8802,15 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.AccessPoliciesListResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/api.APIErrorEnvelope'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: OS4 access policies stub
+      summary: List access policies
       tags:
-      - routing
+      - access-policy
   /routing/client-routes:
     get:
       produces:
@@ -8816,7 +8880,6 @@ paths:
       - access-policy
   /routing/policy-interfaces:
     get:
-      description: Always {"data":[]}. Real data on KeeneticOS 5 only.
       produces:
       - application/json
       responses:
@@ -8824,19 +8887,15 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.PolicyInterfacesListResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/api.APIErrorEnvelope'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: OS4 policy interfaces stub
+      summary: List global policy interfaces
       tags:
-      - routing
+      - access-policy
   /routing/refresh:
     post:
       produces:
@@ -12232,13 +12291,22 @@ paths:
       produces:
       - application/json
       responses:
-        "200":
-          description: OK
+        "202":
+          description: rebuild started (or already running); rebuilding reflects live
+            state
           schema:
             $ref: '#/definitions/api.SelectiveStatusData'
+        "409":
+          description: sing-box config apply in progress
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "503":
+          description: builder not configured
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: Force ipset rebuild
+      summary: Force ipset rebuild (asynchronous)
       tags:
       - singbox-router
   /singbox/router/selective/snapshot/matchers:

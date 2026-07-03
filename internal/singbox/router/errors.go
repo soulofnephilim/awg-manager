@@ -35,4 +35,18 @@ var (
 	// an engine-locked field (the fakeip/real DNS servers, dns.final,
 	// default_domain_resolver, or the hijack-dns rule). Surfaced as 4xx.
 	ErrFakeIPLockedField = errors.New("fakeip-tun config field is engine-locked")
+
+	// ErrQoSClassesInvalid wraps every QoS-class validation failure from
+	// NormalizeSingboxRouterSettings (DSCP out of 0-63, duplicate DSCP,
+	// class limit exceeded, empty outbound, name too long) and the
+	// UpdateSettings outbound-existence check so the API can map them to
+	// 400 with the detailed Russian message intact.
+	ErrQoSClassesInvalid = errors.New("некорректные классы QoS")
+
+	// ErrReservedInboundTag rejects user route rules whose inbound matcher
+	// references the reserved tproxy-qos-*/redirect-qos-* namespace. The
+	// managed QoS rules live in 18-qos-routes.json and merge BEFORE the user
+	// slot, so such a user rule could never match — it would only sit in the
+	// UI as an inert, confusing shadow rule. Mapped to 400 by the API.
+	ErrReservedInboundTag = errors.New("теги qos-* зарезервированы для QoS-классов")
 )

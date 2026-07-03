@@ -841,7 +841,7 @@ func isProxyIface(name string) bool {
 func (r Rule) hasAnyMatcher() bool {
 	return len(r.DomainSuffix) > 0 || len(r.IPCIDR) > 0 || len(r.SourceIPCIDR) > 0 ||
 		len(r.Port) > 0 || len(r.RuleSet) > 0 || r.Protocol != "" || len(r.Rules) > 0 ||
-		r.IPIsPrivate != nil
+		r.IPIsPrivate != nil || len(r.Inbound) > 0
 }
 
 // validateCIDROrAddr accepts a value that is either a CIDR prefix or a bare IP
@@ -872,6 +872,21 @@ func validateRule(r Rule) error {
 	for _, p := range r.Port {
 		if p < 1 || p > 65535 {
 			return fmt.Errorf("port %d out of range [1,65535]", p)
+		}
+	}
+	for _, tag := range r.Inbound {
+		if strings.TrimSpace(tag) == "" {
+			return fmt.Errorf("inbound tag must be a non-empty string")
+		}
+		if isQoSInboundTag(strings.TrimSpace(tag)) {
+			return fmt.Errorf("%w (получен %q)", ErrReservedInboundTag, tag)
+		}
+	}
+	// Nested logical sub-rules carry matchers too — a reserved tag must not
+	// slip in through `rules: [...]`.
+	for _, nested := range r.Rules {
+		if err := validateRule(nested); err != nil {
+			return err
 		}
 	}
 	return nil
