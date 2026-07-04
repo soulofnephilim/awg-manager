@@ -29,6 +29,16 @@ describe('isCatchAllDnsRule', () => {
 	it('is false for a query_type-only rule (query_type restricts the query)', () => {
 		expect(isCatchAllDnsRule(queryTypeOnly())).toBe(false);
 	});
+
+	it('is false for a source_ip_cidr-only rule (matcher backend-side)', () => {
+		const sourceOnly: SingboxRouterDNSRule = {
+			source_ip_cidr: ['192.168.1.5/32'],
+			action: 'route',
+			server: 's',
+		};
+		expect(isCatchAllDnsRule(sourceOnly)).toBe(false);
+		expect(computeShadowedDnsRuleIndices([sourceOnly, suffix('a')]).size).toBe(0);
+	});
 });
 
 describe('firstCatchAllDnsRuleIndex', () => {

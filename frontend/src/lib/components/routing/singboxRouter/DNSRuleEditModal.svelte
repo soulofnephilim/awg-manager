@@ -76,7 +76,11 @@
 			(r.domain?.length ?? 0) > 0 ||
 			(r.domain_keyword?.length ?? 0) > 0 ||
 			(r.domain_regex?.length ?? 0) > 0 ||
-			(r.query_type?.length ?? 0) > 0
+			(r.query_type?.length ?? 0) > 0 ||
+			// source_ip_cidr is a matcher too (backend dnsRuleHasMatcher counts it);
+			// a source-scoped rule must not open in catch-all mode, which would drop
+			// the field on save (bug #445 review).
+			(r.source_ip_cidr?.length ?? 0) > 0
 		);
 	}
 	function initMode(r?: SingboxRouterDNSRule): 'matchers' | 'catchall' {
