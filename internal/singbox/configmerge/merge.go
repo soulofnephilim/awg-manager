@@ -2,9 +2,10 @@
 // `-C config.d/`: read all *.json files in the directory in
 // lexicographic order, concatenate the well-known top-level arrays
 // (inbounds, outbounds, dns.servers, dns.rules, route.rules,
-// route.rule_set), and last-writer-wins everything else. Subdirectories
-// (e.g. `disabled/`) are ignored — the orchestrator parks inactive
-// slots there.
+// route.rule_set), resolve conflicting scalar sub-keys of `dns` and
+// `route` FIRST-FILE-WINS (matching sing-box), and last-writer-wins
+// everything else. Subdirectories (e.g. `disabled/`) are ignored — the
+// orchestrator parks inactive slots there.
 //
 // The merge is read-only and lives outside the orchestrator so handlers
 // can render a diagnostic preview without holding orchestrator locks.
@@ -125,10 +126,36 @@ func mergeSources(sources []fileSource) (map[string]any, error) {
 
 	// Pass 1: last-writer-wins for top-level keys, with shallow merge
 	// for nested objects under "dns", "route", "experimental", "log".
+	//
+	// "dns" and "route" sub-keys resolve FIRST-FILE-WINS to mirror sing-box's
+	// real config.d merge: when two slots set the same scalar sub-key (e.g.
+	// dns.final, dns.strategy, route.final) sing-box keeps the value from the
+	// lexically-first file, NOT the last. The old last-writer-wins here made
+	// the merge preview and DNS inspector report the router's dns.final while
+	// runtime actually kept base's — the preview lied (bug #445). Arrays under
+	// dns/route (servers, rules, rule_set) are overwritten by Pass 2's
+	// concatenation, so their Pass-1 value does not matter.
+	//
+	// "experimental" and "log" keep last-writer-wins — they are not part of
+	// the router/base first-wins contract and existing behavior (e.g. a slot
+	// raising log.level) depends on the later file winning.
 	for _, src := range parsed {
 		for k, v := range src {
 			switch k {
-			case "dns", "route", "experimental", "log":
+			case "dns", "route":
+				dstObj, _ := merged[k].(map[string]any)
+				if dstObj == nil {
+					dstObj = map[string]any{}
+					merged[k] = dstObj
+				}
+				if srcObj, ok := v.(map[string]any); ok {
+					for sk, sv := range srcObj {
+						if _, exists := dstObj[sk]; !exists {
+							dstObj[sk] = sv
+						}
+					}
+				}
+			case "experimental", "log":
 				dstObj, _ := merged[k].(map[string]any)
 				if dstObj == nil {
 					dstObj = map[string]any{}

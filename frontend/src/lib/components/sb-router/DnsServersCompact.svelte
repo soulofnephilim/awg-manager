@@ -19,6 +19,7 @@
   import { dnsRuleTarget } from './dnsRuleLabel';
   import { dnsMatcherParts, dnsMatcherSummary } from './dnsMatcherParts';
   import { dnsServerDeleteBlockReasons, type DnsServerUsageInput } from './dnsServerUsage';
+  import { computeShadowedDnsRuleIndices, isCatchAllDnsRule } from './dnsRuleShadow';
 
   interface Props {
     servers: SingboxRouterDNSServer[];
@@ -62,6 +63,11 @@
   const serverDeleteReasons = $derived(
     dnsUsage ? dnsServerDeleteBlockReasons(servers, dnsUsage) : null,
   );
+
+  // DNS-правила проверяются сверху вниз (first-match). Правило без условий
+  // (catch-all) перехватывает всё, поэтому всё, что ниже него, — мёртвый код.
+  // Пересчитывается на каждый drag-reorder (rules — реактивный prop).
+  const shadowedRuleIdx = $derived(computeShadowedDnsRuleIndices(rules));
 </script>
 
 <div class="wrap">
@@ -125,22 +131,30 @@
       <Button variant="primary" size="sm" onclick={onAddRule} disabled={addRuleDisabled}>+ Правило</Button>
     {/if}
   </div>
+  {#if shadowedRuleIdx.size > 0}
+    <div class="shadow-note">
+      Правила после catch-all (без условий) не проверяются — перенесите их выше или удалите.
+    </div>
+  {/if}
   {#if rules.length > 0}
     <div class="rules-table">
       <div class="rules-rows">
         {#each rules as r, i (i)}
           {@const tgt = dnsRuleTarget(r)}
           {@const matchers = dnsMatcherParts(r)}
-          <div class="rule-row">
+          {@const shadowed = shadowedRuleIdx.has(i)}
+          <div class="rule-row" class:shadowed>
             <button
               type="button"
               class="rule-content"
               onclick={() => onEditRule(i)}
-              title={`${dnsMatcherSummary(r)} → ${tgt.label}`}
+              title={shadowed
+                ? `${dnsMatcherSummary(r)} → ${tgt.label} · перекрыто catch-all правилом выше`
+                : `${dnsMatcherSummary(r)} → ${tgt.label}`}
             >
               <span class="rule-match">
                 {#if matchers.length === 0}
-                  —
+                  <Badge variant="accent" size="xs">catch-all · всё остальное</Badge>
                 {:else}
                   {#each matchers as part, pi (part.key + pi)}
                     <span class="m-part">
@@ -155,6 +169,9 @@
                       <span class="m-val">{part.value}</span>
                     </span>
                   {/each}
+                {/if}
+                {#if shadowed}
+                  <Badge variant="warning" size="xs">перекрыто catch-all выше</Badge>
                 {/if}
               </span>
               <span class="rule-arrow" aria-hidden="true">→</span>
@@ -316,6 +333,18 @@
     background: var(--surface-bg);
     padding: 0.55rem 0.75rem;
     border-radius: 4px;
+  }
+  /* Правило, перекрытое catch-all выше: мёртвый код — приглушаем. */
+  .rule-row.shadowed {
+    opacity: 0.55;
+  }
+  .shadow-note {
+    padding: 6px 14px;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--color-warning, #d97706);
+    background: color-mix(in srgb, var(--color-warning, #d97706) 10%, transparent);
+    border-left: 2px solid var(--color-warning, #d97706);
   }
   .rule-content {
     min-width: 0;

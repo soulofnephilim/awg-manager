@@ -219,8 +219,13 @@ func TestAddDNSRuleValidates(t *testing.T) {
 	c := NewEmptyConfig()
 	_ = c.AddDNSServer(makeDNSServer("s", "udp", "1.1.1.1", ""))
 
-	if err := c.AddDNSRule(DNSRule{Server: "s"}); !errors.Is(err, ErrInvalidMatchers) {
-		t.Errorf("expected invalid matchers, got %v", err)
+	// Matcher-less + server is a valid catch-all (#445 phase 3): accepted.
+	if err := c.AddDNSRule(DNSRule{Server: "s"}); err != nil {
+		t.Errorf("matcher-less catch-all with server should be accepted, got %v", err)
+	}
+	// Bare rule: no matcher, no server, no action → still invalid.
+	if err := c.AddDNSRule(DNSRule{}); !errors.Is(err, ErrInvalidMatchers) {
+		t.Errorf("bare rule with no matcher/server/action should be rejected, got %v", err)
 	}
 	if err := c.AddDNSRule(DNSRule{DomainSuffix: []string{".ru"}}); err == nil {
 		t.Error("expected error for missing server")
@@ -233,6 +238,50 @@ func TestAddDNSRuleValidates(t *testing.T) {
 	}
 	if err := c.AddDNSRule(DNSRule{DomainSuffix: []string{".com"}, Server: "s"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDNSCatchAllRule(t *testing.T) {
+	c := NewEmptyConfig()
+	_ = c.AddDNSServer(makeDNSServer("s", "udp", "1.1.1.1", ""))
+
+	// Matcher-less rule referencing an unknown server is still rejected.
+	if err := c.AddDNSRule(DNSRule{Server: "missing"}); !errors.Is(err, ErrDNSInvalidServer) {
+		t.Errorf("catch-all with unknown server should be rejected, got %v", err)
+	}
+	// Matcher-less catch-all with a valid server is accepted.
+	if err := c.AddDNSRule(DNSRule{Server: "s"}); err != nil {
+		t.Fatalf("catch-all with valid server should be accepted, got %v", err)
+	}
+	// Matcher-less action-only rule (reject) is accepted.
+	if err := c.AddDNSRule(DNSRule{Action: "reject"}); err != nil {
+		t.Errorf("matcher-less reject catch-all should be accepted, got %v", err)
+	}
+	// UpdateDNSRule honors the same relaxed contract.
+	if err := c.UpdateDNSRule(0, DNSRule{Server: "s"}); err != nil {
+		t.Errorf("UpdateDNSRule to matcher-less catch-all with server should be accepted, got %v", err)
+	}
+	if err := c.UpdateDNSRule(0, DNSRule{}); !errors.Is(err, ErrInvalidMatchers) {
+		t.Errorf("UpdateDNSRule to bare rule should be rejected, got %v", err)
+	}
+}
+
+func TestDNSRulesShadowedByCatchAll(t *testing.T) {
+	c := NewEmptyConfig()
+	_ = c.AddDNSServer(makeDNSServer("s", "udp", "1.1.1.1", ""))
+
+	// No catch-all → nothing shadowed.
+	_ = c.AddDNSRule(DNSRule{DomainSuffix: []string{".ru"}, Server: "s"})
+	if got := c.DNSRulesShadowedByCatchAll(); got != nil {
+		t.Errorf("no catch-all should shadow nothing, got %v", got)
+	}
+	// Add a catch-all, then two rules after it → both shadowed.
+	_ = c.AddDNSRule(DNSRule{Server: "s"})                        // index 1: catch-all
+	_ = c.AddDNSRule(DNSRule{Domain: []string{"a"}, Server: "s"}) // index 2: shadowed
+	_ = c.AddDNSRule(DNSRule{Domain: []string{"b"}, Server: "s"}) // index 3: shadowed
+	got := c.DNSRulesShadowedByCatchAll()
+	if len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Errorf("want [2 3] shadowed, got %v", got)
 	}
 }
 

@@ -65,11 +65,35 @@
 		if (r?.action === 'reject' || r?.action === 'predefined') return 'block';
 		return 'route';
 	}
+	// A rule with NO matchers matches every query = catch-all («всё остальное»).
+	// We surface the simplified «catch-all» mode only for the route-to-server
+	// shape; a matcher-less block is unusual and stays in the full editor.
+	function isMatcherless(r?: SingboxRouterDNSRule): boolean {
+		if (!r) return false;
+		return !(
+			(r.rule_set?.length ?? 0) > 0 ||
+			(r.domain_suffix?.length ?? 0) > 0 ||
+			(r.domain?.length ?? 0) > 0 ||
+			(r.domain_keyword?.length ?? 0) > 0 ||
+			(r.domain_regex?.length ?? 0) > 0 ||
+			(r.query_type?.length ?? 0) > 0 ||
+			// source_ip_cidr is a matcher too (backend dnsRuleHasMatcher counts it);
+			// a source-scoped rule must not open in catch-all mode, which would drop
+			// the field on save (bug #445 review).
+			(r.source_ip_cidr?.length ?? 0) > 0
+		);
+	}
+	function initMode(r?: SingboxRouterDNSRule): 'matchers' | 'catchall' {
+		return r && isMatcherless(r) && initAction(r) === 'route' ? 'catchall' : 'matchers';
+	}
 	function initBlockMethod(r?: SingboxRouterDNSRule): 'nxdomain' | 'refused' | 'drop' {
 		if (r?.action === 'predefined') return 'nxdomain';
 		if (r?.action === 'reject' && r?.method === 'drop') return 'drop';
 		return 'refused';
 	}
+	// svelte-ignore state_referenced_locally
+	let mode = $state<'matchers' | 'catchall'>(initMode(rule));
+	const catchAll = $derived(mode === 'catchall');
 	// svelte-ignore state_referenced_locally
 	let action = $state<'route' | 'block'>(initAction(rule));
 	// svelte-ignore state_referenced_locally
@@ -88,6 +112,11 @@
 		{ value: 'block', label: 'Заблокировать' },
 	];
 
+	const modeOptions: SegmentedOption<'matchers' | 'catchall'>[] = [
+		{ value: 'matchers', label: 'По условиям' },
+		{ value: 'catchall', label: 'Catch-all (всё остальное)' },
+	];
+
 	let busy = $state(false);
 	let error = $state('');
 
@@ -101,6 +130,7 @@
 	let initialAction: 'route' | 'block' = $state('route');
 	let initialBlockMethod: 'nxdomain' | 'refused' | 'drop' = $state('refused');
 	let initialServer = $state('');
+	let initialMode: 'matchers' | 'catchall' = $state('matchers');
 
 	// Initialize snapshot when modal opens
 	$effect(() => {
@@ -114,6 +144,7 @@
 			initialAction = initAction(rule);
 			initialBlockMethod = initBlockMethod(rule);
 			initialServer = rule.server ?? '';
+			initialMode = initMode(rule);
 		} else {
 			initialRuleSetTagsSnapshot = [];
 			initialDomainSuffixStr = '';
@@ -124,6 +155,7 @@
 			initialAction = 'route';
 			initialBlockMethod = 'refused';
 			initialServer = '';
+			initialMode = 'matchers';
 		}
 	});
 
@@ -137,7 +169,8 @@
 			queryTypeStr !== initialQueryTypeStr ||
 			action !== initialAction ||
 			blockMethod !== initialBlockMethod ||
-			server !== initialServer
+			server !== initialServer ||
+			mode !== initialMode
 		);
 	});
 
@@ -159,22 +192,28 @@
 				domain_keyword.length > 0 ||
 				domain_regex.length > 0 ||
 				query_type.length > 0;
-			if (!hasMatcher) {
+			// Catch-all mode intentionally ships ZERO matchers (matches everything);
+			// otherwise at least one matcher is required.
+			if (!catchAll && !hasMatcher) {
 				error = 'Нужен хотя бы один matcher';
 				busy = false;
 				return;
 			}
 
-			const built: SingboxRouterDNSRule = {
-				rule_set: rule_set.length ? rule_set : undefined,
-				domain_suffix: domain_suffix.length ? domain_suffix : undefined,
-				domain: domain.length ? domain : undefined,
-				domain_keyword: domain_keyword.length ? domain_keyword : undefined,
-				domain_regex: domain_regex.length ? domain_regex : undefined,
-				query_type: query_type.length ? query_type : undefined,
-			};
+			// In catch-all mode the matcher inputs are hidden — never serialize them,
+			// even if the user had typed something before switching mode.
+			const built: SingboxRouterDNSRule = catchAll
+				? {}
+				: {
+						rule_set: rule_set.length ? rule_set : undefined,
+						domain_suffix: domain_suffix.length ? domain_suffix : undefined,
+						domain: domain.length ? domain : undefined,
+						domain_keyword: domain_keyword.length ? domain_keyword : undefined,
+						domain_regex: domain_regex.length ? domain_regex : undefined,
+						query_type: query_type.length ? query_type : undefined,
+					};
 
-			if (action === 'route') {
+			if (catchAll || action === 'route') {
 				if (!server) { error = 'Выберите DNS сервер'; busy = false; return; }
 				built.action = 'route';
 				built.server = server;
@@ -205,65 +244,88 @@
 	hasUnsavedChanges={() => isDirty}
 >
 	<div class="form">
-		<div class="section-label">Matchers (минимум один)</div>
+		<div class="section-label">Тип правила</div>
+		<SegmentedControl
+			value={mode}
+			options={modeOptions}
+			ariaLabel="Тип DNS правила"
+			onchange={(next) => (mode = next)}
+		/>
 
-		<label class="field">
-			<div class="lbl">Rule sets</div>
-			<ChipMultiSelect
-				values={ruleSetTags}
-				options={ruleSetOptions}
-				onchange={(next) => (ruleSetTags = next)}
-				placeholder="не выбрано"
-				allowOrphans
-			/>
-		</label>
+		{#if catchAll}
+			<div class="warn">
+				Правило без условий совпадает со <b>всеми</b> запросами. Любые правила
+				<b>ниже</b> него в списке игнорируются — держите его последним.
+			</div>
+			<label class="field">
+				<div class="lbl">DNS сервер (для всех запросов)</div>
+				<Dropdown bind:value={server} options={serverOptions} fullWidth />
+			</label>
+			<div class="hint">
+				Для простого запасного сервера обычно достаточно «Final-сервера» в «DNS по умолчанию».
+				Если задать и его, и catch-all правило — правило важнее (проверяется раньше final).
+			</div>
+		{:else}
+			<div class="section-label">Matchers (минимум один)</div>
 
-		<label class="field">
-			<div class="lbl">Domain suffix</div>
-			<textarea bind:value={domainSuffixStr} rows="3" placeholder="по одному на строке: .youtube.com"></textarea>
-		</label>
+			<label class="field">
+				<div class="lbl">Rule sets</div>
+				<ChipMultiSelect
+					values={ruleSetTags}
+					options={ruleSetOptions}
+					onchange={(next) => (ruleSetTags = next)}
+					placeholder="не выбрано"
+					allowOrphans
+				/>
+			</label>
 
-		<label class="field">
-			<div class="lbl">Domain (точное совпадение)</div>
-			<textarea bind:value={domainStr} rows="2" placeholder="example.com"></textarea>
-		</label>
+			<label class="field">
+				<div class="lbl">Domain suffix</div>
+				<textarea bind:value={domainSuffixStr} rows="3" placeholder="по одному на строке: .youtube.com"></textarea>
+			</label>
 
-		<label class="field">
-			<div class="lbl">Domain keyword (через запятую)</div>
-			<input bind:value={domainKeywordStr} placeholder="tracker, analytics" />
-		</label>
+			<label class="field">
+				<div class="lbl">Domain (точное совпадение)</div>
+				<textarea bind:value={domainStr} rows="2" placeholder="example.com"></textarea>
+			</label>
 
-		<label class="field">
-			<div class="lbl">Domain regex (по строке)</div>
-			<textarea bind:value={domainRegexStr} rows="2" placeholder={"^ads?\\d+\\."}></textarea>
-		</label>
+			<label class="field">
+				<div class="lbl">Domain keyword (через запятую)</div>
+				<input bind:value={domainKeywordStr} placeholder="tracker, analytics" />
+			</label>
 
-		<label class="field">
-			<div class="lbl">Query type (через запятую)</div>
-			<input bind:value={queryTypeStr} placeholder="A, AAAA, HTTPS" />
-		</label>
+			<label class="field">
+				<div class="lbl">Domain regex (по строке)</div>
+				<textarea bind:value={domainRegexStr} rows="2" placeholder={"^ads?\\d+\\."}></textarea>
+			</label>
 
-		<div class="action-section">
-			<div class="section-label">Действие</div>
-			<SegmentedControl
-				value={action}
-				options={actionOptions}
-				ariaLabel="Действие DNS правила"
-				onchange={(next) => (action = next)}
-			/>
+			<label class="field">
+				<div class="lbl">Query type (через запятую)</div>
+				<input bind:value={queryTypeStr} placeholder="A, AAAA, HTTPS" />
+			</label>
 
-			{#if action === 'route'}
-				<label class="field">
-					<div class="lbl">DNS сервер</div>
-					<Dropdown bind:value={server} options={serverOptions} fullWidth />
-				</label>
-			{:else}
-				<label class="field">
-					<div class="lbl">Метод блокировки</div>
-					<Dropdown bind:value={blockMethod} options={blockMethodOptions} fullWidth />
-				</label>
-			{/if}
-		</div>
+			<div class="action-section">
+				<div class="section-label">Действие</div>
+				<SegmentedControl
+					value={action}
+					options={actionOptions}
+					ariaLabel="Действие DNS правила"
+					onchange={(next) => (action = next)}
+				/>
+
+				{#if action === 'route'}
+					<label class="field">
+						<div class="lbl">DNS сервер</div>
+						<Dropdown bind:value={server} options={serverOptions} fullWidth />
+					</label>
+				{:else}
+					<label class="field">
+						<div class="lbl">Метод блокировки</div>
+						<Dropdown bind:value={blockMethod} options={blockMethodOptions} fullWidth />
+					</label>
+				{/if}
+			</div>
+		{/if}
 
 		{#if error}<div class="error">{error}</div>{/if}
 	</div>

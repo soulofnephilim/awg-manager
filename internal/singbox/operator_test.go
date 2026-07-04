@@ -216,8 +216,8 @@ func TestEnsureBaseConfig_FullSkeleton(t *testing.T) {
 	if bs["tag"] != "dns-bootstrap" || bs["type"] != "udp" || bs["server"] != "1.1.1.1" {
 		t.Errorf("bootstrap: %#v", bs)
 	}
-	if dns["final"] != "dns-bootstrap" {
-		t.Errorf("dns.final: want dns-bootstrap, got %v", dns["final"])
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should be absent (owned by 20-router.json), got %v", dns["final"])
 	}
 }
 
@@ -1874,6 +1874,204 @@ func TestRemoveFinalFromBase_MalformedJSON_NoOp(t *testing.T) {
 	removeFinalFromBase(basePath)
 
 	// Файл должен остаться неизменным — мы не должны trash bad config.
+	raw, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != garbage {
+		t.Errorf("malformed file mutated: got %q, want %q", string(raw), garbage)
+	}
+}
+
+// --- freshBaseConfig DNS (#445) ---
+
+func TestFreshBaseConfig_OmitsDNSFinal_KeepsStrategy(t *testing.T) {
+	cfg := freshBaseConfig()
+	dns, ok := cfg["dns"].(map[string]any)
+	if !ok {
+		t.Fatalf("dns block missing/wrong type: %v", cfg["dns"])
+	}
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final must be omitted (owned by 20-router.json), got %v", dns["final"])
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy must stay prefer_ipv4 (router-disabled default), got %v", dns["strategy"])
+	}
+	servers, _ := dns["servers"].([]any)
+	if len(servers) != 1 {
+		t.Fatalf("dns.servers: want 1 bootstrap server, got %v", dns["servers"])
+	}
+	first, _ := servers[0].(map[string]any)
+	if first["tag"] != "dns-bootstrap" {
+		t.Errorf("first dns server tag: want dns-bootstrap, got %v", first["tag"])
+	}
+}
+
+// --- removeDNSFinalFromBase tests (#445) ---
+
+func TestRemoveDNSFinalFromBase_DropsFinal_KeepsStrategyWhenRouterAbsent(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4","servers":[{"tag":"dns-bootstrap","type":"udp","server":"1.1.1.1"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No 20-router.json → strategy strip is gated off.
+	removeDNSFinalFromBase(basePath)
+
+	raw, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should be stripped unconditionally")
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy must survive when router slot absent, got %v", dns["strategy"])
+	}
+	// Other dns keys intact.
+	if _, has := dns["servers"]; !has {
+		t.Errorf("dns.servers unexpectedly removed")
+	}
+}
+
+func TestRemoveDNSFinalFromBase_StripsStrategyWhenRouterOwnsIt(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4","servers":[{"tag":"dns-bootstrap","type":"udp","server":"1.1.1.1"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+	// Router slot sets a non-empty strategy → base strategy strip is enabled.
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"),
+		[]byte(`{"dns":{"final":"dns-direct","strategy":"ipv4_only","servers":[{"tag":"dns-direct","type":"udp","server":"8.8.8.8"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
+	raw, _ := os.ReadFile(basePath)
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should be stripped")
+	}
+	if _, has := dns["strategy"]; has {
+		t.Errorf("dns.strategy should be stripped when router owns it, got %v", dns["strategy"])
+	}
+}
+
+func TestRemoveDNSFinalFromBase_RouterStrategyEmpty_KeepsBaseStrategy(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4"}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+	// Router slot exists but strategy is empty → base keeps its strategy.
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"),
+		[]byte(`{"dns":{"final":"dns-direct","strategy":"","servers":[{"tag":"dns-direct","type":"udp","server":"8.8.8.8"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
+	raw, _ := os.ReadFile(basePath)
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should still be stripped")
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy must survive when router strategy empty, got %v", dns["strategy"])
+	}
+}
+
+func TestRemoveDNSFinalFromBase_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"strategy":"prefer_ipv4","servers":[{"tag":"dns-bootstrap","type":"udp","server":"1.1.1.1"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+	removeDNSFinalFromBase(basePath) // second call: no-op
+
+	raw, _ := os.ReadFile(basePath)
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should remain absent")
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy should be untouched, got %v", dns["strategy"])
+	}
+}
+
+func TestRemoveDNSFinalFromBase_NoDNSSection_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	original := `{"log":{"level":"trace"},"outbounds":[{"type":"direct","tag":"direct"}]}`
+	if err := os.WriteFile(basePath, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
+	raw, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("file became invalid JSON: %v", err)
+	}
+	if _, has := m["outbounds"]; !has {
+		t.Errorf("outbounds lost")
+	}
+}
+
+func TestRemoveDNSFinalFromBase_MissingFile_NoPanic(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+
+	removeDNSFinalFromBase(basePath)
+
+	if _, err := os.Stat(basePath); !os.IsNotExist(err) {
+		t.Errorf("file should not be created when missing")
+	}
+}
+
+func TestRemoveDNSFinalFromBase_MalformedJSON_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	garbage := `{this is not json`
+	if err := os.WriteFile(basePath, []byte(garbage), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
 	raw, err := os.ReadFile(basePath)
 	if err != nil {
 		t.Fatal(err)

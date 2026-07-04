@@ -1677,6 +1677,9 @@ export interface SingboxRouterDNSRule {
 	domain_keyword?: string[];
 	domain_regex?: string[];
 	query_type?: string[];
+	// A source-address matcher (backend DNSRule.SourceIPCIDR). No UI input, but
+	// modeled so a hand-edited source-scoped rule isn't mistaken for a catch-all.
+	source_ip_cidr?: string[];
 	server?: string;
 	action?: '' | 'route' | 'reject' | 'predefined';
 	rcode?: string;
