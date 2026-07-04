@@ -49,6 +49,7 @@
 	import { GripVertical, Pencil, Trash2, Lock, Plus } from 'lucide-svelte';
 	import { dnsRuleTarget } from '$lib/components/sb-router/dnsRuleLabel';
 	import { dnsMatcherParts, dnsMatcherSummary } from '$lib/components/sb-router/dnsMatcherParts';
+	import { computeShadowedDnsRuleIndices } from '$lib/components/sb-router/dnsRuleShadow';
 	import { dnsServerDetourDisplay } from '$lib/components/sb-router/dnsServerDetourDisplay';
 	import { dnsServerDeleteBlockReasons } from '$lib/components/sb-router/dnsServerUsage';
 	import OutboundTile from '$lib/components/sb-router/OutboundTile.svelte';
@@ -68,6 +69,10 @@
 		servers: $storeDnsServers,
 		dnsFinal: $storeDnsGlobals.final || '',
 	});
+
+	// first-match: правило без условий (catch-all) перехватывает всё, поэтому
+	// всё, что стоит ниже него, — мёртвый код. Реактивно → обновляется на drag.
+	const shadowedDnsRuleIdx = $derived(computeShadowedDnsRuleIndices($storeDnsRules));
 	const serverDeleteReasons = $derived(
 		dnsServerDeleteBlockReasons($storeDnsServers, dnsServerUsageContext),
 	);
@@ -330,7 +335,8 @@
 {#snippet ruleRow(r: SingboxRouterDNSRule, i: number, ghost: boolean)}
 	{@const tgt = dnsRuleTarget(r)}
 	{@const matchers = dnsMatcherParts(r)}
-	<div class="rrow" class:dragging={!ghost && ruleDrag.draggingIndex === i}>
+	{@const shadowed = !ghost && shadowedDnsRuleIdx.has(i)}
+	<div class="rrow" class:dragging={!ghost && ruleDrag.draggingIndex === i} class:shadowed>
 		<button
 			type="button"
 			class="grip"
@@ -346,10 +352,12 @@
 			type="button"
 			class="match-btn"
 			onclick={() => (dnsRuleEditIdx = i)}
-			title={`${dnsMatcherSummary(r)} → ${tgt.label}`}
+			title={shadowed
+				? `${dnsMatcherSummary(r)} → ${tgt.label} · перекрыто catch-all правилом выше`
+				: `${dnsMatcherSummary(r)} → ${tgt.label}`}
 		>
 			{#if matchers.length === 0}
-				<span class="m-none">—</span>
+				<Badge variant="accent" size="xs">catch-all · всё остальное</Badge>
 			{:else}
 				{#each matchers as part, pi (part.key + pi)}
 					<span class="m-part">
@@ -358,6 +366,9 @@
 						<span class="m-val">{part.value}</span>
 					</span>
 				{/each}
+			{/if}
+			{#if shadowed}
+				<Badge variant="warning" size="xs">перекрыто catch-all выше</Badge>
 			{/if}
 			<span class="r-arrow" aria-hidden="true">→</span>
 			{#if tgt.kind === 'block'}
@@ -463,6 +474,12 @@
 			Какой сервер для какого запроса. first-match. Матч: домен / rule_set / query_type /
 			источник.
 		</p>
+
+		{#if shadowedDnsRuleIdx.size > 0}
+			<div class="shadow-note">
+				Правила после catch-all (без условий) не проверяются — перенесите их выше или удалите.
+			</div>
+		{/if}
 
 		<div class="rows" class:is-dragging={ruleDrag.active} style={ruleDrag.cardsMotionStyle()}>
 			{#each $storeDnsRules as r, i (i)}
@@ -904,6 +921,20 @@
 	.row-shell:last-of-type .rrow {
 		border-bottom: none;
 	}
+	/* Правило, перекрытое catch-all выше: мёртвый код — приглушаем. */
+	.rrow.shadowed {
+		opacity: 0.5;
+	}
+	.shadow-note {
+		padding: 0.4rem 0.6rem;
+		margin-bottom: 0.5rem;
+		font-size: 0.75rem;
+		line-height: 1.35;
+		color: var(--color-warning, #d97706);
+		background: color-mix(in srgb, var(--color-warning, #d97706) 10%, transparent);
+		border-left: 2px solid var(--color-warning, #d97706);
+		border-radius: var(--radius-sm, 6px);
+	}
 	.num {
 		color: var(--text-muted);
 		font-size: 0.8125rem;
@@ -952,9 +983,6 @@
 		opacity: 0.85;
 	}
 	.r-target.none {
-		color: var(--text-muted);
-	}
-	.m-none {
 		color: var(--text-muted);
 	}
 

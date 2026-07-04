@@ -31,6 +31,87 @@ func TestValidateOk(t *testing.T) {
 	}
 }
 
+func TestValidate_DNSFinalConflict_WarnsButOk(t *testing.T) {
+	o, dir := newTestOrch(t)
+	_ = o.Register(SlotMeta{Slot: SlotTunnels, Filename: "10-tunnels.json"})
+	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
+	if err := o.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	// Two enabled slots each set dns.final (to their own valid server).
+	writeSlot(t, dir, "10-tunnels.json", `{"dns":{"servers":[{"tag":"s1","type":"udp"}],"final":"s1"}}`)
+	writeSlot(t, dir, "20-router.json", `{"dns":{"servers":[{"tag":"s2","type":"udp"}],"final":"s2"}}`)
+	o.enabled[SlotTunnels] = true
+	o.enabled[SlotRouter] = true
+
+	res := o.Validate()
+	// Warning must NOT block reload (Ok ignores warnings).
+	if !res.Ok() {
+		t.Errorf("dns-final-conflict is advisory and must not block, got: %v", res.Error())
+	}
+	warn := findValidationWarning(res, "dns-final-conflict")
+	if warn == nil {
+		t.Fatalf("expected dns-final-conflict warning, got: %+v", res.Errors)
+	}
+	if warn.Severity != SeverityWarning {
+		t.Errorf("expected warning severity, got %q", warn.Severity)
+	}
+	// Both slots should be named in the message.
+	if !strings.Contains(warn.Message, string(SlotTunnels)) || !strings.Contains(warn.Message, string(SlotRouter)) {
+		t.Errorf("warning should name both slots, got: %s", warn.Message)
+	}
+}
+
+func findValidationWarning(res ValidationResult, kind string) *ValidationError {
+	for i := range res.Errors {
+		if res.Errors[i].Kind == kind {
+			return &res.Errors[i]
+		}
+	}
+	return nil
+}
+
+func TestValidate_RouteFinalConflict_WarnsButOk(t *testing.T) {
+	o, dir := newTestOrch(t)
+	_ = o.Register(SlotMeta{Slot: SlotTunnels, Filename: "10-tunnels.json"})
+	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
+	if err := o.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	// Both slots set route.final to the builtin "direct".
+	writeSlot(t, dir, "10-tunnels.json", `{"route":{"final":"direct"}}`)
+	writeSlot(t, dir, "20-router.json", `{"route":{"final":"direct"}}`)
+	o.enabled[SlotTunnels] = true
+	o.enabled[SlotRouter] = true
+
+	res := o.Validate()
+	if !res.Ok() {
+		t.Errorf("route-final-conflict is advisory and must not block, got: %v", res.Error())
+	}
+	if findValidationWarning(res, "route-final-conflict") == nil {
+		t.Errorf("expected route-final-conflict warning, got: %+v", res.Errors)
+	}
+}
+
+func TestValidate_SingleDNSFinal_NoWarning(t *testing.T) {
+	o, dir := newTestOrch(t)
+	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
+	if err := o.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	// Only one slot sets dns.final — the normal post-#445 path.
+	writeSlot(t, dir, "20-router.json", `{"dns":{"servers":[{"tag":"s1","type":"udp"}],"final":"s1"}}`)
+	o.enabled[SlotRouter] = true
+
+	res := o.Validate()
+	if !res.Ok() {
+		t.Errorf("single dns.final should be clean, got: %v", res.Error())
+	}
+	if findValidationWarning(res, "dns-final-conflict") != nil {
+		t.Errorf("single setter must not warn, got: %+v", res.Errors)
+	}
+}
+
 func TestValidateDuplicateOutbound(t *testing.T) {
 	o, dir := newTestOrch(t)
 	_ = o.Register(SlotMeta{Slot: SlotTunnels, Filename: "10-tunnels.json"})

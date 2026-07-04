@@ -196,6 +196,107 @@ func TestIntegration_RouterFinal_DisabledRouter_NoFinal(t *testing.T) {
 	}
 }
 
+// writeBaseDNSNoFinal writes a post-#445 00-base.json: dns has a bootstrap
+// server and strategy, but NO dns.final (router owns it).
+func writeBaseDNSNoFinal(t *testing.T, dir string) {
+	t.Helper()
+	base := map[string]any{
+		"outbounds": []any{
+			map[string]any{"type": "direct", "tag": "direct"},
+		},
+		"dns": map[string]any{
+			"strategy": "prefer_ipv4",
+			"servers": []any{
+				map[string]any{"type": "udp", "tag": "dns-bootstrap", "server": "1.1.1.1"},
+			},
+		},
+	}
+	raw, err := json.MarshalIndent(base, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00-base.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeRouterDNSSlot writes a 20-router.json with its own dns server and a
+// dns.final pointing at it.
+func writeRouterDNSSlot(t *testing.T, dir, finalTag string) {
+	t.Helper()
+	router := map[string]any{
+		"dns": map[string]any{
+			"servers": []any{
+				map[string]any{"type": "udp", "tag": finalTag, "server": "8.8.8.8"},
+			},
+			"final": finalTag,
+		},
+	}
+	raw, err := json.MarshalIndent(router, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIntegration_DNSFinal_RouterOwns — with base's dns.final stripped
+// (#445 phase 1), the router slot's dns.final survives the real sing-box
+// merge. Without the fix, base's "dns-bootstrap" would shadow it
+// (first-file-wins for scalar dns sub-keys).
+func TestIntegration_DNSFinal_RouterOwns(t *testing.T) {
+	bin := locateSingboxBinary(t)
+	if bin == "" {
+		t.Skip("no host sing-box binary available")
+	}
+
+	dir := t.TempDir()
+	writeBaseDNSNoFinal(t, dir)
+	writeRouterDNSSlot(t, dir, "dns-direct")
+
+	merged := mergeViaSingbox(t, bin, dir)
+	dns, _ := merged["dns"].(map[string]any)
+	if dns == nil {
+		t.Fatalf("merged config missing dns block: %v", merged)
+	}
+	if dns["final"] != "dns-direct" {
+		t.Errorf("dns.final: want dns-direct, got %v", dns["final"])
+	}
+}
+
+// TestIntegration_DNSFinal_DisabledRouter — no router slot. dns.final is
+// absent, so sing-box falls back to the FIRST dns server (dns-bootstrap),
+// preserving the router-disabled default.
+func TestIntegration_DNSFinal_DisabledRouter(t *testing.T) {
+	bin := locateSingboxBinary(t)
+	if bin == "" {
+		t.Skip("no host sing-box binary available")
+	}
+
+	dir := t.TempDir()
+	writeBaseDNSNoFinal(t, dir)
+	// No 20-router.json — simulates router disabled.
+
+	merged := mergeViaSingbox(t, bin, dir)
+	dns, _ := merged["dns"].(map[string]any)
+	if dns == nil {
+		t.Fatalf("merged config missing dns block: %v", merged)
+	}
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should be absent when no router slot, got %v", dns["final"])
+	}
+	// First dns server is dns-bootstrap → sing-box falls back to it.
+	servers, _ := dns["servers"].([]any)
+	if len(servers) == 0 {
+		t.Fatalf("dns servers missing")
+	}
+	first, _ := servers[0].(map[string]any)
+	if first["tag"] != "dns-bootstrap" {
+		t.Errorf("first dns server should be dns-bootstrap, got %v", first["tag"])
+	}
+}
+
 func TestIntegration_RouterFinal_DefaultDirect_NoConflict(t *testing.T) {
 	bin := locateSingboxBinary(t)
 	if bin == "" {

@@ -300,6 +300,7 @@ func NewOperator(d OperatorDeps) *Operator {
 	patchTunnelsSlotEnsureNaiveUDPOverTCP(filepath.Join(configPath, "10-tunnels.json"))
 	stripStrayDirectPlaceholder(configPath)
 	removeFinalFromBase(filepath.Join(configPath, "00-base.json"), log)
+	removeDNSFinalFromBase(filepath.Join(configPath, "00-base.json"), log)
 
 	op := &Operator{
 		log:               log,
@@ -979,6 +980,101 @@ func removeFinalFromBase(basePath string, loggers ...*slog.Logger) {
 	)
 }
 
+// removeDNSFinalFromBase strips base-owned DNS globals from 00-base.json that
+// would otherwise shadow the router slot's choices in the merged runtime
+// config. Bug #445: sing-box resolves conflicting scalar sub-keys of `dns`
+// FIRST-FILE-WINS across config.d (proven for route.final by
+// router_final_merge_test.go), so 00-base.json's dns.final / dns.strategy
+// always beat the user's 20-router.json values. This self-heal runs on every
+// operator init (right after ensureBaseConfigWithLogLevel) so existing on-disk
+// base files heal on reload. It is a boot self-heal, not a settings migration.
+// Mirrors removeFinalFromBase, which did the same for route.final.
+//
+// dns.final — stripped UNCONDITIONALLY (safe). When final is absent sing-box
+// falls back to the FIRST dns server; base's server list is [dns-bootstrap]
+// and the router's servers concatenate AFTER base, so the merged first server
+// stays dns-bootstrap when the router is disabled, and the router's dns.final
+// (the only slot that then sets it) wins when enabled. Same observable
+// behavior as the old explicit "dns-bootstrap".
+//
+// dns.strategy — stripped ONLY when the sibling 20-router.json exists AND sets
+// a non-empty dns.strategy (the router then owns strategy, set together with
+// final via SetDNSGlobals). Unlike final, strategy has NO first-server
+// fallback: it is a genuine scalar default, so stripping it unconditionally
+// would drop the guaranteed prefer_ipv4 whenever the router slot is absent
+// (router disabled). Gating on the router slot keeps base's prefer_ipv4 as the
+// router-disabled default while letting an enabled router override it.
+//
+// Idempotent; silent skip on missing file / read error / malformed JSON /
+// missing dns section (matches removeFinalFromBase).
+func removeDNSFinalFromBase(basePath string, loggers ...*slog.Logger) {
+	var log *slog.Logger
+	if len(loggers) > 0 {
+		log = loggers[0]
+	}
+	data, err := os.ReadFile(basePath)
+	if err != nil {
+		return
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if dns == nil {
+		return
+	}
+	oldFinal, hadFinal := dns["final"]
+	changed := false
+	if hadFinal {
+		delete(dns, "final")
+		changed = true
+	}
+	strategyStripped := false
+	if _, hasStrategy := dns["strategy"]; hasStrategy && routerOwnsDNSStrategy(filepath.Dir(basePath)) {
+		delete(dns, "strategy")
+		strategyStripped = true
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if err := writeJSONFile(basePath, m); err != nil {
+		logConfigPatchWarn(log, "singbox base config migration failed",
+			"patch", "remove-dns-final",
+			"path", basePath,
+			"err", err,
+		)
+		return
+	}
+	logConfigPatchInfo(log, "singbox base config migrated",
+		"patch", "remove-dns-final",
+		"path", basePath,
+		"oldFinal", oldFinal,
+		"strategyStripped", strategyStripped,
+	)
+}
+
+// routerOwnsDNSStrategy reports whether the sibling 20-router.json in configDir
+// exists and sets a non-empty dns.strategy. See removeDNSFinalFromBase for why
+// the base dns.strategy strip is gated on this.
+func routerOwnsDNSStrategy(configDir string) bool {
+	data, err := os.ReadFile(filepath.Join(configDir, "20-router.json"))
+	if err != nil {
+		return false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if dns == nil {
+		return false
+	}
+	s, _ := dns["strategy"].(string)
+	return strings.TrimSpace(s) != ""
+}
+
 // stripStrayDirectPlaceholder removes the canonical
 // {type:"direct", tag:"direct"} placeholder from every slot file in
 // configDir EXCEPT 00-base.json. Sing-box rejects the merged config
@@ -1225,11 +1321,26 @@ func freshBaseConfigWithLogLevel(logLevel string) map[string]any {
 			},
 		},
 		"dns": map[string]any{
+			// dns.strategy stays in base — base legitimately owns the
+			// router-disabled default (prefer_ipv4). strategy is a genuine
+			// scalar default with no first-server fallback, so it must be
+			// present when the router slot is absent. The self-heal
+			// (removeDNSFinalFromBase) strips it only when 20-router.json
+			// owns strategy.
 			"strategy": "prefer_ipv4",
 			"servers": []any{
 				map[string]any{"type": "udp", "tag": "dns-bootstrap", "server": "1.1.1.1"},
 			},
-			"final": "dns-bootstrap",
+			// dns.final intentionally omitted — owned by 20-router.json
+			// (bug #445). sing-box resolves conflicting scalar sub-keys of
+			// `dns` FIRST-FILE-WINS across config.d, so a base dns.final
+			// would shadow the user's choice. With final absent sing-box
+			// falls back to the FIRST dns server; base's list is
+			// [dns-bootstrap] and router servers concatenate AFTER base, so
+			// router-disabled keeps dns-bootstrap and router-enabled lets the
+			// user's dns.final win (only one slot then sets it). Mirrors the
+			// route.final omission below. See spec
+			// 2026-05-21-route-final-router-owned-design.md.
 		},
 		"outbounds": []any{
 			map[string]any{"type": "direct", "tag": "direct"},
