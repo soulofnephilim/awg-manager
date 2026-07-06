@@ -632,7 +632,7 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateSubscriptionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -719,7 +719,7 @@ func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateSubscriptionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -852,7 +852,7 @@ func (h *SubscriptionHandler) ActiveMember(w http.ResponseWriter, r *http.Reques
 	}
 	h.log.Info("subscription-active-member", id, "requested via API")
 	var req ActiveMemberRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -1029,7 +1029,7 @@ func (h *SubscriptionHandler) RejectedToInfo(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req MoveRejectedToInfoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -1063,7 +1063,7 @@ func (h *SubscriptionHandler) InfoRemove(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req RemoveInfoItemRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -1110,7 +1110,7 @@ func (h *SubscriptionHandler) AddMember(w http.ResponseWriter, r *http.Request) 
 	}
 	h.log.Info("subscription-member-add", id, "requested via API")
 	var req AddMemberRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -1160,7 +1160,7 @@ func (h *SubscriptionHandler) RemoveMember(w http.ResponseWriter, r *http.Reques
 	}
 	h.log.Info("subscription-member-remove", id, "requested via API")
 	var req RemoveMemberRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -1213,7 +1213,7 @@ func (h *SubscriptionHandler) ExcludeMembers(w http.ResponseWriter, r *http.Requ
 	}
 	h.log.Info("subscription-member-exclude", id, "requested via API")
 	var req ExcludeMembersRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -1252,7 +1252,7 @@ func (h *SubscriptionHandler) RestoreMembers(w http.ResponseWriter, r *http.Requ
 	}
 	h.log.Info("subscription-member-restore", id, "requested via API")
 	var req RestoreMembersRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -1285,7 +1285,7 @@ func (h *SubscriptionHandler) PreviewURL(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req PreviewURLRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}

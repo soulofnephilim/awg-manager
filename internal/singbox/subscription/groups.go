@@ -181,6 +181,8 @@ func (s *Service) resolveGroupTags(g AggregateGroup, overrides map[string][]Memb
 
 // reloadWithGroups — единая точка коммита для всех мутаций подписок:
 // пересобирает сводные группы в том же батче и делает один Reload.
+// ВНИМАНИЕ: вызывающий обязан держать txMu (withTx) — коммит работает с
+// общим батчем адаптера и не должен пересекаться с другими операциями.
 func (s *Service) reloadWithGroups(ctx context.Context) error {
 	s.stageGroups(nil)
 	return s.mutator.Reload(ctx)
@@ -252,8 +254,16 @@ func (s *Service) CreateGroup(ctx context.Context, in GroupCreateInput) (*Aggreg
 		}
 	}
 
-	if err := s.reloadWithGroups(ctx); err != nil {
-		s.mutator.Rollback()
+	// Stage (пересборка групп) + Reload и Rollback-компенсация — одна
+	// txMu-секция: параллельная операция не должна закоммитить наш
+	// полу-staged батч, а наш Rollback — сбросить её staged-мутации.
+	if err := s.withTx(func() error {
+		if err := s.reloadWithGroups(ctx); err != nil {
+			s.mutator.Rollback()
+			return err
+		}
+		return nil
+	}); err != nil {
 		if proxyIdx >= 0 {
 			_ = s.mutator.RemoveProxy(ctx, proxyIdx)
 		}
@@ -306,7 +316,8 @@ func (s *Service) UpdateGroup(ctx context.Context, id string, patch GroupUpdateP
 	if err != nil {
 		return nil, err
 	}
-	if err := s.reloadWithGroups(ctx); err != nil {
+	// Stage (пересборка групп) + Reload — одна txMu-секция (общий батч).
+	if err := s.withTx(func() error { return s.reloadWithGroups(ctx) }); err != nil {
 		return g, fmt.Errorf("subscription group: reload: %w", err)
 	}
 	if patch.Label != nil && s.proxyEnabled() && g.ProxyIndex >= 0 {
@@ -335,13 +346,16 @@ func (s *Service) DeleteGroup(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	s.mutator.RemoveRouteRule(g.InboundTag, g.Tag)
-	s.mutator.RemoveInbound(g.InboundTag)
-	s.mutator.RemoveOutbound(g.Tag)
-	// Строка группы ещё в store — исключаем её из пересборки, чтобы
-	// stageGroups не вернул снятые сущности в этот же батч.
-	s.stageGroupsExcept(nil, id)
-	if err := s.mutator.Reload(ctx); err != nil {
+	// Teardown-мутации + Reload — одна txMu-секция (общий батч адаптера).
+	if err := s.withTx(func() error {
+		s.mutator.RemoveRouteRule(g.InboundTag, g.Tag)
+		s.mutator.RemoveInbound(g.InboundTag)
+		s.mutator.RemoveOutbound(g.Tag)
+		// Строка группы ещё в store — исключаем её из пересборки, чтобы
+		// stageGroups не вернул снятые сущности в этот же батч.
+		s.stageGroupsExcept(nil, id)
+		return s.mutator.Reload(ctx)
+	}); err != nil {
 		return fmt.Errorf("subscription group: delete reload: %w", err)
 	}
 	// Ошибка снятия прокси не блокирует удаление строки (симметрично

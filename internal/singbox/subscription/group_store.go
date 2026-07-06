@@ -139,6 +139,42 @@ func (s *GroupStore) saveLocked() error {
 	return storage.AtomicWrite(s.path, b)
 }
 
+// clone — глубокая копия группы: срез UseSubscriptionIDs и указатель URLTest
+// копируются, чтобы правки клона не были видны сквозь общий backing-массив.
+// Используется copy-on-write мутацией GroupStore.mutate.
+func (g *AggregateGroup) clone() *AggregateGroup {
+	cp := *g
+	cp.UseSubscriptionIDs = cloneSlice(g.UseSubscriptionIDs)
+	if g.URLTest != nil {
+		ut := *g.URLTest
+		cp.URLTest = &ut
+	}
+	return &cp
+}
+
+// mutate — copy-on-write мутация одной группы: fn правит глубокий клон, клон
+// кладётся в map и состояние сохраняется на диск. При ошибке записи в map
+// возвращается ОРИГИНАЛ — память никогда не расходится с диском (зеркалит
+// Store.mutate). Успех возвращает новый клон.
+func (s *GroupStore) mutate(id string, fn func(*AggregateGroup) error) (*AggregateGroup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	orig, ok := s.data[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrGroupNotFound, id)
+	}
+	next := orig.clone()
+	if err := fn(next); err != nil {
+		return nil, err
+	}
+	s.data[id] = next
+	if err := s.saveLocked(); err != nil {
+		s.data[id] = orig
+		return nil, err
+	}
+	return next, nil
+}
+
 func (s *GroupStore) Create(in GroupCreateInput) (*AggregateGroup, error) {
 	id := newID()
 	short := id[:8]
@@ -222,12 +258,20 @@ func (s *GroupStore) List() []AggregateGroup {
 }
 
 func (s *GroupStore) Update(id string, patch GroupUpdatePatch) (*AggregateGroup, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	g, ok := s.data[id]
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrGroupNotFound, id)
+	g, err := s.mutate(id, func(g *AggregateGroup) error {
+		applyGroupPatch(g, patch)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	cp := *g
+	return &cp, nil
+}
+
+// applyGroupPatch применяет частичный патч к группе (nil-указатели = «оставить
+// как есть»). Вынесен из Update, чтобы патч работал по клону в mutate.
+func applyGroupPatch(g *AggregateGroup, patch GroupUpdatePatch) {
 	if patch.Label != nil {
 		g.Label = *patch.Label
 	}
@@ -255,69 +299,81 @@ func (s *GroupStore) Update(id string, patch GroupUpdatePatch) (*AggregateGroup,
 	if patch.Enabled != nil {
 		g.Enabled = *patch.Enabled
 	}
-	if err := s.saveLocked(); err != nil {
-		return nil, err
-	}
-	cp := *g
-	return &cp, nil
 }
 
 func (s *GroupStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.data[id]; !ok {
+	g, ok := s.data[id]
+	if !ok {
 		return fmt.Errorf("%w: %q", ErrGroupNotFound, id)
 	}
 	delete(s.data, id)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		// Запись не прошла — возвращаем строку, чтобы память не разошлась
+		// с диском (на диске группа всё ещё есть).
+		s.data[id] = g
+		return err
+	}
+	return nil
 }
 
 // SetListenPort persists the allocated mixed-inbound port.
 func (s *GroupStore) SetListenPort(id string, port uint16) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	g, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("%w: %q", ErrGroupNotFound, id)
-	}
-	g.ListenPort = port
-	return s.saveLocked()
+	_, err := s.mutate(id, func(g *AggregateGroup) error {
+		g.ListenPort = port
+		return nil
+	})
+	return err
 }
 
 // SetProxyIndex persists the NDMS ProxyN index for this group.
 func (s *GroupStore) SetProxyIndex(id string, idx int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	g, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("%w: %q", ErrGroupNotFound, id)
-	}
-	g.ProxyIndex = idx
-	return s.saveLocked()
+	_, err := s.mutate(id, func(g *AggregateGroup) error {
+		g.ProxyIndex = idx
+		return nil
+	})
+	return err
 }
 
 // RemoveSubscriptionRef выкидывает subID из useSubscriptionIds всех групп
-// (вызывается при удалении подписки; сами группы остаются).
+// (вызывается при удалении подписки; сами группы остаются). Copy-on-write:
+// затронутые группы заменяются клонами, при ошибке записи на диск оригиналы
+// возвращаются в map — память не расходится с диском.
 func (s *GroupStore) RemoveSubscriptionRef(subID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	changed := false
-	for _, g := range s.data {
-		kept := g.UseSubscriptionIDs[:0:0]
-		for _, id := range g.UseSubscriptionIDs {
-			if id == subID {
-				changed = true
-				continue
+	restore := map[string]*AggregateGroup{} // id → оригинал для отката
+	for id, g := range s.data {
+		refs := false
+		for _, sid := range g.UseSubscriptionIDs {
+			if sid == subID {
+				refs = true
+				break
 			}
-			kept = append(kept, id)
 		}
-		if kept == nil {
-			kept = []string{}
+		if !refs {
+			continue
 		}
-		g.UseSubscriptionIDs = kept
+		next := g.clone()
+		kept := make([]string, 0, len(next.UseSubscriptionIDs))
+		for _, sid := range next.UseSubscriptionIDs {
+			if sid != subID {
+				kept = append(kept, sid)
+			}
+		}
+		next.UseSubscriptionIDs = kept
+		restore[id] = g
+		s.data[id] = next
 	}
-	if !changed {
+	if len(restore) == 0 {
 		return nil
 	}
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		for id, orig := range restore {
+			s.data[id] = orig
+		}
+		return err
+	}
+	return nil
 }

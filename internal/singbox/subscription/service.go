@@ -78,6 +78,17 @@ type Service struct {
 	// groupMu сериализует Group-CRUD между собой (у групп нет per-id
 	// мьютексов — операций мало, глобальной блокировки достаточно).
 	groupMu sync.Mutex
+	// txMu сериализует стадию stage→Reload/Rollback общего батча адаптера
+	// между конкурентными операциями. Батч в ConfigMutator один на весь слот
+	// (beginIfNeeded открывает его лениво при первой мутации), а операции
+	// держат разные локи (per-sub lockSub у refresh, groupMu у Group-CRUD) —
+	// без сериализации Reload операции A коммитил бы полу-staged мутации
+	// операции B, а восстановление снапшота при упавшем flush у A откатывало
+	// бы уже застейдженную работу B. Порядок блокировок: lockSub / createMu /
+	// groupMu берутся РАНЬШЕ, txMu — ПОСЛЕДНИМ; под txMu нельзя брать другие
+	// мьютексы Service и нельзя выполнять сетевой I/O (fetch подписки идёт
+	// до applyDiff, вне txMu).
+	txMu sync.Mutex
 }
 
 func NewService(store *Store, mutator ConfigMutator) *Service {
@@ -232,6 +243,16 @@ func (s *Service) logPartitionResult(subID string, parts partitionResult) {
 	}
 }
 
+// withTx выполняет fn под txMu: весь цикл stage-мутаций → Reload (или
+// Rollback) становится одной атомарной секцией относительно других операций
+// над общим батчем адаптера. Вложенный withTx запрещён (deadlock);
+// см. комментарий у поля txMu про порядок блокировок.
+func (s *Service) withTx(fn func() error) error {
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+	return fn()
+}
+
 func (s *Service) lockSub(id string) *sync.Mutex {
 	if v, ok := s.muById.Load(id); ok {
 		return v.(*sync.Mutex)
@@ -337,7 +358,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Subscription, er
 		// On a mid-failure nothing was flushed to 40-subscriptions.json, so
 		// discard the uncommitted batch — otherwise the partial would linger
 		// in memory and get committed by the next operation (issue #287).
-		s.mutator.Rollback()
+		// Ошибки applyDiff уже откатаны внутри его txMu-секции; этот Rollback
+		// страхует ранние ошибки (fetch/parse) и потому берёт txMu сам —
+		// иначе он мог бы сбросить открытый батч параллельной операции.
+		_ = s.withTx(func() error { s.mutator.Rollback(); return nil })
 		// EnsureProxy succeeded above — the NDMS Proxy interface is now
 		// live in the router. We must roll it back before dropping the
 		// storage row; otherwise every failed Create leaks a ProxyN that
@@ -491,13 +515,22 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 
 	diff := ApplyDiff(id, sub.MemberTags, parts.Valid)
 
-	if err := s.applyDiff(ctx, sub, diff, flt); err != nil {
-		// Defense-in-depth: applyDiff мог остановиться после части staged
-		// мутаций (ошибка мутатора до Reload). Сбрасываем незакоммиченный
-		// батч, чтобы следующий несвязанный Reload не унёс полуфабрикат в
-		// конфиг. Rollback идемпотентен (no-op без открытого батча) — при
-		// упавшем Reload adapter уже сам восстановил снапшот.
-		s.mutator.Rollback()
+	// applyDiff (stage → Reload) и Rollback-компенсация выполняются одной
+	// txMu-секцией: между staged-мутациями и их коммитом/откатом не может
+	// вклиниться Reload/Rollback параллельной операции (общий батч слота).
+	// Сетевой I/O (fetch) уже позади — под txMu только память и flush.
+	if err := s.withTx(func() error {
+		err := s.applyDiff(ctx, sub, diff, flt)
+		if err != nil {
+			// Defense-in-depth: applyDiff мог остановиться после части staged
+			// мутаций (ошибка мутатора до Reload). Сбрасываем незакоммиченный
+			// батч, чтобы следующий несвязанный Reload не унёс полуфабрикат в
+			// конфиг. Rollback идемпотентен (no-op без открытого батча) — при
+			// упавшем Reload adapter уже сам восстановил снапшот.
+			s.mutator.Rollback()
+		}
+		return err
+	}); err != nil {
 		s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
 		s.logWarn("subscription-refresh", id, "apply failed: "+err.Error())
 		return nil, err
@@ -601,6 +634,9 @@ func filterDeclaredMembers(members []MemberInfo, declared map[string]bool) (kept
 // Сервер пропускается (а для Existing — снимается из конфига), когда он
 // исключён по тегу ИЛИ отвергнут regex-фильтром по имени. Оба механизма
 // применяются вместе (composable).
+//
+// ВНИМАНИЕ: вызывающий обязан держать txMu (withTx) — вся последовательность
+// stage-мутаций и финальный Reload работают с общим батчем адаптера.
 func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffResult, flt *MemberFilter) error {
 	excluded := make(map[string]bool, len(sub.ExcludedTags))
 	for _, t := range sub.ExcludedTags {
@@ -713,18 +749,25 @@ func (s *Service) deleteLocked(ctx context.Context, id string) error {
 		}
 	}
 
-	s.mutator.RemoveRouteRule(sub.InboundTag, sub.SelectorTag)
-	s.mutator.RemoveInbound(sub.InboundTag)
-	s.mutator.RemoveOutbound(sub.SelectorTag)
-	for _, m := range sub.MemberTags {
-		s.mutator.RemoveOutbound(m)
-	}
+	// RemoveProxy — сетевой вызов к NDMS; выполняем ДО txMu-секции, чтобы не
+	// держать общий транзакционный мьютекс во время I/O. Ошибка не блокирует
+	// удаление (как и раньше) — осиротевший ProxyN подберёт cleanup-свип.
 	if sub.ProxyIndex >= 0 {
 		if err := s.mutator.RemoveProxy(ctx, sub.ProxyIndex); err != nil {
 			s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
 		}
 	}
-	if err := s.reloadWithGroups(ctx); err != nil {
+	// Teardown-мутации и коммит — одна txMu-секция: иначе параллельная
+	// операция могла бы закоммитить/откатить наш полу-staged teardown.
+	if err := s.withTx(func() error {
+		s.mutator.RemoveRouteRule(sub.InboundTag, sub.SelectorTag)
+		s.mutator.RemoveInbound(sub.InboundTag)
+		s.mutator.RemoveOutbound(sub.SelectorTag)
+		for _, m := range sub.MemberTags {
+			s.mutator.RemoveOutbound(m)
+		}
+		return s.reloadWithGroups(ctx)
+	}); err != nil {
 		return fmt.Errorf("subscription: delete reload: %w", err)
 	}
 	return s.store.Delete(id)
@@ -869,12 +912,18 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 		// URL / headers / refresh-cadence only mutate metadata.
 		// Label changes mutate store AND must propagate to NDMS Proxy
 		// description so the rename is visible in the router UI.
-		s.mutator.RemoveOutbound(sub.SelectorTag)
-		if err := s.mutator.AddOutbound(sub.SelectorTag, BuildGroupOutbound(*sub, sub.MemberTags, sub.ActiveMember)); err != nil {
-			return sub, fmt.Errorf("rebuild group outbound: %w", err)
-		}
-		if err := s.reloadWithGroups(context.Background()); err != nil {
-			return sub, fmt.Errorf("reload after mode change: %w", err)
+		// Stage + Reload — одна txMu-секция (общий батч адаптера).
+		if err := s.withTx(func() error {
+			s.mutator.RemoveOutbound(sub.SelectorTag)
+			if err := s.mutator.AddOutbound(sub.SelectorTag, BuildGroupOutbound(*sub, sub.MemberTags, sub.ActiveMember)); err != nil {
+				return fmt.Errorf("rebuild group outbound: %w", err)
+			}
+			if err := s.reloadWithGroups(context.Background()); err != nil {
+				return fmt.Errorf("reload after mode change: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return sub, err
 		}
 	} else if enabledChanged {
 		// Включение/выключение подписки меняет состав сводных групп:
@@ -883,7 +932,7 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 		// выключенной подписки (или не подхватывали бы включённую) до
 		// первого несвязанного reload. Для самой подписки enabled остаётся
 		// метаданными (её селектор в конфиге не трогаем — прежнее поведение).
-		if err := s.reloadWithGroups(context.Background()); err != nil {
+		if err := s.withTx(func() error { return s.reloadWithGroups(context.Background()) }); err != nil {
 			return sub, fmt.Errorf("reload after enabled change: %w", err)
 		}
 	}
@@ -1077,35 +1126,43 @@ func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*S
 	subForBuild.MemberTags = newTags
 	groupBody := BuildGroupOutbound(subForBuild, newTags, sub.ActiveMember)
 
-	if err := s.mutator.AddOutbound(tag, replaceTag(out.Outbound, tag)); err != nil {
-		s.logWarn("subscription-member-add", id, "failed to add outbound: "+err.Error())
-		return nil, fmt.Errorf("add outbound: %w", err)
-	}
-	if err := s.mutator.AddOutbound(sub.SelectorTag, groupBody); err != nil {
-		// Rollback the partial member add. If rollback itself fails
-		// the config slot now contains an unreferenced member outbound
-		// (sing-box runs fine, but no code path will reap it). Surface
-		// that explicitly so the caller can advise a full subscription
-		// refresh/delete to clean the slot.
-		if rbErr := s.mutator.RemoveOutbound(tag); rbErr != nil {
-			s.logWarn("subscription-member-add", id, "failed to rebuild selector and rollback member outbound")
-			return nil, fmt.Errorf("rebuild group outbound: %w (rollback also failed, leaving orphan outbound %q in sing-box config: %v)", err, tag, rbErr)
+	// Stage-мутации, запись в store и Reload — одна txMu-секция: общий батч
+	// адаптера не должен коммититься/откатываться параллельной операцией
+	// между нашим staging и нашим Reload.
+	if err := s.withTx(func() error {
+		if err := s.mutator.AddOutbound(tag, replaceTag(out.Outbound, tag)); err != nil {
+			s.logWarn("subscription-member-add", id, "failed to add outbound: "+err.Error())
+			return fmt.Errorf("add outbound: %w", err)
 		}
-		s.logWarn("subscription-member-add", id, "failed to rebuild selector outbound: "+err.Error())
-		return nil, fmt.Errorf("rebuild group outbound: %w", err)
-	}
+		if err := s.mutator.AddOutbound(sub.SelectorTag, groupBody); err != nil {
+			// Rollback the partial member add. If rollback itself fails
+			// the config slot now contains an unreferenced member outbound
+			// (sing-box runs fine, but no code path will reap it). Surface
+			// that explicitly so the caller can advise a full subscription
+			// refresh/delete to clean the slot.
+			if rbErr := s.mutator.RemoveOutbound(tag); rbErr != nil {
+				s.logWarn("subscription-member-add", id, "failed to rebuild selector and rollback member outbound")
+				return fmt.Errorf("rebuild group outbound: %w (rollback also failed, leaving orphan outbound %q in sing-box config: %v)", err, tag, rbErr)
+			}
+			s.logWarn("subscription-member-add", id, "failed to rebuild selector outbound: "+err.Error())
+			return fmt.Errorf("rebuild group outbound: %w", err)
+		}
 
-	newMembers := append([]MemberInfo{}, sub.Members...)
-	newMembers = append(newMembers, toMemberInfo(tag, out))
-	rejected := appendRejectedUnique(sub.RejectedMembers, parts.Rejected...)
-	info := mergeInfoItems(sub.InfoItems, filterDismissedInfo(parts.Info, sub.DismissedInfoIDs))
-	if err := s.store.SetMembersExtras(id, newMembers, sub.OrphanTags, rejected, info, nil, sub.FilteredMembers); err != nil {
+		newMembers := append([]MemberInfo{}, sub.Members...)
+		newMembers = append(newMembers, toMemberInfo(tag, out))
+		rejected := appendRejectedUnique(sub.RejectedMembers, parts.Rejected...)
+		info := mergeInfoItems(sub.InfoItems, filterDismissedInfo(parts.Info, sub.DismissedInfoIDs))
+		if err := s.store.SetMembersExtras(id, newMembers, sub.OrphanTags, rejected, info, nil, sub.FilteredMembers); err != nil {
+			return err
+		}
+
+		if err := s.reloadWithGroups(ctx); err != nil {
+			s.logWarn("subscription-member-add", id, "reload failed: "+err.Error())
+			return fmt.Errorf("reload: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return nil, err
-	}
-
-	if err := s.reloadWithGroups(ctx); err != nil {
-		s.logWarn("subscription-member-add", id, "reload failed: "+err.Error())
-		return nil, fmt.Errorf("reload: %w", err)
 	}
 	updated, err := s.store.Get(id)
 	if err != nil {
@@ -1172,37 +1229,46 @@ func (s *Service) RemoveMember(ctx context.Context, id, memberTag string) (*Subs
 		newActive = newTags[0] // SetMembers will mirror this; pre-compute for the rebuild
 	}
 	groupBody := BuildGroupOutbound(*sub, newTags, newActive)
-	if err := s.mutator.AddOutbound(sub.SelectorTag, groupBody); err != nil {
-		s.logWarn("subscription-member-remove", id, "failed to rebuild selector outbound: "+err.Error())
-		return nil, fmt.Errorf("rebuild group outbound: %w", err)
-	}
 
-	// Selector now references newTags only; safe to drop the old member
-	// outbound. RemoveOutbound is idempotent.
-	s.mutator.RemoveOutbound(memberTag)
+	// Stage + store + Reload — одна txMu-секция (общий батч адаптера).
+	var updated *Subscription
+	if err := s.withTx(func() error {
+		if err := s.mutator.AddOutbound(sub.SelectorTag, groupBody); err != nil {
+			s.logWarn("subscription-member-remove", id, "failed to rebuild selector outbound: "+err.Error())
+			return fmt.Errorf("rebuild group outbound: %w", err)
+		}
 
-	newMembers := append([]MemberInfo{}, sub.Members[:idx]...)
-	newMembers = append(newMembers, sub.Members[idx+1:]...)
-	if err := s.store.SetMembers(id, newMembers, sub.OrphanTags); err != nil {
-		return nil, err
-	}
+		// Selector now references newTags only; safe to drop the old member
+		// outbound. RemoveOutbound is idempotent.
+		s.mutator.RemoveOutbound(memberTag)
 
-	updated, err := s.store.Get(id)
-	if err != nil {
-		return nil, err
-	}
+		newMembers := append([]MemberInfo{}, sub.Members[:idx]...)
+		newMembers = append(newMembers, sub.Members[idx+1:]...)
+		if err := s.store.SetMembers(id, newMembers, sub.OrphanTags); err != nil {
+			return err
+		}
 
-	// SetMembers auto-bumps ActiveMember to the first remaining tag if
-	// the prior active was removed. Mirror that to the live Clash API
-	// for selector mode so connections don't stall on a missing tag.
-	// urltest mode auto-routes by latency — Clash API is not used.
-	if sub.ActiveMember == memberTag && updated.EffectiveMode() == ModeSelector && updated.ActiveMember != "" {
-		_ = s.mutator.SelectClashProxy(updated.SelectorTag, updated.ActiveMember)
-	}
+		var err error
+		updated, err = s.store.Get(id)
+		if err != nil {
+			return err
+		}
 
-	if err := s.reloadWithGroups(ctx); err != nil {
-		s.logWarn("subscription-member-remove", id, "reload failed: "+err.Error())
-		return updated, fmt.Errorf("reload: %w", err)
+		// SetMembers auto-bumps ActiveMember to the first remaining tag if
+		// the prior active was removed. Mirror that to the live Clash API
+		// for selector mode so connections don't stall on a missing tag.
+		// urltest mode auto-routes by latency — Clash API is not used.
+		if sub.ActiveMember == memberTag && updated.EffectiveMode() == ModeSelector && updated.ActiveMember != "" {
+			_ = s.mutator.SelectClashProxy(updated.SelectorTag, updated.ActiveMember)
+		}
+
+		if err := s.reloadWithGroups(ctx); err != nil {
+			s.logWarn("subscription-member-remove", id, "reload failed: "+err.Error())
+			return fmt.Errorf("reload: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return updated, err
 	}
 	s.logInfo("subscription-member-remove", id, "member removed: "+memberTag)
 	return updated, nil
@@ -1251,30 +1317,38 @@ func (s *Service) ExcludeMembers(ctx context.Context, id string, tags []string) 
 		newActive = keepTags[0]
 	}
 
-	// (1) fail-closed: пересобрать селектор на сокращённый набор ПЕРВЫМ.
-	if err := s.mutator.AddOutbound(sub.SelectorTag, BuildGroupOutbound(*sub, keepTags, newActive)); err != nil {
-		return nil, fmt.Errorf("rebuild group outbound: %w", err)
-	}
-	// (2) снять outbounds исключённых (идемпотентно).
-	for _, m := range moved {
-		s.mutator.RemoveOutbound(m.Tag)
-	}
-	// (3) union ExcludedTags + ExcludedMembers, atomic store-write.
-	excludedTags := append(append([]string{}, sub.ExcludedTags...), tags...)
-	excludedMembers := append(append([]MemberInfo{}, sub.ExcludedMembers...), moved...)
-	if err := s.store.MoveToExcluded(id, keep, excludedTags, excludedMembers); err != nil {
-		return nil, err
-	}
-	updated, err := s.store.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	// (4) синхр. Clash для selector-режима, если active сдвинулся.
-	if sub.ActiveMember != updated.ActiveMember && updated.EffectiveMode() == ModeSelector && updated.ActiveMember != "" {
-		_ = s.mutator.SelectClashProxy(updated.SelectorTag, updated.ActiveMember)
-	}
-	if err := s.reloadWithGroups(ctx); err != nil {
-		return updated, fmt.Errorf("reload: %w", err)
+	// Stage + store + Reload — одна txMu-секция (общий батч адаптера).
+	var updated *Subscription
+	if err := s.withTx(func() error {
+		// (1) fail-closed: пересобрать селектор на сокращённый набор ПЕРВЫМ.
+		if err := s.mutator.AddOutbound(sub.SelectorTag, BuildGroupOutbound(*sub, keepTags, newActive)); err != nil {
+			return fmt.Errorf("rebuild group outbound: %w", err)
+		}
+		// (2) снять outbounds исключённых (идемпотентно).
+		for _, m := range moved {
+			s.mutator.RemoveOutbound(m.Tag)
+		}
+		// (3) union ExcludedTags + ExcludedMembers, atomic store-write.
+		excludedTags := append(append([]string{}, sub.ExcludedTags...), tags...)
+		excludedMembers := append(append([]MemberInfo{}, sub.ExcludedMembers...), moved...)
+		if err := s.store.MoveToExcluded(id, keep, excludedTags, excludedMembers); err != nil {
+			return err
+		}
+		var err error
+		updated, err = s.store.Get(id)
+		if err != nil {
+			return err
+		}
+		// (4) синхр. Clash для selector-режима, если active сдвинулся.
+		if sub.ActiveMember != updated.ActiveMember && updated.EffectiveMode() == ModeSelector && updated.ActiveMember != "" {
+			_ = s.mutator.SelectClashProxy(updated.SelectorTag, updated.ActiveMember)
+		}
+		if err := s.reloadWithGroups(ctx); err != nil {
+			return fmt.Errorf("reload: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return updated, err
 	}
 	return updated, nil
 }
@@ -1474,15 +1548,21 @@ func (s *Service) DeleteOrphans(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	for _, t := range sub.OrphanTags {
-		s.mutator.RemoveOutbound(t)
-	}
-	if err := s.store.SetMembership(id, sub.MemberTags, nil); err != nil {
-		s.logWarn("subscription-orphans-delete", id, "failed to clear orphan list in store: "+err.Error())
-		return err
-	}
-	if err := s.reloadWithGroups(ctx); err != nil {
-		s.logWarn("subscription-orphans-delete", id, "reload failed: "+err.Error())
+	// Stage + store + Reload — одна txMu-секция (общий батч адаптера).
+	if err := s.withTx(func() error {
+		for _, t := range sub.OrphanTags {
+			s.mutator.RemoveOutbound(t)
+		}
+		if err := s.store.SetMembership(id, sub.MemberTags, nil); err != nil {
+			s.logWarn("subscription-orphans-delete", id, "failed to clear orphan list in store: "+err.Error())
+			return err
+		}
+		if err := s.reloadWithGroups(ctx); err != nil {
+			s.logWarn("subscription-orphans-delete", id, "reload failed: "+err.Error())
+			return err
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 	s.logInfo("subscription-orphans-delete", id, fmt.Sprintf("deleted %d orphan outbounds", len(sub.OrphanTags)))

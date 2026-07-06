@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -195,7 +194,7 @@ func (h *SubscriptionHandler) CreateGroup(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req CreateSubscriptionGroupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -250,7 +249,7 @@ func (h *SubscriptionHandler) UpdateGroup(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req UpdateSubscriptionGroupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
@@ -299,7 +298,7 @@ func (h *SubscriptionHandler) DeleteGroup(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req DeleteSubscriptionGroupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
