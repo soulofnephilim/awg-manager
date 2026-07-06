@@ -4358,22 +4358,57 @@ const server = http.createServer(async (req, res) => {
 	// Inbounds mirror (feature-inbounds-visibility): rich fixture instead of
 	// Prism's "string" placeholders — covers every source group and all three
 	// idle reasons so the read-only mirror UI is smoke-testable.
+	// Mode-aware, как реальный бэкенд: переключение режима паркует слот
+	// неактивного движка в disabled/ (fakeip_enable.go), поэтому в tproxy
+	// отдаём tproxy-движок + QoS, в fakeip-tun — tun из слота fakeip
+	// (тот в UI дедуплицируется карточкой TunInboundCard); подписки/туннели/
+	// device-proxy режимонезависимы.
 	if (req.method === 'GET' && path === '/singbox/inbounds') {
+		const routingMode = mockSBSettings.routingMode || 'tproxy';
+		const engineInbounds =
+			routingMode === 'fakeip-tun'
+				? [
+						{
+							tag: 'tun-in',
+							type: 'tun',
+							listen: '',
+							listenPort: 0,
+							slot: 'fakeip',
+							source: 'engine',
+							ownerLabel: 'sing-box',
+							idle: false,
+							idleReason: '',
+						},
+					]
+				: [
+						{
+							tag: 'tproxy-in',
+							type: 'tproxy',
+							listen: '::',
+							listenPort: 51272,
+							slot: 'router',
+							source: 'engine',
+							ownerLabel: 'sing-box',
+							idle: false,
+							idleReason: '',
+						},
+						{
+							tag: 'qos-tproxy-in',
+							type: 'tproxy',
+							listen: '::',
+							listenPort: 51280,
+							slot: 'qos-routes',
+							source: 'qos',
+							ownerLabel: 'QoS',
+							idle: false,
+							idleReason: '',
+						},
+					];
 		send(res, 200, {
 			success: true,
 			data: {
 				inbounds: [
-					{
-						tag: 'tun-in',
-						type: 'tun',
-						listen: '',
-						listenPort: 0,
-						slot: 'base',
-						source: 'engine',
-						ownerLabel: 'sing-box',
-						idle: false,
-						idleReason: '',
-					},
+					...engineInbounds,
 					{
 						tag: 'device-proxy-in',
 						type: 'mixed',
@@ -4439,17 +4474,6 @@ const server = http.createServer(async (req, res) => {
 						ownerLabel: 'hysteria-sg-off',
 						idle: true,
 						idleReason: 'ndms_proxy_missing',
-					},
-					{
-						tag: 'qos-tproxy-in',
-						type: 'tproxy',
-						listen: '::',
-						listenPort: 51272,
-						slot: 'qos-routes',
-						source: 'qos',
-						ownerLabel: 'QoS',
-						idle: false,
-						idleReason: '',
 					},
 				],
 				warnings: [
