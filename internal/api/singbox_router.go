@@ -39,22 +39,29 @@ type SingboxRouterStatusData struct {
 	// XtDscpAvailable reports whether iptables DSCP matching is usable
 	// (xt_dscp kernel module present AND iptables `-m dscp` extension works).
 	// The QoS-DSCP settings UI keys its "supported" badge on this field.
-	XtDscpAvailable        bool                    `json:"xtDscpAvailable" example:"true"`
-	PolicyName             string                  `json:"policyName" example:"awgm-router"`
-	PolicyMark             string                  `json:"policyMark,omitempty" example:"0xffffaaa"`
-	PolicyExists           bool                    `json:"policyExists" example:"true"`
-	DeviceMode             string                  `json:"deviceMode" example:"policy" enums:"policy,all"`
-	SnifferEnabled         bool                    `json:"snifferEnabled" example:"true"`
-	DeviceCount            int                     `json:"deviceCount" example:"3"`
-	RuleCount              int                     `json:"ruleCount" example:"12"`
-	RuleSetCount           int                     `json:"ruleSetCount" example:"4"`
-	OutboundAWGCount       int                     `json:"outboundAwgCount" example:"2"`
-	OutboundCompositeCount int                     `json:"outboundCompositeCount" example:"1"`
-	Final                  string                  `json:"final" example:"direct"`
-	FakeIPIface            string                  `json:"fakeipIface,omitempty" example:"opkgtun0"`
-	FakeIPDns              string                  `json:"fakeipDns,omitempty" example:"172.18.0.2"`
-	FakeIPTunAddr          string                  `json:"fakeipTunAddr,omitempty" example:"172.18.0.1"`
-	LastError              string                  `json:"lastError,omitempty" example:"engine start failed"`
+	XtDscpAvailable        bool   `json:"xtDscpAvailable" example:"true"`
+	PolicyName             string `json:"policyName" example:"awgm-router"`
+	PolicyMark             string `json:"policyMark,omitempty" example:"0xffffaaa"`
+	PolicyExists           bool   `json:"policyExists" example:"true"`
+	DeviceMode             string `json:"deviceMode" example:"policy" enums:"policy,all"`
+	SnifferEnabled         bool   `json:"snifferEnabled" example:"true"`
+	DeviceCount            int    `json:"deviceCount" example:"3"`
+	RuleCount              int    `json:"ruleCount" example:"12"`
+	RuleSetCount           int    `json:"ruleSetCount" example:"4"`
+	OutboundAWGCount       int    `json:"outboundAwgCount" example:"2"`
+	OutboundCompositeCount int    `json:"outboundCompositeCount" example:"1"`
+	Final                  string `json:"final" example:"direct"`
+	FakeIPIface            string `json:"fakeipIface,omitempty" example:"opkgtun0"`
+	FakeIPDns              string `json:"fakeipDns,omitempty" example:"172.18.0.2"`
+	FakeIPTunAddr          string `json:"fakeipTunAddr,omitempty" example:"172.18.0.1"`
+	LastError              string `json:"lastError,omitempty" example:"engine start failed"`
+	// CrashCount — падения sing-box за последние 10 минут (issue #456).
+	CrashCount int `json:"crashCount,omitempty" example:"2"`
+	// LastCrashReason — причина последнего падения в окне (например, OOM-kill).
+	LastCrashReason string `json:"lastCrashReason,omitempty" example:"sing-box убит OOM-killer'ом"`
+	// RestartSuppressedUntil — RFC3339-время окончания паузы авто-перезапуска
+	// (анти crash-loop); пусто, когда авто-перезапуск не подавлен.
+	RestartSuppressedUntil string                  `json:"restartSuppressedUntil,omitempty" example:"2026-07-06T12:34:56+03:00"`
 	Issues                 []SingboxRouterIssueDTO `json:"issues,omitempty"`
 }
 

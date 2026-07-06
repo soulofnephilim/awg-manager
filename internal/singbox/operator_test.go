@@ -662,7 +662,7 @@ func TestHandleStderrLine_StartedClearsLastError(t *testing.T) {
 func TestOperator_HandleExit_RedactsLastError(t *testing.T) {
 	op := &Operator{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
-	op.handleExit(errors.New("exit for node.example.org: 203.0.113.77"), "")
+	op.handleExit(errors.New("exit for node.example.org: 203.0.113.77"), "", false)
 	last := op.LastError()
 	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
 		t.Fatalf("raw sensitive value leaked from err: %q", last)
@@ -671,7 +671,7 @@ func TestOperator_HandleExit_RedactsLastError(t *testing.T) {
 		t.Fatalf("redacted values missing from err: %q", last)
 	}
 
-	op.handleExit(errors.New("exit"), "stderr for node.example.org: 203.0.113.77")
+	op.handleExit(errors.New("exit"), "stderr for node.example.org: 203.0.113.77", false)
 	last = op.LastError()
 	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
 		t.Fatalf("raw sensitive value leaked from stderrTail: %q", last)

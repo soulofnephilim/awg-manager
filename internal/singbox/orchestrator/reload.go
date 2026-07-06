@@ -235,6 +235,18 @@ func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
 	return logs
 }
 
+// HasActiveWork reports (under the lock) whether sing-box currently has
+// anything to do beyond hosting base/catalog slots — the same predicate
+// Reload uses to decide "ensure running". Exposed for the Operator's
+// watchdog Reconcile (issue #456): a crashed process must be restarted
+// whenever any active slot (router / deviceproxy / subscriptions / user
+// tunnels) needs the daemon, not only when legacy tunnels exist.
+func (o *Orchestrator) HasActiveWork() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.hasActiveWorkLocked()
+}
+
 // hasActiveWorkLocked reports whether sing-box has anything to do
 // beyond hosting base + catalog slots. Two activation paths:
 //

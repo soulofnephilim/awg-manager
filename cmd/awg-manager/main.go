@@ -929,6 +929,10 @@ func main() {
 	// through SlotTunnels rather than an in-place write that bypasses
 	// the orchestrator's validate / debounced reload.
 	singboxOp.SetOrch(sbOrch)
+	// Предикат перезапуска для watchdog/Reconcile (#456): упавший sing-box
+	// поднимается и когда легаси-туннелей нет, но активны orchestrator-слоты
+	// (router / deviceproxy / subscriptions / пользовательские туннели).
+	singboxOp.SetActiveWorkFn(sbOrch.HasActiveWork)
 
 	// Wire managed-binary installer into Operator. The installer is keyed
 	// by the build-time arch string (e.g. "mipsel-3.4") so it can resolve
