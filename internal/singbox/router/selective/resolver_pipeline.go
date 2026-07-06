@@ -76,7 +76,7 @@ func ResolveDomainQueriesStream(
 			work <- resolveWorkItem{query: queries[i], fullProbes: fullProbes[i]}
 		}
 	}()
-	resolveWorkers(ctx, work, dnsServers, sink, progressFn, func() int { return total }, hostProgressFn)
+	resolveWorkers(ctx, work, dnsServers, sink, progressFn, func() int { return total }, hostProgressFn, nil)
 }
 
 // resolveWorkers runs the fixed pool of maxConcurrentResolves workers until
@@ -85,7 +85,9 @@ func ResolveDomainQueriesStream(
 // record, matching the pre-pool semantics — so the feeding goroutine can
 // never leak blocked on send. totalFn supplies the (possibly still growing)
 // total for progress reporting; done may briefly exceed a stale total, so the
-// reported total is clamped to at least done.
+// reported total is clamped to at least done. onHostResolved (optional)
+// пробрасывается в резолвер — сигнал прогресса на каждый завершённый
+// DNS-резолв хоста (см. stall guard в builder.RebuildOwnedRun).
 func resolveWorkers(
 	ctx context.Context,
 	work <-chan resolveWorkItem,
@@ -94,6 +96,7 @@ func resolveWorkers(
 	progressFn ResolveProgressFn,
 	totalFn func() int,
 	hostProgressFn ResolveHostProgressFn,
+	onHostResolved func(),
 ) {
 	var wg sync.WaitGroup
 	var doneCount atomic.Int32
@@ -107,7 +110,7 @@ func resolveWorkers(
 					if sink.OnIP != nil {
 						sink.OnIP(query, cidr)
 					}
-				}, hostProgressFn, item.fullProbes)
+				}, hostProgressFn, item.fullProbes, onHostResolved)
 
 				if sink.OnRecord != nil {
 					sink.OnRecord(query, rec)
@@ -132,6 +135,8 @@ func resolveWorkers(
 // discovered /32 (or wider static CIDR passed through) without retaining
 // the full IP list in the returned record. fullProbes selects the suffix
 // subdomain expansion mode — batch callers derive it via fullProbeFlags.
+// onHostResolved (optional) вызывается после каждого завершённого резолва
+// хоста — сигнал прогресса для stall guard'а.
 func ResolveOneQueryStream(
 	ctx context.Context,
 	query DomainQuery,
@@ -139,6 +144,7 @@ func ResolveOneQueryStream(
 	onIP func(cidr string),
 	hostProgressFn ResolveHostProgressFn,
 	fullProbes bool,
+	onHostResolved func(),
 ) MatcherRecord {
 	ipsSink := func(list []string) {
 		if onIP == nil {
@@ -148,7 +154,7 @@ func ResolveOneQueryStream(
 			onIP(ip)
 		}
 	}
-	full := resolveOneQueryFn(ctx, query, dnsServers, nil, hostProgressFn, fullProbes)
+	full := resolveOneQueryFn(ctx, query, dnsServers, nil, hostProgressFn, fullProbes, onHostResolved)
 	ipsSink(full.IPs)
 	return MatcherRecord{
 		Matcher:    full.Matcher,

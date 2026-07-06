@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 )
@@ -19,7 +20,20 @@ const (
 	// is a safe ceiling that covers all realistic rule-set sizes without
 	// consuming excessive kernel memory.
 	setMaxElem = 262144
+
+	// ipsetCtlTimeout — явный таймаут одиночных управляющих команд ipset
+	// (create/flush/swap/destroy/list -t). Дефолтные 30 с sysexec тесны для
+	// наборов с maxelem=262144 на нагруженном MIPS-роутере; сами команды
+	// конечны, поэтому щедрый потолок безопасен — зависание ловит этот
+	// exec-таймаут, а не stall guard пересборки.
+	ipsetCtlTimeout = 120 * time.Second
 )
+
+// runIpsetCtl запускает управляющую команду ipset с ipsetCtlTimeout вместо
+// дефолтного таймаута sysexec.
+func runIpsetCtl(ctx context.Context, bin string, args ...string) (*sysexec.Result, error) {
+	return sysexec.RunWithOptions(ctx, bin, args, sysexec.Options{Timeout: ipsetCtlTimeout})
+}
 
 // ipsetBin returns the path to ipset, or an error if not available.
 func ipsetBin() (string, error) {
@@ -38,7 +52,7 @@ func CreateSet(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	res, err := sysexec.Run(ctx, bin,
+	res, err := runIpsetCtl(ctx, bin,
 		"create", SetName, "hash:net",
 		"maxelem", fmt.Sprintf("%d", setMaxElem),
 		"family", "inet",
@@ -64,7 +78,7 @@ func DestroySet(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	res, err := sysexec.Run(ctx, bin, "destroy", SetName)
+	res, err := runIpsetCtl(ctx, bin, "destroy", SetName)
 	if err != nil {
 		combined := ""
 		if res != nil {
@@ -109,7 +123,7 @@ func EntryCount(ctx context.Context) int {
 	if err != nil {
 		return 0
 	}
-	res, err := sysexec.Run(ctx, bin, "list", SetName, "-t")
+	res, err := runIpsetCtl(ctx, bin, "list", SetName, "-t")
 	if err != nil || res == nil {
 		return 0
 	}

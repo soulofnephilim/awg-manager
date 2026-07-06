@@ -131,8 +131,11 @@ type SelectiveHandler struct {
 	status     SelectiveStatusProvider
 }
 
-// rebuildTimeout is the overall backstop for one background ipset rebuild.
-const rebuildTimeout = 10 * time.Minute
+// Настенного таймаута фоновой пересборки ipset больше нет: медленная, но
+// идущая работа на MIPS-роутере легально длится дольше любого фиксированного
+// потолка. Продолжительность ограничивает stall guard внутри билдера
+// (selective.WithStallGuard) — отмена только при отсутствии прогресса
+// (rebuildStallTimeout) либо по абсолютному предохранителю (rebuildHardCap).
 
 // installTimeout is the overall backstop for one opkg install run.
 const installTimeout = 10 * time.Minute
@@ -399,11 +402,12 @@ func (h *SelectiveHandler) Rebuild(w http.ResponseWriter, r *http.Request) {
 	// Point of no return: the flag is ours and the goroutine below is the
 	// only thing that clears it.
 	// Detach cancellation: a client disconnecting mid-rebuild must not abort
-	// the populate (a partial ipset is worse than a stale one). The timeout
-	// backstops a wedged rebuild so the flag cannot stay latched forever.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), rebuildTimeout)
+	// the populate (a partial ipset is worse than a stale one). Настенного
+	// таймаута нет — застрявшую пересборку (и залипание флага) отлавливает
+	// stall guard внутри билдера: отмена при отсутствии прогресса либо по
+	// абсолютному предохранителю (selective.WithStallGuard).
+	ctx := context.WithoutCancel(r.Context())
 	go func() {
-		defer cancel()
 		defer h.rebuilding.Store(false)
 		// Errors are already surfaced by the builder: terminal
 		// selective-progress/selective-status SSE events plus lastError in

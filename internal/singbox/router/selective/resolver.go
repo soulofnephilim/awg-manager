@@ -267,9 +267,19 @@ type ResolveProgressFn func(done, total int, matcher string)
 // ResolveHostProgressFn is called while resolving expanded hosts inside one matcher.
 type ResolveHostProgressFn func(matcher, host string, hostIndex, hostTotal int)
 
-func resolveOneQuery(ctx context.Context, query DomainQuery, dnsServers []string, errFn func(domain, err string), hostProgressFn ResolveHostProgressFn, fullProbes bool) DomainResolveResult {
+// resolveOneQuery resolves all expanded hosts of one matcher. onHostResolved
+// (optional) вызывается после каждого завершённого DNS-резолва хоста — в том
+// числе в CDN-допроходе: один матчер легально резолвится минуты
+// (maxHostsPerMatcher хостов × раунды × dnsQueryTimeout), и stall guard
+// пересборки должен видеть прогресс внутри матчера, а не только между ними.
+func resolveOneQuery(ctx context.Context, query DomainQuery, dnsServers []string, errFn func(domain, err string), hostProgressFn ResolveHostProgressFn, fullProbes bool, onHostResolved func()) DomainResolveResult {
 	primary, public := partitionDNSServers(dnsServers)
 	hosts := discoverQueryHosts(ctx, query.Matcher, query.Kind, primary, fullProbes)
+	hostDone := func() {
+		if onHostResolved != nil {
+			onHostResolved()
+		}
+	}
 	seen := make(map[string]struct{})
 	var ips []string
 	var ipsMu sync.Mutex
@@ -308,6 +318,7 @@ func resolveOneQuery(ctx context.Context, query DomainQuery, dnsServers []string
 			}
 			r, err := resolveHostIPv4Aggressive(ctx, host, primary, dnsResolveRounds, true)
 			resolved[i] = hostResolve{ips: r, host: host, err: err}
+			hostDone()
 		}(i, host)
 	}
 	wg.Wait()
@@ -336,6 +347,7 @@ func resolveOneQuery(ctx context.Context, query DomainQuery, dnsServers []string
 				cdnSem <- struct{}{}
 				defer func() { <-cdnSem }()
 				r, err := resolveHostIPv4Aggressive(ctx, host, cdnServers, dnsResolveRoundsCDN, false)
+				hostDone()
 				if err != nil {
 					return
 				}

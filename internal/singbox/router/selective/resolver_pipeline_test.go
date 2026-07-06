@@ -15,7 +15,7 @@ func stubResolveOneQuery(t testing.TB, onCall func(q DomainQuery, fullProbes boo
 	t.Helper()
 	orig := resolveOneQueryFn
 	t.Cleanup(func() { resolveOneQueryFn = orig })
-	resolveOneQueryFn = func(_ context.Context, query DomainQuery, _ []string, _ func(domain, err string), _ ResolveHostProgressFn, fullProbes bool) DomainResolveResult {
+	resolveOneQueryFn = func(_ context.Context, query DomainQuery, _ []string, _ func(domain, err string), _ ResolveHostProgressFn, fullProbes bool, _ func()) DomainResolveResult {
 		if onCall != nil {
 			onCall(query, fullProbes)
 		}
