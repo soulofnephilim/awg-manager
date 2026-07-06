@@ -83,6 +83,72 @@ func (s *Store) saveLocked() error {
 	return storage.AtomicWrite(s.path, b)
 }
 
+// cloneSlice копирует срез с сохранением nil-ности: nil остаётся nil (важно
+// для omitempty/JSON-формы), пустой не-nil срез остаётся пустым не-nil.
+func cloneSlice[T any](in []T) []T {
+	if in == nil {
+		return nil
+	}
+	out := make([]T, len(in))
+	copy(out, in)
+	return out
+}
+
+// clone — глубокая копия подписки: все slice-поля и указатель URLTest
+// копируются, чтобы правки клона не были видны сквозь общие backing-массивы.
+// Элементы срезов (Header, MemberInfo, RejectedMember, SubscriptionInfoItem)
+// — плоские value-типы без вложенных срезов/указателей, поэтому поэлементного
+// копирования достаточно. Используется copy-on-write мутацией Store.mutate.
+func (s *Subscription) clone() *Subscription {
+	cp := *s
+	cp.Headers = cloneSlice(s.Headers)
+	cp.MemberTags = cloneSlice(s.MemberTags)
+	cp.Members = cloneSlice(s.Members)
+	cp.OrphanTags = cloneSlice(s.OrphanTags)
+	cp.RejectedMembers = cloneSlice(s.RejectedMembers)
+	cp.InfoItems = cloneSlice(s.InfoItems)
+	cp.DismissedInfoIDs = cloneSlice(s.DismissedInfoIDs)
+	cp.ExcludedTags = cloneSlice(s.ExcludedTags)
+	cp.ExcludedMembers = cloneSlice(s.ExcludedMembers)
+	cp.FilteredMembers = cloneSlice(s.FilteredMembers)
+	if s.URLTest != nil {
+		ut := *s.URLTest
+		cp.URLTest = &ut
+	}
+	return &cp
+}
+
+// errMutateNoop сигнализирует mutate из fn, что изменений нет: своп и запись
+// на диск пропускаются, вызывающему возвращается текущее состояние без ошибки.
+var errMutateNoop = errors.New("subscription store: no-op mutation")
+
+// mutate — copy-on-write мутация одной подписки: fn правит глубокий клон,
+// клон кладётся в map и состояние сохраняется на диск. При ошибке записи в
+// map возвращается ОРИГИНАЛ и наружу отдаётся ошибка — память никогда не
+// расходится с диском (иначе следующая успешная запись чего угодно молча
+// унесла бы несохранённое изменение). Успех возвращает новый клон.
+func (s *Store) mutate(id string, fn func(*Subscription) error) (*Subscription, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	orig, ok := s.data[id]
+	if !ok {
+		return nil, fmt.Errorf("subscription %q not found", id)
+	}
+	next := orig.clone()
+	if err := fn(next); err != nil {
+		if errors.Is(err, errMutateNoop) {
+			return orig, nil
+		}
+		return nil, err
+	}
+	s.data[id] = next
+	if err := s.saveLocked(); err != nil {
+		s.data[id] = orig
+		return nil, err
+	}
+	return next, nil
+}
+
 func newID() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -125,6 +191,8 @@ func (s *Store) Create(in CreateInput) (*Subscription, error) {
 		Headers:          in.Headers,
 		RefreshHours:     in.RefreshHours,
 		Enabled:          in.Enabled,
+		FilterInclude:    in.FilterInclude,
+		FilterExclude:    in.FilterExclude,
 		SelectorTag:      "sub-" + short,
 		InboundTag:       "sub-" + short + "-in",
 		ProxyIndex:       -1,
@@ -169,39 +237,42 @@ func (s *Store) List() []Subscription {
 }
 
 func (s *Store) Update(id string, patch UpdatePatch) (*Subscription, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return nil, fmt.Errorf("subscription %q not found", id)
-	}
-	if patch.Label != nil {
-		sub.Label = *patch.Label
-	}
-	if patch.URL != nil {
-		sub.URL = *patch.URL
-	}
-	if patch.Headers != nil {
-		sub.Headers = *patch.Headers
-	}
-	if patch.RefreshHours != nil {
-		sub.RefreshHours = *patch.RefreshHours
-	}
-	if patch.Enabled != nil {
-		sub.Enabled = *patch.Enabled
-	}
-	if patch.Mode != nil {
-		sub.Mode = *patch.Mode
-		if sub.Mode == ModeURLTest && sub.URLTest == nil {
-			cfg := DefaultURLTestConfig()
-			sub.URLTest = &cfg
+	sub, err := s.mutate(id, func(sub *Subscription) error {
+		if patch.Label != nil {
+			sub.Label = *patch.Label
 		}
-	}
-	if patch.URLTest != nil {
-		cp := *patch.URLTest
-		sub.URLTest = &cp
-	}
-	if err := s.saveLocked(); err != nil {
+		if patch.URL != nil {
+			sub.URL = *patch.URL
+		}
+		if patch.Headers != nil {
+			sub.Headers = *patch.Headers
+		}
+		if patch.RefreshHours != nil {
+			sub.RefreshHours = *patch.RefreshHours
+		}
+		if patch.Enabled != nil {
+			sub.Enabled = *patch.Enabled
+		}
+		if patch.Mode != nil {
+			sub.Mode = *patch.Mode
+			if sub.Mode == ModeURLTest && sub.URLTest == nil {
+				cfg := DefaultURLTestConfig()
+				sub.URLTest = &cfg
+			}
+		}
+		if patch.URLTest != nil {
+			cp := *patch.URLTest
+			sub.URLTest = &cp
+		}
+		if patch.FilterInclude != nil {
+			sub.FilterInclude = *patch.FilterInclude
+		}
+		if patch.FilterExclude != nil {
+			sub.FilterExclude = *patch.FilterExclude
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	cp := *sub
@@ -211,129 +282,120 @@ func (s *Store) Update(id string, patch UpdatePatch) (*Subscription, error) {
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.data[id]; !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	delete(s.data, id)
-	return s.saveLocked()
-}
-
-func (s *Store) UpdateState(id string, res RefreshResult) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sub, ok := s.data[id]
 	if !ok {
 		return fmt.Errorf("subscription %q not found", id)
 	}
-	sub.LastFetched = res.When
-	if res.Err != nil {
-		sub.LastError = MaskURL(res.Err.Error(), sub.URL)
-	} else {
-		sub.LastError = ""
+	delete(s.data, id)
+	if err := s.saveLocked(); err != nil {
+		// Запись не прошла — возвращаем строку, чтобы память не разошлась
+		// с диском (на диске подписка всё ещё есть).
+		s.data[id] = sub
+		return err
 	}
-	return s.saveLocked()
+	return nil
+}
+
+func (s *Store) UpdateState(id string, res RefreshResult) error {
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.LastFetched = res.When
+		if res.Err != nil {
+			sub.LastError = MaskURL(res.Err.Error(), sub.URL)
+		} else {
+			sub.LastError = ""
+		}
+		return nil
+	})
+	return err
 }
 
 // SetMembers replaces the Members slice and mirrors tags into MemberTags so
 // existing consumers that iterate by tag still work. Also updates ActiveMember
 // when the current active is no longer present.
 func (s *Store) SetMembers(id string, members []MemberInfo, orphans []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.Members = members
-	tags := make([]string, len(members))
-	for i, m := range members {
-		tags[i] = m.Tag
-	}
-	sub.MemberTags = tags
-	sub.OrphanTags = orphans
-	reconcileActiveMember(sub, tags)
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.Members = members
+		tags := make([]string, len(members))
+		for i, m := range members {
+			tags[i] = m.Tag
+		}
+		sub.MemberTags = tags
+		sub.OrphanTags = orphans
+		reconcileActiveMember(sub, tags)
+		return nil
+	})
+	return err
 }
 
 // MoveToExcluded атомарно: активные члены = keepMembers, excluded набор обновлён.
 func (s *Store) MoveToExcluded(id string, keepMembers []MemberInfo, excludedTags []string, excludedMembers []MemberInfo) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.Members = keepMembers
-	tags := make([]string, 0, len(keepMembers)) // inline, как в SetMembers
-	for _, m := range keepMembers {
-		tags = append(tags, m.Tag)
-	}
-	sub.MemberTags = tags
-	sub.ExcludedTags = excludedTags
-	sub.ExcludedMembers = excludedMembers
-	reconcileActiveMember(sub, sub.MemberTags)
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.Members = keepMembers
+		tags := make([]string, 0, len(keepMembers)) // inline, как в SetMembers
+		for _, m := range keepMembers {
+			tags = append(tags, m.Tag)
+		}
+		sub.MemberTags = tags
+		sub.ExcludedTags = excludedTags
+		sub.ExcludedMembers = excludedMembers
+		reconcileActiveMember(sub, sub.MemberTags)
+		return nil
+	})
+	return err
 }
 
 // SetExcludedTags перезаписывает только excluded-поля (restore-path: уменьшение набора).
 func (s *Store) SetExcludedTags(id string, excludedTags []string, excludedMembers []MemberInfo) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.ExcludedTags = excludedTags
-	sub.ExcludedMembers = excludedMembers
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.ExcludedTags = excludedTags
+		sub.ExcludedMembers = excludedMembers
+		return nil
+	})
+	return err
 }
 
-// SetMembersExtras updates members, orphans, rejected, and info in one write.
-func (s *Store) SetMembersExtras(id string, members []MemberInfo, orphans []string, rejected []RejectedMember, info []SubscriptionInfoItem, excludedMembers []MemberInfo) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.Members = members
-	tags := make([]string, len(members))
-	for i, m := range members {
-		tags[i] = m.Tag
-	}
-	sub.MemberTags = tags
-	sub.OrphanTags = orphans
-	if rejected == nil {
-		rejected = []RejectedMember{}
-	}
-	if info == nil {
-		info = []SubscriptionInfoItem{}
-	}
-	sub.RejectedMembers = rejected
-	sub.InfoItems = info
-	sub.ExcludedMembers = excludedMembers
-	reconcileActiveMember(sub, tags)
-	return s.saveLocked()
+// SetMembersExtras updates members, orphans, rejected, info, excluded and
+// filtered display mirrors in one write.
+func (s *Store) SetMembersExtras(id string, members []MemberInfo, orphans []string, rejected []RejectedMember, info []SubscriptionInfoItem, excludedMembers, filteredMembers []MemberInfo) error {
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.Members = members
+		tags := make([]string, len(members))
+		for i, m := range members {
+			tags[i] = m.Tag
+		}
+		sub.MemberTags = tags
+		sub.OrphanTags = orphans
+		if rejected == nil {
+			rejected = []RejectedMember{}
+		}
+		if info == nil {
+			info = []SubscriptionInfoItem{}
+		}
+		sub.RejectedMembers = rejected
+		sub.InfoItems = info
+		sub.ExcludedMembers = excludedMembers
+		sub.FilteredMembers = filteredMembers
+		reconcileActiveMember(sub, tags)
+		return nil
+	})
+	return err
 }
 
 // RemoveInfoItem moves one info banner to rejectedMembers and dismisses it on refresh.
 func (s *Store) RemoveInfoItem(id, itemID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	idx := findInfoItem(sub.InfoItems, itemID)
-	if idx < 0 {
-		return ErrInfoItemNotFound
-	}
-	item := sub.InfoItems[idx]
-	removedID := strings.TrimSpace(item.ID)
-	sub.InfoItems = append(sub.InfoItems[:idx], sub.InfoItems[idx+1:]...)
-	sub.DismissedInfoIDs = appendDismissedID(sub.DismissedInfoIDs, removedID)
-	sub.RejectedMembers = appendRejectedUnique(sub.RejectedMembers, rejectedFromInfoItem(item))
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		idx := findInfoItem(sub.InfoItems, itemID)
+		if idx < 0 {
+			return ErrInfoItemNotFound
+		}
+		item := sub.InfoItems[idx]
+		removedID := strings.TrimSpace(item.ID)
+		sub.InfoItems = append(sub.InfoItems[:idx], sub.InfoItems[idx+1:]...)
+		sub.DismissedInfoIDs = appendDismissedID(sub.DismissedInfoIDs, removedID)
+		sub.RejectedMembers = appendRejectedUnique(sub.RejectedMembers, rejectedFromInfoItem(item))
+		return nil
+	})
+	return err
 }
 
 func removeDismissedID(dismissed []string, id string) []string {
@@ -352,18 +414,15 @@ func removeDismissedID(dismissed []string, id string) []string {
 
 // UnmarkDismissedInfoID allows a previously hidden info line to appear again after refresh.
 func (s *Store) UnmarkDismissedInfoID(id, infoID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	next := removeDismissedID(sub.DismissedInfoIDs, infoID)
-	if len(next) == len(sub.DismissedInfoIDs) {
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		next := removeDismissedID(sub.DismissedInfoIDs, infoID)
+		if len(next) == len(sub.DismissedInfoIDs) {
+			return errMutateNoop // без изменений — не переписываем диск
+		}
+		sub.DismissedInfoIDs = next
 		return nil
-	}
-	sub.DismissedInfoIDs = next
-	return s.saveLocked()
+	})
+	return err
 }
 
 func appendDismissedID(dismissed []string, id string) []string {
@@ -382,17 +441,14 @@ func appendDismissedID(dismissed []string, id string) []string {
 // SetRejectedAndInfo updates rejected/info slices without touching members.
 // info nil means leave unchanged (used by ClearRejected).
 func (s *Store) SetRejectedAndInfo(id string, rejected []RejectedMember, info []SubscriptionInfoItem) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.RejectedMembers = rejected
-	if info != nil {
-		sub.InfoItems = info
-	}
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.RejectedMembers = rejected
+		if info != nil {
+			sub.InfoItems = info
+		}
+		return nil
+	})
+	return err
 }
 
 func reconcileActiveMember(sub *Subscription, tags []string) {
@@ -414,66 +470,54 @@ func reconcileActiveMember(sub *Subscription, tags []string) {
 
 // SetProxyIndex persists the NDMS ProxyN index for this subscription.
 func (s *Store) SetProxyIndex(id string, idx int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.ProxyIndex = idx
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.ProxyIndex = idx
+		return nil
+	})
+	return err
 }
 
 // SetMembership replaces MemberTags + OrphanTags atomically. Used by Service.Refresh.
 // Auto-defaults ActiveMember to the first member when empty, and falls back to the
 // first remaining member when the current active becomes orphan.
 func (s *Store) SetMembership(id string, members, orphans []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.MemberTags = members
-	sub.OrphanTags = orphans
-	if sub.ActiveMember == "" && len(members) > 0 {
-		sub.ActiveMember = members[0]
-	}
-	if sub.ActiveMember != "" {
-		found := false
-		for _, m := range members {
-			if m == sub.ActiveMember {
-				found = true
-				break
-			}
-		}
-		if !found && len(members) > 0 {
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.MemberTags = members
+		sub.OrphanTags = orphans
+		if sub.ActiveMember == "" && len(members) > 0 {
 			sub.ActiveMember = members[0]
 		}
-	}
-	return s.saveLocked()
+		if sub.ActiveMember != "" {
+			found := false
+			for _, m := range members {
+				if m == sub.ActiveMember {
+					found = true
+					break
+				}
+			}
+			if !found && len(members) > 0 {
+				sub.ActiveMember = members[0]
+			}
+		}
+		return nil
+	})
+	return err
 }
 
 func (s *Store) SetActiveMember(id, memberTag string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.ActiveMember = memberTag
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.ActiveMember = memberTag
+		return nil
+	})
+	return err
 }
 
 func (s *Store) SetListenPort(id string, port uint16) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.data[id]
-	if !ok {
-		return fmt.Errorf("subscription %q not found", id)
-	}
-	sub.ListenPort = port
-	return s.saveLocked()
+	_, err := s.mutate(id, func(sub *Subscription) error {
+		sub.ListenPort = port
+		return nil
+	})
+	return err
 }
 
 // MaskURL replaces the subscription URL in an error message with a placeholder

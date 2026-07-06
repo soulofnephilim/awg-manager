@@ -75,6 +75,9 @@ type Subscription struct {
 	ActiveMember      string                 `json:"activeMember,omitempty"`      // currently-active selector member tag
 	ExcludedTags    []string     `json:"excludedTags,omitempty"`    // полные стабильные теги, исключённые пользователем (источник правды)
 	ExcludedMembers []MemberInfo `json:"excludedMembers,omitempty"` // display-метаданные исключённых (обновляются при refresh)
+	FilterInclude   string       `json:"filterInclude,omitempty"`   // regex (Go RE2): оставить только серверы с совпадающим именем; "" = без фильтра
+	FilterExclude   string       `json:"filterExclude,omitempty"`   // regex (Go RE2): скрыть серверы с совпадающим именем; "" = без фильтра
+	FilteredMembers []MemberInfo `json:"filteredMembers,omitempty"` // display-метаданные скрытых фильтром (перестраиваются при refresh)
 	Enabled      bool             `json:"enabled"`
 	Mode         SubscriptionMode `json:"mode,omitempty"`        // "" treated as ModeSelector for back-compat
 	URLTest      *URLTestConfig   `json:"urlTest,omitempty"`     // populated when Mode == ModeURLTest
@@ -137,6 +140,8 @@ type CreateInput struct {
 	Mode         SubscriptionMode // "" = ModeSelector
 	URLTest      *URLTestConfig   // ignored when Mode != ModeURLTest; defaults applied otherwise
 	ExcludedKeys []string         // суффиксы тегов из превью (suffixOf, узкий или расширенный) для исключения на первичном refresh
+	FilterInclude string          // regex-фильтр «включать только» (валидируется в Service.Create)
+	FilterExclude string          // regex-фильтр «исключать» (валидируется в Service.Create)
 }
 
 // UpdatePatch is partial update; nil pointers mean "leave as-is".
@@ -148,6 +153,8 @@ type UpdatePatch struct {
 	Enabled      *bool
 	Mode         *SubscriptionMode
 	URLTest      *URLTestConfig // overwrites stored URLTest when non-nil
+	FilterInclude *string       // regex-фильтр «включать только»; "" = снять фильтр
+	FilterExclude *string       // regex-фильтр «исключать»; "" = снять фильтр
 }
 
 // RefreshResult is the outcome of a single refresh cycle.

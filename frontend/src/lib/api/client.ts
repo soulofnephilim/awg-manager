@@ -91,6 +91,9 @@ import type {
 	SubscriptionActiveNowResponse,
 	CreateSubscriptionInput,
 	UpdateSubscriptionInput,
+	SubscriptionGroup,
+	CreateSubscriptionGroupInput,
+	UpdateSubscriptionGroupInput,
 	RouterStagingStatusResponse,
 	AmneziaPremiumAccountInfo,
 	ManagedServerBackupFile,
@@ -2597,6 +2600,39 @@ class ApiClient {
 		return this.request<SubscriptionPreviewMember[]>('/singbox/subscriptions/preview', {
 			method: 'POST',
 			body: JSON.stringify(input),
+		});
+	}
+
+	// Сводные группы подписок (#372)
+
+	async listSubscriptionGroups(): Promise<SubscriptionGroup[]> {
+		return this.request<SubscriptionGroup[]>('/singbox/subscriptions/groups');
+	}
+
+	async createSubscriptionGroup(in_: CreateSubscriptionGroupInput): Promise<SubscriptionGroup> {
+		return this.request<SubscriptionGroup>('/singbox/subscriptions/groups/create', {
+			method: 'POST',
+			body: JSON.stringify(in_),
+		});
+	}
+
+	async updateSubscriptionGroup(
+		id: string,
+		patch: UpdateSubscriptionGroupInput,
+	): Promise<SubscriptionGroup> {
+		return this.request<SubscriptionGroup>(
+			`/singbox/subscriptions/groups/update?id=${encodeURIComponent(id)}`,
+			{
+				method: 'PUT',
+				body: JSON.stringify(patch),
+			},
+		);
+	}
+
+	async deleteSubscriptionGroup(id: string): Promise<void> {
+		await this.request(`/singbox/subscriptions/groups/delete`, {
+			method: 'POST',
+			body: JSON.stringify({ id }),
 		});
 	}
 

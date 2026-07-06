@@ -47,6 +47,7 @@
 	import SubscriptionCard from '$lib/components/subscriptions/SubscriptionCard.svelte';
 	import AddTunnelWizard from '$lib/components/subscriptions/AddTunnelWizard.svelte';
 	import SubscriptionActiveCard from '$lib/components/subscriptions/SubscriptionActiveCard.svelte';
+	import SubscriptionGroupsSection from '$lib/components/subscriptions/SubscriptionGroupsSection.svelte';
 	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem } from '$lib/types';
 	import { formatBitRate, formatBytes, formatDuration, formatRelativeTime, secondsSince } from '$lib/utils/format';
 	import { showOutboundReferencedError } from '$lib/utils/outboundReferenced';
@@ -3294,6 +3295,9 @@
 							<p class="tunnel-list-empty">Ничего не найдено</p>
 						{/if}
 						{/if}
+					{/if}
+					{#if !dashboardOn}
+						<SubscriptionGroupsSection subscriptions={subscriptionsList} />
 					{/if}
 				{/if}
 			{/if}
