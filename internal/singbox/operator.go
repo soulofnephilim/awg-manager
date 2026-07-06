@@ -1924,6 +1924,18 @@ func nextFreeListenPortSlot(cfg *Config, reserved map[int]bool) int {
 	return 0
 }
 
+// parseTunnelLinksInput разбирает пользовательский ввод AddTunnels. Обычный
+// путь — построчный ParseBatch по share-link'ам, но канонический JSON-конфиг
+// клиента mieru (экспорт панелей, формат mieru apply config) — это единый
+// многострочный документ: line-split его убивает, поэтому сначала проверяем
+// тело целиком.
+func parseTunnelLinksInput(linksText string) vlink.BatchResult {
+	if body := []byte(linksText); vlink.IsMieruClientJSON(body) {
+		return vlink.ParseMieruClientJSON(body)
+	}
+	return vlink.ParseBatch(strings.Split(linksText, "\n"))
+}
+
 // AddTunnels parses one or more links and atomically adds them.
 // Returns successfully-added tunnels and parse errors.
 func (o *Operator) AddTunnels(ctx context.Context, linksText string) ([]TunnelInfo, []BatchError, error) {
@@ -1938,7 +1950,7 @@ func (o *Operator) AddTunnels(ctx context.Context, linksText string) ([]TunnelIn
 	if o.runtimeLogger != nil {
 		o.runtimeLogger.Info("single-add", "", "start add tunnels batch")
 	}
-	batchResult := vlink.ParseBatch(strings.Split(linksText, "\n"))
+	batchResult := parseTunnelLinksInput(linksText)
 	var parseErrs []BatchError
 	for _, pe := range batchResult.Errors {
 		parseErrs = append(parseErrs, BatchError{Line: pe.LineIdx + 1, Input: pe.Scheme, Err: fmt.Errorf("%s", pe.Message)})

@@ -13,6 +13,18 @@ export function normalizeSpaceSeparatedShareLinks(text: string): string {
 	return text.replace(spaceBeforeShareSchemeRe, '\n$1');
 }
 
+/**
+ * Содержимое загруженного файла (share-link'и, Clash YAML, sing-box/mieru JSON)
+ * в textarea импорта: пустое поле — заменяем целиком, непустое — дописываем
+ * с новой строки. Текст файла не нормализуем и не тримим (кроме ведущего BOM):
+ * многострочный JSON/YAML должен уйти на бэкенд как есть.
+ */
+export function appendImportedFileText(current: string, fileText: string): string {
+	const text = fileText.replace(/^\uFEFF/, '');
+	if (!current.trim()) return text;
+	return current.replace(/\n?$/, '\n') + text;
+}
+
 export function mergePastedShareList(
 	current: string,
 	selectionStart: number,
