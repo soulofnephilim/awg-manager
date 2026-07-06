@@ -20,6 +20,7 @@
 #include <linux/mutex.h>
 #include <linux/net.h>
 #include <linux/in.h>
+#include <linux/in6.h>
 #include <linux/socket.h>
 #include <linux/random.h>
 #include <linux/delay.h>
@@ -27,6 +28,7 @@
 #include <linux/skbuff.h>
 #include <linux/udp.h>
 #include <linux/netdevice.h>
+#include <linux/version.h>
 #include <net/sock.h>
 #include <net/inet_sock.h>
 #include <net/udp.h>
@@ -34,6 +36,12 @@
 #include <net/route.h>
 #include <net/ip.h>
 #include <net/dst_cache.h>
+#if IS_ENABLED(CONFIG_IPV6)
+#include <linux/ipv6.h>
+#include <net/ipv6.h>
+#include <net/ip6_route.h>
+#include <net/addrconf.h>	/* ipv6_stub */
+#endif
 
 #include "proxy.h"
 #include "transform.h"
@@ -48,8 +56,50 @@
  */
 #define AWG_COOKIE_TTL_NS (120ULL * NSEC_PER_SEC)
 
+/*
+ * IPv6 TX route lookup — which ipv6_stub member exists?
+ *
+ * Commit 6c8991f41546 ("net: ipv6_stub: use ip6_dst_lookup_flow instead of
+ * ip6_dst_lookup", v5.5) RENAMED the stub member ipv6_dst_lookup ->
+ * ipv6_dst_lookup_flow (new signature) and was backported to every stable
+ * tree: 4.4.207, 4.9.207, 4.14.160, 4.19.91, 5.3.18, 5.4.5. The version
+ * ranges below mirror wireguard-linux-compat's detection. Vendor kernels
+ * (Keenetic -ndm-*) may carry the backport without the matching SUBLEVEL —
+ * if the build fails on this, override from the make command line with
+ * ccflags-y+=-DAWG_HAVE_IPV6_DST_LOOKUP_FLOW=0|1.
+ */
+#ifndef AWG_HAVE_IPV6_DST_LOOKUP_FLOW
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 5)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 18)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 91)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 160)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 207)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 5, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 207))
+#define AWG_HAVE_IPV6_DST_LOOKUP_FLOW 1
+#else
+#define AWG_HAVE_IPV6_DST_LOOKUP_FLOW 0
+#endif
+#endif
+
 static struct awg_proxy proxies[AWG_MAX_TUNNELS];
 static DEFINE_MUTEX(proxy_mutex);
+
+/*
+ * Render an endpoint for logs / /proc list rows: "a.b.c.d:port" for IPv4
+ * (byte-identical to the historical "%pI4:%d" output), "[v6...]:port" for
+ * IPv6 (%pI6c — compressed lowercase, same shape Go's net.JoinHostPort
+ * produces, so the userspace list parser round-trips it).
+ */
+#define AWG_EP_STRLEN 64
+static void awg_endpoint_fmt(const struct awg_endpoint_addr *addr,
+			     __be16 port, char *buf, size_t len)
+{
+	if (addr->family == AF_INET6)
+		snprintf(buf, len, "[%pI6c]:%d", &addr->ip6, ntohs(port));
+	else
+		snprintf(buf, len, "%pI4:%d", &addr->ip4, ntohs(port));
+}
 
 /*
  * Dummy net_device for the udp_tunnel_xmit_skb TX path. iptunnel_xmit
@@ -139,29 +189,49 @@ static int create_listen_socket(struct socket **sock, u16 *port)
 }
 
 /*
- * Create a UDP socket connected to the remote AWG server.
- * If bind_iface is non-empty, bind the socket to that network interface
- * via SO_BINDTODEVICE before connecting (WAN binding / "connect via").
+ * Create a UDP socket facing the remote AWG server, in the endpoint's
+ * address family (AF_INET or AF_INET6). If bind_iface is non-empty, bind
+ * the socket to that network interface via SO_BINDTODEVICE (WAN binding /
+ * "connect via").
  */
-static int create_remote_socket(struct socket **sock, __be32 ip, __be16 port,
-				const char *bind_iface)
+static int create_remote_socket(struct socket **sock, const awg_config_t *cfg)
 {
+	const char *bind_iface = cfg->bind_iface;
+	int family = cfg->remote_addr.family;
 	int ret;
 
-	(void)ip; (void)port;  /* destination passed per-sendmsg, not via connect */
+	/* destination is passed per-sendmsg, not via connect — see below */
 
-	ret = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, IPPROTO_UDP,
+	ret = sock_create_kern(&init_net, family, SOCK_DGRAM, IPPROTO_UDP,
 			       sock);
 	if (ret)
 		return ret;
 
-	/* Disable Path-MTU-Discovery / Don't-Fragment bit on outbound packets
-	 * — mirrors amneziawg-linux-kernel-module's `skb->ignore_df = 1`
-	 * (src/socket.c). Standard UDP sockets set DF=1 by default, which makes
-	 * some middleboxes drop AWG handshakes (especially with DNS-shaped CPS
-	 * payloads, where DF=1 looks like DNS-amplification probes). Reference
-	 * sends with DF=0 and works against the same servers we fail on. */
-	{
+	if (family == AF_INET6) {
+		/* No mapped-IPv4 ambiguity on this socket: the endpoint is a
+		 * genuine IPv6 address and the RX filter compares in6_addr. */
+		int on = 1;
+		(void)kernel_setsockopt(*sock, SOL_IPV6, IPV6_V6ONLY,
+					(char *)&on, sizeof(on));
+
+		/* IPv6 analog of the IPv4 PMTU opt-out below. There is no DF
+		 * bit in IPv6 (fragmentation is source-only), but this stops
+		 * the socket from honoring cached path-MTU on sends, matching
+		 * the reference's skb->ignore_df = 1 behavior for send6. */
+		{
+			int pmtu = IPV6_PMTUDISC_DONT;
+			(void)kernel_setsockopt(*sock, SOL_IPV6,
+						IPV6_MTU_DISCOVER,
+						(char *)&pmtu, sizeof(pmtu));
+		}
+	} else {
+		/* Disable Path-MTU-Discovery / Don't-Fragment bit on outbound
+		 * packets — mirrors amneziawg-linux-kernel-module's
+		 * `skb->ignore_df = 1` (src/socket.c). Standard UDP sockets set
+		 * DF=1 by default, which makes some middleboxes drop AWG
+		 * handshakes (especially with DNS-shaped CPS payloads, where
+		 * DF=1 looks like DNS-amplification probes). Reference sends
+		 * with DF=0 and works against the same servers we fail on. */
 		int pmtu = IP_PMTUDISC_DONT;
 		(void)kernel_setsockopt(*sock, IPPROTO_IP, IP_MTU_DISCOVER,
 					(char *)&pmtu, sizeof(pmtu));
@@ -186,19 +256,28 @@ static int create_remote_socket(struct socket **sock, __be32 ip, __be16 port,
 	 * 0-byte UDP "probe" to the destination on some kernels (visible on
 	 * the wire as a malformed first packet from our source, a known
 	 * server-side fingerprint for proxy/scanner traffic). Instead, we
-	 * pass the destination addr explicitly in every sendmsg below. */
-	{
+	 * pass the destination addr explicitly in every send. */
+	if (family == AF_INET6) {
+		struct sockaddr_in6 local = {};
+
+		local.sin6_family = AF_INET6;
+		/* sin6_addr already zeroed = in6addr_any */
+		local.sin6_port = 0;
+		ret = kernel_bind(*sock, (struct sockaddr *)&local,
+				  sizeof(local));
+	} else {
 		struct sockaddr_in local = {};
+
 		local.sin_family = AF_INET;
 		local.sin_addr.s_addr = htonl(INADDR_ANY);
 		local.sin_port = 0;
 		ret = kernel_bind(*sock, (struct sockaddr *)&local,
 				  sizeof(local));
-		if (ret) {
-			sock_release(*sock);
-			*sock = NULL;
-			return ret;
-		}
+	}
+	if (ret) {
+		sock_release(*sock);
+		*sock = NULL;
+		return ret;
 	}
 
 	return 0;
@@ -233,13 +312,14 @@ static int proxy_sendmsg(struct socket *sock, u8 *buf, int len,
  * xmit block must run with BH disabled (matches send4's rcu_read_lock_bh).
  * Returns 0 on success; on route/alloc failure the skb is freed here.
  */
-static int proxy_tunnel_xmit(struct awg_proxy *p, const u8 *buf, int len, u8 ds)
+static int proxy_tunnel_xmit4(struct awg_proxy *p, const u8 *buf, int len,
+			      u8 ds)
 {
 	int headroom = sizeof(struct iphdr) + sizeof(struct udphdr) + MAX_HEADER;
 	struct sock *sk = p->remote_sock->sk;
 	__be16 sport = inet_sk(sk)->inet_sport;
 	struct flowi4 fl = {
-		.daddr = p->cfg.remote_ip,
+		.daddr = p->cfg.remote_addr.ip4,
 		.fl4_dport = p->cfg.remote_port,
 		.fl4_sport = sport,
 		.flowi4_oif = p->bind_oif,
@@ -266,7 +346,7 @@ static int proxy_tunnel_xmit(struct awg_proxy *p, const u8 *buf, int len, u8 ds)
 			local_bh_enable();
 			kfree_skb(skb);
 			pr_warn_ratelimited("awg_proxy: no route to %pI4: %ld\n",
-					    &p->cfg.remote_ip, err);
+					    &p->cfg.remote_addr.ip4, err);
 			return (int)err;
 		}
 		dst_cache_set_ip4(&p->tx_dst_cache, &rt->dst, fl.saddr);
@@ -279,12 +359,104 @@ static int proxy_tunnel_xmit(struct awg_proxy *p, const u8 *buf, int len, u8 ds)
 	/* 4.9: udp_tunnel_xmit_skb takes 12 args. It consumes both rt and skb
 	 * on every path (skb_dst_set + ip_local_out) — do NOT ip_rt_put or touch
 	 * skb after this call. */
-	udp_tunnel_xmit_skb(rt, sk, skb, fl.saddr, p->cfg.remote_ip, ds,
+	udp_tunnel_xmit_skb(rt, sk, skb, fl.saddr, p->cfg.remote_addr.ip4, ds,
 			    ip4_dst_hoplimit(&rt->dst), 0, sport,
 			    p->cfg.remote_port, false, false);
 
 	local_bh_enable();
 	return 0;
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+/*
+ * IPv6 twin of proxy_tunnel_xmit4, mirroring native AWG/WG send6
+ * (src/socket.c). Same structure: alloc+copy in process context, then
+ * dst_cache lookup / route / udp_tunnel6_xmit_skb under BH-off. Route
+ * lookup goes through ipv6_stub so the module keeps loading on kernels
+ * where IPv6 is a module (or absent — then family=AF_INET6 never gets
+ * this far because sock_create_kern(AF_INET6) already failed).
+ *
+ * Differences from v4, all matching send6: no DF/frag-off flags (no DF bit
+ * in IPv6), flowlabel 0, hoplimit from the route, and the trailing nocheck
+ * arg is false because the IPv6 UDP checksum is MANDATORY (RFC 2460) —
+ * udp_tunnel6_xmit_skb computes it.
+ */
+static int proxy_tunnel_xmit6(struct awg_proxy *p, const u8 *buf, int len,
+			      u8 ds)
+{
+	int headroom = sizeof(struct ipv6hdr) + sizeof(struct udphdr) +
+		       MAX_HEADER;
+	struct sock *sk = p->remote_sock->sk;
+	__be16 sport = inet_sk(sk)->inet_sport;
+	struct flowi6 fl = {
+		.daddr = p->cfg.remote_addr.ip6,
+		.fl6_dport = p->cfg.remote_port,
+		.fl6_sport = sport,
+		.flowi6_oif = p->bind_oif,
+		.flowi6_mark = 0,
+		.flowi6_proto = IPPROTO_UDP,
+	};
+	struct sk_buff *skb;
+	struct dst_entry *dst;
+
+	skb = alloc_skb(len + headroom, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+	skb_reserve(skb, headroom);
+	memcpy(skb_put(skb, len), buf, len);
+
+	local_bh_disable();
+
+	dst = dst_cache_get_ip6(&p->tx_dst_cache, &fl.saddr);
+	if (!dst) {
+		long err;
+
+#if AWG_HAVE_IPV6_DST_LOOKUP_FLOW
+		dst = ipv6_stub->ipv6_dst_lookup_flow(&init_net, sk, &fl,
+						      NULL);
+		err = IS_ERR(dst) ? PTR_ERR(dst) : 0;
+#else
+		err = ipv6_stub->ipv6_dst_lookup(&init_net, sk, &dst, &fl);
+#endif
+		if (err) {
+			local_bh_enable();
+			kfree_skb(skb);
+			pr_warn_ratelimited("awg_proxy: no route to %pI6c: %ld\n",
+					    &p->cfg.remote_addr.ip6, err);
+			return (int)err;
+		}
+		dst_cache_set_ip6(&p->tx_dst_cache, dst, &fl.saddr);
+	}
+
+	skb->dev = awg_xmit_dev;
+	skb->mark = 0;
+	skb->ignore_df = 1;
+
+	/* 4.9: udp_tunnel6_xmit_skb takes 12 args and consumes both dst and
+	 * skb on every path — do NOT dst_release or touch skb after this. */
+	udp_tunnel6_xmit_skb(dst, sk, skb, skb->dev, &fl.saddr, &fl.daddr,
+			     ds, ip6_dst_hoplimit(dst), 0, sport,
+			     p->cfg.remote_port, false);
+
+	local_bh_enable();
+	return 0;
+}
+#else /* !CONFIG_IPV6 */
+static int proxy_tunnel_xmit6(struct awg_proxy *p, const u8 *buf, int len,
+			      u8 ds)
+{
+	/* Unreachable: awg_proxy_add rejects AF_INET6 endpoints on kernels
+	 * built without IPv6. Kept so the dispatcher links unconditionally. */
+	return -EAFNOSUPPORT;
+}
+#endif /* CONFIG_IPV6 */
+
+/* Family dispatcher — every sender goes through here. */
+static int proxy_tunnel_xmit(struct awg_proxy *p, const u8 *buf, int len, u8 ds)
+{
+	if (p->cfg.remote_addr.family == AF_INET6)
+		return proxy_tunnel_xmit6(p, buf, len, ds);
+	return proxy_tunnel_xmit4(p, buf, len, ds);
 }
 
 /*
@@ -570,10 +742,13 @@ static int c2s_thread_fn(void *data)
 			int sret = proxy_tunnel_xmit(proxy, out, out_len, ds);
 
 			if (sret < 0) {
-				pr_warn_ratelimited("awg_proxy: send to %pI4:%d failed: %d\n",
-						    &proxy->cfg.remote_ip,
-						    ntohs(proxy->cfg.remote_port),
-						    sret);
+				char ep[AWG_EP_STRLEN];
+
+				awg_endpoint_fmt(&proxy->cfg.remote_addr,
+						 proxy->cfg.remote_port,
+						 ep, sizeof(ep));
+				pr_warn_ratelimited("awg_proxy: send to %s failed: %d\n",
+						    ep, sret);
 			} else {
 				atomic_inc(&proxy->tx_packets);
 				atomic64_add(out_len, &proxy->tx_bytes);
@@ -612,15 +787,27 @@ static int awg_encap_rcv(struct sock *sk, struct sk_buff *skb)
 	if (unlikely(!pskb_may_pull(skb, sizeof(struct udphdr))))
 		goto drop;
 
-	/* The socket is unconnected (see create_remote_socket), so ANY host
-	 * that discovers our ephemeral port can inject datagrams: flood the
-	 * rx_queue, skew the counters, or feed forgeries into the
-	 * decrypt-failed-forward-as-is path. Accept only the configured
-	 * server. Both sides are big-endian wire values — no conversion. */
+	/* Accept only the configured server — see awg_src_matches
+	 * (endpoint.h) for the rationale. The remote socket is per-family
+	 * (and IPV6_V6ONLY on v6), so an AF_INET slot only ever sees IPv4
+	 * headers here and an AF_INET6 slot only IPv6 ones — branch on the
+	 * configured family and read the matching header. */
 	uh = (const struct udphdr *)skb->data;
-	if (ip_hdr(skb)->saddr != proxy->cfg.remote_ip ||
-	    uh->source != proxy->cfg.remote_port)
-		goto drop;
+	if (proxy->cfg.remote_addr.family == AF_INET6) {
+#if IS_ENABLED(CONFIG_IPV6)
+		if (!awg_src_matches(&proxy->cfg.remote_addr,
+				     proxy->cfg.remote_port, AF_INET6,
+				     &ipv6_hdr(skb)->saddr, uh->source))
+			goto drop;
+#else
+		goto drop;	/* v6 slot cannot exist on a no-IPv6 kernel */
+#endif
+	} else {
+		if (!awg_src_matches(&proxy->cfg.remote_addr,
+				     proxy->cfg.remote_port, AF_INET,
+				     &ip_hdr(skb)->saddr, uh->source))
+			goto drop;
+	}
 
 	__skb_pull(skb, sizeof(struct udphdr));
 
@@ -788,12 +975,22 @@ int awg_proxy_add(const char *config_line)
 	if (ret)
 		return ret;
 
+	/* Fail v6 endpoints loudly on kernels built without IPv6 instead of
+	 * a cryptic sock_create_kern error later. */
+	if (tmp.remote_addr.family == AF_INET6 &&
+	    !IS_ENABLED(CONFIG_IPV6)) {
+		pr_warn("awg_proxy: IPv6 endpoint but kernel lacks CONFIG_IPV6\n");
+		awg_config_free(&tmp);
+		return -EAFNOSUPPORT;
+	}
+
 	mutex_lock(&proxy_mutex);
 
 	/* Check duplicate */
 	for (i = 0; i < AWG_MAX_TUNNELS; i++) {
 		if (proxies[i].active &&
-		    proxies[i].cfg.remote_ip == tmp.remote_ip &&
+		    awg_endpoint_addr_equal(&proxies[i].cfg.remote_addr,
+					    &tmp.remote_addr) &&
 		    proxies[i].cfg.remote_port == tmp.remote_port) {
 			ret = -EEXIST;
 			goto out_free;
@@ -865,9 +1062,8 @@ int awg_proxy_add(const char *config_line)
 		goto out_cleanup;
 	}
 
-	/* Create remote socket (connected to AWG server) */
-	ret = create_remote_socket(&p->remote_sock, p->cfg.remote_ip,
-				   p->cfg.remote_port, p->cfg.bind_iface);
+	/* Create remote socket (facing the AWG server, per-family) */
+	ret = create_remote_socket(&p->remote_sock, &p->cfg);
 	if (ret) {
 		pr_err("awg_proxy: failed to create remote socket: %d\n", ret);
 		goto out_cleanup;
@@ -903,9 +1099,15 @@ int awg_proxy_add(const char *config_line)
 
 	p->active = true;
 
-	/* Start worker threads */
-	p->c2s_thread = kthread_run(c2s_thread_fn, p,
-				    "awg_c2s_%pI4", &p->cfg.remote_ip);
+	/* Start worker threads. Thread names keep the historical
+	 * "%pI4"-based comm for IPv4 (byte-identical, TASK_COMM_LEN
+	 * truncation applies as before); IPv6 uses the compressed %pI6c. */
+	if (p->cfg.remote_addr.family == AF_INET6)
+		p->c2s_thread = kthread_run(c2s_thread_fn, p, "awg_c2s_%pI6c",
+					    &p->cfg.remote_addr.ip6);
+	else
+		p->c2s_thread = kthread_run(c2s_thread_fn, p, "awg_c2s_%pI4",
+					    &p->cfg.remote_addr.ip4);
 	if (IS_ERR(p->c2s_thread)) {
 		ret = PTR_ERR(p->c2s_thread);
 		p->c2s_thread = NULL;
@@ -913,8 +1115,12 @@ int awg_proxy_add(const char *config_line)
 		goto out_cleanup;
 	}
 
-	p->s2c_thread = kthread_run(s2c_thread_fn, p,
-				    "awg_s2c_%pI4", &p->cfg.remote_ip);
+	if (p->cfg.remote_addr.family == AF_INET6)
+		p->s2c_thread = kthread_run(s2c_thread_fn, p, "awg_s2c_%pI6c",
+					    &p->cfg.remote_addr.ip6);
+	else
+		p->s2c_thread = kthread_run(s2c_thread_fn, p, "awg_s2c_%pI4",
+					    &p->cfg.remote_addr.ip4);
 	if (IS_ERR(p->s2c_thread)) {
 		ret = PTR_ERR(p->s2c_thread);
 		p->s2c_thread = NULL;
@@ -922,9 +1128,14 @@ int awg_proxy_add(const char *config_line)
 		goto out_cleanup;
 	}
 
-	pr_info("awg_proxy: added %pI4:%d -> 127.0.0.1:%u (headroom=%d)\n",
-		&p->cfg.remote_ip, ntohs(p->cfg.remote_port),
-		p->listen_port, p->headroom);
+	{
+		char ep[AWG_EP_STRLEN];
+
+		awg_endpoint_fmt(&p->cfg.remote_addr, p->cfg.remote_port,
+				 ep, sizeof(ep));
+		pr_info("awg_proxy: added %s -> 127.0.0.1:%u (headroom=%d)\n",
+			ep, p->listen_port, p->headroom);
+	}
 
 	mutex_unlock(&proxy_mutex);
 	return 0;
@@ -1049,19 +1260,23 @@ static void proxy_stop(struct awg_proxy *p)
 	awg_config_free(&p->cfg);
 }
 
-int awg_proxy_del(__be32 ip, __be16 port)
+int awg_proxy_del(const struct awg_endpoint_addr *addr, __be16 port)
 {
 	int i, ret = -ENOENT;
 
 	mutex_lock(&proxy_mutex);
 	for (i = 0; i < AWG_MAX_TUNNELS; i++) {
+		char ep[AWG_EP_STRLEN];
+
 		if (!proxies[i].active)
 			continue;
-		if (proxies[i].cfg.remote_ip != ip ||
+		if (!awg_endpoint_addr_equal(&proxies[i].cfg.remote_addr,
+					     addr) ||
 		    proxies[i].cfg.remote_port != port)
 			continue;
 
-		pr_info("awg_proxy: removing %pI4:%d\n", &ip, ntohs(port));
+		awg_endpoint_fmt(addr, port, ep, sizeof(ep));
+		pr_info("awg_proxy: removing %s\n", ep);
 		proxy_stop(&proxies[i]);
 		ret = 0;
 		break;
@@ -1084,24 +1299,31 @@ void awg_proxy_cleanup(void)
 
 /*
  * Format proxy list for procfs read.
- * Output: "REMOTE_IP:REMOTE_PORT listen=127.0.0.1:PORT rx=BYTES tx=BYTES rx_pkt=N tx_pkt=N\n"
+ * Output: "ENDPOINT listen=127.0.0.1:PORT rx=BYTES tx=BYTES rx_pkt=N tx_pkt=N\n"
+ * ENDPOINT is "a.b.c.d:port" for IPv4 rows (unchanged) and "[v6...]:port"
+ * (%pI6c, RFC 5952 compressed) for IPv6 rows — the same shape userspace
+ * writes to /proc add/del, so readers can match rows by string prefix.
  */
 int awg_proxy_list(char *buf, int buflen)
 {
 	int i, len = 0;
 
 	mutex_lock(&proxy_mutex);
-	for (i = 0; i < AWG_MAX_TUNNELS && len < buflen - 128; i++) {
+	/* 192-byte slack: a worst-case IPv6 row (bracketed full-form address
+	 * plus grown 64-bit byte counters) is longer than the old 128. */
+	for (i = 0; i < AWG_MAX_TUNNELS && len < buflen - 192; i++) {
 		struct awg_proxy *p = &proxies[i];
+		char ep[AWG_EP_STRLEN];
 
 		if (!p->active)
 			continue;
 
+		awg_endpoint_fmt(&p->cfg.remote_addr, p->cfg.remote_port,
+				 ep, sizeof(ep));
 		len += snprintf(buf + len, buflen - len,
-			"%pI4:%d listen=127.0.0.1:%u "
+			"%s listen=127.0.0.1:%u "
 			"rx=%lld tx=%lld rx_pkt=%d tx_pkt=%d\n",
-			&p->cfg.remote_ip,
-			ntohs(p->cfg.remote_port),
+			ep,
 			p->listen_port,
 			(long long)atomic64_read(&p->rx_bytes),
 			(long long)atomic64_read(&p->tx_bytes),

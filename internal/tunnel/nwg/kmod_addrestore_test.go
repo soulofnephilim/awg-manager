@@ -17,6 +17,9 @@ type procStub struct {
 	mu       sync.Mutex
 	listBody string
 	writes   []procWrite
+	// version overrides what /proc/awg_proxy/version reports (default
+	// "1.1.10"). IPv6-endpoint tests raise it past kmodVersionIPv6.
+	version string
 	// failAdd lets tests force /proc/awg_proxy/add to return a specific
 	// errno (e.g. EEXIST) on the next attempt and clears itself after.
 	failAddOnce error
@@ -75,6 +78,9 @@ func (p *procStub) read(path string) ([]byte, error) {
 	case "/proc/awg_proxy/list":
 		return []byte(p.listBody), nil
 	case "/proc/awg_proxy/version":
+		if p.version != "" {
+			return []byte(p.version + "\n"), nil
+		}
 		return []byte("1.1.10\n"), nil
 	default:
 		return nil, fmt.Errorf("unexpected read: %s", path)

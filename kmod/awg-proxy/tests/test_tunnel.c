@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <arpa/inet.h>
 
 static int tests_run, tests_failed;
 
@@ -189,6 +190,138 @@ static void test_accepts_valid_numeric_values(void)
 	}
 }
 
+/*
+ * Endpoint parsing — IPv4 legacy form must stay byte-identical (same
+ * in_aton result, same htons'd port), bracketed IPv6 must parse via
+ * in6_pton, and the ambiguous bare-IPv6 form must be rejected.
+ */
+static void test_parses_legacy_ipv4_endpoint(void)
+{
+	awg_config_t cfg;
+	int ret;
+
+	tests_run++;
+	ret = awg_config_parse("203.0.113.1:51820 S1=16", &cfg);
+	ASSERT_TRUE("parses_legacy_ipv4_endpoint", ret == 0,
+		    "plain IPv4 endpoint must parse");
+	if (!ret) {
+		ASSERT_TRUE("parses_legacy_ipv4_endpoint",
+			    cfg.remote_addr.family == AF_INET,
+			    "family must be AF_INET");
+		ASSERT_TRUE("parses_legacy_ipv4_endpoint",
+			    cfg.remote_addr.ip4 == (__be32)inet_addr("203.0.113.1"),
+			    "ip4 must equal in_aton of the address (byte-identical)");
+		ASSERT_TRUE("parses_legacy_ipv4_endpoint",
+			    cfg.remote_port == htons(51820),
+			    "port must be htons(51820)");
+		ASSERT_TRUE("parses_legacy_ipv4_endpoint", cfg.s1 == 16,
+			    "params after the endpoint must still parse");
+		awg_config_free(&cfg);
+	}
+}
+
+static void test_parses_bracketed_ipv6_endpoint(void)
+{
+	awg_config_t cfg;
+	struct in6_addr want;
+	int ret;
+
+	tests_run++;
+	ret = awg_config_parse("[2001:db8::1]:51820 S1=16", &cfg);
+	ASSERT_TRUE("parses_bracketed_ipv6_endpoint", ret == 0,
+		    "[v6]:port endpoint must parse");
+	if (!ret) {
+		inet_pton(AF_INET6, "2001:db8::1", &want);
+		ASSERT_TRUE("parses_bracketed_ipv6_endpoint",
+			    cfg.remote_addr.family == AF_INET6,
+			    "family must be AF_INET6");
+		ASSERT_TRUE("parses_bracketed_ipv6_endpoint",
+			    memcmp(&cfg.remote_addr.ip6, &want, 16) == 0,
+			    "ip6 must equal inet_pton of the address");
+		ASSERT_TRUE("parses_bracketed_ipv6_endpoint",
+			    cfg.remote_port == htons(51820),
+			    "port must be htons(51820)");
+		ASSERT_TRUE("parses_bracketed_ipv6_endpoint", cfg.s1 == 16,
+			    "params after the endpoint must still parse");
+		awg_config_free(&cfg);
+	}
+}
+
+static void test_rejects_bare_ipv6_endpoint(void)
+{
+	awg_config_t cfg;
+	int ret;
+
+	tests_run++;
+	ret = awg_config_parse("2001:db8::1:51820", &cfg);
+	ASSERT_TRUE("rejects_bare_ipv6_endpoint", ret != 0,
+		    "bare IPv6 without brackets must be rejected");
+}
+
+static void test_rejects_malformed_bracket_endpoints(void)
+{
+	static const char *bad[] = {
+		"[2001:db8::1:51820",	/* missing ']' */
+		"[]:51820",		/* empty address */
+		"[2001:db8::1]51820",	/* missing ':' after ']' */
+		"[2001:db8::1]",	/* missing port */
+		"[2001:db8::1]:",	/* empty port */
+		"[not-an-address]:51820",
+		"[2001:db8::1]:0",	/* port out of range */
+		"[2001:db8::1]:99999",	/* port out of range */
+	};
+	size_t k;
+
+	for (k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
+		awg_config_t cfg;
+		int ret;
+
+		tests_run++;
+		ret = awg_config_parse(bad[k], &cfg);
+		if (ret == 0) {
+			test_fail("rejects_malformed_bracket_endpoints",
+				  "%s must be rejected", bad[k]);
+			awg_config_free(&cfg);
+		}
+	}
+}
+
+/* The del path (main.c) uses awg_endpoint_parse directly — exercise both
+ * accepted forms through the shared parser. */
+static void test_endpoint_parse_del_forms(void)
+{
+	struct awg_endpoint_addr addr;
+	struct in6_addr want;
+	__be16 port;
+
+	tests_run++;
+	ASSERT_TRUE("endpoint_parse_del_forms",
+		    awg_endpoint_parse("203.0.113.1:51820", &addr, &port) == 0,
+		    "v4 del line must parse");
+	ASSERT_TRUE("endpoint_parse_del_forms",
+		    addr.family == AF_INET &&
+		    addr.ip4 == (__be32)inet_addr("203.0.113.1") &&
+		    port == htons(51820),
+		    "v4 del parse must match add parse");
+
+	ASSERT_TRUE("endpoint_parse_del_forms",
+		    awg_endpoint_parse("[2001:db8::1]:443", &addr, &port) == 0,
+		    "v6 del line must parse");
+	inet_pton(AF_INET6, "2001:db8::1", &want);
+	ASSERT_TRUE("endpoint_parse_del_forms",
+		    addr.family == AF_INET6 &&
+		    memcmp(&addr.ip6, &want, 16) == 0 &&
+		    port == htons(443),
+		    "v6 del parse must match add parse");
+
+	ASSERT_TRUE("endpoint_parse_del_forms",
+		    awg_endpoint_parse("2001:db8::1:443", &addr, &port) != 0,
+		    "bare v6 del line must be rejected");
+	ASSERT_TRUE("endpoint_parse_del_forms",
+		    awg_endpoint_parse("no-port-here", &addr, &port) != 0,
+		    "token without ':' must be rejected");
+}
+
 int main(void)
 {
 	test_accepts_non_overlapping_h_ranges();
@@ -202,6 +335,11 @@ int main(void)
 	test_rejects_non_numeric_jc_value();
 	test_rejects_malformed_h_value();
 	test_accepts_valid_numeric_values();
+	test_parses_legacy_ipv4_endpoint();
+	test_parses_bracketed_ipv6_endpoint();
+	test_rejects_bare_ipv6_endpoint();
+	test_rejects_malformed_bracket_endpoints();
+	test_endpoint_parse_del_forms();
 
 	printf("\n=== %d run, %d failed ===\n", tests_run, tests_failed);
 	return tests_failed == 0 ? 0 : 1;

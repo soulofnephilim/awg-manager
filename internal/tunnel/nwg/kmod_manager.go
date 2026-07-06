@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"slices"
@@ -24,6 +25,11 @@ const (
 	awgProxyDir         = "/opt/etc/awg-manager/modules"
 	defaultKoPath       = awgProxyDir + "/awg_proxy.ko"
 	expectedKmodVersion = "1.2.0" // minimum required awg_proxy.ko version (UDP-tunnel rx+tx: FASTNAT/PPE bypass)
+	// kmodVersionIPv6 is the first awg_proxy.ko version whose procfs
+	// parser understands "[v6]:port" endpoints. Older parsers run the
+	// legacy strrchr(':')+in_aton path on that string and silently
+	// create a bogus IPv4 slot — addFreshLocked fails loudly instead.
+	kmodVersionIPv6 = "1.3.0"
 )
 
 // KmodManager manages the awg_proxy.ko kernel module for NativeWG tunnels.
@@ -227,11 +233,11 @@ func (km *KmodManager) RestoreTunnel(tunnelID string, cfg KmodConfig) (KmodResul
 			endpointPort: cfg.EndpointPort,
 			listenPort:   listenPort,
 		}
-		km.appLog.Info("adopt-tunnel", tunnelID, fmt.Sprintf("%s:%d -> 127.0.0.1:%d", cfg.EndpointIP, cfg.EndpointPort, listenPort))
+		km.appLog.Info("adopt-tunnel", tunnelID, fmt.Sprintf("%s -> 127.0.0.1:%d", endpointKey(cfg.EndpointIP, cfg.EndpointPort), listenPort))
 		return KmodResult{ListenPort: listenPort, Adopted: true}, nil
 	}
 
-	km.appLog.Info("restore-tunnel", tunnelID, fmt.Sprintf("no live slot for %s:%d, adding fresh", cfg.EndpointIP, cfg.EndpointPort))
+	km.appLog.Info("restore-tunnel", tunnelID, fmt.Sprintf("no live slot for %s, adding fresh", endpointKey(cfg.EndpointIP, cfg.EndpointPort)))
 	return km.addFreshLocked(tunnelID, cfg)
 }
 
@@ -240,7 +246,21 @@ func (km *KmodManager) RestoreTunnel(tunnelID string, cfg KmodConfig) (KmodResul
 // proxy.c) the stale slot is del'd and add is retried — without this
 // retry an orphan slot from a prior Delete would block a fresh install.
 func (km *KmodManager) addFreshLocked(tunnelID string, cfg KmodConfig) (KmodResult, error) {
-	delLine := fmt.Sprintf("%s:%d", cfg.EndpointIP, cfg.EndpointPort)
+	// IPv6 endpoints need kmod >= kmodVersionIPv6 (see the const) —
+	// gate before writing so the failure names the fix instead of a
+	// silently mis-parsed slot.
+	if strings.Contains(cfg.EndpointIP, ":") {
+		loaded := km.readVersionLocked()
+		if loaded == "" || semver.Compare(loaded, kmodVersionIPv6) < 0 {
+			if loaded == "" {
+				loaded = "unknown"
+			}
+			return KmodResult{}, fmt.Errorf("kmod add tunnel %s: IPv6 endpoint %s requires awg_proxy.ko >= %s (loaded: %s)",
+				tunnelID, cfg.EndpointIP, kmodVersionIPv6, loaded)
+		}
+	}
+
+	delLine := endpointKey(cfg.EndpointIP, cfg.EndpointPort)
 	line := buildProcLine(cfg)
 
 	err := km.procWriteFn("/proc/awg_proxy/add", []byte(line))
@@ -260,7 +280,7 @@ func (km *KmodManager) addFreshLocked(tunnelID string, cfg KmodConfig) (KmodResu
 		if raw, rerr := km.procReadFn("/proc/awg_proxy/list"); rerr == nil {
 			km.appLog.Warn("read-listen-port", "", "/proc/awg_proxy/list contents:\n"+string(raw))
 		}
-		km.appLog.Warn("add-tunnel", tunnelID, fmt.Sprintf("failed to read listen port (endpoint=%s:%d): %s", cfg.EndpointIP, cfg.EndpointPort, err.Error()))
+		km.appLog.Warn("add-tunnel", tunnelID, fmt.Sprintf("failed to read listen port (endpoint=%s): %s", endpointKey(cfg.EndpointIP, cfg.EndpointPort), err.Error()))
 		return KmodResult{}, fmt.Errorf("kmod read listen port for %s: %w", tunnelID, err)
 	}
 
@@ -269,8 +289,17 @@ func (km *KmodManager) addFreshLocked(tunnelID string, cfg KmodConfig) (KmodResu
 		endpointPort: cfg.EndpointPort,
 		listenPort:   listenPort,
 	}
-	km.appLog.Info("add-tunnel", tunnelID, fmt.Sprintf("%s:%d -> 127.0.0.1:%d", cfg.EndpointIP, cfg.EndpointPort, listenPort))
+	km.appLog.Info("add-tunnel", tunnelID, fmt.Sprintf("%s -> 127.0.0.1:%d", endpointKey(cfg.EndpointIP, cfg.EndpointPort), listenPort))
 	return KmodResult{ListenPort: listenPort}, nil
+}
+
+// endpointKey renders an endpoint exactly the way awg_proxy.ko prints and
+// parses it: "1.2.3.4:51820" for IPv4, "[2001:db8::1]:51820" for IPv6
+// (bracketed form, accepted by /proc add/del and printed in list rows
+// since kmod v1.3.0; the kernel's %pI6c and Go's net.IP.String() both
+// emit RFC 5952 compressed lowercase, so prefixes match byte-for-byte).
+func endpointKey(ip string, port int) string {
+	return net.JoinHostPort(ip, strconv.Itoa(port))
 }
 
 // listenPortRe matches "listen=127.0.0.1:PORT" in the proxy list output.
@@ -310,8 +339,9 @@ func (km *KmodManager) readListenPortLocked(endpointIP string, endpointPort int)
 		return 0, fmt.Errorf("read /proc/awg_proxy/list: %w", err)
 	}
 
-	// Each line: "IP:PORT listen=127.0.0.1:LPORT rx=... tx=..."
-	target := fmt.Sprintf("%s:%d ", endpointIP, endpointPort)
+	// Each line: "ENDPOINT listen=127.0.0.1:LPORT rx=... tx=..." where
+	// ENDPOINT is "IP:PORT" (v4) or "[IPV6]:PORT" (v6, kmod >= 1.3.0).
+	target := endpointKey(endpointIP, endpointPort) + " "
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if !strings.HasPrefix(line, target) {
 			continue
@@ -351,7 +381,7 @@ func (km *KmodManager) RemoveTunnel(tunnelID string) error {
 		return nil
 	}
 
-	line := fmt.Sprintf("%s:%d", entry.endpointIP, entry.endpointPort)
+	line := endpointKey(entry.endpointIP, entry.endpointPort)
 	if err := km.procWriteFn("/proc/awg_proxy/del", []byte(line)); err != nil {
 		return fmt.Errorf("kmod del tunnel %s: %w", tunnelID, err)
 	}
@@ -392,10 +422,11 @@ func (km *KmodManager) HasTunnel(tunnelID string) bool {
 }
 
 // buildProcLine builds the config line for /proc/awg_proxy/add.
-// Format: IP:PORT H1=min-max H2=... S1=N ... Jc=N ... PUB_SERVER=hex PUB_CLIENT=hex I1="template"
+// Format: ENDPOINT H1=min-max H2=... S1=N ... Jc=N ... PUB_SERVER=hex PUB_CLIENT=hex I1="template"
+// ENDPOINT is "IP:PORT" for IPv4 (unchanged) or "[IPV6]:PORT" (kmod >= 1.3.0).
 func buildProcLine(cfg KmodConfig) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s:%d", cfg.EndpointIP, cfg.EndpointPort)
+	b.WriteString(endpointKey(cfg.EndpointIP, cfg.EndpointPort))
 	fmt.Fprintf(&b, " H1=%s H2=%s H3=%s H4=%s", cfg.H1, cfg.H2, cfg.H3, cfg.H4)
 	fmt.Fprintf(&b, " S1=%d S2=%d S3=%d S4=%d", cfg.S1, cfg.S2, cfg.S3, cfg.S4)
 	fmt.Fprintf(&b, " Jc=%d Jmin=%d Jmax=%d", cfg.Jc, cfg.Jmin, cfg.Jmax)

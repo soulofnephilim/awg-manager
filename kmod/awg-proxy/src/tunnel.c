@@ -38,27 +38,82 @@ static int hrange_overlaps(const hrange_t *a, const hrange_t *b)
 }
 
 /*
+ * Parse an endpoint token — see tunnel.h for the accepted forms.
+ *
+ * The IPv4 branch is byte-identical to the historical parse (strrchr(':'),
+ * in_aton on whatever is left of the colon, kstrtoint on the port), so
+ * every input that used to be accepted still is, with the single deliberate
+ * exception of bare-IPv6-without-brackets: that used to be silently
+ * mis-parsed by in_aton into a bogus IPv4 slot and now fails loudly.
+ */
+int awg_endpoint_parse(const char *str, struct awg_endpoint_addr *addr,
+		       __be16 *port)
+{
+	char buf[64];
+	const char *port_str;
+	int port_int;
+
+	memset(addr, 0, sizeof(*addr));
+
+	if (strscpy(buf, str, sizeof(buf)) < 0)
+		return -EINVAL;
+
+	if (buf[0] == '[') {
+		/* Bracketed IPv6: "[2001:db8::1]:51820" */
+		char *close = strchr(buf, ']');
+
+		if (!close || close == buf + 1 || close[1] != ':')
+			return -EINVAL;
+		*close = '\0';
+		if (in6_pton(buf + 1, -1, addr->ip6.s6_addr, -1, NULL) != 1) {
+			pr_warn("awg_proxy: invalid IPv6 endpoint address\n");
+			return -EINVAL;
+		}
+		addr->family = AF_INET6;
+		port_str = close + 2;
+	} else {
+		char *colon = strrchr(buf, ':');
+
+		if (!colon)
+			return -EINVAL;
+		if (strchr(buf, ':') != colon) {
+			pr_warn("awg_proxy: IPv6 endpoint must be written as [addr]:port\n");
+			return -EINVAL;
+		}
+		*colon = '\0';
+		addr->family = AF_INET;
+		addr->ip4 = in_aton(buf);
+		port_str = colon + 1;
+	}
+
+	if (kstrtoint(port_str, 10, &port_int) ||
+	    port_int <= 0 || port_int > 65535)
+		return -EINVAL;
+	*port = htons(port_int);
+	return 0;
+}
+
+/*
  * Parse config line format:
- *   IP:PORT H1=min-max H2=min-max H3=min-max H4=min-max
+ *   ENDPOINT H1=min-max H2=min-max H3=min-max H4=min-max
  *           S1=N S2=N S3=N S4=N Jc=N Jmin=N Jmax=N
  *           PUB_SERVER=hex PUB_CLIENT=hex
  *           I1="template" I2="template" ...
  *
- * All params after IP:PORT are optional (defaults to identity = standard WG).
+ * ENDPOINT is "A.B.C.D:PORT" or "[IPV6]:PORT" — see awg_endpoint_parse.
+ * All params after ENDPOINT are optional (defaults to identity = standard WG).
  * Fills the provided awg_config_t; calls config_compute() at the end.
  * Returns 0 on success, negative errno on error.
  */
 int awg_config_parse(const char *config_line, awg_config_t *cfg)
 {
 	char ip_str[64];
-	__be32 ip;
+	struct awg_endpoint_addr addr;
 	__be16 port;
-	int port_int;
 	const char *p;
-	char *colon;
-	int i;
+	int i, ret;
 
-	/* Parse IP:PORT */
+	/* Parse ENDPOINT ("IP:PORT" or "[v6]:PORT") */
 	p = config_line;
 	while (*p == ' ' || *p == '\t')
 		p++;
@@ -68,20 +123,13 @@ int awg_config_parse(const char *config_line, awg_config_t *cfg)
 		ip_str[i++] = *p++;
 	ip_str[i] = '\0';
 
-	colon = strrchr(ip_str, ':');
-	if (!colon)
-		return -EINVAL;
-	*colon = '\0';
-
-	ip = in_aton(ip_str);
-	if (kstrtoint(colon + 1, 10, &port_int) ||
-	    port_int <= 0 || port_int > 65535)
-		return -EINVAL;
-	port = htons(port_int);
+	ret = awg_endpoint_parse(ip_str, &addr, &port);
+	if (ret)
+		return ret;
 
 	/* Initialize with identity defaults (standard WG, no transformation) */
 	memset(cfg, 0, sizeof(*cfg));
-	cfg->remote_ip = ip;
+	cfg->remote_addr = addr;
 	cfg->remote_port = port;
 	cfg->h1.min = 1; cfg->h1.max = 1;
 	cfg->h2.min = 2; cfg->h2.max = 2;

@@ -41,6 +41,12 @@ Env knobs:
     SRV_PORT  endpoint we tell the kmod to forward to (default 51999).
               Pick something not in use; the script's listener will bind
               this port for the duration of the test.
+    AWG_V6    if set to 1, run the whole test against the IPv6 loopback
+              ([::1]) instead of 127.0.0.1 — exercises the bracketed
+              "[v6]:port" procfs syntax, the AF_INET6 remote socket and the
+              udp_tunnel6 TX path (requires awg_proxy.ko >= v1.3.0 and a
+              kernel with IPv6). The DSCP-per-junk check uses IPV6_TCLASS
+              ancillary in this mode.
 
 Exit code: 0 if all checks PASS, 1 otherwise. 2 on setup error.
 """
@@ -53,9 +59,20 @@ import threading
 import time
 
 SRV_PORT = int(os.environ.get("SRV_PORT", 51999))
+USE_V6 = os.environ.get("AWG_V6", "") == "1"
 PROC_ADD = "/proc/awg_proxy/add"
 PROC_DEL = "/proc/awg_proxy/del"
 PROC_LIST = "/proc/awg_proxy/list"
+
+# Loopback family the kmod forwards to. The local WG client side is always
+# IPv4 loopback (127.0.0.1:listen_port) regardless — only the *endpoint*
+# family changes here.
+LOOPBACK = "::1" if USE_V6 else "127.0.0.1"
+
+
+def endpoint_str() -> str:
+    """Endpoint token exactly as awg_proxy.ko parses/prints it."""
+    return f"[{LOOPBACK}]:{SRV_PORT}" if USE_V6 else f"{LOOPBACK}:{SRV_PORT}"
 
 
 # ----- /proc/awg_proxy helpers -----
@@ -68,8 +85,9 @@ def _write_proc(path: str, line: str) -> None:
 def add_tunnel() -> int:
     """Add the test tunnel and return its kernel-assigned listen port."""
     pub = "00" * 32
+    ep = endpoint_str()
     line = (
-        f"127.0.0.1:{SRV_PORT}"
+        f"{ep}"
         f" H1= H2= H3= H4= S1=0 S2=0 S3=0 S4=0"
         f" Jc=2 Jmin=60 Jmax=80"
         f" PUB_SERVER={pub} PUB_CLIENT={pub}"
@@ -79,8 +97,9 @@ def add_tunnel() -> int:
     _write_proc(PROC_ADD, line)
     with open(PROC_LIST) as f:
         body = f.read()
+    # kmod list rows start with the same endpoint token we wrote.
     for entry in body.splitlines():
-        if not entry.startswith(f"127.0.0.1:{SRV_PORT}"):
+        if not entry.startswith(ep + " "):
             continue
         for tok in entry.split():
             if tok.startswith("listen=127.0.0.1:"):
@@ -92,7 +111,7 @@ def add_tunnel() -> int:
 
 def del_tunnel() -> None:
     try:
-        _write_proc(PROC_DEL, f"127.0.0.1:{SRV_PORT}")
+        _write_proc(PROC_DEL, endpoint_str())
     except OSError:
         pass  # best-effort cleanup
 
@@ -109,13 +128,20 @@ def run_cycle(srv: socket.socket, listen_port: int):
                 data, ancdata, _flags, _addr = srv.recvmsg(2000, 1024)
                 tos = None
                 for cmsg_level, cmsg_type, cmsg_data in ancdata:
-                    if cmsg_level != socket.IPPROTO_IP or not cmsg_data:
+                    if not cmsg_data:
                         continue
-                    # Linux delivers the received TOS under cmsg_type=IP_TOS=1
-                    # by default. Some kernels echo back the request type
-                    # (IP_RECVTOS=13). Accept either.
-                    if cmsg_type in (1, 13):
-                        tos = cmsg_data[0]
+                    if USE_V6:
+                        # IPv6 delivers the traffic class under
+                        # IPPROTO_IPV6 / IPV6_TCLASS=67 (as an int).
+                        if cmsg_level == socket.IPPROTO_IPV6 and \
+                                cmsg_type == 67:
+                            tos = struct.unpack("i", cmsg_data[:4])[0]
+                    elif cmsg_level == socket.IPPROTO_IP:
+                        # Linux delivers the received TOS under
+                        # cmsg_type=IP_TOS=1 by default. Some kernels echo
+                        # back the request type (IP_RECVTOS=13). Accept either.
+                        if cmsg_type in (1, 13):
+                            tos = cmsg_data[0]
                 captured.append((len(data), tos, data))
             except socket.timeout:
                 return
@@ -127,6 +153,8 @@ def run_cycle(srv: socket.socket, listen_port: int):
 
     # 148 bytes, msgType=1 (LE) — the rest can be zeros; kmod only checks
     # length and the first four bytes for the WG init signature.
+    # The WG-client side is ALWAYS IPv4 loopback (kmod listens on
+    # 127.0.0.1:listen_port) even when the endpoint is IPv6.
     init = b"\x01\x00\x00\x00" + b"\x00" * 144
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sender.sendto(init, ("127.0.0.1", listen_port))
@@ -294,18 +322,29 @@ def main() -> int:
         )
         return 2
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Enable IP_RECVTOS so each received datagram carries its IP TOS byte
-    # as ancillary data (delivered by recvmsg with cmsg_type=IP_TOS=1).
-    # Constant numeric value is hard-coded because socket.IP_RECVTOS is
-    # missing in some Python builds on embedded targets.
-    IP_RECVTOS = 13
-    srv.setsockopt(socket.IPPROTO_IP, IP_RECVTOS, 1)
+    if USE_V6:
+        srv = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        # IPV6_RECVTCLASS=66: deliver each datagram's traffic class as
+        # IPV6_TCLASS=67 ancillary. Hard-coded — socket.IPV6_RECVTCLASS is
+        # missing in some embedded Python builds.
+        IPV6_RECVTCLASS = 66
+        try:
+            srv.setsockopt(socket.IPPROTO_IPV6, IPV6_RECVTCLASS, 1)
+        except OSError:
+            pass  # DSCP check will just report None-tos
+    else:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Enable IP_RECVTOS so each received datagram carries its IP TOS byte
+        # as ancillary data (delivered by recvmsg with cmsg_type=IP_TOS=1).
+        # Constant numeric value is hard-coded because socket.IP_RECVTOS is
+        # missing in some Python builds on embedded targets.
+        IP_RECVTOS = 13
+        srv.setsockopt(socket.IPPROTO_IP, IP_RECVTOS, 1)
     try:
-        srv.bind(("127.0.0.1", SRV_PORT))
+        srv.bind((LOOPBACK, SRV_PORT))
     except OSError as e:
         print(
-            f"cannot bind 127.0.0.1:{SRV_PORT}: {e}  "
+            f"cannot bind {endpoint_str()}: {e}  "
             f"(set SRV_PORT=... to pick another)",
             file=sys.stderr,
         )
@@ -320,7 +359,7 @@ def main() -> int:
         return 2
     print(
         f"tunnel added: kmod listen=127.0.0.1:{listen_port}  "
-        f"target=127.0.0.1:{SRV_PORT}"
+        f"target={endpoint_str()}"
     )
 
     try:

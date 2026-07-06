@@ -10,6 +10,8 @@
 #include <linux/if.h>
 #include <asm/div64.h>
 
+#include "endpoint.h"
+
 /* WireGuard message types (LE uint32 in first 4 bytes) */
 #define WG_HANDSHAKE_INIT      1
 #define WG_HANDSHAKE_RESPONSE  2
@@ -102,7 +104,7 @@ typedef struct {
 	int transport_size_ambiguous;
 
 	/* Proxy-specific (not in reference) */
-	__be32 remote_ip;
+	struct awg_endpoint_addr remote_addr; /* AF_INET or AF_INET6 endpoint */
 	__be16 remote_port;
 	char bind_iface[IFNAMSIZ]; /* SO_BINDTODEVICE interface, empty = no binding */
 } awg_config_t;

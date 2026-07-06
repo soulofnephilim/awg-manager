@@ -327,7 +327,9 @@ func (r *Runner) collectProxyInfo(ctx context.Context, stored *storage.AWGTunnel
 			endpointHost = resolved
 		}
 	}
-	targetPrefix := endpointHost + ":" + endpointPort + " "
+	// net.JoinHostPort brackets IPv6 hosts ("[2001:db8::1]:51820") — the
+	// same form awg_proxy.ko >= 1.3.0 prints in /proc list rows.
+	targetPrefix := net.JoinHostPort(endpointHost, endpointPort) + " "
 
 	for line := range strings.SplitSeq(string(listData), "\n") {
 		if !strings.HasPrefix(line, targetPrefix) {

@@ -43,9 +43,10 @@ test_tunnel: test_tunnel.c shim.c shim.h $(SRC)/tunnel.c $(SRC)/transform.c $(SR
 	$(CC) $(CFLAGS) -o $@ test_tunnel.c shim.c $(SRC)/tunnel.c $(SRC)/transform.c $(SRC)/blake2s.c $(SRC)/cps.c $(LDFLAGS)
 
 # test_proxy_recv covers src/proxy_recv.h — the dual-mode worker recv-loop
-# classifier. proxy_recv.h is header-only (static inline) and pulls
-# stdbool / errno on the host build, so no extra source files are needed.
-test_proxy_recv: test_proxy_recv.c shim.c shim.h $(SRC)/proxy_recv.h
+# classifier — and src/endpoint.h — the pure RX source filter
+# (awg_src_matches) used by awg_encap_rcv for both address families.
+# Both headers are header-only (static inline), so no extra source files.
+test_proxy_recv: test_proxy_recv.c shim.c shim.h $(SRC)/proxy_recv.h $(SRC)/endpoint.h
 	$(CC) $(CFLAGS) -o $@ test_proxy_recv.c shim.c $(LDFLAGS)
 
 # test_proxy_loop replays the worker recv-loop's control flow on top of
