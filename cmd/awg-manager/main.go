@@ -1364,6 +1364,9 @@ func main() {
 	srv.SetSingboxFakeIPConfigHandler(api.NewSingboxFakeIPConfigHandler(routerSvc, loggingService))
 	srv.SetAWGOutboundsHandler(api.NewAWGOutboundsHandler(awgoutboundsSvc))
 	srv.SetSingboxConfigHandler(api.NewSingboxConfigHandler(sbOrch.ConfigDir))
+	// Эксперт-редактор конфигурации: обзор слотов config.d + draft-пайплайн
+	// пользовательского слота 90-user.json (единственный слот без продюсера).
+	srv.SetSingboxConfigEditorHandler(api.NewSingboxConfigEditorHandler(sbOrch))
 	// Зеркало inbound'ов merged-конфига: per-slot чтение config.d с атрибуцией
 	// источника (подписка/группа/туннель/device-proxy/QoS/движок). Резолверы
 	// nil-safe — при частичном bootstrap источник деградирует до слота.

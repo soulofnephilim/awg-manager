@@ -459,6 +459,64 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.ConfigSlotContentResponse:
+    properties:
+      content:
+        description: |-
+          Content — эффективное содержимое слота (pending-preferred), пустая
+          строка когда слот не сконфигурирован.
+        type: string
+      filename:
+        type: string
+      hasDraft:
+        type: boolean
+      slot:
+        type: string
+      state:
+        description: 'State: "active" | "disabled" | "absent" — где лежит применённый
+          файл.'
+        enum:
+        - active
+        - disabled
+        - absent
+        type: string
+    type: object
+  api.ConfigSlotInfo:
+    properties:
+      enabled:
+        type: boolean
+      filename:
+        example: 20-router.json
+        type: string
+      hasDraft:
+        type: boolean
+      mtime:
+        example: "2026-07-06T12:00:00Z"
+        type: string
+      ownership:
+        description: |-
+          Ownership: "system" — слот генерируется продюсером и перезаписывается
+          целиком; "user" — 90-user.json, пишется только редактором.
+        enum:
+        - system
+        - user
+        type: string
+      size:
+        description: |-
+          Size/MTime описывают «эффективное» содержимое (pending → active →
+          disabled). Size 0 и пустой MTime — слот ещё не сконфигурирован.
+        type: integer
+      slot:
+        example: router
+        type: string
+    type: object
+  api.ConfigSlotsResponse:
+    properties:
+      slots:
+        items:
+          $ref: '#/definitions/api.ConfigSlotInfo'
+        type: array
+    type: object
   api.ConnectionProtocolsDTO:
     properties:
       icmp:
@@ -5384,6 +5442,33 @@ definitions:
       urlTest:
         $ref: '#/definitions/api.SubscriptionURLTestDTO'
     type: object
+  api.UserConfigApplyResponse:
+    properties:
+      ok:
+        type: boolean
+      warnings:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
+    type: object
+  api.UserConfigCheckResponse:
+    properties:
+      errors:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
+      ok:
+        type: boolean
+      warnings:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
+    type: object
+  api.UserConfigEnableRequest:
+    properties:
+      enabled:
+        type: boolean
+    type: object
   api.WANIPData:
     properties:
       ip:
@@ -9921,6 +10006,262 @@ paths:
       summary: Get merged sing-box configuration preview
       tags:
       - singbox
+  /singbox/config/slot:
+    get:
+      description: Эффективное содержимое слота (pending-preferred, затем active,
+        затем disabled) — для read-only просмотра системных слотов и загрузки user-слота
+        в редактор.
+      parameters:
+      - description: slot name (e.g. router, user)
+        in: query
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.ConfigSlotContentResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: unknown slot
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Get sing-box config slot content
+      tags:
+      - singbox-config
+  /singbox/config/slots:
+    get:
+      description: 'Возвращает все известные слоты config.d в порядке merge: имя,
+        файл, владелец (system — генерируется автоматически, user — 90-user.json эксперт-редактора),
+        включён ли слот, есть ли черновик и размер/время эффективного содержимого.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.ConfigSlotsResponse'
+              type: object
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List sing-box config.d slots
+      tags:
+      - singbox-config
+  /singbox/config/user:
+    put:
+      consumes:
+      - application/json
+      description: Тело запроса — сырой JSON слота целиком (не DTO, кап 1 МБ). Сервер
+        проверяет синтаксис и что верхний уровень — объект, затем пишет черновик pending/90-user.json.
+        Черновик инертен до /apply.
+      parameters:
+      - description: полный JSON слота
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: malformed JSON / not an object
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Save user config slot draft
+      tags:
+      - singbox-config
+  /singbox/config/user/apply:
+    post:
+      description: Валидирует черновик (кросс-слот + sing-box check) и атомарно коммитит
+        pending → active. Отключённый слот включается ПОСЛЕ успешного apply (провал
+        валидации оставляет слот припаркованным, старый конфиг не воскресает). В 200-ответе
+        могут быть advisory-предупреждения (warnings). Применение — debounced SIGHUP;
+        добавление/удаление tun-inbound вызовет полный рестарт sing-box.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.UserConfigApplyResponse'
+              type: object
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: no draft to apply
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/api.RouterStagingValidationError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Apply user config slot draft
+      tags:
+      - singbox-config
+  /singbox/config/user/check:
+    post:
+      consumes:
+      - application/json
+      description: 'Полный пайплайн валидации (кросс-слот + `sing-box check` над tmpdir-снапшотом
+        «как если бы применили») БЕЗ записи. Тело опционально: непустое — проверяем
+        его; пустое — проверяем текущий черновик; ни того ни другого — 409. Это запрос-вопрос,
+        поэтому логический провал — 200 {ok:false}, а не 422.'
+      parameters:
+      - description: полный JSON слота (опционально)
+        in: body
+        name: body
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.UserConfigCheckResponse'
+              type: object
+        "400":
+          description: malformed JSON / not an object
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: no body and no draft
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Validate user config slot
+      tags:
+      - singbox-config
+  /singbox/config/user/discard:
+    post:
+      description: Удаляет pending/90-user.json. Идемпотентно.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Discard user config slot draft
+      tags:
+      - singbox-config
+  /singbox/config/user/enable:
+    post:
+      consumes:
+      - application/json
+      description: Переносит 90-user.json между config.d/ и config.d/disabled/ — слот
+        можно «припарковать» целиком, не удаляя содержимое (вместо применения пустого
+        {}).
+      parameters:
+      - description: target state
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UserConfigEnableRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Enable/disable user config slot
+      tags:
+      - singbox-config
   /singbox/connections/clients:
     get:
       description: 'Returns the current mapping of source IPs to display names: NDMS

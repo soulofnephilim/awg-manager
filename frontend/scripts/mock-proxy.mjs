@@ -1955,6 +1955,134 @@ let mockSBSettings = {
 	fakeipSourcePreserve: true,
 };
 
+// ── Config editor (config.d slots) mock state ─────────────────────
+// user-слот 90-user.json: applied-содержимое + опциональный черновик,
+// мутируется PUT/apply/discard/enable, чтобы draft-цикл работал в dev-mock.
+const MOCK_USER_SLOT_CONTENT = JSON.stringify(
+	{
+		outbounds: [
+			{
+				tag: 'my-proxy',
+				type: 'shadowsocks',
+				server: '198.51.100.10',
+				server_port: 8388,
+				method: '2022-blake3-aes-128-gcm',
+				password: 'c2VjcmV0LWtleQ==',
+			},
+		],
+		route: {
+			rules: [{ domain_suffix: ['example.org'], outbound: 'my-proxy' }],
+		},
+	},
+	null,
+	2,
+);
+
+let mockConfigEditor = {
+	userActive: MOCK_USER_SLOT_CONTENT,
+	userDraft: null,
+	userEnabled: true,
+};
+
+// Реалистичное содержимое системных слотов для read-only просмотра.
+const MOCK_SYSTEM_SLOT_CONTENT = {
+	base: {
+		filename: '00-base.json',
+		content: JSON.stringify(
+			{
+				log: { level: 'info', timestamp: true },
+				dns: {
+					servers: [
+						{ tag: 'cf', address: '1.1.1.1', detour: 'direct' },
+						{ tag: 'local', address: '192.168.1.1', detour: 'direct' },
+					],
+					rules: [{ outbound: 'any', server: 'local' }],
+					final: 'cf',
+					strategy: 'ipv4_only',
+				},
+				outbounds: [
+					{ tag: 'direct', type: 'direct' },
+					{ tag: 'block', type: 'block' },
+				],
+				route: { final: 'direct', auto_detect_interface: true },
+				experimental: {
+					clash_api: { external_controller: '127.0.0.1:9090', external_ui: 'ui' },
+					cache_file: { enabled: true, path: '/opt/etc/sing-box/cache.db' },
+				},
+			},
+			null,
+			2,
+		),
+	},
+	dns: {
+		filename: '05-dns.json',
+		content: JSON.stringify(
+			{
+				dns: {
+					servers: [{ tag: 'doh-quad9', address: 'https://9.9.9.9/dns-query', detour: 'direct' }],
+				},
+			},
+			null,
+			2,
+		),
+	},
+	router: {
+		filename: '10-router.json',
+		content: JSON.stringify(
+			{
+				inbounds: [{ tag: 'tproxy-in', type: 'tproxy', listen: '::', listen_port: 51272, sniff: true }],
+				route: {
+					rules: [
+						{ action: 'sniff' },
+						{ protocol: 'dns', action: 'hijack-dns' },
+						{ rule_set: ['geoip-ru'], outbound: 'direct' },
+					],
+					rule_set: [
+						{ tag: 'geoip-ru', type: 'remote', format: 'binary', url: 'https://example/ru.srs' },
+					],
+				},
+			},
+			null,
+			2,
+		),
+	},
+	tunnels: {
+		filename: '20-tunnels.json',
+		content: JSON.stringify(
+			{
+				outbounds: [
+					{ tag: 'awg-tunnel-1', type: 'wireguard', server: '203.0.113.7', server_port: 51820 },
+				],
+			},
+			null,
+			2,
+		),
+	},
+	deviceproxy: {
+		filename: '30-deviceproxy.json',
+		content: JSON.stringify(
+			{
+				inbounds: [{ tag: 'device-proxy-in', type: 'mixed', listen: '0.0.0.0', listen_port: 1099 }],
+			},
+			null,
+			2,
+		),
+	},
+	subscriptions: {
+		filename: '40-subscriptions.json',
+		content: JSON.stringify(
+			{
+				outbounds: [
+					{ tag: 'sub-ru', type: 'vless', server: 'ru.example.net', server_port: 443 },
+					{ tag: 'sub-eu', type: 'vless', server: 'eu.example.net', server_port: 443 },
+				],
+			},
+			null,
+			2,
+		),
+	},
+};
+
 // DHCP pools projected as fakeip "segments" (Task 2.1/2.2). Persistent
 // in-memory state so the POST toggle mutates what the GET reads. dnsServer is
 // the fakeip-tun DNS (.2 of the 172.18.0.1/30 link) when a pool is in fakeip.
@@ -4525,6 +4653,150 @@ const server = http.createServer(async (req, res) => {
 		send(res, 200, {
 			success: true,
 			data: { json: JSON.stringify(merged, null, 2) },
+		});
+		return;
+	}
+
+	// ── Config editor (config.d slots, feature-user-config-editor) ──────
+	// Prism отдаёт "string"-плейсхолдеры из swagger — вместо них живая
+	// фикстура: список слотов с бейджами, содержимое base/user, draft-цикл
+	// PUT → check → apply/discard и enable-переключатель. Проверка (check)
+	// возвращает ok:false с двумя ошибками, если в конфиге встречается тег
+	// "bad-tag" — маркер для скриншотов ошибок; конфиг с "final" даёт
+	// ok:true + warning (жёлтый блок предупреждений).
+	if (req.method === 'GET' && path === '/singbox/config/slots') {
+		const userEffective = mockConfigEditor.userDraft ?? mockConfigEditor.userActive;
+		send(res, 200, {
+			success: true,
+			data: {
+				slots: [
+					{ slot: 'base', filename: '00-base.json', ownership: 'system', enabled: true, hasDraft: false, size: 1487, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'dns', filename: '05-dns.json', ownership: 'system', enabled: true, hasDraft: false, size: 612, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'router', filename: '10-router.json', ownership: 'system', enabled: true, hasDraft: true, size: 3961, mtime: '2026-07-06T08:03:41Z' },
+					{ slot: 'tunnels', filename: '20-tunnels.json', ownership: 'system', enabled: true, hasDraft: false, size: 2210, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'deviceproxy', filename: '30-deviceproxy.json', ownership: 'system', enabled: true, hasDraft: false, size: 344, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'subscriptions', filename: '40-subscriptions.json', ownership: 'system', enabled: false, hasDraft: false, size: 5133, mtime: '2026-07-04T11:32:19Z' },
+					{
+						slot: 'user',
+						filename: '90-user.json',
+						ownership: 'user',
+						enabled: mockConfigEditor.userEnabled,
+						hasDraft: mockConfigEditor.userDraft !== null,
+						size: Buffer.byteLength(userEffective),
+						mtime: '2026-07-06T09:12:55Z',
+					},
+				],
+			},
+		});
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/singbox/config/slot') {
+		const name = url.searchParams.get('name') || '';
+		if (name === 'user') {
+			send(res, 200, {
+				success: true,
+				data: {
+					slot: 'user',
+					filename: '90-user.json',
+					content: mockConfigEditor.userDraft ?? mockConfigEditor.userActive,
+					state: mockConfigEditor.userEnabled ? 'active' : 'disabled',
+					hasDraft: mockConfigEditor.userDraft !== null,
+				},
+			});
+			return;
+		}
+		const system = MOCK_SYSTEM_SLOT_CONTENT[name];
+		if (!system) {
+			send(res, 404, { success: false, error: { code: 'SLOT_NOT_FOUND', message: `slot ${name} not found` } });
+			return;
+		}
+		send(res, 200, {
+			success: true,
+			data: {
+				slot: name,
+				filename: system.filename,
+				content: system.content,
+				state: name === 'subscriptions' ? 'disabled' : 'active',
+				hasDraft: name === 'router',
+			},
+		});
+		return;
+	}
+
+	if (req.method === 'PUT' && path === '/singbox/config/user') {
+		readRequestText(req).then((raw) => {
+			mockConfigEditor.userDraft = raw;
+			console.log(`[mock-proxy] user slot draft saved (${raw.length} bytes)`);
+			send(res, 200, { success: true, data: {} });
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/check') {
+		readRequestText(req).then((raw) => {
+			const subject = raw || mockConfigEditor.userDraft;
+			if (subject === null || subject === undefined) {
+				send(res, 409, { success: false, error: { code: 'NO_DRAFT', message: 'нет черновика для проверки' } });
+				return;
+			}
+			if (subject.includes('bad-tag')) {
+				send(res, 200, {
+					success: true,
+					data: {
+						ok: false,
+						// kind'ы выровнены с бэкендом (orchestrator.ValidationError.Kind).
+						errors: [
+							{ slot: 'user', kind: 'duplicate-outbound', tag: 'direct', inRule: '', message: 'тег outbound уже занят слотом 00-base.json' },
+							{ slot: 'user', kind: 'unknown-outbound', tag: 'bad-tag', inRule: 'route.rules[0]', message: 'правило ссылается на несуществующий outbound' },
+						],
+					},
+				});
+				return;
+			}
+			// Маркер "warn-final" — advisory-предупреждение (ok:true + warnings),
+			// как route-final-conflict у бэкенда.
+			if (subject.includes('"final"')) {
+				send(res, 200, {
+					success: true,
+					data: {
+						ok: true,
+						errors: [],
+						warnings: [
+							{ slot: 'user', kind: 'route-final-conflict', tag: '', inRule: 'route.final', message: 'route.final задан несколькими слотами; sing-box оставит первый и молча проигнорирует остальные' },
+						],
+					},
+				});
+				return;
+			}
+			send(res, 200, { success: true, data: { ok: true, errors: [] } });
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/apply') {
+		if (mockConfigEditor.userDraft !== null) {
+			mockConfigEditor.userActive = mockConfigEditor.userDraft;
+			mockConfigEditor.userDraft = null;
+		}
+		mockConfigEditor.userEnabled = true;
+		console.log('[mock-proxy] user slot draft applied');
+		send(res, 200, { success: true, data: { ok: true } });
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/discard') {
+		mockConfigEditor.userDraft = null;
+		console.log('[mock-proxy] user slot draft discarded');
+		send(res, 200, { success: true, data: {} });
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/enable') {
+		readJsonBody(req, {}).then((body) => {
+			mockConfigEditor.userEnabled = body.enabled !== false;
+			console.log(`[mock-proxy] user slot enabled=${mockConfigEditor.userEnabled}`);
+			send(res, 200, { success: true, data: {} });
 		});
 		return;
 	}

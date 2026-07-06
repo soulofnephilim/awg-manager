@@ -100,15 +100,25 @@ func (o *Orchestrator) readActiveBytes(slot Slot) ([]byte, error) {
 	return readIfExists(o.activePath(meta))
 }
 
-// validateWith runs the cross-slot consistency algorithm. bytesFor is
-// the source of slot JSON — callers pass readActiveBytes for normal
-// validation and a swapping variant for draft validation. Caller MUST
-// hold o.mu.
+// validateWith runs the cross-slot consistency algorithm over the
+// currently-enabled slots. bytesFor is the source of slot JSON — callers
+// pass readActiveBytes for normal validation and a swapping variant for
+// draft validation. Caller MUST hold o.mu.
+func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) ValidationResult {
+	return o.validateWithEnabled(bytesFor, func(s Slot) bool { return o.enabled[s] })
+}
+
+// validateWithEnabled is validateWith with an explicit enabled-predicate.
+// Draft validation passes a predicate that treats the TARGET slot as
+// enabled regardless of its current state — "validate as if applied"
+// (the CheckMerged contract): без этого черновик отключённого слота
+// (типично 90-user.json до первого включения) тихо проходил бы
+// логическую проверку. Caller MUST hold o.mu.
 //
 // We deliberately tolerate JSON parse errors: a single broken slot file
 // is reported as one error, scan continues. This makes the result more
 // useful when developing.
-func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) ValidationResult {
+func (o *Orchestrator) validateWithEnabled(bytesFor func(Slot) ([]byte, error), enabledFor func(Slot) bool) ValidationResult {
 	type tagOrigin struct {
 		slot Slot
 	}
@@ -141,7 +151,7 @@ func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) Validat
 	}
 
 	for _, os := range ordered {
-		if !o.enabled[os.slot] {
+		if !enabledFor(os.slot) {
 			continue
 		}
 		data, err := bytesFor(os.slot)
@@ -403,12 +413,17 @@ func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) Validat
 // Use case: ApplyDraft pre-flights cross-slot consistency before
 // renaming pending → active.
 func (o *Orchestrator) validateDraftLocked(target Slot, draftBytes []byte) ValidationResult {
-	return o.validateWith(func(slot Slot) ([]byte, error) {
-		if slot == target {
-			return draftBytes, nil
-		}
-		return o.readActiveBytes(slot)
-	})
+	return o.validateWithEnabled(
+		func(slot Slot) ([]byte, error) {
+			if slot == target {
+				return draftBytes, nil
+			}
+			return o.readActiveBytes(slot)
+		},
+		// Цель считается включённой — «валидируем как будто применили»,
+		// в согласии со снапшотом sing-box check в checkMergedLocked.
+		func(slot Slot) bool { return slot == target || o.enabled[slot] },
+	)
 }
 
 // slotsList renders slots as a comma-separated string for warning messages.

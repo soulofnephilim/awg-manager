@@ -60,6 +60,16 @@ type Orchestrator struct {
 	// cannot add/remove a tun inbound via SIGHUP. Guarded by o.mu.
 	prevHasTun bool
 
+	// lastReloadValidation stores the ValidationResult of the most
+	// recent Reload that was SKIPPED because validateLocked failed
+	// (engine keeps running on the old config). Cleared on the next
+	// successful validation. Surfaced to the UI via
+	// LastReloadValidation — primarily so a dangling reference inside
+	// the user slot (90-user.json), which prune deliberately does not
+	// self-heal, is visible instead of silently freezing applies.
+	// Guarded by o.mu.
+	lastReloadValidation *ValidationResult
+
 	// shouldRun, when non-nil and returning false, suppresses cold-start
 	// of sing-box during Reload. Used by Operator to enforce the
 	// user-pressed-Stop sticky intent so config-change-triggered reloads
@@ -85,6 +95,21 @@ func (o *Orchestrator) SetShouldRun(fn func() bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.shouldRun = fn
+}
+
+// LastReloadValidation returns a copy of the validation result that made
+// the most recent Reload skip applying the merged config, or nil when the
+// last validation passed (or no reload happened yet). Safe for concurrent
+// callers; the copy shares no mutable state with the orchestrator.
+func (o *Orchestrator) LastReloadValidation() *ValidationResult {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.lastReloadValidation == nil {
+		return nil
+	}
+	cp := *o.lastReloadValidation
+	cp.Errors = append([]ValidationError(nil), o.lastReloadValidation.Errors...)
+	return &cp
 }
 
 // CurrentHasTun reports whether the LAST applied config had a tun inbound.

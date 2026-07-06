@@ -2075,6 +2075,48 @@ export interface RouterStagingValidationError {
 	sbCheck?: string;
 }
 
+// === Эксперт-редактор конфигурации sing-box (config.d слоты) ===
+
+/** Один слот config.d в обзоре редактора. */
+export interface ConfigSlotInfo {
+	slot: string;
+	filename: string;
+	/** system — генерируется продюсером; user — 90-user.json эксперт-редактора. */
+	ownership: 'system' | 'user';
+	enabled: boolean;
+	hasDraft: boolean;
+	/** Размер эффективного содержимого (pending → active → disabled), 0 если не сконфигурирован. */
+	size: number;
+	mtime?: string;
+}
+
+export interface ConfigSlotsResponse {
+	slots: ConfigSlotInfo[];
+}
+
+/** Эффективное содержимое слота для просмотра/редактирования. */
+export interface ConfigSlotContentResponse {
+	slot: string;
+	filename: string;
+	content: string;
+	state: 'active' | 'disabled' | 'absent';
+	hasDraft: boolean;
+}
+
+/** Результат POST /singbox/config/user/check (200 и при ok:false — это запрос-вопрос). */
+export interface UserConfigCheckResponse {
+	ok: boolean;
+	errors?: RouterValidationErrorDTO[];
+	/** Advisory-предупреждения (severity=warning): применение не блокируют. */
+	warnings?: RouterValidationErrorDTO[];
+}
+
+/** 200-ответ POST /singbox/config/user/apply — применено, но могут быть предупреждения. */
+export interface UserConfigApplyResponse {
+	ok: boolean;
+	warnings?: RouterValidationErrorDTO[];
+}
+
 // ─────────────────────────────────────────────
 // #region DNS Proxy Info
 // ─────────────────────────────────────────────

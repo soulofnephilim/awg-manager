@@ -117,6 +117,7 @@ type Server struct {
 	singboxRouterHandler       *api.SingboxRouterHandler
 	singboxFakeIPConfigHandler *api.SingboxFakeIPConfigHandler
 	singboxConfigHandler       *api.SingboxConfigHandler
+	singboxConfigEditorHandler *api.SingboxConfigEditorHandler
 	singboxInboundsHandler     *api.SingboxInboundsHandler
 	singboxProxiesHandler      *api.SingboxProxiesHandler
 	selectiveHandler           *api.SelectiveHandler
@@ -338,6 +339,13 @@ func (s *Server) SetAWGOutboundsHandler(h *api.AWGOutboundsHandler) {
 // available after main wires everything up.
 func (s *Server) SetSingboxConfigHandler(h *api.SingboxConfigHandler) {
 	s.singboxConfigHandler = h
+}
+
+// SetSingboxConfigEditorHandler injects the expert config-editor handler
+// (slots browser + user-slot draft pipeline). Wired post-construction like
+// the config-preview handler — it needs the fully-registered orchestrator.
+func (s *Server) SetSingboxConfigEditorHandler(h *api.SingboxConfigEditorHandler) {
+	s.singboxConfigEditorHandler = h
 }
 
 // SetSingboxInboundsHandler injects the read-only inbounds-mirror handler
@@ -1128,6 +1136,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	}
 	if s.singboxConfigHandler != nil {
 		mux.HandleFunc("/api/singbox/config-preview", guarded(s.singboxConfigHandler.Preview))
+	}
+	if s.singboxConfigEditorHandler != nil {
+		ce := s.singboxConfigEditorHandler
+		mux.HandleFunc("/api/singbox/config/slots", guarded(ce.ListSlots))
+		mux.HandleFunc("/api/singbox/config/slot", guarded(ce.GetSlot))
+		mux.HandleFunc("/api/singbox/config/user", guarded(ce.PutUserConfig))
+		mux.HandleFunc("/api/singbox/config/user/check", guarded(ce.CheckUserConfig))
+		mux.HandleFunc("/api/singbox/config/user/apply", guarded(ce.ApplyUserConfig))
+		mux.HandleFunc("/api/singbox/config/user/discard", guarded(ce.DiscardUserConfig))
+		mux.HandleFunc("/api/singbox/config/user/enable", guarded(ce.EnableUserConfig))
 	}
 	if s.singboxInboundsHandler != nil {
 		mux.HandleFunc("/api/singbox/inbounds", guarded(s.singboxInboundsHandler.List))

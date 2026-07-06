@@ -5,7 +5,7 @@
   import { ArrowLeft } from 'lucide-svelte';
   import { LoadingSpinner } from '$lib/components/layout';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
-  import { StagingBanner, RouteInspector, JsonConfigDrawer } from '$lib/components/singbox-routing';
+  import { StagingBanner, RouteInspector, JsonConfigDrawer, ConfigSlotsDrawer } from '$lib/components/singbox-routing';
   import { ConnectionsSubTab } from '$lib/components/routing/singboxRouter';
   import {
     PageShell,
@@ -51,6 +51,10 @@
   let activeSingboxSub = $derived($page.url.searchParams.get('sub'));
   let inspectorOpen = $state(false);
   let jsonOpen = $state(false);
+  // Эксперт-редактор config.d (слоты + 90-user.json). Страница целиком
+  // доступна только на usageLevel=expert (ROUTING_SUBTAB_MIN_LEVEL), кнопка
+  // дополнительно показывается лишь в режиме «Эксперт».
+  let configEditorOpen = $state(false);
   const singboxRulesStore = singboxRouterStore.rules;
   const singboxInitialized = singboxRouterStore.initialized;
   let singboxRulesCount = $derived($singboxRulesStore.length);
@@ -130,7 +134,11 @@
   }
 </script>
 
-<PageShell onOpenInspector={() => (inspectorOpen = true)} onOpenJson={() => (jsonOpen = true)}>
+<PageShell
+  onOpenInspector={() => (inspectorOpen = true)}
+  onOpenJson={() => (jsonOpen = true)}
+  onOpenConfigEditor={$sbMode === 'expert' ? () => (configEditorOpen = true) : undefined}
+>
   <StagingBanner />
   {#if inSubView}
     <button type="button" class="sub-back" onclick={clearSub}>
@@ -159,6 +167,11 @@
 
 <RouteInspector open={inspectorOpen} onClose={() => (inspectorOpen = false)} />
 <JsonConfigDrawer open={jsonOpen} onClose={() => (jsonOpen = false)} />
+<ConfigSlotsDrawer
+  open={configEditorOpen}
+  onClose={() => (configEditorOpen = false)}
+  onOpenMerged={() => (jsonOpen = true)}
+/>
 
 <SelectiveRebuildModal
   open={globalRebuildOpen}
