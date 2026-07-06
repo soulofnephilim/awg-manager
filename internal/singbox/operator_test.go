@@ -2148,3 +2148,50 @@ func TestOperator_Update_SameVersionSameSHA_NoOp(t *testing.T) {
 		t.Fatalf("binary disappeared: %v", err)
 	}
 }
+
+// TestParseTunnelLinksInput covers the whole-body detection step of
+// AddTunnels: канонический mieru client config JSON (экспорт панелей)
+// парсится целиком, а не построчно; обычные share-link'и идут прежним
+// line-split путём. Full AddTunnels integration requires a live sing-box
+// binary — see TestNextFreeListenPortSlot comment above.
+func TestParseTunnelLinksInput(t *testing.T) {
+	mieruJSON := `{
+		"profiles": [
+			{
+				"profileName": "default",
+				"user": { "name": "baozi", "password": "manlianpenfen" },
+				"servers": [
+					{
+						"ipAddress": "12.34.56.78",
+						"portBindings": [
+							{ "port": 6666, "protocol": "TCP" },
+							{ "port": 6489, "protocol": "UDP" }
+						]
+					}
+				]
+			}
+		],
+		"activeProfile": "default"
+	}`
+	res := parseTunnelLinksInput(mieruJSON)
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors: %+v", res.Errors)
+	}
+	if len(res.Outbounds) != 2 {
+		t.Fatalf("outbounds=%d want 2 (TCP+UDP)", len(res.Outbounds))
+	}
+	for _, p := range res.Outbounds {
+		if p.Protocol != "mieru" || p.Server != "12.34.56.78" {
+			t.Fatalf("unexpected outbound: %+v", p)
+		}
+	}
+
+	// Обычные share-link'и — прежний построчный путь.
+	res = parseTunnelLinksInput("vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=h#A\ntrojan://p@h.example:444?security=tls&sni=h#B")
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors: %+v", res.Errors)
+	}
+	if len(res.Outbounds) != 2 {
+		t.Fatalf("outbounds=%d want 2", len(res.Outbounds))
+	}
+}

@@ -464,13 +464,18 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 	}
 	isClash := vlink.IsClashYAML(body)
 	isSbJSON := !isClash && vlink.IsSingboxJSON(body)
+	// Детект по СЫРОМУ телу: base64-обёрнутый JSON (sing-box или mieru)
+	// сюда не попадает — он уйдёт в NormalizeBody/DoubleDecode, где после
+	// декодирования строки без share-схем отбрасываются. Ограничение
+	// сознательное и симметричное для обоих JSON-форматов.
+	isMieruJSON := !isClash && !isSbJSON && vlink.IsMieruClientJSON(body)
 	// Body that's valid JSON but not a recognised sing-box subscription
-	// (no outbounds key in the right place) gets a precise error rather
-	// than a fall-through into share-link parsing — otherwise the user
-	// sees "ни одной валидной ссылки" with a meaningless prefix from
-	// scanning JSON bytes for "://".
-	if !isClash && !isSbJSON && vlink.LooksLikeJSON(body) {
-		err := errors.New("subscription: тело подписки выглядит как JSON, но не похоже на sing-box config (нет outbounds). Поддерживаются: sing-box JSON config (одиночный, массив конфигов, или массив outbounds), Clash / mihomo YAML, base64 share-links, plain text vless://, trojan://, ss://, hysteria2://, mieru://, mierus://.")
+	// (no outbounds key in the right place) or mieru client config (no
+	// profiles) gets a precise error rather than a fall-through into
+	// share-link parsing — otherwise the user sees "ни одной валидной
+	// ссылки" with a meaningless prefix from scanning JSON bytes for "://".
+	if !isClash && !isSbJSON && !isMieruJSON && vlink.LooksLikeJSON(body) {
+		err := errors.New("subscription: тело подписки выглядит как JSON, но не похоже ни на sing-box config (нет outbounds), ни на mieru client config (нет profiles). Поддерживаются: sing-box JSON config (одиночный, массив конфигов, или массив outbounds), mieru JSON config (формат mieru apply config, экспорт панелей), Clash / mihomo YAML, base64 share-links, plain text vless://, trojan://, ss://, hysteria2://, mieru://, mierus://.")
 		s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
 		s.logWarn("subscription-refresh", id, err.Error())
 		return nil, err
@@ -481,6 +486,8 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 		parseRes = vlink.ParseClashBody(body)
 	case isSbJSON:
 		parseRes = vlink.ParseSingboxBody(body)
+	case isMieruJSON:
+		parseRes = vlink.ParseMieruClientJSON(body)
 	default:
 		lines := NormalizeBody(body, ct)
 		parseRes = vlink.ParseBatch(lines)
@@ -498,10 +505,10 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 		case isSbJSON && emptyClean:
 			errMsg = "subscription: подписка пуста (outbounds: []). Возможно, истекла или ещё не активирована — проверь на стороне провайдера."
 		case len(parseRes.Errors) > 0:
-			hint := "ни одной валидной ссылки. Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, Clash YAML / mihomo, а также sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru). Записи vmess пропускаются."
+			hint := "ни одной валидной ссылки. Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, Clash YAML / mihomo, sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru), а также mieru JSON config (формат mieru apply config, экспорт панелей). Записи vmess пропускаются."
 			errMsg = fmt.Sprintf("subscription: %s Первая ошибка парсера: %s", hint, parseRes.Errors[0].Error())
 		default:
-			hint := "ни одной валидной ссылки. Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, Clash YAML / mihomo, а также sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru). Записи vmess пропускаются."
+			hint := "ни одной валидной ссылки. Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, Clash YAML / mihomo, sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru), а также mieru JSON config (формат mieru apply config, экспорт панелей). Записи vmess пропускаются."
 			if len(parts.Info) > 0 {
 				hint += fmt.Sprintf(" (инфо-строк провайдера: %d — не являются серверами)", len(parts.Info))
 			}
@@ -1420,6 +1427,8 @@ func (s *Service) PreviewURL(ctx context.Context, url string, headers []Header) 
 		parseRes = vlink.ParseClashBody(body)
 	case vlink.IsSingboxJSON(body):
 		parseRes = vlink.ParseSingboxBody(body)
+	case vlink.IsMieruClientJSON(body):
+		parseRes = vlink.ParseMieruClientJSON(body)
 	default:
 		parseRes = vlink.ParseBatch(NormalizeBody(body, ct))
 	}
