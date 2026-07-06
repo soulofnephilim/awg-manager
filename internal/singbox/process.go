@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -43,7 +44,10 @@ type Process struct {
 	// period — i.e., a "successful start that died later". The error is
 	// the result of cmd.Wait (typically *exec.ExitError). The captured
 	// stderr buffer (last ~16KB) is passed as the second argument.
-	OnExit func(err error, stderrTail string)
+	// deliberate is true when the exit was requested through Stop/Reload
+	// (SIGTERM/SIGKILL from us) rather than being a crash — consumers use
+	// it to keep crash counters honest (issue #456).
+	OnExit func(err error, stderrTail string, deliberate bool)
 
 	// ReloadNeedsRestart reports whether the currently-running config has a
 	// tun inbound. When it returns true, Reload does a full Stop+Start instead
@@ -64,10 +68,42 @@ type Process struct {
 	stderrMu   sync.RWMutex
 	lastStderr string
 
+	// curGen is the per-run state holder of the CURRENT process
+	// generation; nil before the first spawn. Replaced by every
+	// startLocked, flagged by stopLocked. Guarded by startMu (all writers
+	// hold it); the exit-monitor goroutine never reads curGen — it closes
+	// over ITS OWN generation, so a back-to-back stop→start can neither
+	// clear the predecessor's deliberate flag nor leak the flag into the
+	// successor run (issue #456 FIX-C: раньше один atomic.Bool на весь
+	// Process сбрасывался следующим startLocked раньше, чем предыдущий
+	// монитор успевал его прочитать, и наш же рестарт считался падением).
+	curGen *processGen
+
 	// For tests
 	startCmd      func(bin string, args ...string) (*exec.Cmd, error)
 	signalFn      func(pid int, sig syscall.Signal) error
 	matchBinaryFn func(pid int) bool // nil = matchesBinary
+}
+
+// signal delivers sig to pid through the signalFn seam, falling back to
+// the real syscall when the seam is unset (zero-value Process in tests).
+func (p *Process) signal(pid int, sig syscall.Signal) error {
+	if p.signalFn != nil {
+		return p.signalFn(pid, sig)
+	}
+	return syscall.Kill(pid, sig)
+}
+
+// processGen holds per-run (per-Start) state. One instance is created by
+// each startLocked and captured by that run's exit-monitor goroutine;
+// deliberate is atomic because stopLocked (under startMu) and the
+// monitor goroutine (lock-free) touch it concurrently.
+type processGen struct {
+	// deliberate is true when this run's exit was requested via Stop
+	// (including the stop phase of Reload/restart) rather than being a
+	// crash. Set by stopLocked BEFORE signalling, so it is already
+	// observable when cmd.Wait returns.
+	deliberate atomic.Bool
 }
 
 func NewProcess(binary, configPath, pidPath string) *Process {
@@ -102,23 +138,35 @@ const (
 //
 // Start acquires startMu so concurrent callers cannot both pass the IsRunning
 // gate and spawn duplicate processes. IsRunning is intentionally lock-free.
+// Обёртка над StartSpawned для интерфейсов, которым не нужен признак
+// фактического спавна (orchestrator.ProcessController).
 func (p *Process) Start() error {
+	_, err := p.StartSpawned()
+	return err
+}
+
+// StartSpawned is Start that additionally reports whether a NEW process
+// was actually forked (spawned=false, err=nil — no-op: процесс уже
+// работал). Нужен честной атрибуции backoff-бюджета: проигравший гонку
+// watchdog/router reconcile не должен жечь Allow за чужой рестарт
+// (issue #456 FIX-E) и не должен двигать NoteProcessStart (FIX-I).
+func (p *Process) StartSpawned() (spawned bool, err error) {
 	p.startMu.Lock()
 	defer p.startMu.Unlock()
 	return p.startLocked()
 }
 
 // startLocked is the lock-free body of Start. Must be called with startMu held.
-func (p *Process) startLocked() error {
+func (p *Process) startLocked() (spawned bool, err error) {
 	if running, _ := p.IsRunning(); running {
-		return nil
+		return false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(p.pidPath), 0755); err != nil {
-		return err
+		return false, err
 	}
 	cmd, err := p.startCmd(p.binary, "run", "-C", p.configPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cmd.Env = singboxRuntimeEnv(os.Environ())
 	pr, pw := io.Pipe()
@@ -158,7 +206,7 @@ func (p *Process) startLocked() error {
 		_ = pw.Close()
 		_ = stdoutW.Close()
 		<-scannerDone
-		return fmt.Errorf("start sing-box: %w", err)
+		return false, fmt.Errorf("start sing-box: %w", err)
 	}
 	if err := p.writePID(cmd.Process.Pid); err != nil {
 		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
@@ -166,8 +214,14 @@ func (p *Process) startLocked() error {
 		_ = pw.Close()
 		_ = stdoutW.Close()
 		<-scannerDone
-		return err
+		return false, err
 	}
+	// Свежая генерация процесса со своим «not a deliberate stop» флагом;
+	// stopLocked взводит его перед сигналом. Монитор ниже замыкается на
+	// СВОЮ генерацию, поэтому следующий Start (создающий новую) не может
+	// ретроактивно очистить флаг предшественника (FIX-C).
+	gen := &processGen{}
+	p.curGen = gen
 	errCh := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
@@ -189,20 +243,25 @@ func (p *Process) startLocked() error {
 		}
 		safeMsg := sanitizeSingboxLogText(msg)
 		p.setLastStderr(safeMsg)
-		return fmt.Errorf("sing-box exited during startup: %s", safeMsg)
+		return true, fmt.Errorf("sing-box exited during startup: %s", safeMsg)
 	case <-time.After(startupGracePeriod):
 		myPid := cmd.Process.Pid
 		go func() {
 			waitErr := <-errCh
+			// Читаем флаг СВОЕЙ генерации: stopLocked взводит его до
+			// сигнала, а генерация следующего Start — отдельный объект,
+			// так что здесь честный ответ «этот выход был наш» даже при
+			// мгновенном stop→start (FIX-C).
+			deliberate := gen.deliberate.Load()
 			p.cleanupPidIfOurs(myPid)
 			tail := strings.TrimSpace(stderr.String())
 			safeTail := sanitizeSingboxLogText(tail)
 			p.setLastStderr(safeTail)
 			if p.OnExit != nil {
-				p.OnExit(waitErr, safeTail)
+				p.OnExit(waitErr, safeTail, deliberate)
 			}
 		}()
-		return nil
+		return true, nil
 	}
 }
 
@@ -257,7 +316,15 @@ func (p *Process) stopLocked() error {
 	if err != nil {
 		return nil // nothing to stop
 	}
-	_ = p.signalFn(pid, syscall.SIGTERM)
+	// Mark the upcoming exit of the CURRENT generation as deliberate
+	// BEFORE the signal lands so its exit-monitor goroutine never
+	// mistakes our own SIGTERM/SIGKILL for a crash. nil = процесс из pid
+	// файла спавнили не мы (например, предыдущий awgm) — монитора нет,
+	// метить нечего.
+	if p.curGen != nil {
+		p.curGen.deliberate.Store(true)
+	}
+	_ = p.signal(pid, syscall.SIGTERM)
 	// Wait up to 3s
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -267,7 +334,7 @@ func (p *Process) stopLocked() error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if isAlive(pid) {
-		_ = p.signalFn(pid, syscall.SIGKILL)
+		_ = p.signal(pid, syscall.SIGKILL)
 		// Brief poll for the kernel to reap the SIGKILL'd process before
 		// removing the pid record. Without this, a follow-up Start that
 		// sees a missing pidfile could spawn a second process alongside
@@ -300,7 +367,8 @@ func (p *Process) Reload() error {
 
 	pid, err := p.readPID()
 	if err != nil {
-		return p.startLocked() // no process, start fresh
+		_, err := p.startLocked() // no process, start fresh
+		return err
 	}
 	// A tun inbound cannot survive SIGHUP (sing-box re-opens the tun while the
 	// old instance still holds it → "TUNSETIFF: device or resource busy" →
@@ -309,16 +377,19 @@ func (p *Process) Reload() error {
 	// since they all funnel through here.
 	if p.ReloadNeedsRestart != nil && p.ReloadNeedsRestart() {
 		_ = p.stopLocked()
-		return p.startLocked()
+		_, err := p.startLocked()
+		return err
 	}
-	if err := p.signalFn(pid, syscall.SIGHUP); err != nil {
+	if err := p.signal(pid, syscall.SIGHUP); err != nil {
 		// SIGHUP failed; full restart
 		_ = p.stopLocked()
-		return p.startLocked()
+		_, err := p.startLocked()
+		return err
 	}
 	time.Sleep(150 * time.Millisecond)
 	if !isAlive(pid) {
-		return p.startLocked()
+		_, err := p.startLocked()
+		return err
 	}
 	return nil
 }

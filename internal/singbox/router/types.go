@@ -48,6 +48,16 @@ type Status struct {
 	// LastError is the last sing-box fatal/exit reason, populated only when
 	// the engine is enabled but not active (СБОЙ). Empty otherwise.
 	LastError string `json:"lastError,omitempty"`
+	// CrashCount — падения sing-box за последнее backoff-окно (10 мин).
+	// UI показывает «Падений за 10 мин: N» в панели движка (issue #456).
+	CrashCount int `json:"crashCount,omitempty"`
+	// LastCrashReason — причина последнего падения в окне (например,
+	// распознанный OOM-kill); пусто, когда падений в окне нет.
+	LastCrashReason string `json:"lastCrashReason,omitempty"`
+	// RestartSuppressedUntil — RFC3339-время, до которого авто-перезапуск
+	// приостановлен анти-crash-loop backoff'ом; пусто, когда не подавлен.
+	// Ручной «Перезапустить» не подавляется и сбрасывает паузу.
+	RestartSuppressedUntil string `json:"restartSuppressedUntil,omitempty"`
 }
 
 type Issue struct {

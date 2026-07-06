@@ -1462,6 +1462,16 @@ export interface SingboxRouterStatus {
 	issues?: SingboxRouterIssue[];
 	/** Последняя fatal-причина sing-box; непусто только при «СБОЙ» (enabled && !active). */
 	lastError?: string;
+	/** Падений sing-box за последние 10 минут (окно анти-crash-loop backoff'а, #456). */
+	crashCount?: number;
+	/** Причина последнего падения в окне (например, распознанный OOM-kill). */
+	lastCrashReason?: string;
+	/**
+	 * RFC3339-время, до которого авто-перезапуск приостановлен backoff'ом
+	 * (анти crash-loop). Пусто/absent, когда не подавлен; ручной
+	 * «Перезапустить» не подавляется и сбрасывает паузу.
+	 */
+	restartSuppressedUntil?: string;
 	/**
 	 * xt_dscp kernel module is available for DSCP matching (issue #371 QoS).
 	 * Strict `false` → QoS classes cannot be applied (UI shows a warning).

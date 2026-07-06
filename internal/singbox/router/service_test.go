@@ -123,6 +123,17 @@ type fakeSingbox struct {
 	// startCalls counts Start() invocations so a test can assert the
 	// drift-heal actually (re)spawns a dead process.
 	startCalls int
+
+	// autoRestartFn is an optional override for AutoRestartIfCrashed;
+	// nil keeps the default "restart happened" behaviour (startCalls++,
+	// restarted=true). Tests model manual-stop / backoff suppression by
+	// supplying their own callback.
+	autoRestartFn func() (bool, bool, error)
+
+	// crashStats seeds CrashStats() for status tests.
+	crashCount             int
+	lastCrashReason        string
+	restartSuppressedUntil time.Time
 }
 
 func (f *fakeSingbox) Reload() error { return nil }
@@ -143,6 +154,22 @@ func (f *fakeSingbox) ConfigDir() string                         { return f.dir 
 func (f *fakeSingbox) Binary() string                            { return f.binary }
 func (f *fakeSingbox) LastError() string                         { return f.lastErr }
 
+// AutoRestartIfCrashed mimics the Operator helper: by default it "spawns"
+// (startCalls++) and reports restarted=true. Unlike the real helper it
+// does NOT re-probe IsRunning — tests drive liveness via isRunningFn and
+// expect the spawn to be observable regardless.
+func (f *fakeSingbox) AutoRestartIfCrashed(_ context.Context) (bool, bool, error) {
+	if f.autoRestartFn != nil {
+		return f.autoRestartFn()
+	}
+	f.startCalls++
+	return true, false, nil
+}
+
+func (f *fakeSingbox) CrashStats() (int, string, time.Time) {
+	return f.crashCount, f.lastCrashReason, f.restartSuppressedUntil
+}
+
 // newTestSingbox creates a fakeSingbox backed by a temp directory.
 func newTestSingbox(t *testing.T) *fakeSingbox {
 	t.Helper()
@@ -154,7 +181,6 @@ func newTestSingbox(t *testing.T) *fakeSingbox {
 func newTestService(_ *testing.T, deps Deps) *ServiceImpl {
 	return &ServiceImpl{deps: deps}
 }
-
 
 // stubListeningProbe overrides the singboxListeningProbe seam for the test
 // duration so waitForSingbox/GetStatus don't read the real procfs.
@@ -865,12 +891,18 @@ func TestReconcile_JumpsMissing_Reinstalls(t *testing.T) {
 	}
 	collector := &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}}
 
+	// Живой движок: jump-heal при мёртвом процессе намеренно пропускается
+	// (FIX-B, см. TestReconcileInstalled_DeadEngineSkipsJumpHeal) — здесь
+	// проверяем сам триггер восстановления джампов.
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 4242 }
+
 	svc := &ServiceImpl{
 		deps: Deps{
 			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:           ipt,
 			WANIPCollector:     collector,
-			Singbox:            newTestSingbox(t),
+			Singbox:            sb,
 			NetfilterPreflight: func(context.Context) error { return nil },
 		},
 		// Same mark + WAN IPs as stored, initial sync already done — so the

@@ -216,6 +216,14 @@ func (p *fakeProc) Reload() error {
 	return nil
 }
 
+// startsN/stopsN/reloadsN — потокобезопасные читатели счётчиков: тесты
+// читают их, пока отложенный debounce-таймер оркестратора (Save/SetEnabled)
+// ещё может дёрнуть Start/Reload из своей горутины — прямое чтение полей
+// ловится -race (предсуществовавшая гонка, всплыла на гейте #456).
+func (p *fakeProc) startsN() int  { p.mu.Lock(); defer p.mu.Unlock(); return p.starts }
+func (p *fakeProc) stopsN() int   { p.mu.Lock(); defer p.mu.Unlock(); return p.stops }
+func (p *fakeProc) reloadsN() int { p.mu.Lock(); defer p.mu.Unlock(); return p.reloads }
+
 func TestReloadDoesNotStartForAlwaysOnCatalogSlot(t *testing.T) {
 	// Regression: tunnels + awg are AlwaysOn catalog slots. On a fresh
 	// install with no router, no deviceproxy, no subscriptions and an
@@ -247,8 +255,8 @@ func TestReloadDoesNotStartForAlwaysOnCatalogSlot(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 0 {
-		t.Errorf("expected 0 starts (no consumers, no tunnels), got %d", fp.starts)
+	if fp.startsN() != 0 {
+		t.Errorf("expected 0 starts (no consumers, no tunnels), got %d", fp.startsN())
 	}
 }
 
@@ -278,8 +286,8 @@ func TestReloadStartsWhenAlwaysOnSlotHasContent(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 {
-		t.Errorf("expected 1 start (tunnel content present), got %d", fp.starts)
+	if fp.startsN() != 1 {
+		t.Errorf("expected 1 start (tunnel content present), got %d", fp.startsN())
 	}
 }
 
@@ -304,8 +312,8 @@ func TestReloadStartsWhenSlotEnabled(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 || fp.reloads != 0 {
-		t.Errorf("expected 1 start, 0 reloads; got starts=%d reloads=%d", fp.starts, fp.reloads)
+	if fp.startsN() != 1 || fp.reloadsN() != 0 {
+		t.Errorf("expected 1 start, 0 reloads; got starts=%d reloads=%d", fp.startsN(), fp.reloadsN())
 	}
 }
 
@@ -322,8 +330,8 @@ func TestReloadStopsWhenAllDisabled(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.stops != 1 {
-		t.Errorf("expected 1 stop, got %d", fp.stops)
+	if fp.stopsN() != 1 {
+		t.Errorf("expected 1 stop, got %d", fp.stopsN())
 	}
 }
 
@@ -344,8 +352,8 @@ func TestReloadSighupsWhenAlreadyRunning(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if fp.reloads != 1 || fp.starts != 0 {
-		t.Errorf("expected 1 reload, 0 starts; got reloads=%d starts=%d", fp.reloads, fp.starts)
+	if fp.reloadsN() != 1 || fp.startsN() != 0 {
+		t.Errorf("expected 1 reload, 0 starts; got reloads=%d starts=%d", fp.reloadsN(), fp.startsN())
 	}
 }
 
@@ -368,8 +376,9 @@ func TestReloadSkippedOnValidationError(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected validation error from Reload")
 	}
-	if fp.starts != 0 || fp.reloads != 0 || fp.stops != 0 {
-		t.Errorf("no process action expected on invalid config; got %+v", fp)
+	if fp.startsN() != 0 || fp.reloadsN() != 0 || fp.stopsN() != 0 {
+		t.Errorf("no process action expected on invalid config; got starts=%d reloads=%d stops=%d",
+			fp.startsN(), fp.reloadsN(), fp.stopsN())
 	}
 }
 
@@ -392,10 +401,8 @@ func TestDebouncerCoalescesMultipleSaves(t *testing.T) {
 	}
 	// Wait past debounce.
 	time.Sleep(reloadDebounce + 100*time.Millisecond)
-	fp.mu.Lock()
-	reloads := fp.reloads
-	starts := fp.starts
-	fp.mu.Unlock()
+	reloads := fp.reloadsN()
+	starts := fp.startsN()
 	if reloads+starts > 2 {
 		// SetEnabled fires once; the 3 saves coalesce into at most one
 		// additional reload. Tolerate <=2 total.
@@ -464,8 +471,8 @@ func TestReloadStartsForBothAlwaysOnContentAndConsumerSlot(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 {
-		t.Errorf("expected 1 start (both paths active), got %d", fp.starts)
+	if fp.startsN() != 1 {
+		t.Errorf("expected 1 start (both paths active), got %d", fp.startsN())
 	}
 }
 
@@ -596,8 +603,8 @@ func TestReloadColdStartSuppressedByShouldRun(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 0 {
-		t.Errorf("cold-start must be suppressed; got starts=%d", fp.starts)
+	if fp.startsN() != 0 {
+		t.Errorf("cold-start must be suppressed; got starts=%d", fp.startsN())
 	}
 	if fp.running {
 		t.Errorf("daemon must remain stopped")
@@ -629,8 +636,8 @@ func TestReloadColdStartProceedsWhenShouldRunTrue(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 {
-		t.Errorf("expected 1 start, got %d", fp.starts)
+	if fp.startsN() != 1 {
+		t.Errorf("expected 1 start, got %d", fp.startsN())
 	}
 }
 
@@ -661,11 +668,11 @@ func TestReloadShouldRunOnlyGatesColdStart(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.reloads != 1 {
-		t.Errorf("SIGHUP must still fire when already running; reloads=%d", fp.reloads)
+	if fp.reloadsN() != 1 {
+		t.Errorf("SIGHUP must still fire when already running; reloads=%d", fp.reloadsN())
 	}
-	if fp.starts != 0 {
-		t.Errorf("must not cold-start when already running; starts=%d", fp.starts)
+	if fp.startsN() != 0 {
+		t.Errorf("must not cold-start when already running; starts=%d", fp.startsN())
 	}
 }
 
@@ -711,8 +718,8 @@ func TestReload_RestartsWhenTunAdded(t *testing.T) {
 	if got := fp.calls(); !equalStrs(got, []string{"stop", "start"}) {
 		t.Errorf("expected restart [stop start], got %v", got)
 	}
-	if fp.reloads != 0 {
-		t.Errorf("must not SIGHUP on tun add; reloads=%d", fp.reloads)
+	if fp.reloadsN() != 0 {
+		t.Errorf("must not SIGHUP on tun add; reloads=%d", fp.reloadsN())
 	}
 	if !o.prevHasTun {
 		t.Errorf("prevHasTun must be true after applying a tun config")
@@ -743,8 +750,8 @@ func TestReload_SighupWhenTunStillPresent(t *testing.T) {
 	if got := fp.calls(); !equalStrs(got, []string{"reload"}) {
 		t.Errorf("expected SIGHUP [reload], got %v", got)
 	}
-	if fp.starts != 0 || fp.stops != 0 {
-		t.Errorf("must not restart when tun unchanged; starts=%d stops=%d", fp.starts, fp.stops)
+	if fp.startsN() != 0 || fp.stopsN() != 0 {
+		t.Errorf("must not restart when tun unchanged; starts=%d stops=%d", fp.startsN(), fp.stopsN())
 	}
 }
 

@@ -130,6 +130,16 @@ type SingboxController interface {
 	// (stderr FATAL line or exit tail). Empty after a clean start.
 	// Surfaced via Status.LastError so the UI explains «СБОЙ».
 	LastError() string
+	// AutoRestartIfCrashed restarts a dead sing-box through the shared
+	// crash-loop backoff (issue #456). Respects the sticky manual-stop
+	// intent (all-false return). ONLY for automatic reconcile paths —
+	// user actions go through the ungated Control API. Callers still do
+	// their own mode-aware readiness wait after restarted=true.
+	AutoRestartIfCrashed(ctx context.Context) (restarted, suppressed bool, err error)
+	// CrashStats returns crash observability for Status (issue #456):
+	// crashes within the recent window, the reason of the newest one,
+	// and until when auto-restart is suppressed (zero = not suppressed).
+	CrashStats() (recentCrashes int, lastCrashReason string, restartSuppressedUntil time.Time)
 }
 
 // GeoTagExpander is the narrow contract used by dat→SRS rule-set export.
@@ -1491,7 +1501,46 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 	if sr.Enabled && !active && s.deps.Singbox != nil {
 		lastError = s.deps.Singbox.LastError()
 	}
+	// Crash observability (#456): счётчик недавних падений, причина
+	// последнего и пауза авто-перезапуска. Заполняется всегда (omitempty
+	// прячет нули) — UI показывает блок и после восстановления, пока
+	// падения не выйдут из окна.
+	crashCount := 0
+	lastCrashReason := ""
+	restartSuppressedUntil := ""
+	var suppressedUntil time.Time
+	if s.deps.Singbox != nil {
+		n, reason, until := s.deps.Singbox.CrashStats()
+		crashCount = n
+		lastCrashReason = reason
+		if !until.IsZero() {
+			suppressedUntil = until
+			restartSuppressedUntil = until.Format(time.RFC3339)
+		}
+	}
 	issues := s.computeIssues(cfg)
+	// Мёртвый движок при живом перехвате (#456 FIX-B): PREROUTING-джампы
+	// стоят, а процесс не работает — весь policy-трафик (включая hijacked
+	// DNS:53) уходит в мёртвый порт до конца backoff-паузы. computeIssues
+	// видит только конфиг, поэтому этот runtime-issue собирается здесь, где
+	// уже есть probe и crash-статистика. Только tproxy: у fakeip-tun нет
+	// iptables-перехвата.
+	if sr.Enabled && sr.RoutingMode != "fakeip-tun" && jumps && s.deps.Singbox != nil {
+		if running, _ := s.deps.Singbox.IsRunning(); !running {
+			msg := "Движок остановлен, но перехват трафика активен — трафик политик не ходит."
+			if !suppressedUntil.IsZero() {
+				msg += fmt.Sprintf(" Автоперезапуск приостановлен до %s (падений за 10 мин: %d).",
+					suppressedUntil.Local().Format("15:04"), crashCount)
+			} else {
+				msg += " Автоперезапуск: при следующей проверке (до 30 с)."
+			}
+			issues = append(issues, Issue{
+				Severity: "error",
+				Kind:     "engine-dead-interception",
+				Message:  msg,
+			})
+		}
+	}
 	// QoS-DSCP support: xtDscpAvailable is always reported (the UI keys the
 	// feature's "supported" state on it). When classes are actually
 	// configured but the support probe fails, additionally surface an issue
@@ -1570,6 +1619,9 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 		FakeIPTunAddr:          fakeIPTunAddr,
 		Issues:                 issues,
 		LastError:              lastError,
+		CrashCount:             crashCount,
+		LastCrashReason:        lastCrashReason,
+		RestartSuppressedUntil: restartSuppressedUntil,
 	}, nil
 }
 
@@ -1703,6 +1755,39 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	if err != nil {
 		return err
 	}
+	// Мёртвый sing-box при живых iptables (issue #456): цепочки и
+	// PREROUTING-джампы целы, но процесс упал (OOM и т.п.) — перехваченный
+	// трафик уходит в никуда, а этот reconcile раньше лечил только iptables.
+	// Зеркалим fakeip-ветку (fakeip_reconcile.go): перезапуск через общий
+	// backoff-гейт — ручной Stop и анти-crash-loop пауза уважаются внутри
+	// AutoRestartIfCrashed (подавление логируется там один раз на смену
+	// состояния, не каждый 30s-тик).
+	// engineDown: движок не работает и восстановить его на этом тике не
+	// вышло (рестарт подавлен backoff'ом / ручным Stop, либо сам старт
+	// упал). Ниже это гасит восстановление PREROUTING-джампов (FIX-B):
+	// лечить перехват в мёртвый порт нельзя.
+	engineDown := false
+	if s.deps.Singbox != nil {
+		if running, _ := s.deps.Singbox.IsRunning(); !running {
+			restarted, _, rerr := s.deps.Singbox.AutoRestartIfCrashed(ctx)
+			switch {
+			case rerr != nil:
+				s.appLog.Warn("reconcile", "", "restart dead sing-box: "+rerr.Error())
+			case restarted:
+				// Дожидаемся inbound-сокетов, чтобы дальнейшие шаги (re-Install
+				// iptables) не направили трафик на порты, которые ещё не слушаются.
+				// Мягкий дедлайн: на таймауте продолжаем, как QoS-heal ниже.
+				if alive, _ := s.deps.Singbox.IsRunning(); alive {
+					if e := s.waitForSingbox(ctx, bootWaitWithFloor()); e != nil {
+						s.appLog.Warn("reconcile", "", "sing-box not ready after restart: "+e.Error())
+					}
+				}
+			}
+			if alive, _ := s.deps.Singbox.IsRunning(); !alive {
+				engineDown = true
+			}
+		}
+	}
 	if sr.SelectiveBypass {
 		if err := s.validateSelectiveBypassAgainstApplied(sr); err != nil {
 			if errors.Is(err, errSelectiveIncompatible) {
@@ -1826,6 +1911,16 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// during an NDMS reload must not trigger a needless rebuild.
 	_, jumps, probeErr := s.deps.IPTables.Probe(ctx)
 	jumpsMissing := probeErr == nil && !jumps
+	if jumpsMissing && engineDown {
+		// Не восстанавливаем перехват в мёртвый порт (FIX-B): движок не
+		// работает (рестарт подавлен или не удался), и вернуть PREROUTING-
+		// джампы значило бы направить трафик политик (включая hijacked
+		// DNS:53) в никуда на всю паузу backoff'а. Существующие правила НЕ
+		// трогаем — fail-closed остаётся, VPN не должен fail-open'иться;
+		// просто не долечиваем отсутствующие jump'ы на этом тике.
+		s.appLog.Warn("reconcile", "", "PREROUTING jumps missing, но движок не работает — пропускаем восстановление перехвата на этот тик")
+		jumpsMissing = false
+	}
 	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged || qosChanged
 
 	if needsInstall {
