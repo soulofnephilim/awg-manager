@@ -327,6 +327,68 @@ func (m ruleSetMaterializer) removeInlineArtifacts(tag string) {
 	}
 }
 
+// gcArtifacts deletes orphaned rule-set artifacts under rule-sets/inline/
+// (*.json, *.srs) and rule-sets/dat/ (*.json, *.srs, *.meta.json) whose base
+// name is not in referenced. The dat token file and *.tmp files (in-flight
+// compiles) are never touched. Callers build referenced as the union of every
+// config that may still point at the files (active + pending, router + fakeip)
+// — see (*ServiceImpl).gcRuleSetArtifacts.
+func (m ruleSetMaterializer) gcArtifacts(referenced map[string]struct{}) {
+	if m.configDir == "" {
+		return
+	}
+	m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "inline"), referenced)
+	m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "dat"), referenced)
+}
+
+func (m ruleSetMaterializer) gcArtifactDir(dir string, referenced map[string]struct{}) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // dir absent — nothing to sweep
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		name := entry.Name()
+		base, ok := ruleSetArtifactBase(name)
+		if !ok {
+			continue
+		}
+		if _, ok := referenced[base]; ok {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			if !os.IsNotExist(err) && m.log != nil {
+				m.log.Warn("gc", base, fmt.Sprintf("remove orphaned rule-set artifact %s: %v", path, err))
+			}
+			continue
+		}
+		if m.log != nil {
+			m.log.Debug("gc", base, "removed orphaned rule-set artifact "+path)
+		}
+	}
+}
+
+// ruleSetArtifactBase maps an artifact filename to the base name compared
+// against the referenced set. Returns ok=false for files GC must never touch
+// (the dat token, in-flight *.tmp compiles, unknown extensions).
+func ruleSetArtifactBase(name string) (string, bool) {
+	if name == datRuleSetTokenFile || strings.HasSuffix(name, ".tmp") {
+		return "", false
+	}
+	if strings.HasSuffix(name, datRuleSetMetaExt) {
+		return strings.TrimSuffix(name, datRuleSetMetaExt), true
+	}
+	for _, ext := range []string{".json", ".srs"} {
+		if strings.HasSuffix(name, ext) {
+			return strings.TrimSuffix(name, ext), true
+		}
+	}
+	return "", false
+}
+
 func (m ruleSetMaterializer) restoreRuleSet(rs RuleSet) RuleSet {
 	if !m.isManagedLocalRuleSet(rs) {
 		return rs

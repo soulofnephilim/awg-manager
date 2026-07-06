@@ -67,6 +67,76 @@ func TestExtractGeoSiteTagLines(t *testing.T) {
 	}
 }
 
+// TestExtractGeoSiteTagLinesTyped verifies the lossless typed line format for
+// all four v2ray domain types: Plain → keyword:, Regex → domain_regex:,
+// RootDomain → leading dot, Full → full:. The legacy extractor above must stay
+// byte-stable (Plain/Full bare) — TestExtractGeoSiteTagLines pins that.
+func TestExtractGeoSiteTagLinesTyped(t *testing.T) {
+	entries := [][]byte{
+		buildGeoEntryWithItems(1, "GOOGLE", [][]byte{
+			buildDomainItem(0, "google.com"),
+			buildDomainItem(2, "googlevideo.com"),
+			buildDomainItem(1, `^ads\.google\.`),
+			buildDomainItem(3, "chatgpt.com"),
+		}),
+	}
+	dat := buildGeoDAT(entries)
+	tmp := filepath.Join(t.TempDir(), "geosite.dat")
+	if err := os.WriteFile(tmp, dat, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lines, err := ExtractGeoSiteTagLinesTyped(tmp, "google")
+	if err != nil {
+		t.Fatalf("ExtractGeoSiteTagLinesTyped: %v", err)
+	}
+	want := []string{
+		"keyword:google.com",
+		".googlevideo.com",
+		`domain_regex:^ads\.google\.`,
+		"full:chatgpt.com",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("lines = %v, want %v", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Errorf("lines[%d] = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
+// TestExpandGeoTagTyped_GeoIPMatchesLegacy pins that the typed expansion only
+// changes geosite output; geoip CIDR lines are identical to the legacy path.
+func TestExpandGeoTagTyped_GeoIPMatchesLegacy(t *testing.T) {
+	entries := [][]byte{
+		buildGeoEntryWithItems(1, "RU", [][]byte{
+			buildCidrItem([]byte{5, 8, 0, 0}, 21),
+		}),
+	}
+	dat := buildGeoDAT(entries)
+	dir := t.TempDir()
+	tmp := filepath.Join(dir, "geoip.dat")
+	if err := os.WriteFile(tmp, dat, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gds := NewGeoDataStore(dir)
+	gds.entries = []GeoFileEntry{{Type: "geoip", Path: tmp}}
+
+	legacy, _, err := gds.ExpandGeoTag("geoip", "RU")
+	if err != nil {
+		t.Fatalf("ExpandGeoTag: %v", err)
+	}
+	typed, _, err := gds.ExpandGeoTagTyped("geoip", "RU")
+	if err != nil {
+		t.Fatalf("ExpandGeoTagTyped: %v", err)
+	}
+	if len(legacy) != 1 || len(typed) != 1 || legacy[0] != typed[0] || typed[0] != "5.8.0.0/21" {
+		t.Fatalf("legacy = %v, typed = %v, want identical [5.8.0.0/21]", legacy, typed)
+	}
+}
+
 func TestExtractGeoIPTagLines(t *testing.T) {
 	entries := [][]byte{
 		buildGeoEntryWithItems(1, "RU", [][]byte{

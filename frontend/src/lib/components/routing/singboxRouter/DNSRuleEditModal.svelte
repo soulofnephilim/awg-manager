@@ -268,7 +268,10 @@
 		{:else}
 			<div class="section-label">Matchers (минимум один)</div>
 
-			<label class="field">
+			<!-- div, не label: клик по любой не-интерактивной части label активирует
+			     его первый labelable-элемент — крестик ПЕРВОГО чипа, т.е. клик по
+			     названию любого rule-set удалял первый (bug #446). -->
+			<div class="field">
 				<div class="lbl">Rule sets</div>
 				<ChipMultiSelect
 					values={ruleSetTags}
@@ -277,7 +280,7 @@
 					placeholder="не выбрано"
 					allowOrphans
 				/>
-			</label>
+			</div>
 
 			<label class="field">
 				<div class="lbl">Domain suffix</div>

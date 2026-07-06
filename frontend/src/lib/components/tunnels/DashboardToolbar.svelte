@@ -248,15 +248,22 @@
 		flex: 0 0 auto;
 	}
 
-	/* Mobile: авторазмещение по order — row 1: layout + view 50/50;
-	   далее order + group 50/50, чип тег-фильтра и actions (если есть) на всю
-	   ширину; последняя строка — search then create */
+	/* Mobile: авторазмещение по order, компактно в ≤4 строки —
+	   row 1: layout + view 50/50; row 2: order + group 50/50;
+	   row 3: тег-фильтр + actions 50/50 (одиночный растягивается на всю
+	   строку); row 4: search + create 50/50 */
 	@media (max-width: 760px) {
 		.dashboard-toolbar {
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 			gap: 0.5rem;
 			width: 100%;
+			/* Хост (.toolbar-actions на странице туннелей) на мобильном сам
+			   становится 2-колоночным гридом — без span тулбар зажимался в
+			   ПОЛОВИНУ ширины экрана, и сегмент-контролы наезжали подписями
+			   друг на друга. Занимаем всю строку хост-грида; в flex/блочном
+			   родителе grid-column игнорируется. */
+			grid-column: 1 / -1;
 		}
 
 		.dashboard-toolbar-layout {
@@ -281,14 +288,13 @@
 
 		.dashboard-toolbar-tag-filter {
 			order: 5;
-			grid-column: 1 / -1;
 			min-width: 0;
 		}
 
 		.dashboard-toolbar-actions {
 			order: 6;
-			grid-column: 1 / -1;
 			width: 100%;
+			min-width: 0;
 		}
 
 		.tunnel-toolbar-search {
@@ -308,7 +314,9 @@
 		/* Контрол без пары растягивается на всю строку */
 		.dashboard-toolbar:not(:has(.dashboard-toolbar-view)) .dashboard-toolbar-layout,
 		.dashboard-toolbar:not(:has(.dashboard-toolbar-group)) .dashboard-toolbar-order,
-		.dashboard-toolbar:not(:has(.dashboard-toolbar-order)) .dashboard-toolbar-group {
+		.dashboard-toolbar:not(:has(.dashboard-toolbar-order)) .dashboard-toolbar-group,
+		.dashboard-toolbar:not(:has(.dashboard-toolbar-actions)) .dashboard-toolbar-tag-filter,
+		.dashboard-toolbar:not(:has(.dashboard-toolbar-tag-filter)) .dashboard-toolbar-actions {
 			grid-column: 1 / -1;
 		}
 
@@ -319,6 +327,26 @@
 			width: 100%;
 			min-width: 0;
 			justify-content: stretch;
+		}
+
+		/* Текстовые кнопки сегмент-контролов должны сжиматься внутри узкой
+		   grid-ячейки (в диапазоне 641–760px собственный мобильный брейкпоинт
+		   SegmentedControl (640px) ещё не активен — без flex:1 1 0 / min-width:0
+		   кнопки не влезают, и подписи наезжают друг на друга:
+		   «СплошнРазделы»). display:block + line-height — чтобы работал
+		   text-overflow (не применяется к тексту внутри flex-контейнера). */
+		.dashboard-toolbar-layout :global(.segmented-control .segmented-control-btn),
+		.dashboard-toolbar-order :global(.segmented-control .segmented-control-btn),
+		.dashboard-toolbar-group :global(.segmented-control .segmented-control-btn) {
+			flex: 1 1 0;
+			min-width: 0;
+			padding: 0 6px;
+			display: block;
+			line-height: 26px;
+			text-align: center;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
 		}
 
 		.dashboard-toolbar-view :global(.segmented-control--icon .segmented-control-btn) {
