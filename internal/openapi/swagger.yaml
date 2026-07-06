@@ -3134,10 +3134,12 @@ definitions:
       idle:
         description: |-
           Idle is true when the inbound is a deliberate port reservation that
-          nothing currently feeds (NDMS-proxy toggle off / entity disabled).
+          nothing currently feeds. The signal is grounded in the config itself:
+          no route rule of the inbound's own slot references it (no_route_rule),
+          or the NDMS-proxy toggle is off / the entity has no ProxyN allocated.
         type: boolean
       idleReason:
-        description: ndms_proxy_disabled | entity_disabled | ""
+        description: no_route_rule | ndms_proxy_disabled | ndms_proxy_missing | ""
         type: string
       listen:
         description: listen address, e.g. 127.0.0.1
@@ -10818,11 +10820,14 @@ paths:
       - singbox-fakeip
   /singbox/inbounds:
     get:
-      description: Walks every active config.d slot file, extracts its `inbounds`
+      description: 'Walks every active config.d slot file, extracts its `inbounds`
         array and attributes each inbound to its owning feature (subscription, aggregate
         group, tunnel, device-proxy, QoS, engine). Idle inbounds are deliberate port
-        reservations nothing currently feeds (NDMS-proxy toggle off or entity disabled).
-        Unreadable slot files are reported in `warnings` instead of failing the request.
+        reservations nothing currently feeds: no route rule of the inbound''s own
+        slot references it (no_route_rule), the NDMS-proxy toggle is off (ndms_proxy_disabled)
+        or the entity has no ProxyN allocated (ndms_proxy_missing). Unreadable slot
+        files and duplicate inbound tags are reported in `warnings` instead of failing
+        the request.'
       produces:
       - application/json
       responses:

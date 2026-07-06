@@ -33,14 +33,17 @@ type SingboxInboundEntry struct {
 	// tunnel tag, device-proxy instance name). Empty when not resolvable.
 	OwnerLabel string `json:"ownerLabel"`
 	// Idle is true when the inbound is a deliberate port reservation that
-	// nothing currently feeds (NDMS-proxy toggle off / entity disabled).
+	// nothing currently feeds. The signal is grounded in the config itself:
+	// no route rule of the inbound's own slot references it (no_route_rule),
+	// or the NDMS-proxy toggle is off / the entity has no ProxyN allocated.
 	Idle       bool   `json:"idle"`
-	IdleReason string `json:"idleReason"` // ndms_proxy_disabled | entity_disabled | ""
+	IdleReason string `json:"idleReason"` // no_route_rule | ndms_proxy_disabled | ndms_proxy_missing | ""
 }
 
 // SingboxInboundsResponse is the typed payload of GET /api/singbox/inbounds.
-// Warnings name slot files that could not be read/parsed — inbounds from the
-// remaining slots are still returned (fail-soft).
+// Warnings name slot files that could not be read/parsed and duplicate
+// inbound tags (a config MergeDir/sing-box would refuse) — inbounds from
+// the remaining slots are still returned (fail-soft).
 type SingboxInboundsResponse struct {
 	Inbounds []SingboxInboundEntry `json:"inbounds"`
 	Warnings []string              `json:"warnings,omitempty"`
@@ -81,7 +84,7 @@ func NewSingboxInboundsHandler(deps SingboxInboundsDeps) *SingboxInboundsHandler
 // List returns every inbound of the active config.d slots, normalized.
 //
 //	@Summary		List all inbounds of the merged sing-box configuration
-//	@Description	Walks every active config.d slot file, extracts its `inbounds` array and attributes each inbound to its owning feature (subscription, aggregate group, tunnel, device-proxy, QoS, engine). Idle inbounds are deliberate port reservations nothing currently feeds (NDMS-proxy toggle off or entity disabled). Unreadable slot files are reported in `warnings` instead of failing the request.
+//	@Description	Walks every active config.d slot file, extracts its `inbounds` array and attributes each inbound to its owning feature (subscription, aggregate group, tunnel, device-proxy, QoS, engine). Idle inbounds are deliberate port reservations nothing currently feeds: no route rule of the inbound's own slot references it (no_route_rule), the NDMS-proxy toggle is off (ndms_proxy_disabled) or the entity has no ProxyN allocated (ndms_proxy_missing). Unreadable slot files and duplicate inbound tags are reported in `warnings` instead of failing the request.
 //	@Tags			singbox
 //	@Produce		json
 //	@Security		CookieAuth
@@ -144,21 +147,73 @@ func (h *SingboxInboundsHandler) collect() (SingboxInboundsResponse, error) {
 		}
 		var doc struct {
 			Inbounds []map[string]any `json:"inbounds"`
+			Route    struct {
+				Rules []map[string]any `json:"rules"`
+			} `json:"route"`
 		}
 		if err := json.Unmarshal(data, &doc); err != nil {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 		slot := slotNameForFile(name)
+		routed := routedInboundTags(doc.Route.Rules)
 		for _, ib := range doc.Inbounds {
-			res.Inbounds = append(res.Inbounds, h.normalize(slot, ib))
+			res.Inbounds = append(res.Inbounds, h.normalize(slot, ib, routed))
 		}
 	}
+	res.Warnings = append(res.Warnings, duplicateTagWarnings(res.Inbounds)...)
 	return res, nil
 }
 
+// routedInboundTags собирает теги inbound'ов, на которые ссылается хотя бы
+// одно route-правило слота. Поле "inbound" правила — строка или массив
+// строк (sing-box принимает оба варианта); парсим обобщённо, action не
+// важен — любая ссылка означает, что конфиг направляет трафик с порта.
+func routedInboundTags(rules []map[string]any) map[string]bool {
+	tags := map[string]bool{}
+	for _, r := range rules {
+		switch v := r["inbound"].(type) {
+		case string:
+			tags[v] = true
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					tags[s] = true
+				}
+			}
+		}
+	}
+	return tags
+}
+
+// duplicateTagWarnings находит теги, встречающиеся в нескольких inbound'ах:
+// configmerge.MergeDir откажется мержить такой config.d, sing-box его не
+// загрузит — зеркало обязано сказать, что конфиг сломан.
+func duplicateTagWarnings(entries []SingboxInboundEntry) []string {
+	slotsByTag := map[string][]string{}
+	var order []string
+	for _, e := range entries {
+		if e.Tag == "" {
+			continue
+		}
+		slotsByTag[e.Tag] = append(slotsByTag[e.Tag], e.Slot)
+		if len(slotsByTag[e.Tag]) == 2 {
+			order = append(order, e.Tag)
+		}
+	}
+	var warnings []string
+	for _, tag := range order {
+		slots := slotsByTag[tag]
+		joined := strings.Join(slots[:len(slots)-1], ", ") + " и " + slots[len(slots)-1]
+		warnings = append(warnings, fmt.Sprintf(
+			"конфликт тегов inbound: %q в слотах %s — sing-box не загрузит такой конфиг", tag, joined))
+	}
+	return warnings
+}
+
 // normalize converts one raw inbound object into an attributed entry.
-func (h *SingboxInboundsHandler) normalize(slot string, ib map[string]any) SingboxInboundEntry {
+// routed — теги inbound'ов, на которые ссылаются route-правила ЭТОГО слота.
+func (h *SingboxInboundsHandler) normalize(slot string, ib map[string]any, routed map[string]bool) SingboxInboundEntry {
 	entry := SingboxInboundEntry{
 		Tag:    strAt(ib, "tag"),
 		Type:   strAt(ib, "type"),
@@ -168,36 +223,38 @@ func (h *SingboxInboundsHandler) normalize(slot string, ib map[string]any) Singb
 	if p, ok := ib["listen_port"].(float64); ok {
 		entry.ListenPort = int(p)
 	}
-	h.attribute(&entry)
+	h.attribute(&entry, routed[entry.Tag])
 	return entry
 }
 
 // attribute fills Source / OwnerLabel / Idle / IdleReason. Идемпотентная
 // чистая логика поверх entry.Slot/Tag/Type; резолверы nil-safe — без стора
-// источник остаётся слотовым, OwnerLabel пустой.
-func (h *SingboxInboundsHandler) attribute(e *SingboxInboundEntry) {
+// источник остаётся слотовым, OwnerLabel пустой. routed — inbound упомянут
+// route-правилом своего слота (единственный честный сигнал «порт питается»:
+// флаги сущностей врут — disabled-подписка сохраняет правило, а включённая
+// группа без серверов его теряет).
+func (h *SingboxInboundsHandler) attribute(e *SingboxInboundEntry, routed bool) {
 	ndmsOn := h.ndmsProxyEnabled()
 	switch e.Slot {
 	case string(orchestrator.SlotSubscriptions):
 		switch {
 		case strings.HasPrefix(e.Tag, "sub-"):
 			e.Source = "subscription"
-			h.attributeSubscription(e, ndmsOn)
+			h.attributeSubscription(e, ndmsOn, routed)
 		case strings.HasPrefix(e.Tag, "agg-"):
 			e.Source = "group"
-			h.attributeGroup(e, ndmsOn)
+			h.attributeGroup(e, ndmsOn, routed)
 		default:
 			e.Source = "other"
 		}
 	case string(orchestrator.SlotTunnels):
 		e.Source = "tunnel"
 		// Inbound туннеля всегда "<outboundTag>-in" (AddTunnelWithListenPort);
-		// имя туннеля = outbound tag, отдельный резолвер не нужен.
+		// имя туннеля = outbound tag, отдельный резолвер не нужен. Route-правило
+		// inbound→outbound живёт в том же слоте (AddTunnelWithListenPort пишет
+		// его вместе с inbound), так что no_route_rule применим и к туннелям.
 		e.OwnerLabel = strings.TrimSuffix(e.Tag, "-in")
-		if !ndmsOn {
-			e.Idle = true
-			e.IdleReason = "ndms_proxy_disabled"
-		}
+		markIdle(e, routed, ndmsOn, false)
 	case string(orchestrator.SlotDeviceProxy):
 		e.Source = "deviceproxy"
 		e.OwnerLabel = h.deviceProxyName(e.Tag)
@@ -216,50 +273,59 @@ func (h *SingboxInboundsHandler) attribute(e *SingboxInboundEntry) {
 	}
 }
 
+// markIdle применяет idle-семантику NDMS-питаемых inbound'ов (подписки,
+// группы, туннели). Порядок веток — от самого сильного сигнала к слабому:
+//   - нет route-правила в своём слоте → конфиг не направляет трафик с порта
+//     (выключенная группа, группа без серверов); inbound сохранён ради
+//     стабильности номера порта;
+//   - глобальный тумблер NDMS-прокси выключен → порт никто не питает;
+//   - тумблер включён, но ProxyN не выделен (proxyMissing — сущность
+//     создана при выключенном тумблере) → вход с роутера не создан.
+//
+// Флаг Enabled сущности здесь сознательно НЕ участвует: у выключенной
+// подписки selector, route-правило и ProxyN остаются — трафик идёт.
+func markIdle(e *SingboxInboundEntry, routed, ndmsOn, proxyMissing bool) {
+	switch {
+	case !routed:
+		e.Idle, e.IdleReason = true, "no_route_rule"
+	case !ndmsOn:
+		e.Idle, e.IdleReason = true, "ndms_proxy_disabled"
+	case proxyMissing:
+		e.Idle, e.IdleReason = true, "ndms_proxy_missing"
+	}
+}
+
 // attributeSubscription resolves owner label + idle state for sub-*-in.
-func (h *SingboxInboundsHandler) attributeSubscription(e *SingboxInboundEntry, ndmsOn bool) {
+func (h *SingboxInboundsHandler) attributeSubscription(e *SingboxInboundEntry, ndmsOn, routed bool) {
 	if h.deps.Subscriptions != nil {
 		for _, sub := range h.deps.Subscriptions() {
 			if sub.InboundTag != e.Tag {
 				continue
 			}
 			e.OwnerLabel = sub.Label
-			switch {
-			case !sub.Enabled:
-				e.Idle, e.IdleReason = true, "entity_disabled"
-			case !ndmsOn || sub.ProxyIndex < 0:
-				e.Idle, e.IdleReason = true, "ndms_proxy_disabled"
-			}
+			markIdle(e, routed, ndmsOn, sub.ProxyIndex < 0)
 			return
 		}
 	}
 	// Store отсутствует или подписка не найдена: деградируем честно —
-	// без метки владельца, idle только по глобальному тумблеру.
-	if !ndmsOn {
-		e.Idle, e.IdleReason = true, "ndms_proxy_disabled"
-	}
+	// без метки владельца, idle по route-правилу и глобальному тумблеру
+	// (ProxyIndex неизвестен — ndms_proxy_missing не диагностируем).
+	markIdle(e, routed, ndmsOn, false)
 }
 
 // attributeGroup resolves owner label + idle state for agg-*-in.
-func (h *SingboxInboundsHandler) attributeGroup(e *SingboxInboundEntry, ndmsOn bool) {
+func (h *SingboxInboundsHandler) attributeGroup(e *SingboxInboundEntry, ndmsOn, routed bool) {
 	if h.deps.Groups != nil {
 		for _, g := range h.deps.Groups() {
 			if g.InboundTag != e.Tag {
 				continue
 			}
 			e.OwnerLabel = g.Label
-			switch {
-			case !g.Enabled:
-				e.Idle, e.IdleReason = true, "entity_disabled"
-			case !ndmsOn || g.ProxyIndex < 0:
-				e.Idle, e.IdleReason = true, "ndms_proxy_disabled"
-			}
+			markIdle(e, routed, ndmsOn, g.ProxyIndex < 0)
 			return
 		}
 	}
-	if !ndmsOn {
-		e.Idle, e.IdleReason = true, "ndms_proxy_disabled"
-	}
+	markIdle(e, routed, ndmsOn, false)
 }
 
 // deviceProxyName maps a device-proxy inbound tag ("device-proxy-in" legacy

@@ -5,6 +5,8 @@ import {
 	inboundListenLabel,
 	idleBadgeLabel,
 	idleTitle,
+	deviceProxyInboundTag,
+	inboundsPanelTotal,
 	INBOUND_GROUP_TITLES,
 } from './singboxInbounds';
 
@@ -83,9 +85,47 @@ describe('idleBadgeLabel / idleTitle', () => {
 		expect(idleBadgeLabel(e)).toBe('резерв порта — NDMS-прокси выключен');
 		expect(idleTitle(e)).toContain('порт остаётся зарезервированным');
 	});
-	it('entity_disabled', () => {
-		const e = entry({ idle: true, idleReason: 'entity_disabled' });
-		expect(idleBadgeLabel(e)).toBe('резерв порта — объект отключён');
-		expect(idleTitle(e)).toContain('отключён');
+	it('no_route_rule', () => {
+		const e = entry({ idle: true, idleReason: 'no_route_rule' });
+		expect(idleBadgeLabel(e)).toBe(
+			'не используется — конфиг не направляет трафик с этого порта',
+		);
+		expect(idleTitle(e)).toContain('стабильности порта');
+	});
+	it('ndms_proxy_missing', () => {
+		const e = entry({ idle: true, idleReason: 'ndms_proxy_missing' });
+		expect(idleBadgeLabel(e)).toBe('NDMS-прокси не создан');
+		expect(idleTitle(e)).toContain('ProxyN');
+	});
+});
+
+describe('deviceProxyInboundTag', () => {
+	it('легаси default без id, именованный — с id', () => {
+		expect(deviceProxyInboundTag('default')).toBe('device-proxy-in');
+		expect(deviceProxyInboundTag('')).toBe('device-proxy-in');
+		expect(deviceProxyInboundTag('abc')).toBe('device-proxy-abc-in');
+	});
+});
+
+describe('inboundsPanelTotal', () => {
+	const cfg = [
+		entry({ tag: 'tun-in', type: 'tun', source: 'engine', listen: '', listenPort: 0 }),
+		entry({ tag: 'device-proxy-abc-in', source: 'deviceproxy', slot: 'deviceproxy' }),
+	];
+	it('все инстансы в конфиге → счёт = число inbound’ов', () => {
+		expect(inboundsPanelTotal(cfg, ['abc'])).toBe(2);
+	});
+	it('выключенный инстанс отсутствует в конфиге, но виден карточкой → +1', () => {
+		expect(inboundsPanelTotal(cfg, ['abc', 'off1'])).toBe(3);
+	});
+	it('легаси default-инстанс матчится по device-proxy-in', () => {
+		const withDefault = [
+			...cfg,
+			entry({ tag: 'device-proxy-in', source: 'deviceproxy', slot: 'deviceproxy' }),
+		];
+		expect(inboundsPanelTotal(withDefault, ['abc', 'default'])).toBe(3);
+	});
+	it('без инстансов → просто длина списка', () => {
+		expect(inboundsPanelTotal(cfg, [])).toBe(2);
 	});
 });

@@ -64,17 +64,47 @@ export function inboundListenLabel(e: SingboxInboundEntry): string {
 /** Короткий бейдж для idle-записи (резерв порта). */
 export function idleBadgeLabel(e: SingboxInboundEntry): string {
 	if (!e.idle) return '';
-	return e.idleReason === 'entity_disabled'
-		? 'резерв порта — объект отключён'
-		: 'резерв порта — NDMS-прокси выключен';
+	switch (e.idleReason) {
+		case 'no_route_rule':
+			return 'не используется — конфиг не направляет трафик с этого порта';
+		case 'ndms_proxy_missing':
+			return 'NDMS-прокси не создан';
+		default:
+			return 'резерв порта — NDMS-прокси выключен';
+	}
 }
 
 /** Развёрнутое пояснение (title-tooltip): почему inbound сохранён в конфиге. */
 export function idleTitle(e: SingboxInboundEntry): string {
 	if (!e.idle) return '';
+	if (e.idleReason === 'no_route_rule') {
+		return 'Ни одно route-правило конфига не направляет трафик с этого порта (владелец выключен или в группе нет серверов). Inbound сохранён ради стабильности порта: при включении номера портов не изменятся.';
+	}
 	const cause =
-		e.idleReason === 'entity_disabled'
-			? 'его владелец (подписка/группа) отключён'
+		e.idleReason === 'ndms_proxy_missing'
+			? 'тумблер «Создавать NDMS-прокси» включён, а ProxyN для порта не выделен (объект создан при выключенном тумблере)'
 			: 'тумблер «Создавать NDMS-прокси» выключен и порт никто не питает';
 	return `Inbound сохранён в конфиге, хотя ${cause}: порт остаётся зарезервированным, чтобы при включении не менялись номера портов.`;
+}
+
+/** Тег inbound'а инстанса device-proxy: легаси-инстанс "default" — без id в теге. */
+export function deviceProxyInboundTag(id: string): string {
+	return !id || id === 'default' ? 'device-proxy-in' : `device-proxy-${id}-in`;
+}
+
+/**
+ * Полный счётчик панели Inbounds: все inbound'ы merged-конфига ПЛЮС
+ * инстансы device-proxy, отрисованные карточками, но отсутствующие в
+ * конфиге (выключенный инстанс убирается из слота 30, а карточка остаётся
+ * интерактивной) — иначе счётчик расходится с числом видимых элементов.
+ */
+export function inboundsPanelTotal(
+	entries: SingboxInboundEntry[],
+	instanceIds: string[],
+): number {
+	const present = new Set(
+		entries.filter((e) => e.source === 'deviceproxy').map((e) => e.tag),
+	);
+	const extra = instanceIds.filter((id) => !present.has(deviceProxyInboundTag(id))).length;
+	return entries.length + extra;
 }

@@ -24,11 +24,12 @@
 
   - «Подписки» / «Сводные группы» / «Туннели» / «QoS» — read-only строки
     (общий InboundsMirror с sb-router): tag, тип, 127.0.0.1:port, владелец;
-    idle-записи («резерв порта» — NDMS-прокси выключен / объект отключён)
-    помечаются muted-бейджем с title-пояснением (порт зарезервирован, чтобы
-    номера портов не менялись).
+    idle-записи («резерв порта» — нет route-правила / NDMS-прокси выключен /
+    ProxyN не создан) помечаются muted-бейджем с title-пояснением (порт
+    зарезервирован, чтобы номера портов не менялись).
 
-  Счётчик «Входы · N» = все inbound'ы merged-конфига; при недоступном
+  Счётчик «Входы · N» = все inbound'ы merged-конфига + выключенные инстансы
+  device-proxy (карточки видны, но в слоте 30 их нет); при недоступном
   endpoint'е деградация к прежнему счёту 1 + device-proxy.
 
   ЧЕСТНОСТЬ по счётчику соединений: записи Clash /connections НЕ несут тег
@@ -50,6 +51,7 @@
 	import TunInboundCard from './TunInboundCard.svelte';
 	import DeviceProxyInboundCard from './DeviceProxyInboundCard.svelte';
 	import InboundsMirror from '$lib/components/sb-router/InboundsMirror.svelte';
+	import { inboundsPanelTotal } from '$lib/utils/singboxInbounds';
 
 	interface Props {
 		/** Состояние движка — гейтит живые сигналы (status-точки). */
@@ -215,10 +217,17 @@
 		}
 	}
 
-	// Полный счёт inbound'ов merged-конфига; фолбэк — прежний счёт
-	// «tun-in + device-proxy», когда endpoint недоступен.
+	// Полный счёт видимых элементов: inbound'ы merged-конфига плюс
+	// выключенные инстансы device-proxy (их нет в слоте 30, но карточки
+	// рендерятся). Фолбэк — прежний счёт «tun-in + device-proxy», когда
+	// endpoint недоступен.
 	const inboundsTotal = $derived(
-		allInbounds === null ? 1 + instances.length : allInbounds.length,
+		allInbounds === null
+			? 1 + instances.length
+			: inboundsPanelTotal(
+					allInbounds,
+					instances.map((in_) => in_.id),
+				),
 	);
 </script>
 

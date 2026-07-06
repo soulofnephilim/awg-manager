@@ -36,6 +36,7 @@
     SingboxInboundEntry,
   } from '$lib/types';
   import { newDeviceProxyInstance } from '$lib/utils/deviceProxyInstance';
+  import { inboundsPanelTotal } from '$lib/utils/singboxInbounds';
   import { deleteDeviceProxyInstanceWithNotice } from '$lib/utils/deviceProxyDeleteNotice';
   import { pluralize, SET_WORDS } from '$lib/utils/pluralize';
 
@@ -209,10 +210,13 @@
   const mirrorInbounds = $derived(
     (allInbounds ?? []).filter((e) => e.source !== 'deviceproxy'),
   );
-  // Счётчик панели = все inbound'ы merged-конфига; при недоступном
-  // endpoint'е деградируем к прежней метке device-proxy.
+  // Счётчик панели = все видимые элементы: inbound'ы merged-конфига плюс
+  // выключенные инстансы device-proxy (их нет в слоте 30, но карточки
+  // рендерятся). При недоступном endpoint'е деградируем к прежней метке.
   const inboundsPanelCountLabel = $derived(
-    allInbounds === null ? activeProxyCountLabel : String(allInbounds.length),
+    allInbounds === null
+      ? activeProxyCountLabel
+      : String(inboundsPanelTotal(allInbounds, deviceProxyInstances.map((in_) => in_.id))),
   );
 
   // Refetch при разворачивании панели «Inbounds» (mount покрыт в onMount).

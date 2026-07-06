@@ -54,7 +54,10 @@
 						<span class="group-count">{group.entries.length}</span>
 					</div>
 				{/if}
-				{#each group.entries as e (e.tag)}
+				<!-- Ключ slot:tag — коллизия тегов между слотами (рукой отредактированный
+				     конфиг) не должна ронять зеркало (each_key_duplicate); о самой
+				     коллизии сообщает warning бэкенда. -->
+				{#each group.entries as e (`${e.slot}:${e.tag}`)}
 					<div class="row" class:idle={e.idle}>
 						<div class="row-main">
 							<span class="ty">{e.type}</span>

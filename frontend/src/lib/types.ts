@@ -1255,10 +1255,16 @@ export interface SingboxInboundEntry {
 	ownerLabel: string;
 	/** true — резерв порта: inbound есть в конфиге, но его никто не питает. */
 	idle: boolean;
-	idleReason: '' | 'ndms_proxy_disabled' | 'entity_disabled';
+	/**
+	 * Причина idle (сигнал из самого конфига):
+	 * no_route_rule — ни одно route-правило слота не направляет трафик с порта;
+	 * ndms_proxy_disabled — тумблер «Создавать NDMS-прокси» выключен;
+	 * ndms_proxy_missing — тумблер включён, но ProxyN не выделен.
+	 */
+	idleReason: '' | 'no_route_rule' | 'ndms_proxy_disabled' | 'ndms_proxy_missing';
 }
 
-/** Ответ GET /api/singbox/inbounds. warnings — нечитаемые слот-файлы (fail-soft). */
+/** Ответ GET /api/singbox/inbounds. warnings — нечитаемые слот-файлы и конфликты тегов inbound (fail-soft). */
 export interface SingboxInboundsList {
 	inbounds: SingboxInboundEntry[];
 	warnings?: string[];

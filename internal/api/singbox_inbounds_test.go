@@ -56,7 +56,8 @@ func entryByTag(t *testing.T, resp SingboxInboundsResponse, tag string) SingboxI
 func TestSingboxInboundsHandler_AttributionPerSlot(t *testing.T) {
 	dir := t.TempDir()
 	writeSlot(t, dir, "10-tunnels.json",
-		`{"inbounds":[{"type":"mixed","tag":"my-vless-in","listen":"127.0.0.1","listen_port":1081}]}`)
+		`{"inbounds":[{"type":"mixed","tag":"my-vless-in","listen":"127.0.0.1","listen_port":1081}],
+		  "route":{"rules":[{"inbound":"my-vless-in","outbound":"my-vless"}]}}`)
 	writeSlot(t, dir, "18-qos-routes.json",
 		`{"inbounds":[{"type":"tproxy","tag":"tproxy-qos-0","listen":"127.0.0.1","listen_port":51281}]}`)
 	writeSlot(t, dir, "20-router.json",
@@ -65,10 +66,15 @@ func TestSingboxInboundsHandler_AttributionPerSlot(t *testing.T) {
 		`{"inbounds":[{"type":"tun","tag":"tun-in"}]}`)
 	writeSlot(t, dir, "30-deviceproxy.json",
 		`{"inbounds":[{"type":"mixed","tag":"device-proxy-abc-in","listen":"0.0.0.0","listen_port":1099}]}`)
+	// route.rules: строковая и массивная формы "inbound" — обе валидны для
+	// sing-box, парсер должен принимать обе.
 	writeSlot(t, dir, "40-subscriptions.json",
 		`{"inbounds":[
 			{"type":"mixed","tag":"sub-11112222-in","listen":"127.0.0.1","listen_port":1200},
-			{"type":"mixed","tag":"agg-33334444-in","listen":"127.0.0.1","listen_port":1201}]}`)
+			{"type":"mixed","tag":"agg-33334444-in","listen":"127.0.0.1","listen_port":1201}],
+		  "route":{"rules":[
+			{"inbound":"sub-11112222-in","action":"route","outbound":"sub-11112222-selector"},
+			{"inbound":["agg-33334444-in"],"action":"route","outbound":"agg-33334444"}]}}`)
 
 	h := NewSingboxInboundsHandler(SingboxInboundsDeps{
 		ConfigDir: func() string { return dir },
@@ -153,47 +159,67 @@ func TestSingboxInboundsHandler_IdleMatrix(t *testing.T) {
 		}
 	}
 
+	// Idle-семантика заземлена на конфиг: наличие route-правила своего
+	// слота (routed) — главный сигнал; флаги Enabled сущностей не участвуют.
+	// Матрица: route-правило есть/нет × тумблер NDMS × ProxyIndex.
 	cases := []struct {
 		name       string
 		ndmsOn     bool
+		routed     bool // route-правила слота ссылаются на sub/agg/tunnel inbound'ы
 		subs       func() []subscription.Subscription
 		groups     func() []subscription.AggregateGroup
 		tag        string
 		wantIdle   bool
 		wantReason string
 	}{
-		{"sub: всё включено", true, subs(true, 1), nil, "sub-aaaabbbb-in", false, ""},
-		{"sub: тумблер выключен", false, subs(true, 1), nil, "sub-aaaabbbb-in", true, "ndms_proxy_disabled"},
-		{"sub: ProxyIndex=-1", true, subs(true, -1), nil, "sub-aaaabbbb-in", true, "ndms_proxy_disabled"},
-		{"sub: подписка отключена", true, subs(false, 1), nil, "sub-aaaabbbb-in", true, "entity_disabled"},
-		{"sub: отключена и тумблер off — приоритет entity", false, subs(false, -1), nil, "sub-aaaabbbb-in", true, "entity_disabled"},
-		{"sub: nil store, тумблер on", true, nil, nil, "sub-aaaabbbb-in", false, ""},
-		{"sub: nil store, тумблер off", false, nil, nil, "sub-aaaabbbb-in", true, "ndms_proxy_disabled"},
-		{"group: всё включено", true, nil, groups(true, 2), "agg-ccccdddd-in", false, ""},
-		{"group: ProxyIndex=-1", true, nil, groups(true, -1), "agg-ccccdddd-in", true, "ndms_proxy_disabled"},
-		{"group: группа отключена", true, nil, groups(false, 2), "agg-ccccdddd-in", true, "entity_disabled"},
-		{"tunnel: тумблер on", true, nil, nil, "tun1-in", false, ""},
-		{"tunnel: тумблер off", false, nil, nil, "tun1-in", true, "ndms_proxy_disabled"},
-		{"engine: тумблер off — не idle", false, nil, nil, "tproxy-in", false, ""},
-		{"deviceproxy: тумблер off — не idle", false, nil, nil, "device-proxy-in", false, ""},
-		{"qos: тумблер off — не idle", false, nil, nil, "tproxy-qos-1", false, ""},
+		{"sub: всё включено", true, true, subs(true, 1), nil, "sub-aaaabbbb-in", false, ""},
+		{"sub: тумблер выключен", false, true, subs(true, 1), nil, "sub-aaaabbbb-in", true, "ndms_proxy_disabled"},
+		{"sub: тумблер on, ProxyN не выделен", true, true, subs(true, -1), nil, "sub-aaaabbbb-in", true, "ndms_proxy_missing"},
+		{"sub: подписка отключена — правило остаётся, НЕ idle", true, true, subs(false, 1), nil, "sub-aaaabbbb-in", false, ""},
+		{"sub: нет route-правила", true, true, subs(true, 1), nil, "sub-eeeeffff-in", true, "no_route_rule"},
+		{"sub: нет правила и тумблер off — приоритет no_route_rule", false, true, subs(true, 1), nil, "sub-eeeeffff-in", true, "no_route_rule"},
+		{"sub: nil store, тумблер on", true, true, nil, nil, "sub-aaaabbbb-in", false, ""},
+		{"sub: nil store, тумблер off", false, true, nil, nil, "sub-aaaabbbb-in", true, "ndms_proxy_disabled"},
+		{"sub: nil store, нет route-правила", true, false, nil, nil, "sub-aaaabbbb-in", true, "no_route_rule"},
+		{"group: всё включено", true, true, nil, groups(true, 2), "agg-ccccdddd-in", false, ""},
+		{"group: тумблер on, ProxyN не выделен", true, true, nil, groups(true, -1), "agg-ccccdddd-in", true, "ndms_proxy_missing"},
+		{"group: включена, но без серверов — правило снято", true, false, nil, groups(true, 2), "agg-ccccdddd-in", true, "no_route_rule"},
+		{"group: отключена — правило снято", true, false, nil, groups(false, 2), "agg-ccccdddd-in", true, "no_route_rule"},
+		{"tunnel: тумблер on", true, true, nil, nil, "tun1-in", false, ""},
+		{"tunnel: тумблер off", false, true, nil, nil, "tun1-in", true, "ndms_proxy_disabled"},
+		{"tunnel: нет route-правила", true, false, nil, nil, "tun1-in", true, "no_route_rule"},
+		{"engine: тумблер off — не idle", false, true, nil, nil, "tproxy-in", false, ""},
+		{"deviceproxy: тумблер off — не idle", false, true, nil, nil, "device-proxy-in", false, ""},
+		{"qos: тумблер off — не idle", false, true, nil, nil, "tproxy-qos-1", false, ""},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
+			tunnelRules := ""
+			subRules := ""
+			if c.routed {
+				tunnelRules = `,"route":{"rules":[{"inbound":"tun1-in","outbound":"tun1"}]}`
+				// Массивная форма "inbound" у группы — обе формы валидны.
+				subRules = `,"route":{"rules":[
+					{"inbound":"sub-aaaabbbb-in","action":"route","outbound":"sub-aaaabbbb-selector"},
+					{"inbound":["agg-ccccdddd-in"],"action":"route","outbound":"agg-ccccdddd"}]}`
+			}
 			writeSlot(t, dir, "10-tunnels.json",
-				`{"inbounds":[{"type":"mixed","tag":"tun1-in","listen":"127.0.0.1","listen_port":1081}]}`)
+				`{"inbounds":[{"type":"mixed","tag":"tun1-in","listen":"127.0.0.1","listen_port":1081}]`+tunnelRules+`}`)
 			writeSlot(t, dir, "18-qos-routes.json",
 				`{"inbounds":[{"type":"tproxy","tag":"tproxy-qos-1","listen":"127.0.0.1","listen_port":51282}]}`)
 			writeSlot(t, dir, "20-router.json",
 				`{"inbounds":[{"type":"tproxy","tag":"tproxy-in","listen":"127.0.0.1","listen_port":51280}]}`)
 			writeSlot(t, dir, "30-deviceproxy.json",
 				`{"inbounds":[{"type":"mixed","tag":"device-proxy-in","listen":"0.0.0.0","listen_port":1099}]}`)
+			// sub-eeeeffff-in — inbound без route-правила даже при routed=true
+			// (случай «включённая сущность, но конфиг порт не питает»).
 			writeSlot(t, dir, "40-subscriptions.json",
 				`{"inbounds":[
 					{"type":"mixed","tag":"sub-aaaabbbb-in","listen":"127.0.0.1","listen_port":1300},
-					{"type":"mixed","tag":"agg-ccccdddd-in","listen":"127.0.0.1","listen_port":1301}]}`)
+					{"type":"mixed","tag":"agg-ccccdddd-in","listen":"127.0.0.1","listen_port":1301},
+					{"type":"mixed","tag":"sub-eeeeffff-in","listen":"127.0.0.1","listen_port":1302}]`+subRules+`}`)
 
 			h := NewSingboxInboundsHandler(SingboxInboundsDeps{
 				ConfigDir:        func() string { return dir },
@@ -228,6 +254,67 @@ func TestSingboxInboundsHandler_UnreadableSlotWarning(t *testing.T) {
 	}
 	if got := resp.Warnings[0]; !strings.Contains(got, "40-subscriptions.json") {
 		t.Errorf("warning does not name the unreadable slot: %q", got)
+	}
+}
+
+// TestSingboxInboundsHandler_DuplicateTagWarning: коллизия тегов между
+// слотами (например, рукой отредактированный слот) — MergeDir откажется
+// мержить, sing-box такой конфиг не загрузит; зеркало обязано сказать об
+// этом warning'ом, а не молча показать два ряда с одним тегом.
+func TestSingboxInboundsHandler_DuplicateTagWarning(t *testing.T) {
+	dir := t.TempDir()
+	writeSlot(t, dir, "10-tunnels.json",
+		`{"inbounds":[{"type":"mixed","tag":"clash-in","listen":"127.0.0.1","listen_port":1081}]}`)
+	writeSlot(t, dir, "20-router.json",
+		`{"inbounds":[{"type":"tproxy","tag":"clash-in","listen":"127.0.0.1","listen_port":51280}]}`)
+
+	h := NewSingboxInboundsHandler(SingboxInboundsDeps{
+		ConfigDir: func() string { return dir },
+	})
+	resp := callInbounds(t, h)
+
+	if len(resp.Inbounds) != 2 {
+		t.Fatalf("expected both colliding inbounds returned, got %+v", resp.Inbounds)
+	}
+	if len(resp.Warnings) != 1 {
+		t.Fatalf("expected 1 duplicate-tag warning, got %v", resp.Warnings)
+	}
+	want := `конфликт тегов inbound: "clash-in" в слотах tunnels и router — sing-box не загрузит такой конфиг`
+	if resp.Warnings[0] != want {
+		t.Errorf("warning = %q, want %q", resp.Warnings[0], want)
+	}
+}
+
+// TestSingboxInboundsHandler_ActiveSlotsOnly пиннит инвариант «зеркало ==
+// то, что грузит sing-box» (совпадает с configmerge.collectActiveSlots):
+// припаркованные слоты в config.d/disabled/, черновики в config.d/pending/
+// и не-.json файлы в config.d не дают inbound'ов и warnings.
+func TestSingboxInboundsHandler_ActiveSlotsOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeSlot(t, dir, "10-tunnels.json",
+		`{"inbounds":[{"type":"mixed","tag":"active-in","listen":"127.0.0.1","listen_port":1081}]}`)
+	for _, sub := range []string{"disabled", "pending"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSlot(t, filepath.Join(dir, "disabled"), "40-subscriptions.json",
+		`{"inbounds":[{"type":"mixed","tag":"parked-in","listen":"127.0.0.1","listen_port":1300}]}`)
+	writeSlot(t, filepath.Join(dir, "pending"), "20-router.json",
+		`{"inbounds":[{"type":"tproxy","tag":"draft-in","listen":"127.0.0.1","listen_port":51280}]}`)
+	writeSlot(t, dir, "notes.txt",
+		`{"inbounds":[{"type":"mixed","tag":"not-json-in","listen":"127.0.0.1","listen_port":2000}]}`)
+
+	h := NewSingboxInboundsHandler(SingboxInboundsDeps{
+		ConfigDir: func() string { return dir },
+	})
+	resp := callInbounds(t, h)
+
+	if len(resp.Inbounds) != 1 || resp.Inbounds[0].Tag != "active-in" {
+		t.Errorf("expected only active slot's inbound, got %+v", resp.Inbounds)
+	}
+	if len(resp.Warnings) != 0 {
+		t.Errorf("expected no warnings, got %v", resp.Warnings)
 	}
 }
 
