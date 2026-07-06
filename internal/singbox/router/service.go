@@ -137,6 +137,11 @@ type SingboxController interface {
 // hydraroute package.
 type GeoTagExpander interface {
 	ExpandGeoTag(kind, tag string) (lines []string, filePath string, err error)
+	// ExpandGeoTagTyped preserves the v2ray domain type per line
+	// ("keyword:", "domain_regex:", ".", "full:") so datLinesToRuleSetRules
+	// can map Plain→domain_keyword and Full→domain instead of collapsing
+	// everything to domain_suffix (issue #448).
+	ExpandGeoTagTyped(kind, tag string) (lines []string, filePath string, err error)
 }
 
 // PolicyDevice is one LAN device known to NDMS hotspot, annotated with
@@ -2907,6 +2912,9 @@ func (s *ServiceImpl) ApplyStaging(ctx context.Context) (orchestrator.Validation
 	_ = s.healLegacySelectiveRoutesSlotIfNeeded(ctx)
 	res, err := s.deps.Orch.ApplyDraft(orchestrator.SlotRouter)
 	if err == nil && res.Ok() {
+		// A staged rule-set delete/rename is final now — reap the orphaned
+		// inline/dat artifacts (issue #448: files were never deleted).
+		s.GCRuleSetArtifacts()
 		s.emitStagingEvent("applied")
 		s.emitRulesEvent()
 	}

@@ -1315,6 +1315,10 @@ func main() {
 		if err := routerSvc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
 			routerStartupLog.Warn("fakeip-reap", "startup", err.Error())
 		}
+		// Startup-only: reap rule-set artifacts (rule-sets/inline, rule-sets/dat)
+		// orphaned by deletes/renames on older AWGM versions that never cleaned
+		// them up (issue #448). Steady-state GC runs after each ApplyStaging.
+		routerSvc.GCRuleSetArtifacts()
 		if err := routerSvc.Reconcile(context.Background()); err != nil {
 			routerStartupLog.Error("reconcile", "startup", err.Error())
 		}
