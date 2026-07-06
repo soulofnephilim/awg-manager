@@ -67,6 +67,12 @@ func (o *Orchestrator) Reload() error {
 	pruneLogs := o.pruneDanglingSelectorRefsLocked()
 	res := o.validateLocked()
 	if !res.Ok() {
+		// Запоминаем провал: reload пропущен, движок работает на старом
+		// конфиге, а UI (router status / эксперт-редактор) может показать
+		// причину через LastReloadValidation. Особенно важно для 90-user.json:
+		// его висячие ссылки мы намеренно не чиним автоматически.
+		failed := res
+		o.lastReloadValidation = &failed
 		o.reloading = false
 		o.mu.Unlock()
 		for _, m := range pruneLogs {
@@ -76,6 +82,7 @@ func (o *Orchestrator) Reload() error {
 		o.log("error", msg)
 		return res
 	}
+	o.lastReloadValidation = nil // валидация прошла — прошлый провал неактуален
 	needRunning := o.hasActiveWorkLocked()
 	proc := o.proc
 	shouldRun := o.shouldRun
@@ -173,6 +180,14 @@ func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
 	for _, m := range KnownSlots() {
 		meta := m
 		if _, ok := o.slots[meta.Slot]; !ok || !o.enabled[meta.Slot] {
+			continue
+		}
+		if meta.Slot == SlotUser {
+			// 90-user.json пишет только сам пользователь через эксперт-
+			// редактор — правки пользователя не мутируем молча. Висячая
+			// ссылка в нём остаётся, validateLocked её отловит, reload
+			// пропустится (движок продолжит работать на старом конфиге),
+			// а причина всплывёт через LastReloadValidation в статусе.
 			continue
 		}
 		data, err := o.readActiveBytes(meta.Slot)

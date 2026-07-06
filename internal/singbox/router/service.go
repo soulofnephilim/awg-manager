@@ -1541,6 +1541,36 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 			})
 		}
 	}
+	// Эксперт-редактор (90-user.json): если последний reload пропущен из-за
+	// провала кросс-слот валидации по вине пользовательского слота, движок
+	// продолжает работать на старом конфиге, а сам файл оркестратор
+	// намеренно не чинит (prune пропускает user-слот). computeIssues видит
+	// только конфиг роутера, поэтому runtime-issue собирается здесь из
+	// orchestrator.LastReloadValidation — по паттерну #456.
+	if s.deps.Orch != nil {
+		if v := s.deps.Orch.LastReloadValidation(); v != nil {
+			for _, ve := range v.Errors {
+				if ve.Slot != orchestrator.SlotUser || ve.Severity == orchestrator.SeverityWarning {
+					continue
+				}
+				var msg string
+				switch {
+				case strings.HasPrefix(ve.Kind, "unknown-") && ve.Tag != "":
+					msg = fmt.Sprintf("Пользовательский конфиг (90-user.json) ссылается на несуществующий тег %q — правьте в редакторе конфигурации", ve.Tag)
+				case ve.Tag != "":
+					msg = fmt.Sprintf("Пользовательский конфиг (90-user.json): %s %q — правьте в редакторе конфигурации", ve.Kind, ve.Tag)
+				default:
+					msg = fmt.Sprintf("Пользовательский конфиг (90-user.json): %s — правьте в редакторе конфигурации", ve.Message)
+				}
+				issues = append(issues, Issue{
+					Severity: "error",
+					Kind:     "user-slot-validation",
+					Tag:      ve.Tag,
+					Message:  msg,
+				})
+			}
+		}
+	}
 	// QoS-DSCP support: xtDscpAvailable is always reported (the UI keys the
 	// feature's "supported" state on it). When classes are actually
 	// configured but the support probe fails, additionally surface an issue

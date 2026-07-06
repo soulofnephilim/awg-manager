@@ -96,6 +96,9 @@ import type {
 	CreateSubscriptionGroupInput,
 	UpdateSubscriptionGroupInput,
 	RouterStagingStatusResponse,
+	ConfigSlotsResponse,
+	ConfigSlotContentResponse,
+	UserConfigCheckResponse,
 	AmneziaPremiumAccountInfo,
 	ManagedServerBackupFile,
 	ManagedServerDriftResponse,
@@ -1643,6 +1646,50 @@ class ApiClient {
 
 	async singboxGetConfigPreview(): Promise<SingboxConfigPreview> {
 		return this.request<SingboxConfigPreview>('/singbox/config-preview');
+	}
+
+	// ── Эксперт-редактор конфигурации (config.d слоты) ──
+
+	async singboxConfigSlots(): Promise<ConfigSlotsResponse> {
+		return this.request<ConfigSlotsResponse>('/singbox/config/slots');
+	}
+
+	async singboxConfigSlot(name: string): Promise<ConfigSlotContentResponse> {
+		return this.request<ConfigSlotContentResponse>(
+			`/singbox/config/slot?name=${encodeURIComponent(name)}`,
+		);
+	}
+
+	/** Сохранить черновик user-слота: тело — сырой JSON слота целиком. */
+	async singboxUserConfigSave(content: string): Promise<void> {
+		await this.request('/singbox/config/user', { method: 'PUT', body: content });
+	}
+
+	/**
+	 * Проверить конфиг без записи. content опционален — без него проверяется
+	 * текущий черновик (409 если черновика нет).
+	 */
+	async singboxUserConfigCheck(content?: string): Promise<UserConfigCheckResponse> {
+		return this.request<UserConfigCheckResponse>('/singbox/config/user/check', {
+			method: 'POST',
+			...(content !== undefined ? { body: content } : {}),
+		});
+	}
+
+	/** Применить черновик: 422 (validation/sbCheck) прилетает через err.status/err.body. */
+	async singboxUserConfigApply(): Promise<void> {
+		await this.request('/singbox/config/user/apply', { method: 'POST' });
+	}
+
+	async singboxUserConfigDiscard(): Promise<void> {
+		await this.request('/singbox/config/user/discard', { method: 'POST' });
+	}
+
+	async singboxUserConfigEnable(enabled: boolean): Promise<void> {
+		await this.request('/singbox/config/user/enable', {
+			method: 'POST',
+			body: JSON.stringify({ enabled }),
+		});
 	}
 
 	/** Все inbound'ы merged-конфига sing-box с атрибуцией источника. */

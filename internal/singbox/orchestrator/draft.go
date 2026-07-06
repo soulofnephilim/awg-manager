@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"time"
 )
 
 // SaveDraft writes the slot's JSON to pending/<filename> atomically.
@@ -33,10 +34,10 @@ func (o *Orchestrator) SaveDraft(slot Slot, jsonBytes []byte) error {
 // LoadEffective returns the bytes of the "most relevant" copy of a slot
 // for UI consumers. Priority chain:
 //
-//   1. pending/<filename>  — user's in-flight edits (SaveDraft target)
-//   2. active/<filename>   — applied config, slot enabled
-//   3. disabled/<filename> — saved config, slot disabled
-//   4. (nil, nil)          — slot never configured
+//  1. pending/<filename>  — user's in-flight edits (SaveDraft target)
+//  2. active/<filename>   — applied config, slot enabled
+//  3. disabled/<filename> — saved config, slot disabled
+//  4. (nil, nil)          — slot never configured
 //
 // Including disabled/ makes "engine off" mean "inactive but editable":
 // UI handlers (ListRules etc.) keep showing the user's rules so they can
@@ -68,6 +69,45 @@ func (o *Orchestrator) LoadEffective(slot Slot) ([]byte, error) {
 		return nil, fmt.Errorf("LoadEffective disabled %s: %w", slot, err)
 	}
 	return data, nil
+}
+
+// LoadDraft returns the bytes of the slot's pending (draft) file, or
+// (nil, nil) when no draft exists. Unlike LoadEffective it never falls
+// back to active/disabled — callers that validate "the current draft"
+// (config-editor check endpoint) must not silently re-check the applied
+// config instead. Returns ErrUnknownSlot for unregistered slots.
+func (o *Orchestrator) LoadDraft(slot Slot) ([]byte, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	meta, ok := o.slots[slot]
+	if !ok {
+		return nil, ErrUnknownSlot
+	}
+	data, err := readIfExists(o.pendingPath(meta))
+	if err != nil {
+		return nil, fmt.Errorf("LoadDraft pending %s: %w", slot, err)
+	}
+	return data, nil
+}
+
+// EffectiveStat returns size and mtime of the file LoadEffective would
+// read (same pending → active → disabled priority chain). exists=false
+// when the slot has no file anywhere. Used by the config-editor slots
+// list, which needs metadata without pulling file contents.
+func (o *Orchestrator) EffectiveStat(slot Slot) (size int64, mtime time.Time, exists bool) {
+	o.mu.Lock()
+	meta, ok := o.slots[slot]
+	o.mu.Unlock()
+	if !ok {
+		return 0, time.Time{}, false
+	}
+	for _, p := range []string{o.pendingPath(meta), o.activePath(meta), o.disabledPath(meta)} {
+		st, err := os.Stat(p)
+		if err == nil && st.Mode().IsRegular() {
+			return st.Size(), st.ModTime(), true
+		}
+	}
+	return 0, time.Time{}, false
 }
 
 // LoadApplied returns the bytes of the slot's APPLIED config: active/ when
