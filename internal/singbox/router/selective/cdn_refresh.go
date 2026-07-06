@@ -66,7 +66,7 @@ func (b *Builder) RefreshCDNMatchers(
 	for qi, q := range queries {
 		ResolveOneQueryStream(ctx, q, dnsServers, func(cidr string) {
 			acc.Add(q.Outbound, cidr)
-		}, nil, fullProbes[qi])
+		}, nil, fullProbes[qi], nil)
 	}
 
 	// Mutation phase — the heavy-op gate is held ONLY around the overlay merge

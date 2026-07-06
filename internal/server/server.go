@@ -1210,6 +1210,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/api/singbox/router/selective/install-deps", guarded(sh.InstallDeps))
 		mux.HandleFunc("/api/singbox/router/selective/install-conntrack", guarded(sh.InstallConntrack))
 		mux.HandleFunc("/api/singbox/router/selective/rebuild", guarded(sh.Rebuild))
+		mux.HandleFunc("/api/singbox/router/selective/rebuild/cancel", guarded(sh.CancelRebuild))
 	}
 
 	if s.singboxFakeIPConfigHandler != nil {

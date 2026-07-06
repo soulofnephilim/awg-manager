@@ -2567,6 +2567,14 @@ definitions:
       state:
         type: string
     type: object
+  api.SelectiveCancelData:
+    properties:
+      cancelled:
+        description: |-
+          Cancelled is true when an active rebuild run was found and its
+          cancellation was requested; false when no rebuild was running.
+        type: boolean
+    type: object
   api.SelectiveDomainMatcherRecordDTO:
     properties:
       cdn:
@@ -12575,6 +12583,27 @@ paths:
       security:
       - CookieAuth: []
       summary: Force ipset rebuild (asynchronous)
+      tags:
+      - singbox-router
+  /singbox/router/selective/rebuild/cancel:
+    post:
+      description: Requests cancellation of the in-flight selective ipset rebuild.
+        Returns cancelled=false when no rebuild is running (safe no-op). Completion
+        is delivered via the selective-progress/selective-status SSE events.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SelectiveCancelData'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Cancel a running ipset rebuild
       tags:
       - singbox-router
   /singbox/router/selective/snapshot/matchers:

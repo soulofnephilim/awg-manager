@@ -2,6 +2,7 @@ package selective
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -75,6 +76,100 @@ type Builder struct {
 	// LastIPRulesByOutbound / mergeRoutesLocked) and the former
 	// map[string][]string of "/32" strings cost several times the bytes.
 	routes map[string]map[netip.Addr]struct{}
+	// stallTimeout / stallHardCap переопределяют rebuildStallTimeout /
+	// rebuildHardCap для тестов (0 — значения по умолчанию).
+	stallTimeout time.Duration
+	stallHardCap time.Duration
+	// lastProgress — последний прогресс текущей пересборки (progressMark);
+	// попадает в сообщение об остановке stall guard'ом (stallGuardError).
+	lastProgress atomic.Value
+	// cancelRun — cancel-cause текущего прогона RebuildOwnedRun (под mu);
+	// nil между прогонами. Дёргается из CancelRun по запросу пользователя.
+	cancelRun context.CancelCauseFunc
+}
+
+// progressMark — компактный снимок последнего прогресса пересборки для
+// диагностики stall guard'а.
+type progressMark struct {
+	phase   Phase
+	matcher string
+	current int
+	total   int
+}
+
+func (b *Builder) stallTimeoutOrDefault() time.Duration {
+	if b.stallTimeout > 0 {
+		return b.stallTimeout
+	}
+	return rebuildStallTimeout
+}
+
+func (b *Builder) stallHardCapOrDefault() time.Duration {
+	if b.stallHardCap > 0 {
+		return b.stallHardCap
+	}
+	return rebuildHardCap
+}
+
+// lastProgressInfo описывает последний зафиксированный прогресс для
+// сообщения об остановке пересборки.
+func (b *Builder) lastProgressInfo() string {
+	m, _ := b.lastProgress.Load().(progressMark)
+	s := "фаза "
+	if m.phase == "" {
+		s += "запуск"
+	} else {
+		s += string(m.phase)
+	}
+	if m.matcher != "" {
+		s += ", последний матчер " + m.matcher
+	}
+	if m.total > 0 {
+		s += fmt.Sprintf(", %d/%d", m.current, m.total)
+	}
+	return s
+}
+
+// stallGuardError переписывает ошибку конвейера, вызванную срабатыванием
+// stall guard'а, в понятное сообщение с последним прогрессом; обычные ошибки
+// проходят без изменений. Причины различаются по context.Cause: ErrStalled —
+// нет прогресса, DeadlineExceeded — сработал абсолютный предохранитель.
+func (b *Builder) stallGuardError(guardCtx context.Context, err error) error {
+	cause := context.Cause(guardCtx)
+	switch {
+	case errors.Is(cause, ErrCancelledByUser):
+		// Явная отмена через CancelRun: причина от родительского runCtx
+		// пробрасывается в guard-контекст самим context-пакетом.
+		return fmt.Errorf("%w (%s): %w", ErrCancelledByUser, b.lastProgressInfo(), err)
+	case errors.Is(cause, ErrStalled):
+		// Двойной %w: и причина (ErrStalled — для errors.Is), и ошибка шага,
+		// на котором конвейер заметил отмену (для логов).
+		return fmt.Errorf("пересборка ipset остановлена: %w %s подряд (%s): %w",
+			ErrStalled, formatDurationRu(b.stallTimeoutOrDefault()), b.lastProgressInfo(), err)
+	case errors.Is(cause, context.DeadlineExceeded):
+		return fmt.Errorf("пересборка ipset остановлена: превышен предохранительный лимит %s (%s): %w",
+			formatDurationRu(b.stallHardCapOrDefault()), b.lastProgressInfo(), err)
+	}
+	return err
+}
+
+// CancelRun отменяет текущую пересборку (ограниченный выход из runaway-прогона
+// до истечения rebuildHardCap): работает с момента входа в RebuildOwnedRun,
+// включая ожидание heavy-op гейта. Безопасный no-op, когда прогона нет —
+// возвращает false; true — активный прогон найден и его отмена запрошена.
+// reason == nil трактуется как ErrCancelledByUser.
+func (b *Builder) CancelRun(reason error) bool {
+	if reason == nil {
+		reason = ErrCancelledByUser
+	}
+	b.mu.Lock()
+	cancel := b.cancelRun
+	b.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel(reason)
+	return true
 }
 
 func (b *Builder) opSem() chan struct{} {
@@ -236,7 +331,7 @@ func (b *Builder) Rebuild(
 // RebuildOwnedRun is Rebuild for a caller that already owns the run marker
 // (TryBeginRun returned true). The caller is responsible for EndRun.
 func (b *Builder) RebuildOwnedRun(
-	ctx context.Context,
+	parentCtx context.Context,
 	rules []RuleJSON,
 	ruleSetRefs []RuleSetRef,
 	singboxDNS []SingboxDNSServer,
@@ -244,43 +339,115 @@ func (b *Builder) RebuildOwnedRun(
 ) error {
 	emit := b.emitter(fn)
 
-	// Gate acquisition rides on the RUN's own context (the API background run
-	// caps it at 10 minutes, the boot auto-rebuild likewise): at boot the
-	// orchestrator can legitimately hold the gate 60+ seconds (sing-box cold
-	// start readiness floor), and a short hard sub-timeout here made the
-	// one-shot boot rebuild give up — leaving a reboot-emptied ipset
-	// unpopulated (silent WAN leak). Fast-fail UX for manual rebuilds is
-	// provided by the API handler's TryLock pre-check; in-run waiting can be
-	// patient.
-	if err := heavyop.Default.LockWithContext(ctx); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: %w", ErrBusy))
+	// runCtx делает прогон отменяемым по запросу пользователя (CancelRun):
+	// регистрируется ДО ожидания heavy-op гейта, чтобы отмена работала и на
+	// этом этапе. Причина отмены (ErrCancelledByUser) доезжает до guard-
+	// контекста ниже через штатное распространение context.Cause.
+	runCtx, cancelRun := context.WithCancelCause(parentCtx)
+	defer cancelRun(context.Canceled)
+	b.mu.Lock()
+	b.cancelRun = cancelRun
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.cancelRun = nil
+		b.mu.Unlock()
+	}()
+	// failAcquire различает пользовательскую отмену и занятый гейт/слот на
+	// этапе, когда stall guard ещё не создан.
+	failAcquire := func() error {
+		if errors.Is(context.Cause(runCtx), ErrCancelledByUser) {
+			return b.fail(parentCtx, emit, fmt.Errorf("selective: %w", ErrCancelledByUser))
+		}
+		return b.fail(parentCtx, emit, fmt.Errorf("selective: %w", ErrBusy))
+	}
+
+	// Gate acquisition rides on its own patient timeout (rebuildAcquireTimeout),
+	// NOT on the stall guard below — waiting on the gate is not progress and
+	// must not trip the guard: at boot the orchestrator can legitimately hold
+	// the gate 60+ seconds (sing-box cold start readiness floor), and a short
+	// hard sub-timeout here made the one-shot boot rebuild give up — leaving a
+	// reboot-emptied ipset unpopulated (silent WAN leak). Fast-fail UX for
+	// manual rebuilds is provided by the API handler's TryLock pre-check;
+	// in-run waiting can be patient.
+	acquireCtx, cancelAcquire := context.WithTimeout(runCtx, rebuildAcquireTimeout)
+	defer cancelAcquire()
+	if err := heavyop.Default.LockWithContext(acquireCtx); err != nil {
+		return failAcquire()
 	}
 	defer heavyop.Default.Unlock()
-	if err := b.acquireOp(ctx); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: %w", ErrBusy))
+	if err := b.acquireOp(acquireCtx); err != nil {
+		return failAcquire()
 	}
 	defer b.releaseOp()
+
+	// Прогресс-ориентированный дедлайн вместо настенного (бывшие 10 минут в
+	// API-обработчике и boot-триггере): отмена — только когда touch не
+	// вызывался rebuildStallTimeout подряд либо истёк rebuildHardCap.
+	// Медленная, но идущая пересборка на MIPS-роутере больше не падает по
+	// «timeout». touch дёргают: каждый emit (смена фазы, per-matcher
+	// прогресс), sink'и статических CIDR и доменных записей, каждая
+	// управляющая ipset-команда и restore-чанк (до и после — runIpsetCtl /
+	// addEntriesToSet), завершение каждого DNS-резолва хоста внутри матчера
+	// (onHostResolved в resolveOneQuery), а также материализация rule-set'ов
+	// и периодический тик geosite/geoip-скана (ProgressTouch через контекст).
+	ctx, touch, cancelGuard := WithStallGuard(runCtx, b.stallTimeoutOrDefault(), b.stallHardCapOrDefault())
+	defer cancelGuard()
+	// touch-хук едет вместе с контекстом в слои, куда прокидывается только
+	// ctx: ipset-команды и материализация rule-set'ов в пакете router.
+	ctx = ContextWithProgressTouch(ctx, touch)
+
+	b.lastProgress.Store(progressMark{})
+	rawEmit := emit
+	emit = func(p Progress) {
+		// Прогресс фиксируется, только пока guard-контекст жив: emit'ы,
+		// догоняющие уже отменённую пересборку (например, смена фазы на
+		// populating после stall'а в resolving), не должны переписать
+		// lastProgress — иначе сообщение об остановке назовёт не ту фазу.
+		if p.Phase != PhaseError && ctx.Err() == nil {
+			b.lastProgress.Store(progressMark{phase: p.Phase, matcher: p.Matcher, current: p.Current, total: p.Total})
+		}
+		touch()
+		rawEmit(p)
+	}
+	// fail завершает пересборку через b.fail, предварительно переписывая
+	// ошибку срабатывания stall guard'а в понятное сообщение. EntryCount в
+	// b.fail работает на parentCtx — guard-контекст к этому моменту мёртв.
+	fail := func(err error) error {
+		return b.fail(parentCtx, emit, b.stallGuardError(ctx, err))
+	}
 
 	emit(Progress{Phase: PhaseCollecting, Message: "Сбор IP-адресов и доменов из правил маршрутизации…"})
 
 	if err := CreateSet(ctx); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: create live set: %w", err))
+		return fail(fmt.Errorf("selective: create live set: %w", err))
 	}
 	if err := EnsureStagingSet(ctx); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: create staging set: %w", err))
+		return fail(fmt.Errorf("selective: create staging set: %w", err))
 	}
 	if err := FlushStagingSet(ctx); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: flush staging: %w", err))
+		return fail(fmt.Errorf("selective: flush staging: %w", err))
 	}
 
 	snapW, err := newSnapshotWriter(b.cfg.ConfigDir)
 	if err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: snapshot writer: %w", err))
+		return fail(fmt.Errorf("selective: snapshot writer: %w", err))
 	}
 	defer snapW.Abort()
 
 	routes := NewRouteAccumulator()
 	ctQueue := newConntrackQueue()
+	// commitChunk фиксирует один restore-чанк с сигналами прогресса: «начали
+	// операцию» — тоже прогресс (зависание самой команды ловит её
+	// exec-таймаут ipsetRestoreTimeout, а не stall guard), фиксация — тем более.
+	commitChunk := func(chunk []string) error {
+		touch()
+		if err := ChunkedAddStaging(ctx, chunk); err != nil {
+			return err
+		}
+		touch()
+		return nil
+	}
 	var stagingChunk []string
 	var stagingMu sync.Mutex
 	flushStaging := func() error {
@@ -291,7 +458,7 @@ func (b *Builder) RebuildOwnedRun(
 		}
 		chunk := stagingChunk
 		stagingChunk = nil
-		return ChunkedAddStaging(ctx, chunk)
+		return commitChunk(chunk)
 	}
 	addStaging := func(cidr string) error {
 		cidr = normalizeEntry(cidr)
@@ -307,7 +474,7 @@ func (b *Builder) RebuildOwnedRun(
 		chunk := stagingChunk
 		stagingChunk = nil
 		stagingMu.Unlock()
-		return ChunkedAddStaging(ctx, chunk)
+		return commitChunk(chunk)
 	}
 
 	// staticCount counts collected static-CIDR lines, not unique subnets:
@@ -343,6 +510,7 @@ func (b *Builder) RebuildOwnedRun(
 	stats, collectErrs := collectResolveStream(ctx, rules, ruleSetRefs, b.cfg.Geo, b.cfg.OpenRuleSetJSON, dnsServers,
 		func(cidr string) error {
 			staticCount.Add(1)
+			touch() // каждая собранная статическая CIDR-строка — прогресс
 			return addStaging(cidr)
 		},
 		DomainQueryStreamSink{
@@ -366,6 +534,7 @@ func (b *Builder) RebuildOwnedRun(
 					Error:      rec.Error,
 				})
 				domainCount.Add(1)
+				touch() // завершённый матчер — прогресс
 			},
 		},
 		&queuedDomains,
@@ -387,6 +556,10 @@ func (b *Builder) RebuildOwnedRun(
 				Total:   total,
 			})
 		}, func(matcher, host string, hostIndex, hostTotal int) {
+			// Начало резолва хоста внутри матчера — прогресс независимо от
+			// того, дойдёт ли событие до SSE (подавление ниже касается только
+			// частоты событий, не сигнала stall guard'у).
+			touch()
 			// Host-level SSE only for small lists — avoid flooding during bulk
 			// geosite. Once the queued count passes the threshold, suppression
 			// latches ON for the rest of the run; and while collection is still
@@ -411,7 +584,11 @@ func (b *Builder) RebuildOwnedRun(
 				Current:   hostIndex,
 				Total:     hostTotal,
 			})
-		})
+		},
+		// Один матчер легально резолвится минуты (до maxHostsPerMatcher
+		// хостов × раунды × 2 с) — прогрессом считается и завершение
+		// каждого DNS-резолва хоста внутри матчера.
+		touch)
 	for _, e := range collectErrs {
 		if b.cfg.Log != nil {
 			b.cfg.Log.Warn("selective-rebuild", "collect", e.Error())
@@ -435,15 +612,20 @@ func (b *Builder) RebuildOwnedRun(
 	})
 
 	if err := flushStaging(); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: populate staging: %w", err))
+		return fail(fmt.Errorf("selective: populate staging: %w", err))
 	}
 
 	if err := SwapWithStaging(ctx); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: swap ipset: %w", err))
+		return fail(fmt.Errorf("selective: swap ipset: %w", err))
 	}
 	_ = FlushStagingSet(ctx)
 
-	entryCount := EntryCount(ctx)
+	// После успешного swap пересборка фактически состоялась — счётчик снимаем
+	// на parentCtx (guard мог сработать в зазоре после swap и убить ctx) и
+	// честно различаем «подтверждённый ноль» и «счётчик прочитать не удалось»:
+	// сбой счётчика не должен рождать ложное «ipset пустой — весь трафик в
+	// WAN» при только что залитом наборе.
+	entryCount, entryCountOK := EntryCountChecked(parentCtx)
 	b.setSuccess()
 	b.mu.Lock()
 	b.routes = routes.AddrsByOutbound()
@@ -458,7 +640,7 @@ func (b *Builder) RebuildOwnedRun(
 		TruncatedRoutes:    routesDropped,
 	}
 	if err := snapW.CloseAndCommit(summary); err != nil {
-		return b.fail(ctx, emit, fmt.Errorf("selective: commit snapshot: %w", err))
+		return fail(fmt.Errorf("selective: commit snapshot: %w", err))
 	}
 	b.mu.Lock()
 	b.summary = &summary
@@ -467,7 +649,11 @@ func (b *Builder) RebuildOwnedRun(
 	go b.deferredConntrackFlush(ctQueue.Drain())
 
 	doneMsg := fmt.Sprintf("ipset обновлён. Записей: %d", entryCount)
-	if entryCount == 0 {
+	if !entryCountOK {
+		// Swap прошёл, но счётчик снять не удалось — успех с неизвестным
+		// количеством, а не сфабрикованный «пустой» набор.
+		doneMsg = "ipset обновлён. Записей: н/д (счётчик прочитать не удалось)"
+	} else if entryCount == 0 {
 		doneMsg = "ipset пустой — правил с IP/доменами нет. Весь трафик идёт в WAN мимо sing-box."
 	}
 	if stats.DroppedMatchers > 0 {
@@ -488,7 +674,9 @@ func (b *Builder) RebuildOwnedRun(
 // list exist in memory. queued is incremented per enqueued matcher and doubles
 // as the moving progress total. onCollected (optional) fires once the collect
 // stage has finished — i.e. queued is final — while resolves may still be in
-// flight. Returns once BOTH stages have finished.
+// flight. onHostResolved (optional) fires after every completed DNS host
+// resolve inside a matcher — сигнал прогресса для stall guard'а. Returns once
+// BOTH stages have finished.
 func collectResolveStream(
 	ctx context.Context,
 	rules []RuleJSON,
@@ -502,6 +690,7 @@ func collectResolveStream(
 	onCollected func(),
 	progressFn ResolveProgressFn,
 	hostProgressFn ResolveHostProgressFn,
+	onHostResolved func(),
 ) (CollectStats, []error) {
 	work := make(chan resolveWorkItem, resolveQueueDepth)
 	resolveDone := make(chan struct{})
@@ -509,7 +698,7 @@ func collectResolveStream(
 		defer close(resolveDone)
 		resolveWorkers(ctx, work, dnsServers, resolveSink, progressFn, func() int {
 			return int(queued.Load())
-		}, hostProgressFn)
+		}, hostProgressFn, onHostResolved)
 	}()
 
 	// Streaming variant of fullProbeFlags: the first fullProbeSuffixBudget

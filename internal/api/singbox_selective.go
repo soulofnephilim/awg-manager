@@ -131,8 +131,11 @@ type SelectiveHandler struct {
 	status     SelectiveStatusProvider
 }
 
-// rebuildTimeout is the overall backstop for one background ipset rebuild.
-const rebuildTimeout = 10 * time.Minute
+// Настенного таймаута фоновой пересборки ipset больше нет: медленная, но
+// идущая работа на MIPS-роутере легально длится дольше любого фиксированного
+// потолка. Продолжительность ограничивает stall guard внутри билдера
+// (selective.WithStallGuard) — отмена только при отсутствии прогресса
+// (rebuildStallTimeout) либо по абсолютному предохранителю (rebuildHardCap).
 
 // installTimeout is the overall backstop for one opkg install run.
 const installTimeout = 10 * time.Minute
@@ -153,6 +156,21 @@ type SelectiveStatusProvider interface {
 	// Rebuilding reports a rebuild in flight regardless of who started it
 	// (this handler or the boot/reconcile auto-rebuild).
 	Rebuilding() bool
+}
+
+// SelectiveRebuildCanceller — необязательная способность status-провайдера
+// останавливать текущую пересборку (CancelRebuild проверяет её type-assert'ом:
+// *selective.Builder реализует, тестовые заглушки без неё получают
+// cancelled:false). reason == nil трактуется как «отменено пользователем».
+type SelectiveRebuildCanceller interface {
+	CancelRun(reason error) bool
+}
+
+// SelectiveCancelData is the payload for POST .../rebuild/cancel.
+type SelectiveCancelData struct {
+	// Cancelled is true when an active rebuild run was found and its
+	// cancellation was requested; false when no rebuild was running.
+	Cancelled bool `json:"cancelled"`
 }
 
 // NewSelectiveHandler creates a new handler. configDir is the sing-box config.d
@@ -399,11 +417,16 @@ func (h *SelectiveHandler) Rebuild(w http.ResponseWriter, r *http.Request) {
 	// Point of no return: the flag is ours and the goroutine below is the
 	// only thing that clears it.
 	// Detach cancellation: a client disconnecting mid-rebuild must not abort
-	// the populate (a partial ipset is worse than a stale one). The timeout
-	// backstops a wedged rebuild so the flag cannot stay latched forever.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), rebuildTimeout)
+	// the populate (a partial ipset is worse than a stale one). Настенного
+	// таймаута нет — застрявшую пересборку (и залипание флага) отлавливает
+	// stall guard внутри билдера (selective.WithStallGuard): отмена при
+	// отсутствии прогресса либо по абсолютному предохранителю; материализация
+	// rule-set'ов (decompile/dat) подчинена guard-контексту и собственным
+	// exec-таймаутам, так что зависнуть «мимо guard'а» ей негде. Медленную,
+	// но живую пересборку guard легально не трогает до предохранителя —
+	// ограниченный ручной выход даёт CancelRebuild (POST /rebuild/cancel).
+	ctx := context.WithoutCancel(r.Context())
 	go func() {
-		defer cancel()
 		defer h.rebuilding.Store(false)
 		// Errors are already surfaced by the builder: terminal
 		// selective-progress/selective-status SSE events plus lastError in
@@ -421,4 +444,32 @@ func (h *SelectiveHandler) Rebuild(w http.ResponseWriter, r *http.Request) {
 // would otherwise leave the button stuck at «Пересборка…»).
 func (h *SelectiveHandler) respondRebuildAccepted(w http.ResponseWriter, r *http.Request) {
 	response.Accepted(w, h.statusData(r.Context()))
+}
+
+// CancelRebuild handles POST /api/singbox/router/selective/rebuild/cancel.
+// Останавливает текущую пересборку ipset по запросу пользователя —
+// ограниченный выход из медленной, но «живой» пересборки, которую stall guard
+// легально не трогает до 2-часового предохранителя (иначе единственным
+// выходом был перезапуск демона). Завершение прилетает обычным путём: билдер
+// публикует терминальные SSE-события selective-progress (PhaseError,
+// «пересборка отменена пользователем») и selective-status.
+//
+//	@Summary		Cancel a running ipset rebuild
+//	@Description	Requests cancellation of the in-flight selective ipset rebuild. Returns cancelled=false when no rebuild is running (safe no-op). Completion is delivered via the selective-progress/selective-status SSE events.
+//	@Tags			singbox-router
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Success		200	{object}	SelectiveCancelData
+//	@Failure		405	{object}	APIErrorEnvelope
+//	@Router			/singbox/router/selective/rebuild/cancel [post]
+func (h *SelectiveHandler) CancelRebuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	cancelled := false
+	if c, ok := h.status.(SelectiveRebuildCanceller); ok {
+		cancelled = c.CancelRun(selective.ErrCancelledByUser)
+	}
+	response.Success(w, SelectiveCancelData{Cancelled: cancelled})
 }

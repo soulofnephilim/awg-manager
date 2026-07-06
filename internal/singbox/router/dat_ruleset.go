@@ -67,7 +67,7 @@ func (s *ServiceImpl) DatRuleSetURL(_ context.Context, kind string, tags []strin
 	return fmt.Sprintf("http://127.0.0.1:%d/api/singbox/router/rulesets/dat-srs?%s", port, q.Encode()), nil
 }
 
-func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []string, token string) (string, error) {
+func (s *ServiceImpl) DatRuleSetFile(ctx context.Context, kind string, tags []string, token string) (string, error) {
 	kind, tags, err := normalizeDatRuleSetInput(kind, tags)
 	if err != nil {
 		return "", err
@@ -86,9 +86,18 @@ func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []stri
 	s.datRuleSetMu.Lock()
 	defer s.datRuleSetMu.Unlock()
 
+	// Материализация dat→srs состоит из дорогих фаз (разворачивание тегов из
+	// .dat, компиляция srs, публикация файлов), каждая из которых сама по
+	// себе не подчинена контексту — между фазами проверяем ctx, чтобы
+	// отменённая пересборка (stall guard, отмена пользователем) не продолжала
+	// молотить CPU на 580МГц MIPS впустую. Вывод функции при живом ctx
+	// не меняется.
 	allLines := make([]string, 0)
 	sources := make([]datRuleSetSourceMeta, 0, len(tags))
 	for _, tag := range tags {
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("dat rule-set %s: %w", kind, err)
+		}
 		lines, sourcePath, err := s.deps.GeoData.ExpandGeoTagTyped(kind, tag)
 		if err != nil {
 			return "", err
@@ -134,6 +143,11 @@ func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []stri
 		return srsPath, nil
 	}
 
+	// Фаза разворачивания завершена — перед компиляцией srs ещё раз сверяемся
+	// с контекстом (см. комментарий выше).
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("dat rule-set %s: %w", kind, err)
+	}
 	rules, err := datLinesToRuleSetRules(kind, allLines)
 	if err != nil {
 		return "", err
@@ -141,6 +155,10 @@ func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []stri
 	_, sourceJSON, err := buildInlineRuleSetSource(rules)
 	if err != nil {
 		return "", err
+	}
+	// Перед записью/публикацией json+srs (последняя дорогая фаза).
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("dat rule-set %s: %w", kind, err)
 	}
 	binary := ""
 	if s.deps.Singbox != nil {

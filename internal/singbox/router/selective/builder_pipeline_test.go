@@ -104,7 +104,7 @@ func TestCollectResolveStream_MatchesBatchPipeline(t *testing.T) {
 			},
 			OnRecord: func(DomainQuery, MatcherRecord) { records.Add(1) },
 		},
-		&queued, nil, nil, nil)
+		&queued, nil, nil, nil, nil)
 	if len(errs) > 0 {
 		t.Fatalf("stream collect errors: %v", errs)
 	}
@@ -172,7 +172,7 @@ func TestCollectResolveStream_RouteBudgetEdge(t *testing.T) {
 			OnIP:     func(q DomainQuery, cidr string) { acc.Add(q.Outbound, cidr) },
 			OnRecord: func(DomainQuery, MatcherRecord) {},
 		},
-		&queued, nil, nil, nil)
+		&queued, nil, nil, nil, nil)
 	if len(errs) > 0 {
 		t.Fatalf("collect errors: %v", errs)
 	}
@@ -242,7 +242,7 @@ func BenchmarkCollectResolvePipeline(b *testing.B) {
 						OnIP:     func(q DomainQuery, cidr string) { acc.Add(q.Outbound, cidr) },
 						OnRecord: func(DomainQuery, MatcherRecord) {},
 					},
-					&queued, nil, nil, nil)
+					&queued, nil, nil, nil, nil)
 			}
 			b.ReportMetric(float64(peakGoroutines.Load()), "peak-goroutines")
 		})

@@ -34,7 +34,7 @@ func TestOpenSelectiveRuleSetJSON_RemoteSRSStream(t *testing.T) {
 	if err := os.WriteFile(decompiled, []byte(`{"version":3,"rules":[{"domain_suffix":["only-ruleset.example"]}]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ruleSetDecompileToFile = func(_binary, _srsPath string) (string, error) {
+	ruleSetDecompileToFile = func(_ context.Context, _binary, _srsPath string) (string, error) {
 		return decompiled, nil
 	}
 
@@ -128,7 +128,7 @@ func TestLoadRuleSetSourceRules_RemoteDecompile(t *testing.T) {
 	ruleSetDownload = func(_ context.Context, url, _format string) (string, error) {
 		return "/tmp/fake-" + strings.TrimPrefix(url, "https://") + ".srs", nil
 	}
-	ruleSetDecompileExec = func(_binary, _srsPath string) ([]byte, error) {
+	ruleSetDecompileExec = func(_ context.Context, _binary, _srsPath string) ([]byte, error) {
 		return []byte(`{"version":3,"rules":[{"domain_suffix":["example.com"]}]}`), nil
 	}
 

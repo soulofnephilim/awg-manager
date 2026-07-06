@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 )
@@ -16,6 +17,13 @@ const StagingSetName = "AWGM-SELECTIVE-STG"
 
 // IpsetChunkSize is how many entries are batched into one ipset restore call.
 const IpsetChunkSize = 512
+
+// ipsetRestoreTimeout ограничивает один вызов `ipset restore` на чанк из
+// IpsetChunkSize записей. Медленный роутер под нагрузкой (256–512MB MIPS)
+// легально укладывает чанк не за секунды, а за минуты; чанк конечен (512
+// записей), поэтому зависание команды ловит этот exec-таймаут, а не stall
+// guard пересборки (rebuildStallTimeout подобран не меньше этого шага).
+const ipsetRestoreTimeout = 180 * time.Second
 
 var ipsetChunkPool = sync.Pool{
 	New: func() any {
@@ -46,7 +54,7 @@ func SwapWithStaging(ctx context.Context) error {
 	if err := CreateSet(ctx); err != nil {
 		return err
 	}
-	res, err := sysexec.Run(ctx, bin, "swap", SetName, StagingSetName)
+	res, err := runIpsetCtl(ctx, bin, "swap", SetName, StagingSetName)
 	if err != nil {
 		return sysexec.FormatError(res, fmt.Errorf("ipset swap: %w", err))
 	}
@@ -97,8 +105,14 @@ func addEntriesToSet(ctx context.Context, setName string, cidrs []string) error 
 	if writeRestoreLines(b, setName, cidrs) == 0 {
 		return nil
 	}
+	// Прогресс stall guard'у до и после restore-команды (ProgressTouch —
+	// no-op вне пересборки): «начали операцию» — тоже прогресс, зависание
+	// самой команды ловит её exec-таймаут ipsetRestoreTimeout.
+	touch := ProgressTouch(ctx)
+	touch()
 	res, err := sysexec.RunWithOptions(ctx, bin, []string{"restore", "-exist"},
-		sysexec.Options{Stdin: b, Timeout: 60e9})
+		sysexec.Options{Stdin: b, Timeout: ipsetRestoreTimeout})
+	touch()
 	if err != nil {
 		return sysexec.FormatError(res, fmt.Errorf("ipset restore: %w", err))
 	}
@@ -127,7 +141,7 @@ func createNamedSet(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	res, err := sysexec.Run(ctx, bin,
+	res, err := runIpsetCtl(ctx, bin,
 		"create", name, "hash:net",
 		"maxelem", fmt.Sprintf("%d", setMaxElem),
 		"family", "inet",
@@ -150,7 +164,7 @@ func flushNamedSet(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	res, err := sysexec.Run(ctx, bin, "flush", name)
+	res, err := runIpsetCtl(ctx, bin, "flush", name)
 	if err != nil {
 		combined := ""
 		if res != nil {

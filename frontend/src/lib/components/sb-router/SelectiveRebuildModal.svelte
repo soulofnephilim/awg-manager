@@ -65,6 +65,8 @@
 				maxPct = 0;
 			} else if (active && wasIdle) {
 				maxPct = 0; // new run
+				cancelPending = false; // свежий прогон — кнопка отмены снова доступна
+				cancelError = '';
 			}
 			if (p && active && p.total > 0) {
 				const raw = Math.min(100, Math.round((p.current / p.total) * 100));
@@ -81,6 +83,24 @@
 	const totalIsGrowing = $derived(progress?.phase === 'collecting');
 
 	const finished = $derived(progress?.phase === 'done' || progress?.phase === 'error');
+
+	// Отмена пересборки: кнопка видна, пока идёт активная фаза. После
+	// успешного POST кнопка остаётся заблокированной («Отмена…») до прихода
+	// терминального SSE-события (phase=error, «пересборка отменена
+	// пользователем») — оно и закрывает цикл.
+	let cancelPending = $state(false);
+	let cancelError = $state('');
+
+	async function handleCancelRebuild() {
+		cancelPending = true;
+		cancelError = '';
+		try {
+			await api.singboxRouterSelectiveRebuildCancel();
+		} catch (e) {
+			cancelPending = false;
+			cancelError = e instanceof Error ? e.message : String(e);
+		}
+	}
 
 	function handleBackdrop() {
 		if (finished) onDismiss();
@@ -195,6 +215,19 @@
 			{/if}
 
 			<footer class="modal-foot">
+				{#if cancelError}
+					<span class="err cancel-err">{cancelError}</span>
+				{/if}
+				{#if progress && !finished}
+					<button
+						type="button"
+						class="btn btn-danger"
+						disabled={cancelPending}
+						onclick={handleCancelRebuild}
+					>
+						{cancelPending ? 'Отмена…' : 'Отменить пересборку'}
+					</button>
+				{/if}
 				<button type="button" class="btn" onclick={handleCloseButton}>
 					{finished ? 'Закрыть' : 'Свернуть'}
 				</button>
@@ -311,7 +344,10 @@
 	}
 	.modal-foot {
 		margin-top: 16px;
-		text-align: right;
+		display: flex;
+		justify-content: flex-end;
+		align-items: center;
+		gap: 8px;
 	}
 	.btn {
 		padding: 6px 14px;
@@ -321,5 +357,17 @@
 		color: inherit;
 		cursor: pointer;
 		font-size: 13px;
+	}
+	.btn-danger {
+		border-color: #a44;
+		color: #f88;
+	}
+	.btn-danger:disabled {
+		opacity: 0.6;
+		cursor: default;
+	}
+	.cancel-err {
+		margin-right: auto;
+		text-align: left;
 	}
 </style>
