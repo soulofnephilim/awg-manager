@@ -39,4 +39,34 @@ describe('editTunnelSchema endpoint', () => {
     it('rejects empty endpoint', () => {
         expect(endpointErr('')).toBe('Endpoint обязателен');
     });
+
+    // Bracketed-form shape checks: content must be a plausible v6 literal
+    // (hex digits/colons/dots, at least one colon) and the port 1-65535.
+    it('accepts loopback and embedded-IPv4 v6 literals', () => {
+        expect(endpointErr('[::1]:51820')).toBeUndefined();
+        expect(endpointErr('[::ffff:192.0.2.1]:443')).toBeUndefined();
+        expect(endpointErr('[2001:DB8::1]:65535')).toBeUndefined();
+    });
+
+    it('rejects empty brackets', () => {
+        expect(endpointErr('[]:1')).toBeDefined();
+    });
+
+    it('rejects bracketed IPv6 without a port', () => {
+        expect(endpointErr('[::1]')).toBeDefined();
+        expect(endpointErr('[2001:db8::1]:')).toBeDefined();
+    });
+
+    it('rejects non-v6 garbage inside brackets', () => {
+        expect(endpointErr('[junk]:51820')).toBeDefined();
+        expect(endpointErr('[vpn.example.com]:51820')).toBeDefined();
+        expect(endpointErr('[192.0.2.1]:51820')).toBeDefined(); // no colon → not v6
+    });
+
+    it('rejects out-of-range or non-numeric ports', () => {
+        expect(endpointErr('[2001:db8::1]:0')).toBeDefined();
+        expect(endpointErr('[2001:db8::1]:65536')).toBeDefined();
+        expect(endpointErr('[2001:db8::1]:x')).toBeDefined();
+        expect(endpointErr('[2001:db8::1]:51820 ')).toBeDefined(); // trailing junk
+    });
 });

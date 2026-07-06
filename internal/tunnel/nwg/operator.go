@@ -205,7 +205,12 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 
 	// Peer
 	peerCfg := payloads.PeerConfig{
-		PublicKey:   stored.Peer.PublicKey,
+		PublicKey: stored.Peer.PublicKey,
+		// Deliberately unbracketed "%s:%d" even for IPv6 literals: the
+		// NDMS RCI contract for the native-ASC endpoint field is unknown
+		// (bracketed form untested against real firmware), so the format
+		// is left as-is. IPv6 endpoints through the native ASC path are
+		// out of scope / unverified — the supported v6 path is awg_proxy.
 		Endpoint:    fmt.Sprintf("%s:%d", endpointIP, endpointPort),
 		AllowedIPv4: []payloads.AllowedIP{{Address: "0.0.0.0", Mask: "0"}},
 	}
@@ -295,6 +300,10 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 	}
 	o.appLog.Full("start", stored.Name, fmt.Sprintf("Resolving endpoint %s -> %s:%d", stored.Peer.Endpoint, endpointIP, endpointPort))
 
+	// Deliberately unbracketed "%s:%d" even for IPv6 literals — the NDMS
+	// RCI contract for the native-ASC peer endpoint is unknown, so the
+	// historical format is preserved. IPv6 through the native ASC path is
+	// untested/out of scope; the verified v6 path is the awg_proxy kmod.
 	realEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
 
 	// Sync address/MTU from storage

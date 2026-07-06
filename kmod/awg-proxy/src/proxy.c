@@ -61,21 +61,25 @@
  *
  * Commit 6c8991f41546 ("net: ipv6_stub: use ip6_dst_lookup_flow instead of
  * ip6_dst_lookup", v5.5) RENAMED the stub member ipv6_dst_lookup ->
- * ipv6_dst_lookup_flow (new signature) and was backported to every stable
- * tree: 4.4.207, 4.9.207, 4.14.160, 4.19.91, 5.3.18, 5.4.5. The version
- * ranges below mirror wireguard-linux-compat's detection. Vendor kernels
- * (Keenetic -ndm-*) may carry the backport without the matching SUBLEVEL —
- * if the build fails on this, override from the make command line with
+ * ipv6_dst_lookup_flow (new signature). Careful: the December-2019 stable
+ * backports (4.4.207/4.9.207/4.14.160/4.19.91) only added the
+ * ip6_dst_lookup_flow FUNCTION; the ipv6_stub member itself was renamed
+ * later, in the May-2020 rounds: 4.4.224, 4.9.224, 4.14.181, 4.19.119
+ * (plus 5.3.18 and 5.4.5, where both landed together). The version ranges
+ * below are taken verbatim from wireguard-linux-compat's compat.h
+ * detection of the stub member. Vendor kernels (Keenetic -ndm-*) may carry
+ * the backport without the matching SUBLEVEL — if the build fails on this,
+ * override from the make command line with
  * ccflags-y+=-DAWG_HAVE_IPV6_DST_LOOKUP_FLOW=0|1.
  */
 #ifndef AWG_HAVE_IPV6_DST_LOOKUP_FLOW
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0) || \
     (LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 5)) || \
     (LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 18)) || \
-    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 91)) || \
-    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 160)) || \
-    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 207)) || \
-    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 5, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 207))
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 119)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 181)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 224)) || \
+    (LINUX_VERSION_CODE < KERNEL_VERSION(4, 5, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 224))
 #define AWG_HAVE_IPV6_DST_LOOKUP_FLOW 1
 #else
 #define AWG_HAVE_IPV6_DST_LOOKUP_FLOW 0

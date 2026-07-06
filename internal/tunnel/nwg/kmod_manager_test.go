@@ -149,6 +149,39 @@ func TestReadListenPortLocked_MixedFamilies(t *testing.T) {
 	}
 }
 
+func TestReadListenPortLocked_EmbeddedIPv4Forms(t *testing.T) {
+	// The kernel's %pI6c renders addresses with an embedded IPv4 tail
+	// (ISATAP ::5efe:x.x.x.x and friends) in dotted-quad form, while Go's
+	// net.IP.String() prints hex groups ("::5efe:c000:201"). A string
+	// prefix match never fires → orphan live slot. The row must be found
+	// by PARSED address comparison.
+	km, _ := newKmodManagerForTest()
+	km.procReadFn = func(path string) ([]byte, error) {
+		return []byte("[::5efe:192.0.2.1]:51820 listen=127.0.0.1:50003 rx=0 tx=0 rx_pkt=0 tx_pkt=0\n"), nil
+	}
+
+	km.mu.Lock()
+	defer km.mu.Unlock()
+
+	// Go's canonical spelling of the same address.
+	port, err := km.readListenPortLocked("::5efe:c000:201", 51820)
+	if err != nil {
+		t.Fatalf("readListenPortLocked ISATAP: %v", err)
+	}
+	if port != 50003 {
+		t.Errorf("ISATAP listen port = %d, want 50003", port)
+	}
+
+	// Same address, WRONG port — must not match.
+	if _, err := km.readListenPortLocked("::5efe:c000:201", 443); err == nil {
+		t.Error("want error for same address with different port")
+	}
+	// Different address, same port — must not match.
+	if _, err := km.readListenPortLocked("::5efe:c000:202", 51820); err == nil {
+		t.Error("want error for different address")
+	}
+}
+
 // --- IPv6 endpoints are gated on kmod >= kmodVersionIPv6 -------------------
 
 func TestAddTunnel_IPv6RequiresKmod130(t *testing.T) {

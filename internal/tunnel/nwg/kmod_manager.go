@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -18,13 +19,14 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/sys/exec"
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
+	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
 	"github.com/hoaxisr/awg-manager/internal/sys/semver"
 )
 
 const (
 	awgProxyDir         = "/opt/etc/awg-manager/modules"
 	defaultKoPath       = awgProxyDir + "/awg_proxy.ko"
-	expectedKmodVersion = "1.2.0" // minimum required awg_proxy.ko version (UDP-tunnel rx+tx: FASTNAT/PPE bypass)
+	expectedKmodVersion = "1.3.0" // minimum required awg_proxy.ko version (dual-family: IPv6 endpoint support)
 	// kmodVersionIPv6 is the first awg_proxy.ko version whose procfs
 	// parser understands "[v6]:port" endpoints. Older parsers run the
 	// legacy strrchr(':')+in_aton path on that string and silently
@@ -45,6 +47,16 @@ type KmodManager struct {
 	// first chunk truncates the list on kmod < 1.1.11, issue #362).
 	procWriteFn func(path string, data []byte) error
 	procReadFn  func(path string) ([]byte, error)
+
+	// execFn isolates external commands (insmod/rmmod/modprobe) so unit
+	// tests can run EnsureLoaded against a fake runner. Default: exec.Run.
+	execFn func(ctx context.Context, name string, args ...string) (*exec.Result, error)
+	// isLoadedFn reports whether awg_proxy is currently loaded
+	// (/proc/awg_proxy/version exists). Stubbed in tests.
+	isLoadedFn func() bool
+	// modLoadedFn reports whether an arbitrary kernel module is loaded
+	// (/proc/modules scan). Stubbed in tests.
+	modLoadedFn func(name string) bool
 }
 
 // kmodEntry tracks a loaded tunnel's endpoint and proxy listen port.
@@ -80,6 +92,12 @@ func NewKmodManager(appLogger logging.AppLogger) *KmodManager {
 		appLog:      logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubKmod),
 		procWriteFn: func(path string, data []byte) error { return os.WriteFile(path, data, 0) },
 		procReadFn:  kmod.ReadProc,
+		execFn:      exec.Run,
+		isLoadedFn: func() bool {
+			_, err := os.Stat("/proc/awg_proxy/version")
+			return err == nil
+		},
+		modLoadedFn: isModuleLoadedProc,
 	}
 }
 
@@ -119,28 +137,32 @@ func (km *KmodManager) resolveKoPath() string {
 }
 
 // EnsureLoaded loads awg_proxy.ko if not already loaded.
-// If the module is loaded but has a different version, it is reloaded only
-// when the kernel proxy has no live slots.
+// If the loaded module version is below expected, it is upgraded (rmmod +
+// insmod of the on-disk .ko) only when the kernel proxy has no live slots;
+// with active slots the upgrade is deferred — rmmod would destroy ALL
+// running tunnels' proxies.
 func (km *KmodManager) EnsureLoaded() error {
 	km.mu.Lock()
 	defer km.mu.Unlock()
+
+	ctx := context.Background()
 
 	if km.koPath == "" {
 		km.koPath = km.resolveKoPath()
 	}
 
 	if km.isLoadedLocked() {
-		// Check version — reload if loaded version is below expected.
+		// Check version — upgrade if loaded version is below expected.
 		loaded := km.readVersionLocked()
 		if loaded != "" && semver.Compare(loaded, expectedKmodVersion) < 0 {
 			// Don't reload if there are active proxy entries —
 			// rmmod would destroy ALL running tunnels' proxies.
 			if activeSlots := km.loadedSlotCountLocked(); activeSlots > 0 {
-				km.appLog.Warn("reload", "", fmt.Sprintf("outdated (loaded=%s, want>=%s), %d active slots — skipping reload", loaded, expectedKmodVersion, activeSlots))
+				km.appLog.Warn("reload", "", fmt.Sprintf("outdated (loaded=%s, want>=%s), %d active slots — upgrade deferred until module is idle", loaded, expectedKmodVersion, activeSlots))
 				return nil
 			}
-			km.appLog.Info("reload", "", fmt.Sprintf("outdated (loaded=%s, want>=%s), reloading", loaded, expectedKmodVersion))
-			_, _ = exec.Run(context.Background(), "rmmod", "awg_proxy")
+			km.appLog.Info("reload", "", fmt.Sprintf("upgrading awg_proxy: loaded=%s, want>=%s, no active slots — rmmod + insmod %s", loaded, expectedKmodVersion, km.koPath))
+			_, _ = km.execFn(ctx, "rmmod", "awg_proxy")
 			// Fall through to insmod below.
 		} else {
 			// Do not purge unknown slots here. After daemon restart km.tunnels
@@ -151,16 +173,99 @@ func (km *KmodManager) EnsureLoaded() error {
 		}
 	}
 
-	result, err := exec.Run(context.Background(), "insmod", km.koPath)
-	if err != nil {
-		return fmt.Errorf("insmod %s: %w", km.koPath, err)
+	// awg_proxy.ko >= 1.3.0 gained depends=udp_tunnel,udp_tunnel6 (the v6
+	// TX path references udp_tunnel6_xmit_skb whenever the target kernel
+	// has CONFIG_IPV6=y/m) and bare insmod resolves no dependencies —
+	// preflight-load them best-effort so v4-only setups don't lose the
+	// module after upgrade.
+	km.preloadDepsLocked(ctx)
+
+	result, err := km.execFn(ctx, "insmod", km.koPath)
+	var stderr string
+	if result != nil {
+		stderr = result.Stderr
 	}
-	if result.ExitCode != 0 {
-		return fmt.Errorf("insmod %s: exit %d: %s", km.koPath, result.ExitCode, result.Stderr)
+	if err == nil && result != nil && result.ExitCode == 0 {
+		km.appLog.Info("load", "", "awg_proxy.ko loaded (expected>="+expectedKmodVersion+")")
+		return nil
 	}
 
-	km.appLog.Info("load", "", "awg_proxy.ko loaded (expected>="+expectedKmodVersion+")")
-	return nil
+	var insmodErr error
+	if err != nil {
+		insmodErr = fmt.Errorf("insmod %s: %w: %s", km.koPath, err, strings.TrimSpace(stderr))
+	} else {
+		insmodErr = fmt.Errorf("insmod %s: exit %d: %s", km.koPath, result.ExitCode, strings.TrimSpace(stderr))
+	}
+	// «Unknown symbol» here almost always means the kernel lacks the
+	// udp_tunnel6 symbols (Keenetic with the IPv6 system component
+	// disabled) — name the fix instead of the raw symbol soup.
+	if strings.Contains(strings.ToLower(stderr), "unknown symbol") {
+		insmodErr = fmt.Errorf("%w — ядро без IPv6-компонента: udp_tunnel6.ko недоступен — установите/включите компонент IPv6 либо используйте сборку awg_proxy без IPv6", insmodErr)
+	}
+	return insmodErr
+}
+
+// awgProxyDeps lists the modules awg_proxy.ko depends on, in load order.
+//
+//   - udp_tunnel: dependency since v1.2.0 (udp_tunnel_xmit_skb / rx encap).
+//     On real Keenetic targets it has effectively always been loaded before
+//     us — NDMS pulls it in for its own tunnels at boot — which is why the
+//     historical bare insmod got away without preloading it. Preflighted
+//     anyway: it costs one /proc/modules check and covers firmwares where
+//     nothing else loaded it yet.
+//   - udp_tunnel6: new dependency in v1.3.0 (udp_tunnel6_xmit_skb). On
+//     Keenetic it is modular and only present when the IPv6 system
+//     component is installed.
+var awgProxyDeps = []string{"udp_tunnel", "udp_tunnel6"}
+
+// preloadDepsLocked best-effort loads awg_proxy.ko's module dependencies
+// before insmod. Mirrors ensureKernelModule in
+// internal/singbox/router/iptables.go (the xt_* preload used by QoS/TPROXY):
+// skip if already in /proc/modules, try modprobe (resolves paths and deps
+// itself), else insmod from the flat /lib/modules/$(uname -r) layout.
+// Soft-fail by design: already-loaded and built-in (no .ko on disk) are
+// success, and a genuinely unloadable dep is only logged — the awg_proxy
+// insmod that follows surfaces the real verdict («Unknown symbol»), where
+// EnsureLoaded appends a user-facing hint about the missing IPv6 component.
+func (km *KmodManager) preloadDepsLocked(ctx context.Context) {
+	for _, name := range awgProxyDeps {
+		if km.modLoadedFn(name) {
+			continue
+		}
+		if res, err := km.execFn(ctx, "modprobe", name); err == nil && res != nil && res.ExitCode == 0 {
+			continue
+		}
+		// modprobe unavailable or failed — insmod from the standard
+		// module dir (flat on Keenetic, same path the xt_* loader uses).
+		kernel := osdetect.KernelRelease()
+		if kernel == "" {
+			continue
+		}
+		path := filepath.Join("/lib/modules", kernel, name+".ko")
+		if _, err := os.Stat(path); err != nil {
+			continue // built-in or absent — awg_proxy insmod decides
+		}
+		if res, err := km.execFn(ctx, "insmod", path); err != nil || res == nil || res.ExitCode != 0 {
+			km.appLog.Warn("preload-dep", name, fmt.Sprintf("best-effort insmod %s failed (continuing): %v", path, err))
+		}
+	}
+}
+
+// isModuleLoadedProc checks /proc/modules for the given module name.
+// Same helper as internal/singbox/router — duplicated to avoid importing
+// the sing-box router package from the tunnel layer.
+func isModuleLoadedProc(name string) bool {
+	data, err := os.ReadFile("/proc/modules")
+	if err != nil {
+		return false
+	}
+	prefix := name + " "
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (km *KmodManager) loadedSlotCountLocked() int {
@@ -341,9 +446,19 @@ func (km *KmodManager) readListenPortLocked(endpointIP string, endpointPort int)
 
 	// Each line: "ENDPOINT listen=127.0.0.1:LPORT rx=... tx=..." where
 	// ENDPOINT is "IP:PORT" (v4) or "[IPV6]:PORT" (v6, kmod >= 1.3.0).
+	//
+	// Fast path: exact string prefix — for ordinary addresses the kernel's
+	// %pI6c and Go's net.IP.String() both emit RFC 5952 compressed
+	// lowercase, so the prefix matches byte-for-byte. Slow path: parsed
+	// comparison — %pI6c renders an embedded-IPv4 tail (ISATAP
+	// "::5efe:192.0.2.1", v4-compat, …) in dotted-quad form while Go prints
+	// hex groups ("::5efe:c000:201"); without the parse the freshly added
+	// slot is "not found", the caller errors, and the live slot stays
+	// orphaned in the kernel.
 	target := endpointKey(endpointIP, endpointPort) + " "
+	expIP := net.ParseIP(endpointIP)
 	for line := range strings.SplitSeq(string(data), "\n") {
-		if !strings.HasPrefix(line, target) {
+		if !strings.HasPrefix(line, target) && !rowEndpointEquals(line, expIP, endpointPort) {
 			continue
 		}
 		m := listenPortRe.FindStringSubmatch(line)
@@ -358,6 +473,26 @@ func (km *KmodManager) readListenPortLocked(endpointIP string, endpointPort int)
 	}
 
 	return 0, fmt.Errorf("endpoint %s:%d not found in proxy list", endpointIP, endpointPort)
+}
+
+// rowEndpointEquals reports whether the first field of a /proc list row
+// ("IP:PORT ..." or "[V6]:PORT ...") denotes the same address and port as
+// expIP/expPort, comparing parsed addresses instead of strings.
+func rowEndpointEquals(line string, expIP net.IP, expPort int) bool {
+	if expIP == nil {
+		return false
+	}
+	ep, _, _ := strings.Cut(line, " ")
+	host, portStr, err := net.SplitHostPort(ep)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port != expPort {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.Equal(expIP)
 }
 
 // GetListenPort returns the cached listen port for a tunnel.
@@ -409,8 +544,7 @@ func (km *KmodManager) IsLoaded() bool {
 }
 
 func (km *KmodManager) isLoadedLocked() bool {
-	_, err := os.Stat("/proc/awg_proxy/version")
-	return err == nil
+	return km.isLoadedFn()
 }
 
 // HasTunnel checks if a tunnel is tracked.
