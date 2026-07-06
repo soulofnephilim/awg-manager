@@ -6,7 +6,13 @@ import (
 	"strconv"
 )
 
-const MaxTunnels = 10
+// MaxTunnels — ёмкость индексов WireguardN в NDMS: Wireguard0..Wireguard99.
+// Подтверждено автором проекта — NDMS принимает индексы WireguardN до 99.
+// Отдельный, более узкий предел существует только для пути через awg_proxy:
+// kmod держит 16 одновременных прокси-слотов (AWG_MAX_TUNNELS в
+// kmod/awg-proxy/src/proxy.h) и срабатывает при СТАРТЕ туннеля с обфускацией
+// на прошивках без нативного ASC, а не при создании интерфейса.
+const MaxTunnels = 100
 
 var reNDMSCreated = regexp.MustCompile(`"Wireguard(\d+)" interface created`)
 

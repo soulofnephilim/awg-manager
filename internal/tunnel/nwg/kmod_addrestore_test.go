@@ -326,3 +326,26 @@ var _ = func() bool {
 	e := &errnoPathErr{err: syscall.EEXIST}
 	return errors.Is(e, syscall.EEXIST)
 }()
+
+// Все 16 слотов awg_proxy заняты: ядро отвечает -ENOSPC на /proc/add, и
+// ошибка старта обязана нести понятное русское пояснение про предел kmod
+// (срабатывает при старте туннеля с обфускацией, а не при создании).
+func TestAddTunnel_SlotsExhausted_ENOSPC(t *testing.T) {
+	km, stub := newKmodManagerForTest()
+	stub.failAddOnce = &errnoPathErr{op: "write", path: "/proc/awg_proxy/add", err: syscall.ENOSPC}
+
+	_, err := km.AddTunnel("awg20", defaultCfg())
+	if err == nil {
+		t.Fatal("AddTunnel with ENOSPC: want error, got nil")
+	}
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("error must preserve ENOSPC in the chain: %v", err)
+	}
+	if !strings.Contains(err.Error(), "достигнут предел awg_proxy: 16 туннелей с обфускацией") {
+		t.Fatalf("error = %q, want kmod slot-limit hint", err.Error())
+	}
+	// ENOSPC — не EEXIST: fallback-del и повторный add не должны выполняться.
+	if got := stub.countWritesTo("/proc/awg_proxy/del"); got != 0 {
+		t.Fatalf("ENOSPC must not trigger EEXIST del-retry; got %d del writes", got)
+	}
+}

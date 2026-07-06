@@ -821,7 +821,7 @@ func (o *OperatorNativeWG) nextFreeIndex(ctx context.Context) (int, error) {
 			return i, nil
 		}
 	}
-	return 0, fmt.Errorf("all %d Wireguard slots are occupied", MaxTunnels)
+	return 0, fmt.Errorf("достигнут максимум NativeWG-туннелей (%d): все интерфейсы Wireguard0..%d в NDMS заняты", MaxTunnels, MaxTunnels-1)
 }
 
 // buildKmodConfigResolved builds a KmodConfig with a pre-resolved endpoint IP.

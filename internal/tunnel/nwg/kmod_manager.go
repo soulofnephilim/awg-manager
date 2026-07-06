@@ -32,6 +32,11 @@ const (
 	// legacy strrchr(':')+in_aton path on that string and silently
 	// create a bogus IPv4 slot — addFreshLocked fails loudly instead.
 	kmodVersionIPv6 = "1.3.0"
+	// kmodMaxSlots — AWG_MAX_TUNNELS в kmod/awg-proxy/src/proxy.h: столько
+	// одновременных прокси-слотов (туннелей с обфускацией) держит
+	// awg_proxy.ko. При добавлении сверх лимита ядро отвечает -ENOSPC —
+	// addFreshLocked переводит это в понятное сообщение.
+	kmodMaxSlots = 16
 )
 
 // KmodManager manages the awg_proxy.ko kernel module for NativeWG tunnels.
@@ -377,6 +382,11 @@ func (km *KmodManager) addFreshLocked(tunnelID string, cfg KmodConfig) (KmodResu
 		err = km.procWriteFn("/proc/awg_proxy/add", []byte(line))
 	}
 	if err != nil {
+		// -ENOSPC из /proc/awg_proxy/add: свободных слотов в ядре нет
+		// (см. "Find free slot" в kmod/awg-proxy/src/proxy.c).
+		if errors.Is(err, syscall.ENOSPC) {
+			return KmodResult{}, fmt.Errorf("kmod add tunnel %s: %w — достигнут предел awg_proxy: %d туннелей с обфускацией одновременно", tunnelID, err, kmodMaxSlots)
+		}
 		return KmodResult{}, fmt.Errorf("kmod add tunnel %s: %w", tunnelID, err)
 	}
 

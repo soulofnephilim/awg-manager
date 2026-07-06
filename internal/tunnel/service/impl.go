@@ -72,7 +72,7 @@ type AWGSyncer interface {
 func (s *ServiceImpl) SetAWGSyncer(sync AWGSyncer) { s.awgSyncer = sync }
 
 func (s *ServiceImpl) SetDeviceProxyRefChecker(c DeviceProxyRefChecker) { s.deviceProxyRefs = c }
-func (s *ServiceImpl) SetRouterRefChecker(c RouterRefChecker)            { s.routerRefs = c }
+func (s *ServiceImpl) SetRouterRefChecker(c RouterRefChecker)           { s.routerRefs = c }
 
 func (s *ServiceImpl) notifyAWGSyncer(ctx context.Context) {
 	if s.awgSyncer == nil {
@@ -714,7 +714,7 @@ func (s *ServiceImpl) Import(ctx context.Context, confContent, name, backend str
 	}
 
 	// Kernel path (existing logic)
-	tunnelID, err := s.store.NextAvailableID()
+	tunnelID, err := s.store.NextAvailableID(backend)
 	if err != nil {
 		return nil, fmt.Errorf("generate ID: %w", err)
 	}
@@ -743,8 +743,9 @@ func (s *ServiceImpl) importNativeWG(ctx context.Context, parsed *storage.AWGTun
 		return nil, fmt.Errorf("NativeWG backend not available")
 	}
 
-	// Generate tunnel ID
-	tunnelID, err := s.store.NextAvailableID()
+	// Generate tunnel ID — NativeWG-диапазон (awg20+), не делит
+	// kernel-лимит OpkgTun10..16.
+	tunnelID, err := s.store.NextAvailableID("nativewg")
 	if err != nil {
 		return nil, fmt.Errorf("generate ID: %w", err)
 	}
