@@ -4662,7 +4662,8 @@ const server = http.createServer(async (req, res) => {
 	// фикстура: список слотов с бейджами, содержимое base/user, draft-цикл
 	// PUT → check → apply/discard и enable-переключатель. Проверка (check)
 	// возвращает ok:false с двумя ошибками, если в конфиге встречается тег
-	// "bad-tag" — маркер для скриншотов ошибок.
+	// "bad-tag" — маркер для скриншотов ошибок; конфиг с "final" даёт
+	// ok:true + warning (жёлтый блок предупреждений).
 	if (req.method === 'GET' && path === '/singbox/config/slots') {
 		const userEffective = mockConfigEditor.userDraft ?? mockConfigEditor.userActive;
 		send(res, 200, {
@@ -4744,9 +4745,25 @@ const server = http.createServer(async (req, res) => {
 					success: true,
 					data: {
 						ok: false,
+						// kind'ы выровнены с бэкендом (orchestrator.ValidationError.Kind).
 						errors: [
-							{ slot: 'user', kind: 'duplicate_tag', tag: 'direct', inRule: '', message: 'тег outbound уже занят слотом 00-base.json' },
-							{ slot: 'user', kind: 'unknown_outbound', tag: 'bad-tag', inRule: 'route.rules[0]', message: 'правило ссылается на несуществующий outbound' },
+							{ slot: 'user', kind: 'duplicate-outbound', tag: 'direct', inRule: '', message: 'тег outbound уже занят слотом 00-base.json' },
+							{ slot: 'user', kind: 'unknown-outbound', tag: 'bad-tag', inRule: 'route.rules[0]', message: 'правило ссылается на несуществующий outbound' },
+						],
+					},
+				});
+				return;
+			}
+			// Маркер "warn-final" — advisory-предупреждение (ok:true + warnings),
+			// как route-final-conflict у бэкенда.
+			if (subject.includes('"final"')) {
+				send(res, 200, {
+					success: true,
+					data: {
+						ok: true,
+						errors: [],
+						warnings: [
+							{ slot: 'user', kind: 'route-final-conflict', tag: '', inRule: 'route.final', message: 'route.final задан несколькими слотами; sing-box оставит первый и молча проигнорирует остальные' },
 						],
 					},
 				});
@@ -4764,7 +4781,7 @@ const server = http.createServer(async (req, res) => {
 		}
 		mockConfigEditor.userEnabled = true;
 		console.log('[mock-proxy] user slot draft applied');
-		send(res, 200, { success: true, data: {} });
+		send(res, 200, { success: true, data: { ok: true } });
 		return;
 	}
 

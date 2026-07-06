@@ -5442,6 +5442,15 @@ definitions:
       urlTest:
         $ref: '#/definitions/api.SubscriptionURLTestDTO'
     type: object
+  api.UserConfigApplyResponse:
+    properties:
+      ok:
+        type: boolean
+      warnings:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
+    type: object
   api.UserConfigCheckResponse:
     properties:
       errors:
@@ -5450,6 +5459,10 @@ definitions:
         type: array
       ok:
         type: boolean
+      warnings:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
     type: object
   api.UserConfigEnableRequest:
     properties:
@@ -10104,16 +10117,22 @@ paths:
   /singbox/config/user/apply:
     post:
       description: Валидирует черновик (кросс-слот + sing-box check) и атомарно коммитит
-        pending → active. Отключённый слот при apply включается (иначе файл лёг бы
-        в active/ при enabled=false). Применение — debounced SIGHUP; добавление/удаление
-        tun-inbound вызовет полный рестарт sing-box.
+        pending → active. Отключённый слот включается ПОСЛЕ успешного apply (провал
+        валидации оставляет слот припаркованным, старый конфиг не воскресает). В 200-ответе
+        могут быть advisory-предупреждения (warnings). Применение — debounced SIGHUP;
+        добавление/удаление tun-inbound вызовет полный рестарт sing-box.
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/api.OkResponse'
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.UserConfigApplyResponse'
+              type: object
         "405":
           description: Method Not Allowed
           schema:

@@ -183,3 +183,48 @@ func TestLastReloadValidation_SetAndCleared(t *testing.T) {
 		t.Error("LastReloadValidation not cleared after successful reload")
 	}
 }
+
+// Включённый, но содержательно пустой user-слот (90-user.json с «{}») не
+// должен держать/запускать процесс sing-box; хотя бы один содержательный
+// массив (outbounds/inbounds/dns.*/route.*) — уже работа для демона.
+func TestHasActiveWork_UserSlot_EmptyVsContent(t *testing.T) {
+	o, dir := setupUserOrch(t) // awg (AlwaysOn, без HasContent) + user (enabled)
+	userPath := filepath.Join(dir, "90-user.json")
+
+	// Слот включён, файла нет — не работа.
+	if o.HasActiveWork() {
+		t.Error("enabled user slot without a file must not be active work")
+	}
+
+	// Пустой объект — не работа.
+	if err := os.WriteFile(userPath, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if o.HasActiveWork() {
+		t.Error("enabled user slot with {} must not be active work")
+	}
+
+	// Пустые массивы — тоже не работа.
+	if err := os.WriteFile(userPath, []byte(`{"outbounds":[],"route":{"rules":[]}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if o.HasActiveWork() {
+		t.Error("enabled user slot with empty arrays must not be active work")
+	}
+
+	// Один outbound — работа есть.
+	if err := os.WriteFile(userPath, []byte(`{"outbounds":[{"type":"direct","tag":"u-direct"}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !o.HasActiveWork() {
+		t.Error("enabled user slot with an outbound must be active work")
+	}
+
+	// Выключенный слот — не работа независимо от содержимого.
+	if err := o.SetEnabled(SlotUser, false); err != nil {
+		t.Fatal(err)
+	}
+	if o.HasActiveWork() {
+		t.Error("disabled user slot must not be active work")
+	}
+}

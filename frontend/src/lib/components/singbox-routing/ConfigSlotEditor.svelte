@@ -38,6 +38,11 @@
 		hasDraft?: boolean;
 		/** Дёргается после apply/discard/enable — родитель обновляет список слотов. */
 		onStateChanged?: () => void;
+		/**
+		 * Проброс dirty-состояния родителю: drawer спрашивает подтверждение
+		 * перед закрытием/возвратом к списку, чтобы правки не пропали молча.
+		 */
+		onDirtyChange?: (dirty: boolean) => void;
 	}
 
 	let {
@@ -47,6 +52,7 @@
 		enabled = false,
 		hasDraft = false,
 		onStateChanged,
+		onDirtyChange,
 	}: Props = $props();
 
 	// Пропсы фиксируются на маунте намеренно: родитель пересоздаёт редактор
@@ -66,6 +72,9 @@
 	const baselineText = content;
 
 	let dirty = $derived(!readonly && text !== serverText);
+	$effect(() => {
+		onDirtyChange?.(dirty);
+	});
 
 	// ── клиентский JSON.parse с debounce ~300 мс ──────────────────────
 	let parseError = $state<{ message: string; pos: JsonErrorPos | null } | null>(null);
@@ -111,14 +120,24 @@
 	let busy = $derived(checkBusy || saveBusy || applyBusy || discardBusy || enableBusy);
 
 	let serverErrors = $state<RouterValidationErrorDTO[] | null>(null);
+	/** Advisory-предупреждения (severity=warning) — не блокируют применение. */
+	let serverWarnings = $state<RouterValidationErrorDTO[] | null>(null);
 	let sbCheckError = $state<string | null>(null);
 	let checkOkShown = $state(false);
 
 	function resetServerFeedback(): void {
 		serverErrors = null;
+		serverWarnings = null;
 		sbCheckError = null;
 		checkOkShown = false;
 	}
+
+	// Зелёный баннер «проверка пройдена» относится к проверенному тексту —
+	// любая правка делает его недостоверным, гасим сразу.
+	$effect(() => {
+		void text;
+		checkOkShown = false;
+	});
 
 	function tunCount(s: string): number {
 		return (s.match(/"type"\s*:\s*"tun"/g) ?? []).length;
@@ -132,6 +151,7 @@
 		resetServerFeedback();
 		try {
 			const res = await api.singboxUserConfigCheck(text);
+			serverWarnings = res.warnings?.length ? res.warnings : null;
 			if (res.ok) {
 				checkOkShown = true;
 			} else {
@@ -178,9 +198,10 @@
 			if (dirty || !draftSaved) {
 				if (!(await saveDraft(true))) return;
 			}
-			await api.singboxUserConfigApply();
+			const res = await api.singboxUserConfigApply();
+			serverWarnings = res.warnings?.length ? res.warnings : null;
 			draftSaved = false;
-			slotEnabled = true; // apply включает припаркованный слот
+			slotEnabled = true; // apply включает припаркованный слот (после успешной валидации)
 			notifications.success('Конфигурация применена');
 			onStateChanged?.();
 		} catch (e) {
@@ -307,11 +328,28 @@
 		<div class="feedback error">
 			<div class="feedback-title">Проверка не пройдена</div>
 			<ul class="error-list">
-				{#each serverErrors as e (`${e.slot}/${e.kind}/${e.tag}/${e.inRule}`)}
+				<!-- Ключ с индексом: повторные duplicate-* ошибки совпадают по
+				     slot/kind/tag (пустой inRule) и без индекса роняют keyed-each. -->
+				{#each serverErrors as e, i (`${i}-${e.kind}`)}
 					<li>
 						<strong>{e.inRule || e.slot}</strong>: {e.message}{#if e.tag}
 							&nbsp;({e.tag}){/if}
 						<span class="err-kind">[{e.kind}]</span>
+					</li>
+				{/each}
+			</ul>
+		</div>
+	{/if}
+
+	{#if serverWarnings}
+		<div class="feedback warn">
+			<div class="feedback-title">Предупреждения — применение возможно</div>
+			<ul class="error-list">
+				{#each serverWarnings as w, i (`${i}-${w.kind}`)}
+					<li>
+						<strong>{w.inRule || w.slot}</strong>: {w.message}{#if w.tag}
+							&nbsp;({w.tag}){/if}
+						<span class="err-kind">[{w.kind}]</span>
 					</li>
 				{/each}
 			</ul>

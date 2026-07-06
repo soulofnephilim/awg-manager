@@ -62,9 +62,42 @@ type ConfigSlotContentResponse struct {
 // UserConfigCheckResponse is the payload of POST /singbox/config/user/check.
 // Errors mirror RouterStagingValidationError's validation entries; ошибка
 // `sing-box check` приходит тем же списком (kind: "sing-box check").
+// Warnings — advisory-замечания (severity=warning, например
+// route-final-conflict): не блокируют применение, но молча терять их
+// нельзя — first-wins merge тихо затенит пользовательский route.final.
+// Форма RouterStagingValidationError (роутерный staging) не меняется —
+// warnings добавлены только в ответы user-эндпоинтов.
 type UserConfigCheckResponse struct {
-	Ok     bool                       `json:"ok"`
-	Errors []RouterValidationErrorDTO `json:"errors,omitempty"`
+	Ok       bool                       `json:"ok"`
+	Errors   []RouterValidationErrorDTO `json:"errors,omitempty"`
+	Warnings []RouterValidationErrorDTO `json:"warnings,omitempty"`
+}
+
+// UserConfigApplyResponse is the 200 payload of POST /singbox/config/user/apply.
+// Warnings — как в UserConfigCheckResponse: применение прошло, но advisory-
+// замечания нужно показать пользователю.
+type UserConfigApplyResponse struct {
+	Ok       bool                       `json:"ok"`
+	Warnings []RouterValidationErrorDTO `json:"warnings,omitempty"`
+}
+
+// splitUserValidationDTO раскладывает результат валидации на блокирующие
+// ошибки и advisory-предупреждения (SeverityWarning). validationDTOFrom
+// для Ok()-результата возвращает nil — предупреждения без этого helper'а
+// не доехали бы до DTO вовсе, а при провале смешивались бы с ошибками.
+func splitUserValidationDTO(res orchestrator.ValidationResult) (errs, warns []RouterValidationErrorDTO) {
+	for _, e := range res.Errors {
+		dto := RouterValidationErrorDTO{
+			Slot: string(e.Slot), Kind: e.Kind, Tag: e.Tag,
+			InRule: e.InRule, Message: e.Message,
+		}
+		if e.Severity == orchestrator.SeverityWarning {
+			warns = append(warns, dto)
+		} else {
+			errs = append(errs, dto)
+		}
+	}
+	return errs, warns
 }
 
 // UserConfigEnableRequest is the body of POST /singbox/config/user/enable.
@@ -295,20 +328,18 @@ func (h *SingboxConfigEditorHandler) CheckUserConfig(w http.ResponseWriter, r *h
 		return
 	}
 	out := UserConfigCheckResponse{Ok: res.Ok()}
-	if dto := validationDTOFrom(res); dto != nil {
-		out.Errors = dto.Errors
-	}
+	out.Errors, out.Warnings = splitUserValidationDTO(res)
 	response.Success(w, out)
 }
 
 // ApplyUserConfig commits the pending draft.
 //
 //	@Summary		Apply user config slot draft
-//	@Description	Валидирует черновик (кросс-слот + sing-box check) и атомарно коммитит pending → active. Отключённый слот при apply включается (иначе файл лёг бы в active/ при enabled=false). Применение — debounced SIGHUP; добавление/удаление tun-inbound вызовет полный рестарт sing-box.
+//	@Description	Валидирует черновик (кросс-слот + sing-box check) и атомарно коммитит pending → active. Отключённый слот включается ПОСЛЕ успешного apply (провал валидации оставляет слот припаркованным, старый конфиг не воскресает). В 200-ответе могут быть advisory-предупреждения (warnings). Применение — debounced SIGHUP; добавление/удаление tun-inbound вызовет полный рестарт sing-box.
 //	@Tags			singbox-config
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Success		200	{object}	OkResponse
+//	@Success		200	{object}	OkResponse{data=UserConfigApplyResponse}
 //	@Failure		405	{object}	APIErrorEnvelope
 //	@Failure		409	{object}	APIErrorEnvelope	"no draft to apply"
 //	@Failure		422	{object}	RouterStagingValidationError
@@ -319,18 +350,20 @@ func (h *SingboxConfigEditorHandler) ApplyUserConfig(w http.ResponseWriter, r *h
 		response.MethodNotAllowed(w)
 		return
 	}
-	// ApplyDraft кладёт файл в active/ независимо от enabled-состояния;
-	// применение к «припаркованному» слоту дало бы дрейф (validate слот
-	// пропускает, а sing-box файл читает). Поэтому apply включает слот —
-	// но только когда черновик существует, иначе 409 без побочек.
+	// Явный pre-check ради чистого 409 без побочных эффектов.
 	if !h.orch.HasDraft(orchestrator.SlotUser) {
 		response.ErrorWithStatus(w, http.StatusConflict, "no draft to apply", "NO_DRAFT")
 		return
 	}
-	if err := h.orch.SetEnabled(orchestrator.SlotUser, true); err != nil {
-		response.InternalError(w, err.Error())
-		return
-	}
+	// Порядок — apply, ПОТОМ enable. ApplyDraft валидирует черновик «как
+	// будто применён и включён» (цель попадает в снапшот sing-box check
+	// безусловно), поэтому включать слот заранее не нужно; включение после
+	// успеха безопасно и не оставляет побочек на провале: 422 оставляет
+	// припаркованный слот выключенным, а его старый конфиг в disabled/ —
+	// нетронутым (не воскресает). ApplyDraft у выключенного слота кладёт
+	// файл в active/ — немедленный SetEnabled ниже (внутри debounce-окна
+	// reload) убирает возможный устаревший дубль из disabled/ и выравнивает
+	// enabled-карту с диском.
 	res, err := h.orch.ApplyDraft(orchestrator.SlotUser)
 	if errors.Is(err, orchestrator.ErrNoDraft) {
 		response.ErrorWithStatus(w, http.StatusConflict, "no draft to apply", "NO_DRAFT")
@@ -344,7 +377,13 @@ func (h *SingboxConfigEditorHandler) ApplyUserConfig(w http.ResponseWriter, r *h
 		writeJSONStatus(w, http.StatusUnprocessableEntity, RouterStagingValidationError{Validation: validationDTOFrom(res)})
 		return
 	}
-	response.Success(w, OkData{Ok: true})
+	if err := h.orch.SetEnabled(orchestrator.SlotUser, true); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	out := UserConfigApplyResponse{Ok: true}
+	_, out.Warnings = splitUserValidationDTO(res)
+	response.Success(w, out)
 }
 
 // DiscardUserConfig removes the pending draft.

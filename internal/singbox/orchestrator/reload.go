@@ -275,6 +275,10 @@ func (o *Orchestrator) HasActiveWork() bool {
 // activate the daemon on their own — they are infrastructure for
 // other slots, not a reason to keep sing-box running.
 //
+// Исключение — SlotUser: включённый, но содержательно пустой
+// пользовательский слот (90-user.json с «{}») работой не считается,
+// см. userSlotHasMeaningfulContentLocked.
+//
 // Caller MUST hold o.mu.
 func (o *Orchestrator) hasActiveWorkLocked() bool {
 	for slot, enabled := range o.enabled {
@@ -291,7 +295,49 @@ func (o *Orchestrator) hasActiveWorkLocked() bool {
 			}
 			continue
 		}
+		if slot == SlotUser {
+			// Пустой пользовательский слот не должен держать/запускать
+			// процесс: включённый 90-user.json с «{}» (или без содержательных
+			// массивов) — не работа для демона, в отличие от системных слотов,
+			// у которых сам факт включения — сигнал продюсера.
+			if o.userSlotHasMeaningfulContentLocked() {
+				return true
+			}
+			continue
+		}
 		return true
 	}
 	return false
+}
+
+// userSlotHasMeaningfulContentLocked reports whether the user slot's
+// ACTIVE file carries anything sing-box would actually do work for: at
+// least one non-empty array among inbounds / outbounds / dns.servers /
+// dns.rules / route.rules / route.rule_set. Missing, empty or unparseable
+// file → false (битый файл всё равно заблокирует reload на parse-error в
+// validateLocked). Читаем и парсим файл на каждый вызов — reload не
+// горячий путь, кэш не нужен. Caller MUST hold o.mu.
+func (o *Orchestrator) userSlotHasMeaningfulContentLocked() bool {
+	data, err := o.readActiveBytes(SlotUser)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	var c struct {
+		Inbounds  []json.RawMessage `json:"inbounds"`
+		Outbounds []json.RawMessage `json:"outbounds"`
+		DNS       struct {
+			Servers []json.RawMessage `json:"servers"`
+			Rules   []json.RawMessage `json:"rules"`
+		} `json:"dns"`
+		Route struct {
+			Rules   []json.RawMessage `json:"rules"`
+			RuleSet []json.RawMessage `json:"rule_set"`
+		} `json:"route"`
+	}
+	if json.Unmarshal(data, &c) != nil {
+		return false
+	}
+	return len(c.Inbounds) > 0 || len(c.Outbounds) > 0 ||
+		len(c.DNS.Servers) > 0 || len(c.DNS.Rules) > 0 ||
+		len(c.Route.Rules) > 0 || len(c.Route.RuleSet) > 0
 }

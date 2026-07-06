@@ -367,11 +367,126 @@ func TestConfigEditor_Apply_EnablesParkedSlot(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("re-apply: %d %s", rec.Code, rec.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(dir, "90-user.json")); err != nil {
-		t.Errorf("active file missing: %v", err)
+	// Активный файл — НОВЫЙ черновик, а не воскрешённая припаркованная копия
+	// (порядок apply→enable не должен дать renameForToggle затереть его).
+	got, err := os.ReadFile(filepath.Join(dir, "90-user.json"))
+	if err != nil {
+		t.Fatalf("active file missing: %v", err)
+	}
+	if string(got) != `{"outbounds":[]}` {
+		t.Errorf("active file must hold the new draft, got: %s", got)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "disabled", "90-user.json")); !os.IsNotExist(err) {
 		t.Errorf("stale disabled copy: %v", err)
+	}
+}
+
+// РЕГРЕССИЯ (порядок apply→enable): провал apply на припаркованном слоте
+// не должен ни включать слот, ни трогать его старый конфиг в disabled/ —
+// раньше слот включался ДО валидации, и 422 воскрешал старый конфиг.
+func TestConfigEditor_Apply_FailureOnParkedSlotKeepsParked(t *testing.T) {
+	h, o, dir := newEditorHandler(t)
+	goodBody := `{"outbounds":[{"type":"direct","tag":"user-direct"}]}`
+	if err := o.SaveDraft(orchestrator.SlotUser, []byte(goodBody)); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ApplyUserConfig(rec, httptest.NewRequest(http.MethodPost, "/api/singbox/config/user/apply", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply good: %d %s", rec.Code, rec.Body.String())
+	}
+	// Паркуем слот.
+	rec = httptest.NewRecorder()
+	h.EnableUserConfig(rec, httptest.NewRequest(http.MethodPost, "/api/singbox/config/user/enable",
+		strings.NewReader(`{"enabled":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Плохой черновик поверх припаркованного слота → apply = 422.
+	if err := o.SaveDraft(orchestrator.SlotUser,
+		[]byte(`{"route":{"rules":[{"outbound":"ghost-tag"}]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ApplyUserConfig(rec, httptest.NewRequest(http.MethodPost, "/api/singbox/config/user/apply", nil))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("apply bad: status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+
+	// Слот остался выключенным…
+	for _, st := range o.Snapshot() {
+		if st.Slot == orchestrator.SlotUser && st.Enabled {
+			t.Error("failed apply must leave the parked slot disabled")
+		}
+	}
+	// …активного файла нет…
+	if _, err := os.Stat(filepath.Join(dir, "90-user.json")); !os.IsNotExist(err) {
+		t.Errorf("active file must be absent after failed apply: %v", err)
+	}
+	// …старый конфиг в disabled/ нетронут (не «воскрешён» и не подменён)…
+	parked, err := os.ReadFile(filepath.Join(dir, "disabled", "90-user.json"))
+	if err != nil {
+		t.Fatalf("parked file missing after failed apply: %v", err)
+	}
+	if string(parked) != goodBody {
+		t.Errorf("parked config mutated by failed apply: %s", parked)
+	}
+	// …а черновик сохранён для дальнейшего редактирования.
+	if !o.HasDraft(orchestrator.SlotUser) {
+		t.Error("draft must survive failed apply")
+	}
+}
+
+// Advisory-предупреждения (severity=warning, например route-final-conflict)
+// доезжают до ответов check (ok:true + warnings) и apply (200 + warnings) —
+// раньше validationDTOFrom для Ok()-результата возвращал nil и первое-
+// выигрывает затенение route.final терялось молча.
+func TestConfigEditor_CheckAndApply_SurfaceWarnings(t *testing.T) {
+	h, o, dir := newEditorHandler(t)
+	// Системный слот уже задаёт route.final → второй сеттер в user-слоте
+	// даёт route-final-conflict (warning, не блокирует).
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"),
+		[]byte(`{"route":{"final":"direct"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SetEnabled(orchestrator.SlotRouter, true); err != nil {
+		t.Fatal(err)
+	}
+	userBody := `{"route":{"final":"direct"}}`
+
+	// check: ok:true + 1 warning, errors пуст.
+	rec := httptest.NewRecorder()
+	h.CheckUserConfig(rec, httptest.NewRequest(http.MethodPost, "/api/singbox/config/user/check",
+		strings.NewReader(userBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check status %d: %s", rec.Code, rec.Body.String())
+	}
+	var data UserConfigCheckResponse
+	decodeEnvelope(t, rec.Body.Bytes(), &data)
+	if !data.Ok || len(data.Errors) != 0 {
+		t.Fatalf("check must pass with warnings only: %+v", data)
+	}
+	if len(data.Warnings) != 1 || data.Warnings[0].Kind != "route-final-conflict" {
+		t.Fatalf("check warnings: %+v", data.Warnings)
+	}
+
+	// apply: 200, warnings в теле.
+	if err := o.SaveDraft(orchestrator.SlotUser, []byte(userBody)); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ApplyUserConfig(rec, httptest.NewRequest(http.MethodPost, "/api/singbox/config/user/apply", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply status %d: %s", rec.Code, rec.Body.String())
+	}
+	var applyData UserConfigApplyResponse
+	decodeEnvelope(t, rec.Body.Bytes(), &applyData)
+	if !applyData.Ok {
+		t.Fatalf("apply data: %+v", applyData)
+	}
+	if len(applyData.Warnings) != 1 || applyData.Warnings[0].Kind != "route-final-conflict" {
+		t.Errorf("apply warnings: %+v", applyData.Warnings)
 	}
 }
 

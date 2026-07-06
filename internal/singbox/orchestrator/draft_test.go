@@ -202,6 +202,73 @@ func TestApplyDraft_HappyPath(t *testing.T) {
 	}
 }
 
+// snapshotRecordingValidator запоминает содержимое tmpdir-снапшота,
+// переданного в sing-box check.
+type snapshotRecordingValidator struct {
+	files map[string][]byte
+}
+
+func (v *snapshotRecordingValidator) Validate(_ context.Context, dir string) error {
+	v.files = map[string][]byte{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return err
+		}
+		v.files[e.Name()] = data
+	}
+	return nil
+}
+
+// Черновик ВЫКЛЮЧЕННОГО целевого слота обязан попасть в снапшот sing-box
+// check — «валидируем как будто применён и включён» (контракт CheckMerged/
+// validateWithEnabled). Раньше цикл по o.enabled пропускал выключенную
+// цель: validateDraftLocked считал её включённой, а sing-box check её не
+// видел — внутренне противоречиво, и черновик уезжал в active/ мимо
+// проверки (дыра затрагивала и router ApplyStaging на выключенном слоте).
+func TestApplyDraft_DisabledTargetIncludedInSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	o := New(dir, nil)
+	if err := o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := o.Bootstrap(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	// Слот НЕ включаем — цель выключена.
+	if o.enabled[SlotRouter] {
+		t.Fatal("precondition: router slot must be disabled")
+	}
+	draft := []byte(`{"outbounds":[{"tag":"draft-ob","type":"direct"}]}`)
+	if err := o.SaveDraft(SlotRouter, draft); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	rv := &snapshotRecordingValidator{}
+	o.SetValidator(rv)
+
+	res, err := o.ApplyDraft(SlotRouter)
+	if err != nil {
+		t.Fatalf("ApplyDraft: %v", err)
+	}
+	if !res.Ok() {
+		t.Fatalf("ApplyDraft validation: %s", res.Error())
+	}
+	got, ok := rv.files["20-router.json"]
+	if !ok {
+		t.Fatalf("disabled target's draft missing from sing-box check snapshot; snapshot: %v", rv.files)
+	}
+	if string(got) != string(draft) {
+		t.Errorf("snapshot draft bytes mismatch: %s", got)
+	}
+}
+
 func TestApplyDraft_NoDraft(t *testing.T) {
 	o, _ := setupOrch(t)
 	res, err := o.ApplyDraft(SlotRouter)

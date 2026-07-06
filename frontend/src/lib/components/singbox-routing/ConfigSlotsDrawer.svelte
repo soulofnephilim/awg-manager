@@ -28,8 +28,21 @@
 	let slotLoading = $state(false);
 	/** Ключ пересоздания редактора после discard/refresh. */
 	let editorEpoch = $state(0);
+	/** В редакторе есть несохранённые правки (проброс из ConfigSlotEditor). */
+	let editorDirty = $state(false);
 
 	let wasOpen = $state(false);
+
+	/**
+	 * Guard для in-app навигации: несохранённые правки редактора не должны
+	 * молча пропасть при возврате к списку или закрытии панели (beforeunload
+	 * ловит только уход со страницы). window.confirm — принятый в репо
+	 * паттерн для лёгких подтверждений (см. HeadersTextarea).
+	 */
+	function confirmDiscardDirty(): boolean {
+		if (!editorDirty) return true;
+		return confirm('Есть несохранённые изменения — закрыть без сохранения?');
+	}
 
 	async function loadSlots(): Promise<void> {
 		listLoading = true;
@@ -61,14 +74,40 @@
 	}
 
 	function backToList(): void {
+		if (!confirmDiscardDirty()) return;
+		editorDirty = false;
 		selected = null;
 		selectedInfo = null;
 		void loadSlots();
 	}
 
+	/** Закрытие панели (крестик/backdrop/Esc/свайп) — тоже через dirty-guard. */
+	function handleClose(): void {
+		if (!confirmDiscardDirty()) return;
+		editorDirty = false;
+		onClose();
+	}
+
 	function onEditorStateChanged(): void {
-		// Обновляем бейджи списка не покидая редактор.
-		void loadSlots();
+		// Обновляем бейджи не покидая редактор: и в списке, и в шапке
+		// открытого слота («черновик»/«выключен» должны жить сразу после
+		// apply/discard/enable, а не после повторного открытия слота).
+		void loadSlots().then(() => {
+			const info = selectedInfo;
+			if (!info) return;
+			const fresh = slots.find((s) => s.slot === info.slot);
+			if (!fresh) return;
+			selectedInfo = fresh;
+			if (selected) {
+				// Редактор пересоздаётся только по editorEpoch — обновление
+				// selected не трогает текст в textarea.
+				selected = {
+					...selected,
+					hasDraft: fresh.hasDraft,
+					state: fresh.size === 0 ? 'absent' : fresh.enabled ? 'active' : 'disabled',
+				};
+			}
+		});
 	}
 
 	function formatSize(bytes: number): string {
@@ -82,9 +121,15 @@
 			wasOpen = true;
 			selected = null;
 			selectedInfo = null;
+			editorDirty = false;
 			void loadSlots();
 		} else if (!open && wasOpen) {
+			// Закрытие: пользовательские пути (крестик/backdrop/Esc) уже
+			// прошли dirty-guard в handleClose; при внешнем сбросе open
+			// редактор размонтирован SideDrawer'ом — dirty-флаг обнуляем,
+			// чтобы устаревшее значение не блокировало следующую сессию.
 			wasOpen = false;
+			editorDirty = false;
 		}
 	});
 
@@ -93,7 +138,7 @@
 	);
 </script>
 
-<SideDrawer {open} {onClose} {title} width={840}>
+<SideDrawer {open} onClose={handleClose} {title} width={840}>
 	<div class="content">
 		{#if selected}
 			<div class="slot-toolbar">
@@ -118,6 +163,7 @@
 					enabled={selectedInfo?.enabled ?? false}
 					hasDraft={selected.hasDraft}
 					onStateChanged={onEditorStateChanged}
+					onDirtyChange={(d: boolean) => (editorDirty = d)}
 				/>
 			{/key}
 		{:else}

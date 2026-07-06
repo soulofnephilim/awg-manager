@@ -99,6 +99,7 @@ import type {
 	ConfigSlotsResponse,
 	ConfigSlotContentResponse,
 	UserConfigCheckResponse,
+	UserConfigApplyResponse,
 	AmneziaPremiumAccountInfo,
 	ManagedServerBackupFile,
 	ManagedServerDriftResponse,
@@ -1676,9 +1677,14 @@ class ApiClient {
 		});
 	}
 
-	/** Применить черновик: 422 (validation/sbCheck) прилетает через err.status/err.body. */
-	async singboxUserConfigApply(): Promise<void> {
-		await this.request('/singbox/config/user/apply', { method: 'POST' });
+	/**
+	 * Применить черновик: 422 (validation/sbCheck) прилетает через
+	 * err.status/err.body; 200 может нести advisory-предупреждения.
+	 */
+	async singboxUserConfigApply(): Promise<UserConfigApplyResponse> {
+		return this.request<UserConfigApplyResponse>('/singbox/config/user/apply', {
+			method: 'POST',
+		});
 	}
 
 	async singboxUserConfigDiscard(): Promise<void> {

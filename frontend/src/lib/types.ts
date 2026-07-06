@@ -2107,6 +2107,14 @@ export interface ConfigSlotContentResponse {
 export interface UserConfigCheckResponse {
 	ok: boolean;
 	errors?: RouterValidationErrorDTO[];
+	/** Advisory-предупреждения (severity=warning): применение не блокируют. */
+	warnings?: RouterValidationErrorDTO[];
+}
+
+/** 200-ответ POST /singbox/config/user/apply — применено, но могут быть предупреждения. */
+export interface UserConfigApplyResponse {
+	ok: boolean;
+	warnings?: RouterValidationErrorDTO[];
 }
 
 // ─────────────────────────────────────────────
