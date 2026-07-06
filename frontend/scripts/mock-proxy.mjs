@@ -4355,6 +4355,111 @@ const server = http.createServer(async (req, res) => {
 		return;
 	}
 
+	// Inbounds mirror (feature-inbounds-visibility): rich fixture instead of
+	// Prism's "string" placeholders — covers every source group and all three
+	// idle reasons so the read-only mirror UI is smoke-testable.
+	if (req.method === 'GET' && path === '/singbox/inbounds') {
+		send(res, 200, {
+			success: true,
+			data: {
+				inbounds: [
+					{
+						tag: 'tun-in',
+						type: 'tun',
+						listen: '',
+						listenPort: 0,
+						slot: 'base',
+						source: 'engine',
+						ownerLabel: 'sing-box',
+						idle: false,
+						idleReason: '',
+					},
+					{
+						tag: 'device-proxy-in',
+						type: 'mixed',
+						listen: '0.0.0.0',
+						listenPort: 1099,
+						slot: 'deviceproxy',
+						source: 'deviceproxy',
+						ownerLabel: 'Прокси',
+						idle: false,
+						idleReason: '',
+					},
+					{
+						tag: 'sub-ru-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11021,
+						slot: 'subscriptions',
+						source: 'subscription',
+						ownerLabel: 'Sing subscription RU',
+						idle: false,
+						idleReason: '',
+					},
+					{
+						tag: 'sub-alexray-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11022,
+						slot: 'subscriptions',
+						source: 'subscription',
+						ownerLabel: 'AleXRAY (SUB)',
+						idle: true,
+						idleReason: 'ndms_proxy_disabled',
+					},
+					{
+						tag: 'group-eu-selector-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11031,
+						slot: 'subscriptions',
+						source: 'group',
+						ownerLabel: 'EU Selector',
+						idle: true,
+						idleReason: 'no_route_rule',
+					},
+					{
+						tag: 'Kto-VLESS-kto-po-drova-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11011,
+						slot: 'tunnels',
+						source: 'tunnel',
+						ownerLabel: 'Kto-VLESS-kto-po-drova',
+						idle: false,
+						idleReason: '',
+					},
+					{
+						tag: 'hysteria-sg-off-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11015,
+						slot: 'tunnels',
+						source: 'tunnel',
+						ownerLabel: 'hysteria-sg-off',
+						idle: true,
+						idleReason: 'ndms_proxy_missing',
+					},
+					{
+						tag: 'qos-tproxy-in',
+						type: 'tproxy',
+						listen: '::',
+						listenPort: 51272,
+						slot: 'qos-routes',
+						source: 'qos',
+						ownerLabel: 'QoS',
+						idle: false,
+						idleReason: '',
+					},
+				],
+				warnings: [
+					'слот 55-fakeip.json не прочитан: unexpected end of JSON input',
+				],
+			},
+		});
+		return;
+	}
+
 	if (req.method === 'GET' && path === '/singbox/config-preview') {
 		const merged = {
 			log: { level: 'trace', timestamp: true },
@@ -5431,6 +5536,9 @@ const server = http.createServer(async (req, res) => {
 				enabled: mockEngineRunning,
 				installed: true,
 				running: mockEngineRunning,
+				// Interception path live (chains + PREROUTING jumps). Only meaningful
+				// in tproxy mode; fakeip-tun drives its own badge via routingMode.
+				active: mockEngineRunning && routingMode === 'tproxy',
 				version: '1.13.11',
 				configValid: true,
 				netfilterAvailable: true,
