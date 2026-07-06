@@ -1,25 +1,35 @@
 <!--
-  Вкладка «Inbounds» страницы FakeIP по мокапу `page-inbounds-v2.html`.
+  Вкладка «Inbounds» страницы FakeIP — зеркало ВСЕХ inbound'ов merged-конфига
+  (GET /api/singbox/inbounds), сгруппированных по источнику, а не только
+  «tun-in + device-proxy» как раньше.
 
-  Две группы карточек в адаптивной сетке:
+  Группы:
 
-  - tun-in (READ-ONLY) — единственный вход движка fakeip-tun. Управляется
-    движком: интерфейс/адрес/стек/MTU/DNS — факты из бэкенда, без правки.
-    Источники (ЧЕСТНО, без хардкода magic-IP):
+  - «Движок» — tun-in (READ-ONLY, карточка TunInboundCard): единственный вход
+    движка fakeip-tun. Интерфейс/адрес/стек/MTU/DNS — факты из бэкенда:
       • interface  — status.fakeipIface (e.g. «opkgtun10»);
       • address    — status.fakeipTunAddr (адрес tun-шлюза, e.g. «172.18.0.1»);
       • стек · MTU — settings.fakeipStack · settings.fakeipMtu;
       • DNS клиентам — status.fakeipDns (адрес для ручной настройки клиентов).
-    Существует только в fakeip-режиме (страница уже гейтит это целиком).
+    Прочие engine-inbound'ы (tproxy/redirect чужого режима, если вдруг активны)
+    показываются read-only строками.
 
-  - SOCKS/HTTP-входы (EDITABLE) = инстансы device-proxy. ПЕРЕИСПОЛЬЗУЕМ фичу
-    device-proxy целиком, не пересобираем:
+  - «Прокси устройств» (EDITABLE) = инстансы device-proxy. ПЕРЕИСПОЛЬЗУЕМ фичу
+    device-proxy целиком (карточки с редактированием/удалением/toggle):
       • api.listDeviceProxyInstances / getDeviceProxyListenChoices /
         getDeviceProxyInstanceRuntime / saveDeviceProxyInstance;
-      • InboundSettingsDrawer (sb-router) — модал правки (SettingsCard внутри);
-      • newDeviceProxyInstance / mergeInstanceConfig (utils);
-      • deleteDeviceProxyInstanceWithNotice (utils) — удаление с уведомлением.
+      • InboundSettingsDrawer (sb-router) — модал правки;
+      • newDeviceProxyInstance / deleteDeviceProxyInstanceWithNotice (utils).
     Конфиг-инстансы видны всегда; статус-точка деградирует по runtime.alive.
+
+  - «Подписки» / «Сводные группы» / «Туннели» / «QoS» — read-only строки
+    (общий InboundsMirror с sb-router): tag, тип, 127.0.0.1:port, владелец;
+    idle-записи («резерв порта» — NDMS-прокси выключен / объект отключён)
+    помечаются muted-бейджем с title-пояснением (порт зарезервирован, чтобы
+    номера портов не менялись).
+
+  Счётчик «Входы · N» = все inbound'ы merged-конфига; при недоступном
+  endpoint'е деградация к прежнему счёту 1 + device-proxy.
 
   ЧЕСТНОСТЬ по счётчику соединений: записи Clash /connections НЕ несут тег
   inbound (см. ClashConnectionsRaw — только metadata/chains/rule), поэтому
@@ -35,10 +45,11 @@
 	import InboundSettingsDrawer from '$lib/components/sb-router/InboundSettingsDrawer.svelte';
 	import { newDeviceProxyInstance } from '$lib/utils/deviceProxyInstance';
 	import { deleteDeviceProxyInstanceWithNotice } from '$lib/utils/deviceProxyDeleteNotice';
-	import type { DeviceProxyInstance, DeviceProxyRuntime } from '$lib/types';
+	import type { DeviceProxyInstance, DeviceProxyRuntime, SingboxInboundEntry } from '$lib/types';
 	import type { FakeIPEngineState } from '../engineState';
 	import TunInboundCard from './TunInboundCard.svelte';
 	import DeviceProxyInboundCard from './DeviceProxyInboundCard.svelte';
+	import InboundsMirror from '$lib/components/sb-router/InboundsMirror.svelte';
 
 	interface Props {
 		/** Состояние движка — гейтит живые сигналы (status-точки). */
@@ -93,8 +104,36 @@
 		}
 	}
 
+	// ── Зеркало всех inbound'ов merged-конфига ──────────────────
+	// null = endpoint недоступен → деградация к прежнему виду
+	// (tun-in + device-proxy) и прежнему счётчику.
+	let allInbounds = $state<SingboxInboundEntry[] | null>(null);
+	let inboundWarnings = $state<string[]>([]);
+
+	async function loadAllInbounds(): Promise<void> {
+		try {
+			const res = await api.listSingboxInbounds();
+			allInbounds = res.inbounds;
+			inboundWarnings = res.warnings ?? [];
+		} catch {
+			allInbounds = null;
+			inboundWarnings = [];
+		}
+	}
+
+	// Прочие engine-inbound'ы, кроме fakeip-tun (он показан карточкой TunInboundCard).
+	const engineExtras = $derived(
+		(allInbounds ?? []).filter(
+			(e) => e.source === 'engine' && !(e.slot === 'fakeip' && e.type === 'tun'),
+		),
+	);
+	// Read-only источники: всё, кроме движка и device-proxy (у них свои карточки).
+	const mirrorEntries = $derived(
+		(allInbounds ?? []).filter((e) => e.source !== 'engine' && e.source !== 'deviceproxy'),
+	);
+
 	onMount(async () => {
-		await loadDeviceProxy();
+		await Promise.all([loadDeviceProxy(), loadAllInbounds()]);
 	});
 
 	function runtimeFor(id: string): DeviceProxyRuntime {
@@ -140,6 +179,7 @@
 	function onDrawerSaved(): void {
 		drawerOpen = false;
 		void loadDeviceProxy();
+		void loadAllInbounds();
 	}
 
 	// ── Toggle enabled (persist via saveDeviceProxyInstance) ────
@@ -151,6 +191,7 @@
 		try {
 			await api.saveDeviceProxyInstance({ ...in_, enabled: next });
 			await loadDeviceProxy();
+			await loadAllInbounds();
 		} catch (e) {
 			notifications.error(
 				`Не удалось ${next ? 'включить' : 'выключить'} inbound: ${e instanceof Error ? e.message : String(e)}`,
@@ -168,12 +209,17 @@
 					'Inbound удалён из конфига, но sing-box ещё не обновлён — изменение применится, когда сервис снова будет доступен.',
 			});
 			await loadDeviceProxy();
+			await loadAllInbounds();
 		} catch (e) {
 			notifications.error(`Не удалось удалить: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
 
-	const inboundsTotal = $derived(1 + instances.length);
+	// Полный счёт inbound'ов merged-конфига; фолбэк — прежний счёт
+	// «tun-in + device-proxy», когда endpoint недоступен.
+	const inboundsTotal = $derived(
+		allInbounds === null ? 1 + instances.length : allInbounds.length,
+	);
 </script>
 
 <section class="inbounds-tab">
@@ -184,6 +230,11 @@
 		</button>
 	</div>
 
+	{#if inboundWarnings.length > 0}
+		<p class="warn-note">Не удалось прочитать: {inboundWarnings.join('; ')}</p>
+	{/if}
+
+	<div class="grp-h">Движок</div>
 	<div class="icards">
 		<TunInboundCard
 			iface={$status?.fakeipIface}
@@ -193,22 +244,30 @@
 			fakeipMtu={$settings?.fakeipMtu}
 			{live}
 		/>
-
-		{#each instances as in_ (in_.id)}
-			<DeviceProxyInboundCard
-				name={in_.name || in_.id}
-				listen={listenLabel(in_)}
-				authEnabled={in_.auth?.enabled ?? false}
-				enabled={in_.enabled}
-				alive={runtimeFor(in_.id).alive}
-				{live}
-				toggling={togglingId === in_.id}
-				onEdit={() => openEdit(in_)}
-				onToggle={(next) => void toggleInstance(in_, next)}
-				onDelete={() => void deleteInstance(in_)}
-			/>
-		{/each}
 	</div>
+	{#if engineExtras.length > 0}
+		<InboundsMirror entries={engineExtras} showGroupHeaders={false} />
+	{/if}
+
+	<div class="grp-h">Прокси устройств</div>
+	{#if instances.length > 0}
+		<div class="icards">
+			{#each instances as in_ (in_.id)}
+				<DeviceProxyInboundCard
+					name={in_.name || in_.id}
+					listen={listenLabel(in_)}
+					authEnabled={in_.auth?.enabled ?? false}
+					enabled={in_.enabled}
+					alive={runtimeFor(in_.id).alive}
+					{live}
+					toggling={togglingId === in_.id}
+					onEdit={() => openEdit(in_)}
+					onToggle={(next) => void toggleInstance(in_, next)}
+					onDelete={() => void deleteInstance(in_)}
+				/>
+			{/each}
+		</div>
+	{/if}
 
 	{#if loadError}
 		<p class="load-error">Не удалось загрузить inbound'ы: {loadError}</p>
@@ -217,6 +276,10 @@
 			SOCKS/HTTP-входов нет. «+ SOCKS/HTTP inbound» — локальный прокси для устройств с
 			ручной настройкой.
 		</p>
+	{/if}
+
+	{#if mirrorEntries.length > 0}
+		<InboundsMirror entries={mirrorEntries} />
 	{/if}
 </section>
 
@@ -280,6 +343,21 @@
 		margin: 0;
 		font-size: 0.8125rem;
 		color: var(--color-error);
+	}
+
+	.warn-note {
+		margin: 0;
+		font-size: 0.75rem;
+		color: var(--color-warning, #d97706);
+	}
+
+	/* Заголовок группы источника — в стиле sectlbl, но строкой над блоком */
+	.grp-h {
+		font-size: 0.6875rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+		font-weight: 600;
 	}
 
 	.empty-note {

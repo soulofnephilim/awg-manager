@@ -56,6 +56,7 @@ import type {
 	SingboxStatus,
 	SingboxImportResponse,
 	SingboxConfigPreview,
+	SingboxInboundsList,
 	DeviceProxyConfig,
 	DeviceProxyInstance,
 	DeviceProxyOutbound,
@@ -1642,6 +1643,11 @@ class ApiClient {
 
 	async singboxGetConfigPreview(): Promise<SingboxConfigPreview> {
 		return this.request<SingboxConfigPreview>('/singbox/config-preview');
+	}
+
+	/** Все inbound'ы merged-конфига sing-box с атрибуцией источника. */
+	async listSingboxInbounds(): Promise<SingboxInboundsList> {
+		return this.request<SingboxInboundsList>('/singbox/inbounds');
 	}
 
 	async singboxListTunnels(): Promise<SingboxTunnel[]> {

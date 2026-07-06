@@ -1225,6 +1225,45 @@ export interface SingboxConfigPreview {
 	json: string;
 }
 
+/** Источник inbound'а merged-конфига (владелец-фича). */
+export type SingboxInboundSource =
+	| 'subscription'
+	| 'group'
+	| 'tunnel'
+	| 'deviceproxy'
+	| 'qos'
+	| 'engine'
+	| 'other';
+
+/**
+ * Один inbound merged-конфига sing-box (GET /api/singbox/inbounds):
+ * нормализованная запись из per-slot чтения config.d с атрибуцией
+ * источника и признаком «резерв порта» (idle).
+ */
+export interface SingboxInboundEntry {
+	tag: string;
+	/** mixed | tun | tproxy | redirect | socks | http | ... */
+	type: string;
+	/** Адрес прослушивания, например 127.0.0.1; пусто у tun. */
+	listen: string;
+	/** 0, когда listen_port отсутствует (tun). */
+	listenPort: number;
+	/** Слот оркестратора: base | tunnels | awg | qos-routes | router | fakeip | deviceproxy | subscriptions | ... */
+	slot: string;
+	source: SingboxInboundSource;
+	/** Человекочитаемое имя владельца (метка подписки/группы, тег туннеля, имя инстанса device-proxy). */
+	ownerLabel: string;
+	/** true — резерв порта: inbound есть в конфиге, но его никто не питает. */
+	idle: boolean;
+	idleReason: '' | 'ndms_proxy_disabled' | 'entity_disabled';
+}
+
+/** Ответ GET /api/singbox/inbounds. warnings — нечитаемые слот-файлы (fail-soft). */
+export interface SingboxInboundsList {
+	inbounds: SingboxInboundEntry[];
+	warnings?: string[];
+}
+
 export interface SingboxTraffic {
 	tag: string;
 	upload: number;
