@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import type { Subscription, SubscriptionGroup } from '$lib/types';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
@@ -20,19 +19,33 @@
 	let pendingDelete = $state<SubscriptionGroup | null>(null);
 	let deleting = $state(false);
 
+	// Монотонный счётчик запросов: ответ применяется только если за время
+	// полёта не стартовал более свежий load (ignore-stale-response) — заодно
+	// схлопывает перекрывающиеся вызовы из $effect ниже.
+	let loadSeq = 0;
+
 	async function load(): Promise<void> {
+		const seq = ++loadSeq;
 		try {
-			groups = await api.listSubscriptionGroups();
+			const fresh = await api.listSubscriptionGroups();
+			if (seq !== loadSeq) return;
+			groups = fresh;
 		} catch {
 			// Секция не должна ронять страницу подписок (старый бекенд без
 			// групп, сетевой сбой) — просто остаёмся с пустым списком.
+			if (seq !== loadSeq) return;
 			groups = [];
 		} finally {
-			loaded = true;
+			if (seq === loadSeq) loaded = true;
 		}
 	}
 
-	onMount(() => {
+	// Перезагрузка при каждом изменении subscriptions (store опрашивается
+	// каждые 30 с и меняется при действиях пользователя): состав групп
+	// (memberCount/members) считается на сервере из членов подписок и без
+	// этого протухал бы до ручного действия. Срабатывает и на mount.
+	$effect(() => {
+		void subscriptions;
 		void load();
 	});
 

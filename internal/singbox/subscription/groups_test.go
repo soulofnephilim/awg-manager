@@ -3,6 +3,7 @@ package subscription
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -383,6 +384,184 @@ func TestService_UpdateGroup_DisableTearsDown(t *testing.T) {
 	}
 	if _, staged := mut.bodies[g.Tag]; staged {
 		t.Error("disabled group must not stage a fresh outbound")
+	}
+}
+
+// countTag — сколько раз tag встречается в срезе (reset не чистит
+// added/removed inbounds, поэтому проверяем дельты по количеству).
+func countTag(ss []string, t string) int {
+	n := 0
+	for _, s := range ss {
+		if s == t {
+			n++
+		}
+	}
+	return n
+}
+
+// TestService_UpdateGroup_DisableKeepsInbound — выключенная группа обязана
+// сохранить свой mixed inbound в слоте: он резервирует listen_port (иначе
+// AllocListenPort, сканирующий inbounds слота, выдал бы порт другому, и
+// повторное включение упёрлось бы в коллизию). Полный teardown inbound —
+// только в DeleteGroup.
+func TestService_UpdateGroup_DisableKeepsInbound(t *testing.T) {
+	svc, mut, _ := newTestServiceWithGroups(t)
+	body := namedLinks("A-1")
+	srv := serveLinks(t, &body)
+	sub, _ := svc.Create(context.Background(), CreateInput{Label: "a", URL: srv.URL, Enabled: true})
+	g, err := svc.CreateGroup(context.Background(), GroupCreateInput{
+		Label: "grp", UseSubscriptionIDs: []string{sub.ID}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addsBefore := countTag(mut.addedInbounds, g.InboundTag)
+	off := false
+	if _, err := svc.UpdateGroup(context.Background(), g.ID, GroupUpdatePatch{Enabled: &off}); err != nil {
+		t.Fatalf("UpdateGroup(disable): %v", err)
+	}
+	if countTag(mut.removedInbounds, g.InboundTag) != 0 {
+		t.Error("disabled group must KEEP its inbound (port reservation), but it was removed")
+	}
+	if countTag(mut.addedInbounds, g.InboundTag) <= addsBefore {
+		t.Error("disabled group inbound must stay staged (idempotent AddInbound)")
+	}
+
+	// Повторное включение: outbound + route-правило поднимаются заново,
+	// AddInbound идемпотентен — коллизии порта нет, ошибок нет.
+	mut.reset()
+	on := true
+	if _, err := svc.UpdateGroup(context.Background(), g.ID, GroupUpdatePatch{Enabled: &on}); err != nil {
+		t.Fatalf("UpdateGroup(re-enable): %v", err)
+	}
+	if members := groupMembers(t, mut, g.Tag); len(members) != 1 {
+		t.Errorf("re-enabled group must stage its outbound with members, got %v", members)
+	}
+	if countTag(mut.removedInbounds, g.InboundTag) != 0 {
+		t.Error("re-enable must not tear the inbound down")
+	}
+}
+
+// TestService_Update_EnabledToggleRestagesGroups — resolveGroupTags пропускает
+// выключенные подписки, поэтому смена enabled обязана пересобрать группы
+// сразу, а не при следующем случайном reload.
+func TestService_Update_EnabledToggleRestagesGroups(t *testing.T) {
+	svc, mut, _ := newTestServiceWithGroups(t)
+	bodyA := namedLinks("A-1")
+	srvA := serveLinks(t, &bodyA)
+	bodyB := namedLinks("B-1")
+	srvB := serveLinks(t, &bodyB)
+	subA, _ := svc.Create(context.Background(), CreateInput{Label: "a", URL: srvA.URL, Enabled: true})
+	subB, _ := svc.Create(context.Background(), CreateInput{Label: "b", URL: srvB.URL, Enabled: true})
+	g, err := svc.CreateGroup(context.Background(), GroupCreateInput{
+		Label: "grp", UseSubscriptionIDs: []string{subA.ID, subB.ID}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := groupMembers(t, mut, g.Tag); len(got) != 2 {
+		t.Fatalf("want 2 members before toggle, got %v", got)
+	}
+
+	mut.reset()
+	reloadsBefore := mut.reloads
+	off := false
+	if _, err := svc.Update(subA.ID, UpdatePatch{Enabled: &off}); err != nil {
+		t.Fatalf("Update(disable): %v", err)
+	}
+	if mut.reloads != reloadsBefore+1 {
+		t.Errorf("enabled toggle must commit exactly one reload, got %d", mut.reloads-reloadsBefore)
+	}
+	got := groupMembers(t, mut, g.Tag)
+	if len(got) != 1 || got[0] != subB.MemberTags[0] {
+		t.Errorf("group must be rebuilt without disabled sub's members, got %v want [%s]", got, subB.MemberTags[0])
+	}
+
+	// Обратное включение возвращает членов подписки в группу.
+	mut.reset()
+	on := true
+	if _, err := svc.Update(subA.ID, UpdatePatch{Enabled: &on}); err != nil {
+		t.Fatalf("Update(enable): %v", err)
+	}
+	got = groupMembers(t, mut, g.Tag)
+	if len(got) != 2 {
+		t.Errorf("re-enabled sub's members must return to the group, got %v", got)
+	}
+}
+
+// TestService_DeleteGroup_FailedReloadRetryable — teardown-reload коммитится
+// ДО удаления строки store: упавший reload оставляет строку (retry вместо
+// 404), ProxyN не снимается до успешного коммита.
+func TestService_DeleteGroup_FailedReloadRetryable(t *testing.T) {
+	svc, mut, gs := newTestServiceWithGroups(t)
+	body := namedLinks("A-1")
+	srv := serveLinks(t, &body)
+	sub, _ := svc.Create(context.Background(), CreateInput{Label: "a", URL: srv.URL, Enabled: true})
+	g, err := svc.CreateGroup(context.Background(), GroupCreateInput{
+		Label: "grp", UseSubscriptionIDs: []string{sub.ID}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mut.reloadErr = errors.New("boom")
+	if err := svc.DeleteGroup(context.Background(), g.ID); err == nil {
+		t.Fatal("DeleteGroup must fail when the teardown reload fails")
+	}
+	if _, err := gs.Get(g.ID); err != nil {
+		t.Fatalf("group row must survive a failed teardown reload: %v", err)
+	}
+	for _, idx := range mut.removedProxies {
+		if idx == g.ProxyIndex {
+			t.Error("proxy must not be removed before the teardown reload commits")
+		}
+	}
+
+	// Retry после устранения причины: строка ещё на месте → не 404.
+	mut.reloadErr = nil
+	mut.reset()
+	if err := svc.DeleteGroup(context.Background(), g.ID); err != nil {
+		t.Fatalf("DeleteGroup retry: %v", err)
+	}
+	if _, err := gs.Get(g.ID); err == nil {
+		t.Error("group row must be deleted after a successful retry")
+	}
+	if !mut.removedOutbound(g.Tag) {
+		t.Error("group outbound must be removed on retry")
+	}
+	// stageGroups не должен пересоздать сущности удаляемой группы в том же батче.
+	if _, staged := mut.bodies[g.Tag]; staged {
+		t.Error("teardown batch must not restage the deleted group's outbound")
+	}
+}
+
+// TestGroupStore_List_Sorted — детерминированный порядок: Label без учёта
+// регистра, при равенстве — ID.
+func TestGroupStore_List_Sorted(t *testing.T) {
+	gs, err := NewGroupStore(filepath.Join(t.TempDir(), "groups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gb, _ := gs.Create(GroupCreateInput{Label: "bravo"})
+	ga, _ := gs.Create(GroupCreateInput{Label: "Alpha"})
+	gc1, _ := gs.Create(GroupCreateInput{Label: "same"})
+	gc2, _ := gs.Create(GroupCreateInput{Label: "same"})
+
+	list := gs.List()
+	if len(list) != 4 {
+		t.Fatalf("len=%d want 4", len(list))
+	}
+	if list[0].ID != ga.ID || list[1].ID != gb.ID {
+		t.Errorf("order: got [%s %s ...] want [Alpha bravo ...]", list[0].Label, list[1].Label)
+	}
+	// Tie-break по ID.
+	wantFirst, wantSecond := gc1.ID, gc2.ID
+	if wantSecond < wantFirst {
+		wantFirst, wantSecond = wantSecond, wantFirst
+	}
+	if list[2].ID != wantFirst || list[3].ID != wantSecond {
+		t.Errorf("tie-break: got [%s %s] want [%s %s]", list[2].ID, list[3].ID, wantFirst, wantSecond)
 	}
 }
 

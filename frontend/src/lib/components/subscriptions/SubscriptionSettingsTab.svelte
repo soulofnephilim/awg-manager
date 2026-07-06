@@ -13,6 +13,7 @@
 	import { Button, Dropdown, Modal, Toggle } from '$lib/components/ui';
 	import { untrack } from 'svelte';
 	import { showOutboundReferencedError } from '$lib/utils/outboundReferenced';
+	import { softCompileGoRegex } from '$lib/utils/subscriptionGroupPreview';
 
 	interface Props {
 		subscription: Subscription;
@@ -62,13 +63,16 @@
 		filterExclude = subscription.filterExclude ?? '';
 	});
 
-	// Мягкая клиентская проверка regex — НЕ авторитетна: JS принимает
-	// lookahead, который Go RE2 отвергнет; финальная валидация на сервере.
+	// Мягкая клиентская проверка regex — НЕ авторитетна; финальная валидация
+	// на сервере. softCompileGoRegex понимает ведущий (?i) (JS RegExp его не
+	// принимает — плейсхолдер поля не должен подсвечиваться как ошибка) и
+	// адресно ловит lookahead/lookbehind, которые JS принял бы, а Go RE2 — нет.
 	function softRegexWarning(pattern: string): string {
-		if (!pattern) return '';
-		try {
-			new RegExp(pattern);
-		} catch {
+		const res = softCompileGoRegex(pattern);
+		if (res.lookaround) {
+			return 'Go RE2 не поддерживает lookahead/lookbehind — используйте поле «Исключать»';
+		}
+		if (res.invalid) {
 			return 'Похоже на некорректное выражение (окончательно проверит сервер)';
 		}
 		return '';
@@ -380,6 +384,12 @@
 				Проверка выражения выполняется на сервере; скрытые серверы видны во
 				вкладке «Серверы» в блоке «Скрыто фильтром».
 			</div>
+			{#if subscription.isInline}
+				<div class="filter-hint filter-hint-inline">
+					У inline-подписки изменение фильтра пересобирает список из исходного
+					текста: ручные добавления/удаления серверов будут сброшены.
+				</div>
+			{/if}
 		</div>
 	</section>
 
@@ -715,6 +725,9 @@
 		background: var(--color-bg-primary);
 		border: 1px solid var(--color-border);
 		border-radius: 3px;
+	}
+	.filter-hint-inline {
+		color: #d29922;
 	}
 
 	.mono { font-family: var(--font-mono, ui-monospace, monospace); }

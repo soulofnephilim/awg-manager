@@ -88,6 +88,8 @@ func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, err err
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "EXCLUDE_ON_INLINE")
 	case errors.Is(err, subscription.ErrAllMembersExcluded):
 		response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "ALL_MEMBERS_EXCLUDED")
+	case errors.Is(err, subscription.ErrAllMembersFiltered):
+		response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "ALL_MEMBERS_FILTERED")
 	case errors.Is(err, subscription.ErrMemberNotFound):
 		response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "MEMBER_NOT_FOUND")
 	default:
@@ -125,32 +127,32 @@ type SubscriptionURLTestDTO struct {
 // only needs IsInline to gate UI affordances; raw paste stays
 // server-side until a future single-record endpoint requires it.
 type SubscriptionDTO struct {
-	ID           string                  `json:"id" example:"sub-demo"`
-	Label        string                  `json:"label" example:"Demo Provider"`
-	URL          string                  `json:"url" example:"https://example.com/subscriptions/demo.txt"`
-	IsInline     bool                    `json:"isInline" example:"false"`
-	Headers      []SubscriptionHeader    `json:"headers"`
-	RefreshHours int                     `json:"refreshHours" example:"24"`
-	LastFetched  string                  `json:"lastFetched" example:"2026-05-14T21:30:00Z"`
-	LastError    string                  `json:"lastError,omitempty" example:""`
-	SelectorTag  string                  `json:"selectorTag" example:"sub-demo"`
-	InboundTag   string                  `json:"inboundTag" example:"sub-demo-in"`
-	ListenPort   int                     `json:"listenPort" example:"11000"`
-	ProxyIndex   int                     `json:"proxyIndex" example:"1" description:"NDMS ProxyN index for this subscription. -1 when no proxy is allocated yet OR when global 'Create NDMS Proxy for sing-box' is disabled (the composite interface does not exist in that mode — UI should hide t2sN/ProxyN labels and disable per-subscription speedtest)."`
-	MemberTags   []string                `json:"memberTags" example:"sub-demo-001,sub-demo-002,sub-demo-003"`
-	Members      []SubscriptionMemberDTO `json:"members"`
-	OrphanTags        []string                      `json:"orphanTags" example:""`
-	RejectedMembers   []SubscriptionRejectedDTO   `json:"rejectedMembers"`
-	InfoItems         []SubscriptionInfoItemDTO   `json:"infoItems"`
-	ActiveMember      string                      `json:"activeMember" example:"sub-demo-001"`
-	ExcludedTags      []string                    `json:"excludedTags"`
-	ExcludedMembers   []SubscriptionMemberDTO     `json:"excludedMembers,omitempty"`
-	FilterInclude     string                      `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`
-	FilterExclude     string                      `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"`
-	FilteredMembers   []SubscriptionMemberDTO     `json:"filteredMembers,omitempty"`
-	Enabled      bool                    `json:"enabled" example:"true"`
-	Mode         string                  `json:"mode" example:"selector"`
-	URLTest      *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
+	ID              string                    `json:"id" example:"sub-demo"`
+	Label           string                    `json:"label" example:"Demo Provider"`
+	URL             string                    `json:"url" example:"https://example.com/subscriptions/demo.txt"`
+	IsInline        bool                      `json:"isInline" example:"false"`
+	Headers         []SubscriptionHeader      `json:"headers"`
+	RefreshHours    int                       `json:"refreshHours" example:"24"`
+	LastFetched     string                    `json:"lastFetched" example:"2026-05-14T21:30:00Z"`
+	LastError       string                    `json:"lastError,omitempty" example:""`
+	SelectorTag     string                    `json:"selectorTag" example:"sub-demo"`
+	InboundTag      string                    `json:"inboundTag" example:"sub-demo-in"`
+	ListenPort      int                       `json:"listenPort" example:"11000"`
+	ProxyIndex      int                       `json:"proxyIndex" example:"1" description:"NDMS ProxyN index for this subscription. -1 when no proxy is allocated yet OR when global 'Create NDMS Proxy for sing-box' is disabled (the composite interface does not exist in that mode — UI should hide t2sN/ProxyN labels and disable per-subscription speedtest)."`
+	MemberTags      []string                  `json:"memberTags" example:"sub-demo-001,sub-demo-002,sub-demo-003"`
+	Members         []SubscriptionMemberDTO   `json:"members"`
+	OrphanTags      []string                  `json:"orphanTags" example:""`
+	RejectedMembers []SubscriptionRejectedDTO `json:"rejectedMembers"`
+	InfoItems       []SubscriptionInfoItemDTO `json:"infoItems"`
+	ActiveMember    string                    `json:"activeMember" example:"sub-demo-001"`
+	ExcludedTags    []string                  `json:"excludedTags"`
+	ExcludedMembers []SubscriptionMemberDTO   `json:"excludedMembers,omitempty"`
+	FilterInclude   string                    `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`
+	FilterExclude   string                    `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"`
+	FilteredMembers []SubscriptionMemberDTO   `json:"filteredMembers,omitempty"`
+	Enabled         bool                      `json:"enabled" example:"true"`
+	Mode            string                    `json:"mode" example:"selector"`
+	URLTest         *SubscriptionURLTestDTO   `json:"urlTest,omitempty"`
 }
 
 // SubscriptionHeader is a single custom HTTP header for the fetch request.
@@ -174,31 +176,31 @@ type SubscriptionResponse struct {
 // CreateSubscriptionRequest is the body for POST /api/singbox/subscriptions/create.
 // Exactly one of URL or Inline must be provided.
 type CreateSubscriptionRequest struct {
-	Label        string                  `json:"label" example:"Demo Provider"`
-	URL          string                  `json:"url,omitempty" example:"https://example.com/subscriptions/demo.txt"`
-	Inline       string                  `json:"inline,omitempty" example:"vless://11111111-2222-3333-4444-555555555555@demo.example.com:443?type=tcp&encryption=none&security=reality&pbk=EXAMPLE_PUBLIC_KEY&fp=chrome&sni=cdn.example.com&sid=abcd1234&spx=%2F&flow=xtls-rprx-vision#Demo-vless-reality"`
-	Headers      []SubscriptionHeader    `json:"headers"`
-	RefreshHours int                     `json:"refreshHours" example:"24"`
-	Enabled      bool                    `json:"enabled" example:"true"`
-	Mode         string                  `json:"mode,omitempty"` // "selector" (default) | "urltest"
-	URLTest      *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
-	ExcludedKeys []string                `json:"excludedKeys,omitempty"` // identity-суффиксы серверов, снятых в import-preview
-	FilterInclude string                 `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`   // regex «включать только» (по имени сервера)
-	FilterExclude string                 `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"` // regex «исключать» (по имени сервера)
+	Label         string                  `json:"label" example:"Demo Provider"`
+	URL           string                  `json:"url,omitempty" example:"https://example.com/subscriptions/demo.txt"`
+	Inline        string                  `json:"inline,omitempty" example:"vless://11111111-2222-3333-4444-555555555555@demo.example.com:443?type=tcp&encryption=none&security=reality&pbk=EXAMPLE_PUBLIC_KEY&fp=chrome&sni=cdn.example.com&sid=abcd1234&spx=%2F&flow=xtls-rprx-vision#Demo-vless-reality"`
+	Headers       []SubscriptionHeader    `json:"headers"`
+	RefreshHours  int                     `json:"refreshHours" example:"24"`
+	Enabled       bool                    `json:"enabled" example:"true"`
+	Mode          string                  `json:"mode,omitempty"` // "selector" (default) | "urltest"
+	URLTest       *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
+	ExcludedKeys  []string                `json:"excludedKeys,omitempty"`                            // identity-суффиксы серверов, снятых в import-preview
+	FilterInclude string                  `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`     // regex «включать только» (по имени сервера)
+	FilterExclude string                  `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"` // regex «исключать» (по имени сервера)
 }
 
 // UpdateSubscriptionRequest is the body for PUT /api/singbox/subscriptions/update.
 // All fields are optional; absent fields leave the stored value unchanged.
 type UpdateSubscriptionRequest struct {
-	Label        *string                 `json:"label,omitempty" example:"Demo Provider Updated"`
-	URL          *string                 `json:"url,omitempty" example:"https://example.com/subscriptions/demo.txt"`
-	Headers      *[]SubscriptionHeader   `json:"headers,omitempty"`
-	RefreshHours *int                    `json:"refreshHours,omitempty"`
-	Enabled      *bool                   `json:"enabled,omitempty"`
-	Mode         *string                 `json:"mode,omitempty" example:"selector"`
-	URLTest      *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
-	FilterInclude *string                `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`   // regex «включать только»; "" снимает фильтр
-	FilterExclude *string                `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"` // regex «исключать»; "" снимает фильтр
+	Label         *string                 `json:"label,omitempty" example:"Demo Provider Updated"`
+	URL           *string                 `json:"url,omitempty" example:"https://example.com/subscriptions/demo.txt"`
+	Headers       *[]SubscriptionHeader   `json:"headers,omitempty"`
+	RefreshHours  *int                    `json:"refreshHours,omitempty"`
+	Enabled       *bool                   `json:"enabled,omitempty"`
+	Mode          *string                 `json:"mode,omitempty" example:"selector"`
+	URLTest       *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
+	FilterInclude *string                 `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`     // regex «включать только»; "" снимает фильтр
+	FilterExclude *string                 `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"` // regex «исключать»; "" снимает фильтр
 }
 
 // ActiveMemberRequest is the body for POST /api/singbox/subscriptions/active-member.
@@ -350,32 +352,32 @@ func toSubscriptionDTO(s subscription.Subscription, ndmsProxyEnabled bool) Subsc
 		proxyIdx = -1
 	}
 	return SubscriptionDTO{
-		ID:           s.ID,
-		Label:        s.Label,
-		URL:          s.URL,
-		IsInline:     s.IsInline(),
-		Headers:      hh,
-		RefreshHours: s.RefreshHours,
-		LastFetched:  last,
-		LastError:    s.LastError,
-		SelectorTag:  s.SelectorTag,
-		InboundTag:   s.InboundTag,
-		ListenPort:   int(s.ListenPort),
-		ProxyIndex:   proxyIdx,
-		MemberTags:   memberTags,
-		Members:      memberDTOs,
-		OrphanTags:        orphans,
-		RejectedMembers:   rejected,
-		InfoItems:         info,
-		ActiveMember:      s.ActiveMember,
-		ExcludedTags:      excludedTags,
-		ExcludedMembers:   excludedMemberDTOs,
-		FilterInclude:     s.FilterInclude,
-		FilterExclude:     s.FilterExclude,
-		FilteredMembers:   filteredMemberDTOs,
-		Enabled:      s.Enabled,
-		Mode:         mode,
-		URLTest:      urltest,
+		ID:              s.ID,
+		Label:           s.Label,
+		URL:             s.URL,
+		IsInline:        s.IsInline(),
+		Headers:         hh,
+		RefreshHours:    s.RefreshHours,
+		LastFetched:     last,
+		LastError:       s.LastError,
+		SelectorTag:     s.SelectorTag,
+		InboundTag:      s.InboundTag,
+		ListenPort:      int(s.ListenPort),
+		ProxyIndex:      proxyIdx,
+		MemberTags:      memberTags,
+		Members:         memberDTOs,
+		OrphanTags:      orphans,
+		RejectedMembers: rejected,
+		InfoItems:       info,
+		ActiveMember:    s.ActiveMember,
+		ExcludedTags:    excludedTags,
+		ExcludedMembers: excludedMemberDTOs,
+		FilterInclude:   s.FilterInclude,
+		FilterExclude:   s.FilterExclude,
+		FilteredMembers: filteredMemberDTOs,
+		Enabled:         s.Enabled,
+		Mode:            mode,
+		URLTest:         urltest,
 	}
 }
 
@@ -384,26 +386,26 @@ func toSubscriptionDTO(s subscription.Subscription, ndmsProxyEnabled bool) Subsc
 // arrive as separate member events). The `total` field tells the UI
 // how many member events to expect for progress.
 type SubscriptionMetaDTO struct {
-	ID           string                  `json:"id"`
-	Label        string                  `json:"label"`
-	URL          string                  `json:"url"`
-	IsInline     bool                    `json:"isInline"`
-	Headers      []SubscriptionHeader    `json:"headers"`
-	RefreshHours int                     `json:"refreshHours"`
-	LastFetched  string                  `json:"lastFetched" example:"2026-05-14T21:30:00Z"`
-	LastError    string                  `json:"lastError,omitempty" example:""`
-	SelectorTag  string                  `json:"selectorTag"`
-	InboundTag   string                  `json:"inboundTag"`
-	ListenPort   int                     `json:"listenPort"`
-	ProxyIndex   int                     `json:"proxyIndex" description:"See SubscriptionDTO.ProxyIndex — gated identically (-1 when NDMS Proxy disabled)."`
-	Enabled      bool                    `json:"enabled"`
-	Mode         string                  `json:"mode"`
-	URLTest           *SubscriptionURLTestDTO     `json:"urlTest,omitempty"`
-	Total             int                         `json:"total"`
-	RejectedMembers   []SubscriptionRejectedDTO   `json:"rejectedMembers"`
-	InfoItems         []SubscriptionInfoItemDTO   `json:"infoItems"`
-	FilterInclude     string                      `json:"filterInclude,omitempty"`
-	FilterExclude     string                      `json:"filterExclude,omitempty"`
+	ID              string                    `json:"id"`
+	Label           string                    `json:"label"`
+	URL             string                    `json:"url"`
+	IsInline        bool                      `json:"isInline"`
+	Headers         []SubscriptionHeader      `json:"headers"`
+	RefreshHours    int                       `json:"refreshHours"`
+	LastFetched     string                    `json:"lastFetched" example:"2026-05-14T21:30:00Z"`
+	LastError       string                    `json:"lastError,omitempty" example:""`
+	SelectorTag     string                    `json:"selectorTag"`
+	InboundTag      string                    `json:"inboundTag"`
+	ListenPort      int                       `json:"listenPort"`
+	ProxyIndex      int                       `json:"proxyIndex" description:"See SubscriptionDTO.ProxyIndex — gated identically (-1 when NDMS Proxy disabled)."`
+	Enabled         bool                      `json:"enabled"`
+	Mode            string                    `json:"mode"`
+	URLTest         *SubscriptionURLTestDTO   `json:"urlTest,omitempty"`
+	Total           int                       `json:"total"`
+	RejectedMembers []SubscriptionRejectedDTO `json:"rejectedMembers"`
+	InfoItems       []SubscriptionInfoItemDTO `json:"infoItems"`
+	FilterInclude   string                    `json:"filterInclude,omitempty"`
+	FilterExclude   string                    `json:"filterExclude,omitempty"`
 }
 
 // SubscriptionStreamMemberDTO wraps a single member with its index for
@@ -612,6 +614,7 @@ func (h *SubscriptionHandler) List(w http.ResponseWriter, r *http.Request) {
 //	@Param			req	body		CreateSubscriptionRequest	true	"create request"
 //	@Success		200	{object}	SubscriptionResponse
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope	"фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)"
 //	@Failure		412	{object}	APIErrorEnvelope
 //	@Failure		422	{object}	APIErrorEnvelope	"sing-box validation rejected the subscription"
 //	@Failure		500	{object}	APIErrorEnvelope
@@ -643,15 +646,15 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in := subscription.CreateInput{
-		Label:        req.Label,
-		URL:          req.URL,
-		Inline:       req.Inline,
-		Headers:      fromSubscriptionHeaders(req.Headers),
-		RefreshHours: req.RefreshHours,
-		Enabled:      req.Enabled,
-		Mode:         mode,
-		URLTest:      urlTestDTOToConfig(req.URLTest),
-		ExcludedKeys: req.ExcludedKeys,
+		Label:         req.Label,
+		URL:           req.URL,
+		Inline:        req.Inline,
+		Headers:       fromSubscriptionHeaders(req.Headers),
+		RefreshHours:  req.RefreshHours,
+		Enabled:       req.Enabled,
+		Mode:          mode,
+		URLTest:       urlTestDTOToConfig(req.URLTest),
+		ExcludedKeys:  req.ExcludedKeys,
 		FilterInclude: req.FilterInclude,
 		FilterExclude: req.FilterExclude,
 	}
@@ -702,6 +705,7 @@ func (h *SubscriptionHandler) Get(w http.ResponseWriter, r *http.Request) {
 //	@Param			req	body		UpdateSubscriptionRequest	true	"update request"
 //	@Success		200	{object}	SubscriptionResponse
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope	"фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)"
 //	@Failure		422	{object}	APIErrorEnvelope	"sing-box validation rejected the subscription"
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/subscriptions/update [put]
@@ -806,6 +810,7 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 //	@Produce		json
 //	@Param			id	query		string	false	"subscription id"
 //	@Success		200	{object}	SubscriptionResponse
+//	@Failure		409	{object}	APIErrorEnvelope	"фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)"
 //	@Failure		422	{object}	APIErrorEnvelope	"sing-box validation rejected the refreshed subscription"
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/subscriptions/refresh [post]

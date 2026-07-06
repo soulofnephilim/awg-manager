@@ -902,8 +902,18 @@ func main() {
 	subGroupStorePath := filepath.Join(*dataDir, "subscription-groups.json")
 	subGroupStore, err := subscription.NewGroupStore(subGroupStorePath)
 	if err != nil {
-		bootLog.Error("subscription-group-store", "", err.Error())
-	} else {
+		// Битый файл групп: карантиним (<path>.corrupt — данные сохраняются
+		// для ручного восстановления, как у других store) и пересоздаём
+		// пустой store. Иначе функциональность групп молча выключалась бы,
+		// а их ProxyN оставались бы без владельца до конца аптайма.
+		bootLog.Error("subscription-group-store", "", err.Error()+" — quarantining and recreating empty store")
+		storage.QuarantineCorrupt(subGroupStorePath, err)
+		subGroupStore, err = subscription.NewGroupStore(subGroupStorePath)
+		if err != nil {
+			bootLog.Error("subscription-group-store", "", "recreate after quarantine failed: "+err.Error())
+		}
+	}
+	if subGroupStore != nil {
 		subSvc.SetGroupStore(subGroupStore)
 	}
 

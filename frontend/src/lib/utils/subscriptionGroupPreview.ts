@@ -14,14 +14,51 @@ export interface GroupPreviewResult {
 	invalidInclude: boolean;
 	/** filterExclude не скомпилировался в JS. */
 	invalidExclude: boolean;
+	/** filterInclude содержит lookahead/lookbehind — Go RE2 отклонит. */
+	lookaroundInclude: boolean;
+	/** filterExclude содержит lookahead/lookbehind. */
+	lookaroundExclude: boolean;
 }
 
-function compileSoft(pattern: string): { re: RegExp | null; invalid: boolean } {
-	if (!pattern) return { re: null, invalid: false };
+/** Результат мягкой компиляции Go-шаблона в JS RegExp. */
+export interface SoftRegexResult {
+	/** Скомпилированный RegExp; null когда пусто / invalid / lookaround. */
+	re: RegExp | null;
+	/** Шаблон не скомпилировался (и это не lookaround). */
+	invalid: boolean;
+	/** Обнаружен lookahead/lookbehind — Go RE2 не поддерживает. */
+	lookaround: boolean;
+}
+
+// Тот же список, что и в backend filter.go (containsLookaround): точные
+// токены, поэтому именованные группы `(?<name>...)` не задевает.
+const LOOKAROUND_TOKENS = ['(?=', '(?!', '(?<=', '(?<!'];
+
+/**
+ * Мягкая компиляция Go-regex в JS RegExp для клиентских превью/подсказок.
+ * Понимает ведущий `(?i)` (документированное у нас место флага — все хинты
+ * и плейсхолдеры начинаются с него): JS его не принимает, поэтому срезаем и
+ * компилируем с флагом 'i'. Lookahead/lookbehind детектируем отдельно —
+ * JS их принял бы, а Go RE2 отклонит, так что вызывающие показывают
+ * адресное предупреждение вместо уверенного счётчика.
+ * НЕ авторитетна: финальная валидация — на сервере.
+ */
+export function softCompileGoRegex(pattern: string): SoftRegexResult {
+	if (!pattern) return { re: null, invalid: false, lookaround: false };
+	if (LOOKAROUND_TOKENS.some((tok) => pattern.includes(tok))) {
+		return { re: null, invalid: false, lookaround: true };
+	}
+	let source = pattern;
+	let flags = '';
+	if (source.startsWith('(?i)')) {
+		source = source.slice(4);
+		flags = 'i';
+	}
+	if (!source) return { re: null, invalid: false, lookaround: false };
 	try {
-		return { re: new RegExp(pattern), invalid: false };
+		return { re: new RegExp(source, flags), invalid: false, lookaround: false };
 	} catch {
-		return { re: null, invalid: true };
+		return { re: null, invalid: true, lookaround: false };
 	}
 }
 
@@ -37,8 +74,8 @@ export function resolveGroupPreview(
 	filterInclude: string,
 	filterExclude: string,
 ): GroupPreviewResult {
-	const include = compileSoft(filterInclude);
-	const exclude = compileSoft(filterExclude);
+	const include = softCompileGoRegex(filterInclude);
+	const exclude = softCompileGoRegex(filterExclude);
 	const byId = new Map(subs.map((s) => [s.id, s]));
 	const seen = new Set<string>();
 	const labels: string[] = [];
@@ -59,5 +96,7 @@ export function resolveGroupPreview(
 		labels,
 		invalidInclude: include.invalid,
 		invalidExclude: exclude.invalid,
+		lookaroundInclude: include.lookaround,
+		lookaroundExclude: exclude.lookaround,
 	};
 }

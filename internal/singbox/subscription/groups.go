@@ -71,17 +71,37 @@ func (s *Service) ResolveGroupMembers(g AggregateGroup) ([]MemberInfo, error) {
 // группы всегда консистентны с подписками). overrides позволяет refresh-пути
 // подставить свежую (ещё не записанную в store) членскую базу подписки.
 func (s *Service) stageGroups(overrides map[string][]MemberInfo) {
+	s.stageGroupsExcept(overrides, "")
+}
+
+// stageGroupsExcept — тело stageGroups с исключением одной группы по ID.
+// Нужен DeleteGroup: во время teardown-reload строка группы ещё лежит в
+// store (удаляется только после успешного коммита — retry-friendly), и без
+// исключения пересборка вернула бы только что снятые сущности в тот же батч.
+func (s *Service) stageGroupsExcept(overrides map[string][]MemberInfo, exceptID string) {
 	if s.groups == nil {
 		return
 	}
 	for _, g := range s.groups.List() {
+		if exceptID != "" && g.ID == exceptID {
+			continue
+		}
 		// Старый group outbound снимаем всегда (идемпотентно): при пустом
 		// разрешённом наборе он не должен остаться висеть в конфиге.
 		s.mutator.RemoveOutbound(g.Tag)
 		if !g.Enabled {
-			// Выключенная группа — полный teardown её сущностей в слоте.
+			// Выключенная группа: outbound и route-правило снимаем, но
+			// inbound оставляем — он держит занятым listen_port (иначе
+			// AllocListenPort мог бы выдать его другой подписке/группе,
+			// и повторное включение упёрлось бы в коллизию портов) и
+			// структурно валиден без правила. Полный teardown inbound —
+			// только в DeleteGroup.
 			s.mutator.RemoveRouteRule(g.InboundTag, g.Tag)
-			s.mutator.RemoveInbound(g.InboundTag)
+			if g.ListenPort != 0 {
+				if err := s.mutator.AddInbound(g.InboundTag, BuildMixedInbound(g.InboundTag, g.ListenPort)); err != nil {
+					s.logWarn("subscription-group", g.ID, "stage inbound (disabled group) failed: "+err.Error())
+				}
+			}
 			continue
 		}
 		tags, err := s.resolveGroupTags(g, overrides)
@@ -101,7 +121,9 @@ func (s *Service) stageGroups(overrides map[string][]MemberInfo) {
 			// и структурно валиден без правила.
 			s.mutator.RemoveRouteRule(g.InboundTag, g.Tag)
 			if g.ListenPort != 0 {
-				s.mutator.AddInbound(g.InboundTag, BuildMixedInbound(g.InboundTag, g.ListenPort))
+				if err := s.mutator.AddInbound(g.InboundTag, BuildMixedInbound(g.InboundTag, g.ListenPort)); err != nil {
+					s.logWarn("subscription-group", g.ID, "stage inbound (empty group) failed: "+err.Error())
+				}
 			}
 			continue
 		}
@@ -110,8 +132,18 @@ func (s *Service) stageGroups(overrides map[string][]MemberInfo) {
 			continue
 		}
 		if g.ListenPort != 0 {
-			s.mutator.AddInbound(g.InboundTag, BuildMixedInbound(g.InboundTag, g.ListenPort))
-			s.mutator.AddRouteRule(BuildRouteRule(g.InboundTag, g.Tag))
+			if err := s.mutator.AddInbound(g.InboundTag, BuildMixedInbound(g.InboundTag, g.ListenPort)); err != nil {
+				// Inbound не встал (например, коллизия listen_port) —
+				// route-правило без него ссылалось бы на несуществующий
+				// inbound и валило бы весь flush. Outbound группы остаётся
+				// (валиден сам по себе), точка входа появится после
+				// устранения коллизии на следующей пересборке.
+				s.logWarn("subscription-group", g.ID, "stage inbound failed: "+err.Error())
+				continue
+			}
+			if err := s.mutator.AddRouteRule(BuildRouteRule(g.InboundTag, g.Tag)); err != nil {
+				s.logWarn("subscription-group", g.ID, "stage route rule failed: "+err.Error())
+			}
 		}
 	}
 }
@@ -288,8 +320,10 @@ func (s *Service) UpdateGroup(ctx context.Context, id string, patch GroupUpdateP
 }
 
 // DeleteGroup сносит группу целиком: outbound, route-правило, inbound,
-// NDMS ProxyN и строку в store. Ошибки мутатора не блокируют удаление
-// строки (симметрично Service.Delete для подписок).
+// NDMS ProxyN и строку в store. Teardown в слоте коммитится (Reload) ДО
+// снятия прокси и удаления строки — при упавшем reload строка остаётся и
+// retry возможен (зеркалит deleteLocked подписок); иначе agg-* сущности
+// зависли бы в конфиге без владельца, а повторный вызов получал бы 404.
 func (s *Service) DeleteGroup(ctx context.Context, id string) error {
 	if s.groups == nil {
 		return ErrGroupsDisabled
@@ -304,6 +338,14 @@ func (s *Service) DeleteGroup(ctx context.Context, id string) error {
 	s.mutator.RemoveRouteRule(g.InboundTag, g.Tag)
 	s.mutator.RemoveInbound(g.InboundTag)
 	s.mutator.RemoveOutbound(g.Tag)
+	// Строка группы ещё в store — исключаем её из пересборки, чтобы
+	// stageGroups не вернул снятые сущности в этот же батч.
+	s.stageGroupsExcept(nil, id)
+	if err := s.mutator.Reload(ctx); err != nil {
+		return fmt.Errorf("subscription group: delete reload: %w", err)
+	}
+	// Ошибка снятия прокси не блокирует удаление строки (симметрично
+	// Service.Delete для подписок): осиротевший ProxyN подберёт cleanup-свип.
 	if g.ProxyIndex >= 0 {
 		if err := s.mutator.RemoveProxy(ctx, g.ProxyIndex); err != nil {
 			s.logWarn("subscription-group-delete", id, "remove proxy failed: "+err.Error())
@@ -311,9 +353,6 @@ func (s *Service) DeleteGroup(ctx context.Context, id string) error {
 	}
 	if err := s.groups.Delete(id); err != nil {
 		return err
-	}
-	if err := s.reloadWithGroups(ctx); err != nil {
-		return fmt.Errorf("subscription group: delete reload: %w", err)
 	}
 	s.logInfo("subscription-group-delete", id, "deleted")
 	return nil

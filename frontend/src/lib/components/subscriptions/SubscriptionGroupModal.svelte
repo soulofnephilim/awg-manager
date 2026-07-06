@@ -176,13 +176,17 @@
 			{:else}
 				<div class="sub-list">
 					{#each subscriptions as sub (sub.id)}
-						<label class="sub-item">
+						<!-- Выключенная подписка остаётся выбираемой: сервер хранит
+						     ссылку и подхватит её членов после включения, но сейчас
+						     она в группу ничего не даёт — приглушаем и бейджим. -->
+						<label class="sub-item" class:sub-item-off={!sub.enabled}>
 							<input
 								type="checkbox"
 								checked={selectedIds.includes(sub.id)}
 								onchange={() => toggleSub(sub.id)}
 							/>
 							<span class="sub-label">{sub.label || sub.url || sub.id}</span>
+							{#if !sub.enabled}<span class="sub-off-badge">отключена</span>{/if}
 							<span class="sub-count">{sub.members?.length ?? 0} серв.</span>
 						</label>
 					{/each}
@@ -220,7 +224,11 @@
 			</div>
 			<div class="preview" class:preview-empty={preview.count === 0}>
 				Попадёт серверов: <strong>{preview.count}</strong>
-				{#if preview.invalidInclude || preview.invalidExclude}
+				{#if preview.lookaroundInclude || preview.lookaroundExclude}
+					<span class="preview-warn"
+						>· Go RE2 не поддерживает lookahead/lookbehind — используйте поле «Исключать»</span
+					>
+				{:else if preview.invalidInclude || preview.invalidExclude}
 					<span class="preview-warn">· выражение не разобрано, оценка без фильтра</span>
 				{/if}
 			</div>
@@ -363,6 +371,20 @@
 	.sub-count {
 		flex-shrink: 0;
 		font-size: 0.72rem;
+		color: var(--color-text-muted);
+	}
+	.sub-item-off .sub-label {
+		color: var(--color-text-muted);
+	}
+	.sub-off-badge {
+		flex-shrink: 0;
+		font-size: 0.65rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		padding: 0.1rem 0.4rem;
+		border-radius: 999px;
+		background: var(--color-bg-tertiary);
 		color: var(--color-text-muted);
 	}
 	.empty-subs {

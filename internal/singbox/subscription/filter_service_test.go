@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -254,7 +255,92 @@ func TestService_Refresh_FilterHidingAllFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Create must fail when the filter hides every server")
 	}
+	if !errors.Is(err, ErrAllMembersFiltered) {
+		t.Errorf("error must wrap ErrAllMembersFiltered, got: %v", err)
+	}
 	if !strings.Contains(err.Error(), "скрывают все серверы") {
 		t.Errorf("expected the hide-all error, got: %v", err)
+	}
+}
+
+// TestService_Refresh_AllFiltered_NoStagedMutations — ошибка «фильтр скрывает
+// всё» обязана детектироваться ДО первой мутации: staged RemoveOutbound'ы в
+// общем незакоммиченном батче унёс бы в конфиг следующий несвязанный Reload
+// (тихая де-материализация подписки). Плюс defense-in-depth: refresh-путь
+// сбрасывает батч Rollback'ом при любой ошибке applyDiff.
+func TestService_Refresh_AllFiltered_NoStagedMutations(t *testing.T) {
+	svc, mut := newTestService(t)
+	body := namedLinks("DE-1", "RU-1")
+	srv := serveLinks(t, &body)
+
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label: "x", URL: srv.URL, Enabled: true,
+		FilterExclude: "RU",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Фид меняется: остаются только RU-серверы — фильтр скрывает всё.
+	body = namedLinks("RU-1", "RU-2")
+	mut.reset()
+	updatedBefore := len(mut.updatedOutbounds)
+	inboundsBefore := len(mut.addedInbounds)
+	rollbacksBefore := mut.rollbacks
+
+	_, err = svc.Refresh(context.Background(), sub.ID)
+	if !errors.Is(err, ErrAllMembersFiltered) {
+		t.Fatalf("Refresh err=%v want ErrAllMembersFiltered", err)
+	}
+	// Ни одной staged-мутации: батч остался чистым.
+	if len(mut.addedOutbounds) != 0 {
+		t.Errorf("no outbounds must be staged, added=%v", mut.addedOutbounds)
+	}
+	if len(mut.removedOutbounds) != 0 {
+		t.Errorf("no removals must be staged, removed=%v", mut.removedOutbounds)
+	}
+	if len(mut.updatedOutbounds) != updatedBefore {
+		t.Errorf("no updates must be staged, updated=%v", mut.updatedOutbounds[updatedBefore:])
+	}
+	if len(mut.addedInbounds) != inboundsBefore {
+		t.Errorf("no inbounds must be staged, added=%v", mut.addedInbounds[inboundsBefore:])
+	}
+	// Rollback вызван (идемпотентен при пустом батче — но страхует пути,
+	// где applyDiff падает после части мутаций).
+	if mut.rollbacks <= rollbacksBefore {
+		t.Error("refresh failure must roll the pending batch back")
+	}
+	// Прежний состав подписки не тронут.
+	stored, _ := svc.Get(sub.ID)
+	if len(stored.Members) != 1 || stored.Members[0].Label != "DE-1" {
+		t.Errorf("Members=%v want [DE-1] (untouched)", memberLabels(stored.Members))
+	}
+}
+
+// TestService_Update_FilterCompensationOnFailedRefresh — упавшая после
+// записи фильтра ре-материализация не должна оставить новый фильтр на диске:
+// каждый плановый refresh падал бы той же ошибкой до ручного вмешательства.
+func TestService_Update_FilterCompensationOnFailedRefresh(t *testing.T) {
+	svc, _ := newTestService(t)
+	body := namedLinks("RU-1", "RU-2")
+	srv := serveLinks(t, &body)
+
+	sub, err := svc.Create(context.Background(), CreateInput{Label: "x", URL: srv.URL, Enabled: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	exclude := "RU" // скрывает все серверы → refresh падает
+	_, err = svc.Update(sub.ID, UpdatePatch{FilterExclude: &exclude})
+	if !errors.Is(err, ErrAllMembersFiltered) {
+		t.Fatalf("Update err=%v want ErrAllMembersFiltered", err)
+	}
+	stored, _ := svc.Get(sub.ID)
+	if stored.FilterExclude != "" {
+		t.Errorf("failed filter must be rolled back in store, got %q", stored.FilterExclude)
+	}
+	// Компенсация вернула рабочее состояние: плановый refresh снова проходит.
+	if _, err := svc.Refresh(context.Background(), sub.ID); err != nil {
+		t.Errorf("refresh after compensation must succeed, got: %v", err)
 	}
 }

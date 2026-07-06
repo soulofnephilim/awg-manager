@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveGroupPreview } from './subscriptionGroupPreview';
+import { resolveGroupPreview, softCompileGoRegex } from './subscriptionGroupPreview';
 import type { Subscription, SubscriptionMember } from '$lib/types';
 
 function member(tag: string, label: string): SubscriptionMember {
@@ -64,12 +64,67 @@ describe('resolveGroupPreview', () => {
 	it('флагует некомпилируемый шаблон и не ограничивает по нему', () => {
 		const res = resolveGroupPreview(subs, ['b'], '(broken', '');
 		expect(res.invalidInclude).toBe(true);
+		expect(res.lookaroundInclude).toBe(false);
 		expect(res.count).toBe(2); // битый include игнорируется в превью
+	});
+
+	it('ведущий (?i) фильтрует без учёта регистра (Go-плейсхолдер валиден)', () => {
+		// '(?i)(de|nl)' совпадает с 'DE-1' и 'NL-*' несмотря на разный регистр.
+		const res = resolveGroupPreview(subs, ['a', 'b'], '(?i)(de|nl)', '');
+		expect(res.invalidInclude).toBe(false);
+		expect(res.lookaroundInclude).toBe(false);
+		expect(res.labels).toEqual(['🇩🇪 DE-1', 'NL-1', 'NL-2']);
+	});
+
+	it('lookahead флагуется отдельно от invalid и не ограничивает превью', () => {
+		const res = resolveGroupPreview(subs, ['b'], '(?!RU)', '');
+		expect(res.lookaroundInclude).toBe(true);
+		expect(res.invalidInclude).toBe(false);
+		expect(res.count).toBe(2); // lookaround игнорируется в превью
 	});
 
 	it('пустое имя сервера подставляет server:port', () => {
 		const withEmpty = [sub('c', true, [member('c1', '')])];
 		const res = resolveGroupPreview(withEmpty, ['c'], '', '');
 		expect(res.labels).toEqual(['c1.example:443']);
+	});
+});
+
+describe('softCompileGoRegex', () => {
+	it('срезает ведущий (?i) и компилирует с флагом i', () => {
+		const res = softCompileGoRegex('(?i)(DE|NL|🇩🇪)');
+		expect(res.invalid).toBe(false);
+		expect(res.lookaround).toBe(false);
+		expect(res.re?.test('de-frankfurt')).toBe(true);
+		expect(res.re?.test('nl-1')).toBe(true);
+		expect(res.re?.test('ru-1')).toBe(false);
+	});
+
+	it('детектирует все lookaround-токены (список как в backend filter.go)', () => {
+		for (const p of ['(?=x)', '(?!x)', '(?<=x)', '(?<!x)', '(?i)^(?!.*(RU|Russia)).*$']) {
+			const res = softCompileGoRegex(p);
+			expect(res.lookaround).toBe(true);
+			expect(res.invalid).toBe(false);
+			expect(res.re).toBeNull();
+		}
+	});
+
+	it('именованная группа (?<name>) НЕ считается lookaround', () => {
+		const res = softCompileGoRegex('(?<country>DE|NL)');
+		expect(res.lookaround).toBe(false);
+		expect(res.invalid).toBe(false);
+		expect(res.re?.test('DE-1')).toBe(true);
+	});
+
+	it('прочие некомпилируемые шаблоны остаются invalid', () => {
+		const res = softCompileGoRegex('(broken');
+		expect(res.invalid).toBe(true);
+		expect(res.lookaround).toBe(false);
+		expect(res.re).toBeNull();
+	});
+
+	it('пустой шаблон и голый (?i) — без ограничения и без флагов', () => {
+		expect(softCompileGoRegex('')).toEqual({ re: null, invalid: false, lookaround: false });
+		expect(softCompileGoRegex('(?i)')).toEqual({ re: null, invalid: false, lookaround: false });
 	});
 });

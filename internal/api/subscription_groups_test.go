@@ -188,13 +188,53 @@ func TestSubscriptionGroupHandler_UpdateAndDelete(t *testing.T) {
 		t.Error("group must be gone after delete")
 	}
 
-	// Delete неизвестного id → 404.
+	// Delete неизвестного id → 404 (через sentinel ErrGroupNotFound).
 	delBody2, _ := json.Marshal(DeleteSubscriptionGroupRequest{ID: "nope"})
 	dr2 := httptest.NewRequest(http.MethodPost, "/api/singbox/subscriptions/groups/delete", strings.NewReader(string(delBody2)))
 	drr2 := httptest.NewRecorder()
 	h.DeleteGroup(drr2, dr2)
 	if drr2.Code != http.StatusNotFound {
 		t.Errorf("delete unknown id status=%d want 404", drr2.Code)
+	}
+	if !strings.Contains(drr2.Body.String(), "NOT_FOUND") {
+		t.Errorf("delete unknown id body must carry NOT_FOUND: %s", drr2.Body.String())
+	}
+
+	// Update неизвестного id → 404 тем же sentinel-путём.
+	ur2 := httptest.NewRequest(http.MethodPut, "/api/singbox/subscriptions/groups/update?id=nope", strings.NewReader(`{"label":"x"}`))
+	urr2 := httptest.NewRecorder()
+	h.UpdateGroup(urr2, ur2)
+	if urr2.Code != http.StatusNotFound {
+		t.Errorf("update unknown id status=%d want 404, body=%s", urr2.Code, urr2.Body.String())
+	}
+}
+
+// TestSubscriptionHandler_Update_AllFiltered409 — фильтр, скрывающий все
+// серверы, отклоняется 409 ALL_MEMBERS_FILTERED (sentinel через errors.Is),
+// а прежний фильтр остаётся в store (компенсация в Service.Update).
+func TestSubscriptionHandler_Update_AllFiltered409(t *testing.T) {
+	svc, subID := seedSubscription(t, 2)
+	h := NewSubscriptionHandler(svc, &fakePresenceProbe{installed: true})
+
+	body := `{"filterExclude":"member"}` // члены называются member-N → скрыты все
+	r := httptest.NewRequest(http.MethodPut, "/api/singbox/subscriptions/update?id="+subID, strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.Update(rr, r)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status=%d want 409, body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "ALL_MEMBERS_FILTERED") {
+		t.Errorf("body must carry ALL_MEMBERS_FILTERED: %s", rr.Body.String())
+	}
+	sub, err := svc.Get(subID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub.FilterExclude != "" {
+		t.Errorf("rejected filter must not persist, got %q", sub.FilterExclude)
+	}
+	if len(sub.Members) != 2 {
+		t.Errorf("members must be untouched, got %d", len(sub.Members))
 	}
 }
 

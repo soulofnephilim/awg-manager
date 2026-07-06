@@ -492,6 +492,12 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 	diff := ApplyDiff(id, sub.MemberTags, parts.Valid)
 
 	if err := s.applyDiff(ctx, sub, diff, flt); err != nil {
+		// Defense-in-depth: applyDiff мог остановиться после части staged
+		// мутаций (ошибка мутатора до Reload). Сбрасываем незакоммиченный
+		// батч, чтобы следующий несвязанный Reload не унёс полуфабрикат в
+		// конфиг. Rollback идемпотентен (no-op без открытого батча) — при
+		// упавшем Reload adapter уже сам восстановил снапшот.
+		s.mutator.Rollback()
 		s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
 		s.logWarn("subscription-refresh", id, "apply failed: "+err.Error())
 		return nil, err
@@ -601,6 +607,29 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 		excluded[t] = true
 	}
 	skip := func(tag, label string) bool { return excluded[tag] || !flt.Allows(label) }
+
+	// Итоговый набор member-тегов считается ЧИСТЫМ вычислением ДО первой
+	// мутации: батч мутатора общий на весь слот, и ошибка «фильтр скрывает
+	// всё», выданная после staged RemoveOutbound'ов, оставила бы их висеть
+	// в открытом батче — следующий несвязанный Reload закоммитил бы снятие
+	// всех серверов подписки.
+	memberTags := make([]string, 0, len(diff.New)+len(diff.Existing))
+	for _, n := range diff.New {
+		if !skip(n.Tag, n.Out.Label) {
+			memberTags = append(memberTags, n.Tag)
+		}
+	}
+	for _, e := range diff.Existing {
+		if !skip(e.Tag, e.Out.Label) {
+			memberTags = append(memberTags, e.Tag)
+		}
+	}
+	// Пустой selector sing-box отвергает — не даём фильтру скрыть всё,
+	// возвращаем понятную ошибку вместо валидационного отказа при flush.
+	if len(memberTags) == 0 {
+		return ErrAllMembersFiltered
+	}
+
 	for _, n := range diff.New {
 		if skip(n.Tag, n.Out.Label) {
 			continue // исключённый / отфильтрованный сервер не материализуем
@@ -619,24 +648,6 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 		if err := s.mutator.UpdateOutbound(e.Tag, jsonWithTag); err != nil {
 			return err
 		}
-	}
-
-	memberTags := make([]string, 0, len(diff.New)+len(diff.Existing))
-	for _, n := range diff.New {
-		if !skip(n.Tag, n.Out.Label) {
-			memberTags = append(memberTags, n.Tag)
-		}
-	}
-	for _, e := range diff.Existing {
-		if !skip(e.Tag, e.Out.Label) {
-			memberTags = append(memberTags, e.Tag)
-		}
-	}
-
-	// Пустой selector sing-box отвергает — не даём фильтру скрыть всё,
-	// возвращаем понятную ошибку вместо валидационного отказа при flush.
-	if len(memberTags) == 0 {
-		return errors.New("subscription: фильтр и исключения скрывают все серверы подписки; ослабьте фильтр в настройках")
 	}
 
 	// Selector / urltest — remove old (idempotent) then add fresh.
@@ -786,6 +797,10 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 	mu := s.lockSub(id)
 	mu.Lock()
 	defer mu.Unlock()
+	current, err := s.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
 	// Source-type guard: URL-backed and inline subscriptions stay on
 	// their original source for life. Reject patches that would clear
 	// a URL (would make a URL-backed sub source-less) or that would
@@ -794,10 +809,6 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 	// unreachable from API.
 	if patch.URL != nil {
 		newURL := *patch.URL
-		current, err := s.store.Get(id)
-		if err != nil {
-			return nil, err
-		}
 		if current.IsInline() {
 			return nil, errors.New("subscription: cannot add URL to an inline subscription")
 		}
@@ -810,11 +821,8 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 	// пару (patch-значение либо текущее) — ошибка одного поля не должна
 	// маскироваться валидностью другого.
 	filterChanged := false
+	prevInclude, prevExclude := current.FilterInclude, current.FilterExclude
 	if patch.FilterInclude != nil || patch.FilterExclude != nil {
-		current, err := s.store.Get(id)
-		if err != nil {
-			return nil, err
-		}
 		newInclude, newExclude := current.FilterInclude, current.FilterExclude
 		if patch.FilterInclude != nil {
 			newInclude = *patch.FilterInclude
@@ -827,6 +835,7 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 		}
 		filterChanged = newInclude != current.FilterInclude || newExclude != current.FilterExclude
 	}
+	enabledChanged := patch.Enabled != nil && *patch.Enabled != current.Enabled
 	sub, err := s.store.Update(id, patch)
 	if err != nil {
 		return nil, err
@@ -838,6 +847,16 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 	// в этом случае не нужна.
 	if filterChanged {
 		if _, err := s.refreshLockedOpts(context.Background(), id, true); err != nil {
+			// Компенсация: новый фильтр уже записан в store, но
+			// ре-материализация не удалась (фильтр скрывает всё, URL
+			// недоступен). Оставить его — значит ронять каждый плановый
+			// refresh той же ошибкой. Возвращаем прежнюю пару фильтров
+			// и отдаём ошибку — клиент видит, что сохранение не прошло.
+			if _, rbErr := s.store.Update(id, UpdatePatch{FilterInclude: &prevInclude, FilterExclude: &prevExclude}); rbErr != nil {
+				s.logWarn("subscription-update", id, "failed to restore previous filters after failed refresh: "+rbErr.Error())
+			} else {
+				s.logWarn("subscription-update", id, "filter change rolled back (refresh failed): "+err.Error())
+			}
 			return sub, fmt.Errorf("subscription: применение фильтра: %w", err)
 		}
 		sub, err = s.store.Get(id)
@@ -847,7 +866,7 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 	} else if patch.Mode != nil || patch.URLTest != nil {
 		// Mode / urltest config changes require a fresh group outbound in
 		// sing-box config and a SIGHUP so the new wrapper takes effect.
-		// URL / headers / refresh-cadence / enabled only mutate metadata.
+		// URL / headers / refresh-cadence only mutate metadata.
 		// Label changes mutate store AND must propagate to NDMS Proxy
 		// description so the rename is visible in the router UI.
 		s.mutator.RemoveOutbound(sub.SelectorTag)
@@ -856,6 +875,16 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 		}
 		if err := s.reloadWithGroups(context.Background()); err != nil {
 			return sub, fmt.Errorf("reload after mode change: %w", err)
+		}
+	} else if enabledChanged {
+		// Включение/выключение подписки меняет состав сводных групп:
+		// resolveGroupTags пропускает выключенные подписки, так что без
+		// пересборки группы продолжали бы маршрутизировать через членов
+		// выключенной подписки (или не подхватывали бы включённую) до
+		// первого несвязанного reload. Для самой подписки enabled остаётся
+		// метаданными (её селектор в конфиге не трогаем — прежнее поведение).
+		if err := s.reloadWithGroups(context.Background()); err != nil {
+			return sub, fmt.Errorf("reload after enabled change: %w", err)
 		}
 	}
 	if patch.Label != nil && s.proxyEnabled() && sub.ProxyIndex >= 0 {
@@ -946,6 +975,12 @@ var ErrExcludeOnInline = errors.New("subscription: exclude is only allowed on UR
 // tags would leave the subscription with no active members. At least one member
 // must remain so the selector has something to route to.
 var ErrAllMembersExcluded = errors.New("subscription: cannot exclude all members; at least one must remain active")
+
+// ErrAllMembersFiltered возвращается applyDiff, когда regex-фильтр вместе с
+// исключениями скрывает все серверы подписки. Проверяется ДО первой мутации
+// (батч остаётся чистым); HTTP-обработчики маппят через errors.Is на 409
+// ALL_MEMBERS_FILTERED — зеркально ErrAllMembersExcluded.
+var ErrAllMembersFiltered = errors.New("subscription: фильтр и исключения скрывают все серверы подписки; ослабьте фильтр в настройках")
 
 // ErrValidation wraps subscription-save failures produced by the Pass-2
 // `sing-box check` gate when the merged config is rejected. Callers can

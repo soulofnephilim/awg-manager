@@ -5,10 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
+
+// ErrGroupNotFound возвращается Get/Update/Delete/Set*, когда группы с таким
+// ID нет в store. HTTP-обработчики маппят через errors.Is на 404 (вместо
+// хрупкого поиска "not found" в тексте ошибки).
+var ErrGroupNotFound = errors.New("subscription: aggregate group not found")
 
 // AggregateGroup — сводная группа: один selector/urltest outbound поверх
 // членов НЕСКОЛЬКИХ подписок (#372). Группа не владеет member-outbound'ами
@@ -188,12 +195,15 @@ func (s *GroupStore) Get(id string) (*AggregateGroup, error) {
 	defer s.mu.RUnlock()
 	g, ok := s.data[id]
 	if !ok {
-		return nil, fmt.Errorf("subscription group %q not found", id)
+		return nil, fmt.Errorf("%w: %q", ErrGroupNotFound, id)
 	}
 	cp := *g
 	return &cp, nil
 }
 
+// List возвращает все группы в детерминированном порядке: по Label без
+// учёта регистра, при равенстве — по ID. Map-обход недетерминирован, а
+// стабильный порядок нужен и API-списку, и повторяемости пересборок.
 func (s *GroupStore) List() []AggregateGroup {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -201,6 +211,13 @@ func (s *GroupStore) List() []AggregateGroup {
 	for _, g := range s.data {
 		out = append(out, *g)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		li, lj := strings.ToLower(out[i].Label), strings.ToLower(out[j].Label)
+		if li != lj {
+			return li < lj
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 
@@ -209,7 +226,7 @@ func (s *GroupStore) Update(id string, patch GroupUpdatePatch) (*AggregateGroup,
 	defer s.mu.Unlock()
 	g, ok := s.data[id]
 	if !ok {
-		return nil, fmt.Errorf("subscription group %q not found", id)
+		return nil, fmt.Errorf("%w: %q", ErrGroupNotFound, id)
 	}
 	if patch.Label != nil {
 		g.Label = *patch.Label
@@ -249,7 +266,7 @@ func (s *GroupStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.data[id]; !ok {
-		return fmt.Errorf("subscription group %q not found", id)
+		return fmt.Errorf("%w: %q", ErrGroupNotFound, id)
 	}
 	delete(s.data, id)
 	return s.saveLocked()
@@ -261,7 +278,7 @@ func (s *GroupStore) SetListenPort(id string, port uint16) error {
 	defer s.mu.Unlock()
 	g, ok := s.data[id]
 	if !ok {
-		return fmt.Errorf("subscription group %q not found", id)
+		return fmt.Errorf("%w: %q", ErrGroupNotFound, id)
 	}
 	g.ListenPort = port
 	return s.saveLocked()
@@ -273,7 +290,7 @@ func (s *GroupStore) SetProxyIndex(id string, idx int) error {
 	defer s.mu.Unlock()
 	g, ok := s.data[id]
 	if !ok {
-		return fmt.Errorf("subscription group %q not found", id)
+		return fmt.Errorf("%w: %q", ErrGroupNotFound, id)
 	}
 	g.ProxyIndex = idx
 	return s.saveLocked()

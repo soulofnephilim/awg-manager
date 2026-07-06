@@ -148,7 +148,7 @@ func (h *SubscriptionHandler) respondGroupServiceError(w http.ResponseWriter, er
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "GROUP_SUBSCRIPTION_NOT_FOUND")
 	case errors.Is(err, subscription.ErrValidation):
 		response.ErrorWithStatus(w, http.StatusUnprocessableEntity, err.Error(), "VALIDATION_FAILED")
-	case strings.Contains(err.Error(), "not found"):
+	case errors.Is(err, subscription.ErrGroupNotFound):
 		response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "NOT_FOUND")
 	default:
 		response.InternalError(w, err.Error())
