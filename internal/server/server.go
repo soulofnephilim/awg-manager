@@ -117,6 +117,7 @@ type Server struct {
 	singboxRouterHandler       *api.SingboxRouterHandler
 	singboxFakeIPConfigHandler *api.SingboxFakeIPConfigHandler
 	singboxConfigHandler       *api.SingboxConfigHandler
+	singboxInboundsHandler     *api.SingboxInboundsHandler
 	singboxProxiesHandler      *api.SingboxProxiesHandler
 	selectiveHandler           *api.SelectiveHandler
 	awgOutboundsHandler        *api.AWGOutboundsHandler
@@ -337,6 +338,13 @@ func (s *Server) SetAWGOutboundsHandler(h *api.AWGOutboundsHandler) {
 // available after main wires everything up.
 func (s *Server) SetSingboxConfigHandler(h *api.SingboxConfigHandler) {
 	s.singboxConfigHandler = h
+}
+
+// SetSingboxInboundsHandler injects the read-only inbounds-mirror handler
+// (/api/singbox/inbounds). Wired post-construction like the config-preview
+// handler — its resolvers (stores, settings toggle) are built in main.
+func (s *Server) SetSingboxInboundsHandler(h *api.SingboxInboundsHandler) {
+	s.singboxInboundsHandler = h
 }
 
 // SetSingboxProxiesHandler injects the runtime-controls handler that
@@ -1120,6 +1128,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	}
 	if s.singboxConfigHandler != nil {
 		mux.HandleFunc("/api/singbox/config-preview", guarded(s.singboxConfigHandler.Preview))
+	}
+	if s.singboxInboundsHandler != nil {
+		mux.HandleFunc("/api/singbox/inbounds", guarded(s.singboxInboundsHandler.List))
 	}
 	if s.clashProxy != nil {
 		mux.HandleFunc("/api/singbox/clash/", guarded(s.clashProxy.ServeHTTP))

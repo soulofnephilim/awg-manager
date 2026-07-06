@@ -1225,6 +1225,51 @@ export interface SingboxConfigPreview {
 	json: string;
 }
 
+/** Источник inbound'а merged-конфига (владелец-фича). */
+export type SingboxInboundSource =
+	| 'subscription'
+	| 'group'
+	| 'tunnel'
+	| 'deviceproxy'
+	| 'qos'
+	| 'engine'
+	| 'other';
+
+/**
+ * Один inbound merged-конфига sing-box (GET /api/singbox/inbounds):
+ * нормализованная запись из per-slot чтения config.d с атрибуцией
+ * источника и признаком «резерв порта» (idle).
+ */
+export interface SingboxInboundEntry {
+	tag: string;
+	/** mixed | tun | tproxy | redirect | socks | http | ... */
+	type: string;
+	/** Адрес прослушивания, например 127.0.0.1; пусто у tun. */
+	listen: string;
+	/** 0, когда listen_port отсутствует (tun). */
+	listenPort: number;
+	/** Слот оркестратора: base | tunnels | awg | qos-routes | router | fakeip | deviceproxy | subscriptions | ... */
+	slot: string;
+	source: SingboxInboundSource;
+	/** Человекочитаемое имя владельца (метка подписки/группы, тег туннеля, имя инстанса device-proxy). */
+	ownerLabel: string;
+	/** true — резерв порта: inbound есть в конфиге, но его никто не питает. */
+	idle: boolean;
+	/**
+	 * Причина idle (сигнал из самого конфига):
+	 * no_route_rule — ни одно route-правило слота не направляет трафик с порта;
+	 * ndms_proxy_disabled — тумблер «Создавать NDMS-прокси» выключен;
+	 * ndms_proxy_missing — тумблер включён, но ProxyN не выделен.
+	 */
+	idleReason: '' | 'no_route_rule' | 'ndms_proxy_disabled' | 'ndms_proxy_missing';
+}
+
+/** Ответ GET /api/singbox/inbounds. warnings — нечитаемые слот-файлы и конфликты тегов inbound (fail-soft). */
+export interface SingboxInboundsList {
+	inbounds: SingboxInboundEntry[];
+	warnings?: string[];
+}
+
 export interface SingboxTraffic {
 	tag: string;
 	upload: number;

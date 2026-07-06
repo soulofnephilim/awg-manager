@@ -623,6 +623,29 @@ definitions:
         example: 1420
         type: integer
     type: object
+  api.CreateSubscriptionGroupRequest:
+    properties:
+      enabled:
+        example: true
+        type: boolean
+      filterExclude:
+        type: string
+      filterInclude:
+        type: string
+      label:
+        example: Все европейские
+        type: string
+      mode:
+        description: '"urltest" (default) | "selector"'
+        example: urltest
+        type: string
+      urlTest:
+        $ref: '#/definitions/api.SubscriptionURLTestDTO'
+      useSubscriptionIds:
+        items:
+          type: string
+        type: array
+    type: object
   api.CreateSubscriptionRequest:
     properties:
       enabled:
@@ -633,6 +656,14 @@ definitions:
         items:
           type: string
         type: array
+      filterExclude:
+        description: regex «исключать» (по имени сервера)
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        description: regex «включать только» (по имени сервера)
+        example: (?i)(DE|NL)
+        type: string
       headers:
         items:
           $ref: '#/definitions/api.SubscriptionHeader'
@@ -668,6 +699,12 @@ definitions:
         type: integer
       refreshMode:
         example: interval
+        type: string
+    type: object
+  api.DeleteSubscriptionGroupRequest:
+    properties:
+      id:
+        example: a1b2c3d4e5f60718293a4b5c
         type: string
     type: object
   api.DeviceProxyAuthDTO:
@@ -3092,6 +3129,56 @@ definitions:
         example: ipv4_only
         type: string
     type: object
+  api.SingboxInboundEntry:
+    properties:
+      idle:
+        description: |-
+          Idle is true when the inbound is a deliberate port reservation that
+          nothing currently feeds. The signal is grounded in the config itself:
+          no route rule of the inbound's own slot references it (no_route_rule),
+          or the NDMS-proxy toggle is off / the entity has no ProxyN allocated.
+        type: boolean
+      idleReason:
+        description: no_route_rule | ndms_proxy_disabled | ndms_proxy_missing | ""
+        type: string
+      listen:
+        description: listen address, e.g. 127.0.0.1
+        type: string
+      listenPort:
+        description: 0 when the inbound has no listen_port (tun)
+        type: integer
+      ownerLabel:
+        description: |-
+          OwnerLabel is the human-readable owner name (subscription/group label,
+          tunnel tag, device-proxy instance name). Empty when not resolvable.
+        type: string
+      slot:
+        description: |-
+          Slot is the orchestrator slot name the inbound came from
+          (base | tunnels | awg | qos-routes | router | fakeip | deviceproxy | subscriptions | ...).
+        type: string
+      source:
+        description: |-
+          Source refines the slot to the owning feature:
+          subscription | group | tunnel | deviceproxy | qos | engine | other.
+        type: string
+      tag:
+        type: string
+      type:
+        description: mixed | tun | tproxy | redirect | socks | http | ...
+        type: string
+    type: object
+  api.SingboxInboundsResponse:
+    properties:
+      inbounds:
+        items:
+          $ref: '#/definitions/api.SingboxInboundEntry'
+        type: array
+      warnings:
+        items:
+          type: string
+        type: array
+    type: object
   api.SingboxProxiesListResponse:
     properties:
       groups:
@@ -4326,6 +4413,16 @@ definitions:
         items:
           type: string
         type: array
+      filterExclude:
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        example: (?i)(DE|NL)
+        type: string
+      filteredMembers:
+        items:
+          $ref: '#/definitions/api.SubscriptionMemberDTO'
+        type: array
       headers:
         items:
           $ref: '#/definitions/api.SubscriptionHeader'
@@ -4394,6 +4491,79 @@ definitions:
         type: string
       urlTest:
         $ref: '#/definitions/api.SubscriptionURLTestDTO'
+    type: object
+  api.SubscriptionGroupDTO:
+    properties:
+      enabled:
+        example: true
+        type: boolean
+      filterExclude:
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        example: (?i)(DE|NL)
+        type: string
+      id:
+        example: a1b2c3d4e5f60718293a4b5c
+        type: string
+      inboundTag:
+        example: agg-a1b2c3d4-in
+        type: string
+      label:
+        example: Все европейские
+        type: string
+      listenPort:
+        example: 11002
+        type: integer
+      memberCount:
+        example: 12
+        type: integer
+      members:
+        items:
+          $ref: '#/definitions/api.SubscriptionGroupMemberDTO'
+        type: array
+      mode:
+        example: urltest
+        type: string
+      proxyIndex:
+        example: 2
+        type: integer
+      tag:
+        example: agg-a1b2c3d4
+        type: string
+      urlTest:
+        $ref: '#/definitions/api.SubscriptionURLTestDTO'
+      useSubscriptionIds:
+        items:
+          type: string
+        type: array
+    type: object
+  api.SubscriptionGroupListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.SubscriptionGroupDTO'
+        type: array
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.SubscriptionGroupMemberDTO:
+    properties:
+      label:
+        example: "\U0001F1E9\U0001F1EA Frankfurt-1"
+        type: string
+      tag:
+        example: sub-abc12345-aabbccdd
+        type: string
+    type: object
+  api.SubscriptionGroupResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SubscriptionGroupDTO'
+      success:
+        example: true
+        type: boolean
     type: object
   api.SubscriptionHeader:
     properties:
@@ -5141,10 +5311,38 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.UpdateSubscriptionGroupRequest:
+    properties:
+      enabled:
+        type: boolean
+      filterExclude:
+        type: string
+      filterInclude:
+        type: string
+      label:
+        type: string
+      mode:
+        example: selector
+        type: string
+      urlTest:
+        $ref: '#/definitions/api.SubscriptionURLTestDTO'
+      useSubscriptionIds:
+        items:
+          type: string
+        type: array
+    type: object
   api.UpdateSubscriptionRequest:
     properties:
       enabled:
         type: boolean
+      filterExclude:
+        description: regex «исключать»; "" снимает фильтр
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        description: regex «включать только»; "" снимает фильтр
+        example: (?i)(DE|NL)
+        type: string
       headers:
         items:
           $ref: '#/definitions/api.SubscriptionHeader'
@@ -10620,6 +10818,41 @@ paths:
       summary: Update fakeip-config ruleset
       tags:
       - singbox-fakeip
+  /singbox/inbounds:
+    get:
+      description: 'Walks every active config.d slot file, extracts its `inbounds`
+        array and attributes each inbound to its owning feature (subscription, aggregate
+        group, tunnel, device-proxy, QoS, engine). Idle inbounds are deliberate port
+        reservations nothing currently feeds: no route rule of the inbound''s own
+        slot references it (no_route_rule), the NDMS-proxy toggle is off (ndms_proxy_disabled)
+        or the entity has no ProxyN allocated (ndms_proxy_missing). Unreadable slot
+        files and duplicate inbound tags are reported in `warnings` instead of failing
+        the request.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.SingboxInboundsResponse'
+              type: object
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List all inbounds of the merged sing-box configuration
+      tags:
+      - singbox
   /singbox/install:
     post:
       produces:
@@ -12758,6 +12991,10 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
         "412":
           description: Precondition Failed
           schema:
@@ -12860,6 +13097,138 @@ paths:
       security:
       - CookieAuth: []
       summary: Stream subscription details progressively (SSE)
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups:
+    get:
+      description: Returns configured aggregate groups (one selector/urltest across
+        several subscriptions) with server-side resolved member previews.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SubscriptionGroupListResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: List aggregate subscription groups
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups/create:
+    post:
+      consumes:
+      - application/json
+      description: Creates a selector/urltest group over members of several subscriptions
+        with optional regex filters. Invalid regex or unknown subscription id → 400.
+      parameters:
+      - description: create request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateSubscriptionGroupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SubscriptionGroupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: sing-box validation rejected the group
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Create aggregate subscription group
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups/delete:
+    post:
+      consumes:
+      - application/json
+      description: Removes the group outbound, its mixed inbound / route rule and
+        the NDMS ProxyN, then drops the group from storage.
+      parameters:
+      - description: group id
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/api.DeleteSubscriptionGroupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.APIEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Delete aggregate subscription group
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups/update:
+    put:
+      consumes:
+      - application/json
+      description: Applies a partial patch (label, mode, urltest, subscriptions, filters,
+        enabled) and re-materializes the group with a single reload.
+      parameters:
+      - description: group id
+        in: query
+        name: id
+        required: true
+        type: string
+      - description: update request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateSubscriptionGroupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SubscriptionGroupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: sing-box validation rejected the group
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Update aggregate subscription group
       tags:
       - subscriptions
   /singbox/subscriptions/members/add:
@@ -13119,6 +13488,10 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.SubscriptionResponse'
+        "409":
+          description: фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
         "422":
           description: sing-box validation rejected the refreshed subscription
           schema:
@@ -13158,6 +13531,10 @@ paths:
             $ref: '#/definitions/api.SubscriptionResponse'
         "400":
           description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
         "422":

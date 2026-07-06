@@ -1360,6 +1360,28 @@ func main() {
 	srv.SetSingboxFakeIPConfigHandler(api.NewSingboxFakeIPConfigHandler(routerSvc, loggingService))
 	srv.SetAWGOutboundsHandler(api.NewAWGOutboundsHandler(awgoutboundsSvc))
 	srv.SetSingboxConfigHandler(api.NewSingboxConfigHandler(sbOrch.ConfigDir))
+	// Зеркало inbound'ов merged-конфига: per-slot чтение config.d с атрибуцией
+	// источника (подписка/группа/туннель/device-proxy/QoS/движок). Резолверы
+	// nil-safe — при частичном bootstrap источник деградирует до слота.
+	srv.SetSingboxInboundsHandler(api.NewSingboxInboundsHandler(api.SingboxInboundsDeps{
+		ConfigDir: sbOrch.ConfigDir,
+		Subscriptions: func() []subscription.Subscription {
+			if subStore == nil {
+				return nil
+			}
+			return subStore.List()
+		},
+		Groups: func() []subscription.AggregateGroup {
+			if subGroupStore == nil {
+				return nil
+			}
+			return subGroupStore.List()
+		},
+		DeviceProxyInstances: func() []deviceproxy.Instance {
+			return deviceProxySvc.GetSnapshot().Instances
+		},
+		NDMSProxyEnabled: settingsStore.IsSingboxNDMSProxyEnabled,
+	}))
 
 	proxiesHandler := api.NewSingboxProxiesHandler(
 		clashProxy.ClashBaseURL,

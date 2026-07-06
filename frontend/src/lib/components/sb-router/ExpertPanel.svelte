@@ -33,8 +33,10 @@
     SingboxRouterDNSRule,
     SingboxRouterDNSStrategy,
     DeviceProxyInstance,
+    SingboxInboundEntry,
   } from '$lib/types';
   import { newDeviceProxyInstance } from '$lib/utils/deviceProxyInstance';
+  import { inboundsPanelTotal } from '$lib/utils/singboxInbounds';
   import { deleteDeviceProxyInstanceWithNotice } from '$lib/utils/deviceProxyDeleteNotice';
   import { pluralize, SET_WORDS } from '$lib/utils/pluralize';
 
@@ -47,6 +49,8 @@
   import OutboundsCompact from './OutboundsCompact.svelte';
   import DnsServersCompact from './DnsServersCompact.svelte';
   import DeviceProxyCompact from './DeviceProxyCompact.svelte';
+  import InboundsMirror from './InboundsMirror.svelte';
+  import { expertPanelCollapse } from './expertPanelCollapseStore';
   import InboundSettingsDrawer from './InboundSettingsDrawer.svelte';
   import EngineFatalModal from './EngineFatalModal.svelte';
 
@@ -185,6 +189,44 @@
     activeProxyCount === null || totalProxyCount === null ? '—' : `${activeProxyCount}/${totalProxyCount}`,
   );
 
+  // ── Зеркало inbound'ов merged-конфига (GET /api/singbox/inbounds) ────
+  // Панель «Inbounds» показывает ВСЕ inbound'ы, а не только device-proxy:
+  // интерактивная часть device-proxy остаётся в DeviceProxyCompact, остальные
+  // источники — read-only списком (InboundsMirror).
+  let allInbounds = $state<SingboxInboundEntry[] | null>(null);
+  let inboundWarnings = $state<string[]>([]);
+
+  async function loadAllInbounds() {
+    try {
+      const res = await api.listSingboxInbounds();
+      allInbounds = res.inbounds;
+      inboundWarnings = res.warnings ?? [];
+    } catch {
+      allInbounds = null;
+      inboundWarnings = [];
+    }
+  }
+
+  const mirrorInbounds = $derived(
+    (allInbounds ?? []).filter((e) => e.source !== 'deviceproxy'),
+  );
+  // Счётчик панели = все видимые элементы: inbound'ы merged-конфига плюс
+  // выключенные инстансы device-proxy (их нет в слоте 30, но карточки
+  // рендерятся). При недоступном endpoint'е деградируем к прежней метке.
+  const inboundsPanelCountLabel = $derived(
+    allInbounds === null
+      ? activeProxyCountLabel
+      : String(inboundsPanelTotal(allInbounds, deviceProxyInstances.map((in_) => in_.id))),
+  );
+
+  // Refetch при разворачивании панели «Inbounds» (mount покрыт в onMount).
+  let prevInboundsCollapsed = $expertPanelCollapse.inbounds;
+  $effect(() => {
+    const collapsed = $expertPanelCollapse.inbounds;
+    if (prevInboundsCollapsed && !collapsed) void loadAllInbounds();
+    prevInboundsCollapsed = collapsed;
+  });
+
   // Modal state
   let ruleEditIdx = $state<number | null>(null);
   let ruleAddOpen = $state(false);
@@ -239,6 +281,7 @@
     inboundDrawerOpen = false;
     dpReloadKey += 1;
     void loadActiveProxyCount();
+    void loadAllInbounds();
   }
   function deleteInbound(in_: DeviceProxyInstance) {
     pendingConfirm = {
@@ -253,6 +296,7 @@
           });
           dpReloadKey += 1;
           await loadActiveProxyCount();
+          await loadAllInbounds();
         } catch (e) {
           notifications.error(`Не удалось удалить: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -263,6 +307,7 @@
   onMount(() => {
     void singboxRouterStore.loadAll();
     void loadActiveProxyCount();
+    void loadAllInbounds();
   });
 
   // Derived modal targets
@@ -738,7 +783,7 @@
         <SidePanel
           section="inbounds"
           title="Inbounds"
-          count={activeProxyCountLabel}
+          count={inboundsPanelCountLabel}
           actionLabel="+ Добавить"
           actionVariant="filled"
           onAction={addInbound}
@@ -746,6 +791,11 @@
         {#key dpReloadKey}
           <DeviceProxyCompact bare onSelect={openInbound} onDelete={deleteInbound} />
         {/key}
+        {#if mirrorInbounds.length > 0 || inboundWarnings.length > 0}
+          <div class="inbounds-mirror-wrap">
+            <InboundsMirror entries={mirrorInbounds} warnings={inboundWarnings} />
+          </div>
+        {/if}
       </SidePanel>
     </div>
   </div>
@@ -919,6 +969,11 @@
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  /* Read-only зеркало остальных inbound'ов под интерактивным device-proxy */
+  .inbounds-mirror-wrap {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
   }
   /* Globals-бар route-final (шапка панели «Правила») */
   .globals-bar {
