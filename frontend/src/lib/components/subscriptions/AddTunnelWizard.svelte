@@ -169,19 +169,34 @@
 	// JSON или mieru JSON (экспорт панелей, формат mieru apply config). Пустое
 	// поле заменяем содержимым файла, непустое — дописываем с новой строки.
 	async function onImportFile(file: File, get: () => string, set: (v: string) => void): Promise<void> {
+		// Кап тела запроса на бэкенде — 1 МБ (http.MaxBytesReader): больший
+		// файл упал бы только на submit с невнятным 413.
+		if (file.size > 1 << 20) {
+			error = `Файл «${file.name}» больше 1 МБ — превышает лимит импорта`;
+			return;
+		}
 		try {
 			const text = await file.text();
 			if (!text.trim()) {
 				error = `Файл «${file.name}» пуст`;
 				return;
 			}
-			set(appendImportedFileText(get(), text));
+			const merged = appendImportedFileText(get(), text);
+			if (merged.error) {
+				error = merged.error;
+				return;
+			}
+			set(merged.text);
 			error = '';
 		} catch {
 			error = `Не удалось прочитать файл «${file.name}»`;
 		}
 	}
 
+	// «Один сервер» понимает только share-ссылки и mieru JSON; Clash YAML и
+	// sing-box JSON принимает лишь ветка «Группа серверов» (inline-подписка).
+	const IMPORT_FILE_ACCEPT_SINGLE = '.json,.txt';
+	const IMPORT_FILE_DROP_TITLE_SINGLE = 'или перетащите .json / .txt файл сюда';
 	const IMPORT_FILE_ACCEPT = '.json,.txt,.yaml,.yml';
 	const IMPORT_FILE_DROP_TITLE = 'или перетащите .json / .txt / .yaml файл сюда';
 
@@ -372,8 +387,8 @@
 				onpaste={(e) => onShareListPaste(e, () => singleLinks, (v) => (singleLinks = v))}
 			/>
 			<RoutingImportDropZone
-				dropTitle={IMPORT_FILE_DROP_TITLE}
-				accept={IMPORT_FILE_ACCEPT}
+				dropTitle={IMPORT_FILE_DROP_TITLE_SINGLE}
+				accept={IMPORT_FILE_ACCEPT_SINGLE}
 				onfile={(f) => void onImportFile(f, () => singleLinks, (v) => (singleLinks = v))}
 			/>
 			{#if error}<div class="err">{error}</div>{/if}

@@ -464,6 +464,10 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 	}
 	isClash := vlink.IsClashYAML(body)
 	isSbJSON := !isClash && vlink.IsSingboxJSON(body)
+	// Детект по СЫРОМУ телу: base64-обёрнутый JSON (sing-box или mieru)
+	// сюда не попадает — он уйдёт в NormalizeBody/DoubleDecode, где после
+	// декодирования строки без share-схем отбрасываются. Ограничение
+	// сознательное и симметричное для обоих JSON-форматов.
 	isMieruJSON := !isClash && !isSbJSON && vlink.IsMieruClientJSON(body)
 	// Body that's valid JSON but not a recognised sing-box subscription
 	// (no outbounds key in the right place) or mieru client config (no

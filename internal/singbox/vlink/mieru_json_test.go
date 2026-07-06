@@ -89,6 +89,8 @@ func TestParseMieruClientJSON_EquivalentToMieruLink(t *testing.T) {
 					Name:     proto.String("baozi"),
 					Password: proto.String("manlianpenfen"),
 				},
+				// Два сервера в профиле: эквивалентность обязана покрывать
+				// multi-server конфиги (панели экспортируют и такие).
 				Servers: []*pb.ServerEndpoint{
 					{
 						IpAddress: proto.String("12.34.56.78"),
@@ -96,6 +98,12 @@ func TestParseMieruClientJSON_EquivalentToMieruLink(t *testing.T) {
 							{Port: proto.Int32(6666), Protocol: pb.TransportProtocol_TCP.Enum()},
 							{PortRange: proto.String("9998-9999"), Protocol: pb.TransportProtocol_TCP.Enum()},
 							{Port: proto.Int32(6489), Protocol: pb.TransportProtocol_UDP.Enum()},
+						},
+					},
+					{
+						DomainName: proto.String("mirror.example.com"),
+						PortBindings: []*pb.PortBinding{
+							{Port: proto.Int32(443), Protocol: pb.TransportProtocol_TCP.Enum()},
 						},
 					},
 				},

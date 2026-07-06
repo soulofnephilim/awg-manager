@@ -29,24 +29,52 @@ describe('mergePastedShareList', () => {
 describe('appendImportedFileText', () => {
 	it('replaces empty textarea with file content as-is', () => {
 		const json = '{\n  "profiles": []\n}';
-		expect(appendImportedFileText('', json)).toBe(json);
-		expect(appendImportedFileText('  \n', json)).toBe(json);
+		expect(appendImportedFileText('', json)).toEqual({ text: json, error: '' });
+		expect(appendImportedFileText('  \n', json)).toEqual({ text: json, error: '' });
 	});
 
-	it('appends to non-empty textarea on a new line', () => {
-		expect(appendImportedFileText('vless://a', 'vless://b')).toBe('vless://a\nvless://b');
+	it('appends share links to non-empty textarea on a new line', () => {
+		expect(appendImportedFileText('vless://a', 'vless://b')).toEqual({
+			text: 'vless://a\nvless://b',
+			error: '',
+		});
 	});
 
 	it('does not duplicate trailing newline of current text', () => {
-		expect(appendImportedFileText('vless://a\n', 'vless://b')).toBe('vless://a\nvless://b');
+		expect(appendImportedFileText('vless://a\n', 'vless://b')).toEqual({
+			text: 'vless://a\nvless://b',
+			error: '',
+		});
 	});
 
 	it('strips leading BOM from file content', () => {
-		expect(appendImportedFileText('', '\uFEFF{"profiles":[]}')).toBe('{"profiles":[]}');
+		expect(appendImportedFileText('', '﻿{"profiles":[]}')).toEqual({
+			text: '{"profiles":[]}',
+			error: '',
+		});
 	});
 
 	it('keeps file content untrimmed otherwise (multiline JSON survives)', () => {
 		const json = '{\n  "profiles": [\n    { "profileName": "default" }\n  ]\n}\n';
-		expect(appendImportedFileText('', json)).toBe(json);
+		expect(appendImportedFileText('', json)).toEqual({ text: json, error: '' });
+	});
+
+	// Автодетект формата на бэкенде работает по ЦЕЛОМУ телу: JSON после ссылок
+	// молча выпал бы при построчном разборе. Склейка запрещена с ошибкой.
+	it('rejects mixing a JSON config file into a non-empty textarea', () => {
+		const res = appendImportedFileText('vless://a', '{"profiles":[]}');
+		expect(res.text).toBe('vless://a');
+		expect(res.error).toContain('целиком');
+	});
+
+	it('rejects mixing a Clash YAML file into a non-empty textarea', () => {
+		const res = appendImportedFileText('vless://a', 'proxies:\n  - name: x\n');
+		expect(res.error).toContain('целиком');
+	});
+
+	it('rejects appending links when textarea already holds a JSON config', () => {
+		const res = appendImportedFileText('{"outbounds":[]}', 'vless://b');
+		expect(res.text).toBe('{"outbounds":[]}');
+		expect(res.error).toContain('целиком');
 	});
 });
