@@ -898,9 +898,18 @@ func main() {
 	// creating NDMS Proxy interfaces too.
 	subSvc.SetNDMSProxyEnabled(settingsStore.IsSingboxNDMSProxyEnabled)
 
+	// Сводные группы (#372) — отдельный JSON-файл рядом с subscriptions.json.
+	subGroupStorePath := filepath.Join(*dataDir, "subscription-groups.json")
+	subGroupStore, err := subscription.NewGroupStore(subGroupStorePath)
+	if err != nil {
+		bootLog.Error("subscription-group-store", "", err.Error())
+	} else {
+		subSvc.SetGroupStore(subGroupStore)
+	}
+
 	// Let NDMS-proxy enable/disable + orphan cleanup manage subscription
 	// composite proxies (a set separate from Tunnels()).
-	singboxOp.SetSubscriptionProxySet(subProxySet{store: subStore})
+	singboxOp.SetSubscriptionProxySet(subProxySet{store: subStore, groups: subGroupStore})
 	// On MigrateOn, reconcile subscription proxies through the service so
 	// subscriptions created while the toggle was off get a freshly allocated
 	// ProxyN (not just the already-indexed ones).
@@ -2390,9 +2399,11 @@ func (a *orchValidatorAdapter) Validate(ctx context.Context, configDir string) e
 
 // subProxySet adapts the subscription store to singbox.SubscriptionProxySet,
 // exposing each subscription's allocated NDMS composite proxy (index/port/label)
-// so the NDMS-proxy migration and orphan cleanup manage them.
+// so the NDMS-proxy migration and orphan cleanup manage them. Сводные группы
+// (#372) включены в тот же набор — иначе orphan cleanup реап их ProxyN.
 type subProxySet struct {
-	store *subscription.Store
+	store  *subscription.Store
+	groups *subscription.GroupStore
 }
 
 func (a subProxySet) SubscriptionProxies() []singbox.SubscriptionProxy {
@@ -2409,6 +2420,18 @@ func (a subProxySet) SubscriptionProxies() []singbox.SubscriptionProxy {
 			Port:  int(sub.ListenPort),
 			Label: sub.Label,
 		})
+	}
+	if a.groups != nil {
+		for _, g := range a.groups.List() {
+			if g.ProxyIndex < 0 || g.ListenPort == 0 {
+				continue
+			}
+			out = append(out, singbox.SubscriptionProxy{
+				Index: g.ProxyIndex,
+				Port:  int(g.ListenPort),
+				Label: g.Label,
+			})
+		}
 	}
 	return out
 }

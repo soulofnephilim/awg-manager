@@ -38,6 +38,8 @@
 	let utToleranceMs = $state(
 		untrack(() => subscription.urlTest?.toleranceMs ?? DEFAULT_SUBSCRIPTION_URLTEST.toleranceMs),
 	);
+	let filterInclude = $state(untrack(() => subscription.filterInclude ?? ''));
+	let filterExclude = $state(untrack(() => subscription.filterExclude ?? ''));
 	let saving = $state(false);
 	let togglingEnabled = $state(false);
 	let confirmDelete = $state(false);
@@ -56,7 +58,23 @@
 			subscription.urlTest?.intervalSec ?? DEFAULT_SUBSCRIPTION_URLTEST.intervalSec;
 		utToleranceMs =
 			subscription.urlTest?.toleranceMs ?? DEFAULT_SUBSCRIPTION_URLTEST.toleranceMs;
+		filterInclude = subscription.filterInclude ?? '';
+		filterExclude = subscription.filterExclude ?? '';
 	});
+
+	// Мягкая клиентская проверка regex — НЕ авторитетна: JS принимает
+	// lookahead, который Go RE2 отвергнет; финальная валидация на сервере.
+	function softRegexWarning(pattern: string): string {
+		if (!pattern) return '';
+		try {
+			new RegExp(pattern);
+		} catch {
+			return 'Похоже на некорректное выражение (окончательно проверит сервер)';
+		}
+		return '';
+	}
+	const includeWarning = $derived(softRegexWarning(filterInclude));
+	const excludeWarning = $derived(softRegexWarning(filterExclude));
 
 	$effect(() => {
 		refreshHours = parseInt(refreshHoursStr, 10) || 0;
@@ -97,6 +115,8 @@
 					mode === 'urltest'
 						? { url: utUrl, intervalSec: utIntervalSec, toleranceMs: utToleranceMs }
 						: undefined,
+				filterInclude: filterInclude.trim(),
+				filterExclude: filterExclude.trim(),
 			};
 			if (!subscription.isInline) {
 				patch.url = url;
@@ -105,6 +125,10 @@
 			}
 			await api.updateSubscription(subscription.id, patch);
 			onUpdated();
+		} catch (e) {
+			// Сервер отвечает 400 на невалидный regex-фильтр (RE2) —
+			// показываем текст ошибки, настройки не сохранены.
+			notifications.error(e instanceof Error ? e.message : 'Не удалось сохранить настройки');
 		} finally {
 			saving = false;
 		}
@@ -323,6 +347,40 @@
 				fullWidth
 			/>
 		{/if}
+
+		<div class="filter-section">
+			<h3 class="col-title">Фильтр серверов</h3>
+			<label class="row">
+				<span class="lbl">Включать только (regex)</span>
+				<input
+					class="inp mono"
+					bind:value={filterInclude}
+					placeholder="(?i)(DE|NL|🇩🇪)"
+					autocomplete="off"
+					spellcheck="false"
+				/>
+				{#if includeWarning}<span class="filter-warn">{includeWarning}</span>{/if}
+			</label>
+			<label class="row">
+				<span class="lbl">Исключать (regex)</span>
+				<input
+					class="inp mono"
+					bind:value={filterExclude}
+					placeholder="(?i)(🇷🇺|Россия|RU|BRIDGE|LTE)"
+					autocomplete="off"
+					spellcheck="false"
+				/>
+				{#if excludeWarning}<span class="filter-warn">{excludeWarning}</span>{/if}
+			</label>
+			<div class="filter-hint">
+				Матчится по имени сервера. Синтаксис Go RE2: lookahead
+				(<code class="mono">(?!...)</code>) не поддерживается — вместо него
+				используйте поле «Исключать». Пример:
+				<code class="mono">(?i)(🇷🇺|Россия|RU|BRIDGE|LTE)</code>.
+				Проверка выражения выполняется на сервере; скрытые серверы видны во
+				вкладке «Серверы» в блоке «Скрыто фильтром».
+			</div>
+		</div>
 	</section>
 
 	
@@ -632,6 +690,31 @@
 		font-size: var(--sub-body);
 		line-height: 1.45;
 		color: var(--color-text-muted);
+	}
+
+	.filter-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		margin-top: 0.5rem;
+		padding-top: 0.7rem;
+		border-top: 1px solid var(--color-border);
+	}
+	.filter-warn {
+		font-size: var(--sub-meta);
+		color: #d29922;
+	}
+	.filter-hint {
+		font-size: var(--sub-meta);
+		line-height: 1.5;
+		color: var(--color-text-muted);
+	}
+	.filter-hint code {
+		font-size: 11px;
+		padding: 0 3px;
+		background: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: 3px;
 	}
 
 	.mono { font-family: var(--font-mono, ui-monospace, monospace); }

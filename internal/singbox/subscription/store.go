@@ -125,6 +125,8 @@ func (s *Store) Create(in CreateInput) (*Subscription, error) {
 		Headers:          in.Headers,
 		RefreshHours:     in.RefreshHours,
 		Enabled:          in.Enabled,
+		FilterInclude:    in.FilterInclude,
+		FilterExclude:    in.FilterExclude,
 		SelectorTag:      "sub-" + short,
 		InboundTag:       "sub-" + short + "-in",
 		ProxyIndex:       -1,
@@ -200,6 +202,12 @@ func (s *Store) Update(id string, patch UpdatePatch) (*Subscription, error) {
 	if patch.URLTest != nil {
 		cp := *patch.URLTest
 		sub.URLTest = &cp
+	}
+	if patch.FilterInclude != nil {
+		sub.FilterInclude = *patch.FilterInclude
+	}
+	if patch.FilterExclude != nil {
+		sub.FilterExclude = *patch.FilterExclude
 	}
 	if err := s.saveLocked(); err != nil {
 		return nil, err
@@ -288,8 +296,9 @@ func (s *Store) SetExcludedTags(id string, excludedTags []string, excludedMember
 	return s.saveLocked()
 }
 
-// SetMembersExtras updates members, orphans, rejected, and info in one write.
-func (s *Store) SetMembersExtras(id string, members []MemberInfo, orphans []string, rejected []RejectedMember, info []SubscriptionInfoItem, excludedMembers []MemberInfo) error {
+// SetMembersExtras updates members, orphans, rejected, info, excluded and
+// filtered display mirrors in one write.
+func (s *Store) SetMembersExtras(id string, members []MemberInfo, orphans []string, rejected []RejectedMember, info []SubscriptionInfoItem, excludedMembers, filteredMembers []MemberInfo) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sub, ok := s.data[id]
@@ -312,6 +321,7 @@ func (s *Store) SetMembersExtras(id string, members []MemberInfo, orphans []stri
 	sub.RejectedMembers = rejected
 	sub.InfoItems = info
 	sub.ExcludedMembers = excludedMembers
+	sub.FilteredMembers = filteredMembers
 	reconcileActiveMember(sub, tags)
 	return s.saveLocked()
 }

@@ -1837,6 +1837,12 @@ export interface Subscription {
 	urlTest?: SubscriptionURLTest;
 	excludedTags?: string[];
 	excludedMembers?: SubscriptionMember[];
+	/** Regex (Go RE2) «включать только» — матчится по имени сервера. */
+	filterInclude?: string;
+	/** Regex (Go RE2) «исключать» — матчится по имени сервера. */
+	filterExclude?: string;
+	/** Display-зеркало серверов, скрытых фильтром (перестраивается при refresh). */
+	filteredMembers?: SubscriptionMember[];
 }
 
 export interface SubscriptionRefreshResult {
@@ -1864,6 +1870,8 @@ export interface CreateSubscriptionInput {
 	mode?: SubscriptionMode;
 	urlTest?: SubscriptionURLTest;
 	excludedKeys?: string[];
+	filterInclude?: string;
+	filterExclude?: string;
 }
 
 export interface UpdateSubscriptionInput {
@@ -1874,6 +1882,54 @@ export interface UpdateSubscriptionInput {
 	enabled?: boolean;
 	mode?: SubscriptionMode;
 	urlTest?: SubscriptionURLTest;
+	filterInclude?: string;
+	filterExclude?: string;
+}
+
+// === Subscription aggregate groups (#372) ===
+
+/** Сводная группа: один selector/urltest поверх членов нескольких подписок. */
+export interface SubscriptionGroup {
+	id: string;
+	label: string;
+	tag: string;
+	inboundTag: string;
+	listenPort: number;
+	proxyIndex: number;
+	mode: SubscriptionMode;
+	urlTest?: SubscriptionURLTest;
+	useSubscriptionIds: string[];
+	filterInclude?: string;
+	filterExclude?: string;
+	enabled: boolean;
+	/** Серверное разрешение состава на момент запроса. */
+	memberCount: number;
+	members: SubscriptionGroupMemberPreview[];
+}
+
+export interface SubscriptionGroupMemberPreview {
+	tag: string;
+	label?: string;
+}
+
+export interface CreateSubscriptionGroupInput {
+	label: string;
+	mode?: SubscriptionMode; // default 'urltest'
+	urlTest?: SubscriptionURLTest;
+	useSubscriptionIds: string[];
+	filterInclude?: string;
+	filterExclude?: string;
+	enabled: boolean;
+}
+
+export interface UpdateSubscriptionGroupInput {
+	label?: string;
+	mode?: SubscriptionMode;
+	urlTest?: SubscriptionURLTest;
+	useSubscriptionIds?: string[];
+	filterInclude?: string;
+	filterExclude?: string;
+	enabled?: boolean;
 }
 
 // ─────────────────────────────────────────────

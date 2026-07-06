@@ -78,7 +78,10 @@ func (h *SubscriptionHandler) ndmsProxyEnabled() bool {
 // frontend can surface a "your subscription has invalid outbound(s)"
 // banner instead of a generic 500. Other errors fall through to 500.
 func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, err error) {
+	var filterErr *subscription.FilterError
 	switch {
+	case errors.As(err, &filterErr):
+		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
 	case errors.Is(err, subscription.ErrValidation):
 		response.ErrorWithStatus(w, http.StatusUnprocessableEntity, err.Error(), "VALIDATION_FAILED")
 	case errors.Is(err, subscription.ErrExcludeOnInline):
@@ -142,6 +145,9 @@ type SubscriptionDTO struct {
 	ActiveMember      string                      `json:"activeMember" example:"sub-demo-001"`
 	ExcludedTags      []string                    `json:"excludedTags"`
 	ExcludedMembers   []SubscriptionMemberDTO     `json:"excludedMembers,omitempty"`
+	FilterInclude     string                      `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`
+	FilterExclude     string                      `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"`
+	FilteredMembers   []SubscriptionMemberDTO     `json:"filteredMembers,omitempty"`
 	Enabled      bool                    `json:"enabled" example:"true"`
 	Mode         string                  `json:"mode" example:"selector"`
 	URLTest      *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
@@ -177,6 +183,8 @@ type CreateSubscriptionRequest struct {
 	Mode         string                  `json:"mode,omitempty"` // "selector" (default) | "urltest"
 	URLTest      *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
 	ExcludedKeys []string                `json:"excludedKeys,omitempty"` // identity-суффиксы серверов, снятых в import-preview
+	FilterInclude string                 `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`   // regex «включать только» (по имени сервера)
+	FilterExclude string                 `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"` // regex «исключать» (по имени сервера)
 }
 
 // UpdateSubscriptionRequest is the body for PUT /api/singbox/subscriptions/update.
@@ -189,6 +197,8 @@ type UpdateSubscriptionRequest struct {
 	Enabled      *bool                   `json:"enabled,omitempty"`
 	Mode         *string                 `json:"mode,omitempty" example:"selector"`
 	URLTest      *SubscriptionURLTestDTO `json:"urlTest,omitempty"`
+	FilterInclude *string                `json:"filterInclude,omitempty" example:"(?i)(DE|NL)"`   // regex «включать только»; "" снимает фильтр
+	FilterExclude *string                `json:"filterExclude,omitempty" example:"(?i)(RU|Russia)"` // regex «исключать»; "" снимает фильтр
 }
 
 // ActiveMemberRequest is the body for POST /api/singbox/subscriptions/active-member.
@@ -318,6 +328,13 @@ func toSubscriptionDTO(s subscription.Subscription, ndmsProxyEnabled bool) Subsc
 		memberDTOs[i] = subscriptionMemberToDTO(m)
 	}
 	excludedTags, excludedMemberDTOs := buildExcludedDTO(s)
+	var filteredMemberDTOs []SubscriptionMemberDTO
+	if len(s.FilteredMembers) > 0 {
+		filteredMemberDTOs = make([]SubscriptionMemberDTO, len(s.FilteredMembers))
+		for i, m := range s.FilteredMembers {
+			filteredMemberDTOs[i] = subscriptionMemberToDTO(m)
+		}
+	}
 	mode := string(s.EffectiveMode())
 	var urltest *SubscriptionURLTestDTO
 	if s.EffectiveMode() == subscription.ModeURLTest {
@@ -353,6 +370,9 @@ func toSubscriptionDTO(s subscription.Subscription, ndmsProxyEnabled bool) Subsc
 		ActiveMember:      s.ActiveMember,
 		ExcludedTags:      excludedTags,
 		ExcludedMembers:   excludedMemberDTOs,
+		FilterInclude:     s.FilterInclude,
+		FilterExclude:     s.FilterExclude,
+		FilteredMembers:   filteredMemberDTOs,
 		Enabled:      s.Enabled,
 		Mode:         mode,
 		URLTest:      urltest,
@@ -382,6 +402,8 @@ type SubscriptionMetaDTO struct {
 	Total             int                         `json:"total"`
 	RejectedMembers   []SubscriptionRejectedDTO   `json:"rejectedMembers"`
 	InfoItems         []SubscriptionInfoItemDTO   `json:"infoItems"`
+	FilterInclude     string                      `json:"filterInclude,omitempty"`
+	FilterExclude     string                      `json:"filterExclude,omitempty"`
 }
 
 // SubscriptionStreamMemberDTO wraps a single member with its index for
@@ -402,6 +424,7 @@ type SubscriptionStreamDoneDTO struct {
 	InfoItems       []SubscriptionInfoItemDTO `json:"infoItems"`
 	ExcludedTags    []string                  `json:"excludedTags"`
 	ExcludedMembers []SubscriptionMemberDTO   `json:"excludedMembers,omitempty"`
+	FilteredMembers []SubscriptionMemberDTO   `json:"filteredMembers,omitempty"`
 }
 
 // buildSubscriptionMetaDTO extracts the meta-event payload from a
@@ -450,6 +473,8 @@ func buildSubscriptionMetaDTO(s subscription.Subscription, ndmsProxyEnabled bool
 		Total:           len(s.Members),
 		RejectedMembers: rejectedMembersToDTO(s.RejectedMembers),
 		InfoItems:       infoItemsToDTO(s.InfoItems),
+		FilterInclude:   s.FilterInclude,
+		FilterExclude:   s.FilterExclude,
 	}
 }
 
@@ -627,6 +652,8 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Mode:         mode,
 		URLTest:      urlTestDTOToConfig(req.URLTest),
 		ExcludedKeys: req.ExcludedKeys,
+		FilterInclude: req.FilterInclude,
+		FilterExclude: req.FilterExclude,
 	}
 	sub, err := h.svc.Create(r.Context(), in)
 	if err != nil {
@@ -699,10 +726,12 @@ func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	patch := subscription.UpdatePatch{
-		Label:        req.Label,
-		URL:          req.URL,
-		RefreshHours: req.RefreshHours,
-		Enabled:      req.Enabled,
+		Label:         req.Label,
+		URL:           req.URL,
+		RefreshHours:  req.RefreshHours,
+		Enabled:       req.Enabled,
+		FilterInclude: req.FilterInclude,
+		FilterExclude: req.FilterExclude,
 	}
 	if req.Headers != nil {
 		hh := fromSubscriptionHeaders(*req.Headers)
@@ -936,6 +965,13 @@ func (h *SubscriptionHandler) GetStream(w http.ResponseWriter, r *http.Request) 
 		orphans = []string{}
 	}
 	excludedTags, excludedMemberDTOs := buildExcludedDTO(*sub)
+	var filteredMemberDTOs []SubscriptionMemberDTO
+	if len(sub.FilteredMembers) > 0 {
+		filteredMemberDTOs = make([]SubscriptionMemberDTO, len(sub.FilteredMembers))
+		for i, m := range sub.FilteredMembers {
+			filteredMemberDTOs[i] = subscriptionMemberToDTO(m)
+		}
+	}
 	doneJSON, _ := json.Marshal(SubscriptionStreamDoneDTO{
 		OrphanTags:      orphans,
 		ActiveMember:    sub.ActiveMember,
@@ -943,6 +979,7 @@ func (h *SubscriptionHandler) GetStream(w http.ResponseWriter, r *http.Request) 
 		InfoItems:       infoItemsToDTO(sub.InfoItems),
 		ExcludedTags:    excludedTags,
 		ExcludedMembers: excludedMemberDTOs,
+		FilteredMembers: filteredMemberDTOs,
 	})
 	fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneJSON)
 	flusher.Flush()

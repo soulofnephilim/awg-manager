@@ -123,6 +123,7 @@
 				activeMember: '',
 				excludedTags: [],
 				excludedMembers: [],
+				filteredMembers: [],
 			} as Subscription;
 			progressTotal = meta.total ?? 0;
 		});
@@ -144,6 +145,7 @@
 				subscription.infoItems = data.infoItems ?? subscription.infoItems ?? [];
 				subscription.excludedTags = data.excludedTags ?? [];
 				subscription.excludedMembers = data.excludedMembers ?? [];
+				subscription.filteredMembers = data.filteredMembers ?? [];
 			}
 			streamDone = true;
 			loading = false;

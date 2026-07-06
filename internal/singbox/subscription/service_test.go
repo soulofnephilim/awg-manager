@@ -42,6 +42,7 @@ type fakeMutator struct {
 	clashActiveByTag map[string]string // selectorTag → live active member
 	declaredTags     []string          // DeclaredOutboundTags result; nil = no-op (no pruning)
 	bodies           map[string][]byte // tag → последний JSON из AddOutbound/UpdateOutbound
+	reloads          int               // сколько раз вызывался Reload (батч-коммит)
 }
 
 func (m *fakeMutator) reset() {
@@ -171,9 +172,12 @@ func (f *fakeMutator) RemoveProxy(_ context.Context, idx int) error {
 	f.removedProxies = append(f.removedProxies, idx)
 	return nil
 }
-func (f *fakeMutator) Reload(ctx context.Context) error { return nil }
-func (f *fakeMutator) Rollback()                        {}
-func (f *fakeMutator) DeclaredOutboundTags() []string   { return f.declaredTags }
+func (f *fakeMutator) Reload(ctx context.Context) error {
+	f.reloads++
+	return nil
+}
+func (f *fakeMutator) Rollback()                      {}
+func (f *fakeMutator) DeclaredOutboundTags() []string { return f.declaredTags }
 func (f *fakeMutator) SelectClashProxy(selectorTag, memberTag string) error {
 	f.selectedSelector = append(f.selectedSelector, selectorTag+"→"+memberTag)
 	return nil

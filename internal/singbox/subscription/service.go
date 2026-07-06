@@ -72,6 +72,12 @@ type Service struct {
 	// closure is nil the service behaves as if enabled (back-compat for
 	// tests / legacy bootstrap), mirroring OperatorDeps.IsNDMSProxyEnabled.
 	ndmsProxyEnabled func() bool
+	// groups — store сводных групп (#372). nil = функциональность выключена
+	// (тесты / legacy bootstrap): stageGroups и Group-CRUD становятся no-op.
+	groups *GroupStore
+	// groupMu сериализует Group-CRUD между собой (у групп нет per-id
+	// мьютексов — операций мало, глобальной блокировки достаточно).
+	groupMu sync.Mutex
 }
 
 func NewService(store *Store, mutator ConfigMutator) *Service {
@@ -130,6 +136,19 @@ func (s *Service) SyncProxies(ctx context.Context) error {
 			return fmt.Errorf("subscription %s: ensure proxy: %w", sub.ID, err)
 		}
 	}
+	// Pass 1 (groups): re-register retained group proxies for the same reason.
+	var groups []AggregateGroup
+	if s.groups != nil {
+		groups = s.groups.List()
+	}
+	for _, g := range groups {
+		if g.ListenPort == 0 || g.ProxyIndex < 0 {
+			continue
+		}
+		if err := s.mutator.EnsureProxy(ctx, g.ProxyIndex, int(g.ListenPort), g.Label); err != nil {
+			return fmt.Errorf("subscription group %s: ensure proxy: %w", g.ID, err)
+		}
+	}
 	// Pass 2: allocate a fresh ProxyN for subscriptions created while the
 	// toggle was off (ProxyIndex=-1). The live-router scan now sees the pass-1
 	// slots as taken, so no collision with a retained index.
@@ -155,6 +174,22 @@ func (s *Service) SyncProxies(ctx context.Context) error {
 		}()
 		if err != nil {
 			return fmt.Errorf("subscription %s: %w", sub.ID, err)
+		}
+	}
+	// Pass 2 (groups): allocate for groups created while the toggle was off.
+	for _, g := range groups {
+		if g.ListenPort == 0 || g.ProxyIndex >= 0 {
+			continue
+		}
+		idx, err := s.mutator.AllocProxyIndex(ctx)
+		if err != nil {
+			return fmt.Errorf("subscription group %s: alloc proxy index: %w", g.ID, err)
+		}
+		if err := s.mutator.EnsureProxy(ctx, idx, int(g.ListenPort), g.Label); err != nil {
+			return fmt.Errorf("subscription group %s: ensure proxy: %w", g.ID, err)
+		}
+		if err := s.groups.SetProxyIndex(g.ID, idx); err != nil {
+			return fmt.Errorf("subscription group %s: persist proxy index: %w", g.ID, err)
 		}
 	}
 	return nil
@@ -217,6 +252,11 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Subscription, er
 		return nil, errors.New("subscription: either URL or inline content is required")
 	case in.URL != "" && in.Inline != "":
 		return nil, errors.New("subscription: URL and inline content are mutually exclusive")
+	}
+	// Regex-фильтры валидируются до создания строки в store: битый шаблон
+	// не должен попасть на диск (refreshLocked падал бы на каждом refresh).
+	if _, err := CompileMemberFilter(in.FilterInclude, in.FilterExclude); err != nil {
+		return nil, fmt.Errorf("subscription: %w", err)
 	}
 	// Serialize the whole Create: allocation scans-without-reserve, so two
 	// concurrent Creates must not interleave between allocate and commit
@@ -325,10 +365,30 @@ func (s *Service) Refresh(ctx context.Context, id string) (*RefreshResult, error
 }
 
 func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult, error) {
+	return s.refreshLockedOpts(ctx, id, false)
+}
+
+// refreshLockedOpts — тело refresh. forceInlineReparse обходит inline
+// short-circuit: сохранённое тело Inline парсится заново, даже когда
+// MemberTags уже заполнены. Нужен при смене regex-фильтров — только
+// полный re-parse может вернуть/убрать серверы, скрытые фильтром.
+// ВНИМАНИЕ: re-parse перестраивает Members из исходного paste, ручные
+// правки (add/remove member) при этом перезаписываются.
+func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineReparse bool) (*RefreshResult, error) {
 	s.logInfo("subscription-refresh", id, "start")
 	sub, err := s.store.Get(id)
 	if err != nil {
 		s.logWarn("subscription-refresh", id, "load failed: "+err.Error())
+		return nil, err
+	}
+	// Фильтр компилируется один раз на refresh. Create/Update валидируют
+	// шаблоны, так что сюда битый regex попадает только из руками
+	// отредактированного store-файла — падаем с понятной ошибкой, не паникуем.
+	flt, err := CompileMemberFilter(sub.FilterInclude, sub.FilterExclude)
+	if err != nil {
+		err = fmt.Errorf("subscription: %w", err)
+		s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
+		s.logWarn("subscription-refresh", id, err.Error())
 		return nil, err
 	}
 	var body []byte
@@ -345,7 +405,8 @@ func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult,
 		// directly mutates that slice, and re-parsing sub.Inline would
 		// clobber those edits (Inline is preserved as the original
 		// seed only). So skip re-parsing on subsequent Refresh calls.
-		if len(sub.MemberTags) > 0 {
+		// forceInlineReparse (смена фильтров) обходит short-circuit.
+		if len(sub.MemberTags) > 0 && !forceInlineReparse {
 			res := &RefreshResult{When: time.Now()}
 			if err := s.store.UpdateState(id, *res); err != nil {
 				return nil, err
@@ -430,7 +491,7 @@ func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult,
 
 	diff := ApplyDiff(id, sub.MemberTags, parts.Valid)
 
-	if err := s.applyDiff(ctx, sub, diff); err != nil {
+	if err := s.applyDiff(ctx, sub, diff, flt); err != nil {
 		s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
 		s.logWarn("subscription-refresh", id, "apply failed: "+err.Error())
 		return nil, err
@@ -442,19 +503,28 @@ func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult,
 	}
 	newMembers := make([]MemberInfo, 0, len(diff.New)+len(diff.Existing))
 	excludedMembers := make([]MemberInfo, 0, len(sub.ExcludedTags))
+	filteredMembers := []MemberInfo{}
+	// Исключение по тегу имеет приоритет над фильтром: сервер попадает
+	// ровно в одну из трёх корзин (members / excluded / filtered).
 	for _, n := range diff.New {
 		mi := toMemberInfo(n.Tag, n.Out)
-		if excluded[n.Tag] {
+		switch {
+		case excluded[n.Tag]:
 			excludedMembers = append(excludedMembers, mi)
-		} else {
+		case !flt.Allows(n.Out.Label):
+			filteredMembers = append(filteredMembers, mi)
+		default:
 			newMembers = append(newMembers, mi)
 		}
 	}
 	for _, e := range diff.Existing {
 		mi := toMemberInfo(e.Tag, e.Out)
-		if excluded[e.Tag] {
+		switch {
+		case excluded[e.Tag]:
 			excludedMembers = append(excludedMembers, mi)
-		} else {
+		case !flt.Allows(e.Out.Label):
+			filteredMembers = append(filteredMembers, mi)
+		default:
 			newMembers = append(newMembers, mi)
 		}
 	}
@@ -471,7 +541,7 @@ func (s *Service) refreshLocked(ctx context.Context, id string) (*RefreshResult,
 	if len(prunedTags) > 0 {
 		s.logWarn("subscription-refresh", id, fmt.Sprintf("pruned %d member(s) not materialized (dropped by validation): %s", len(prunedTags), strings.Join(prunedTags, ", ")))
 	}
-	if err := s.store.SetMembersExtras(id, newMembers, diff.Orphan, rejected, info, excludedMembers); err != nil {
+	if err := s.store.SetMembersExtras(id, newMembers, diff.Orphan, rejected, info, excludedMembers, filteredMembers); err != nil {
 		return nil, err
 	}
 
@@ -521,14 +591,19 @@ func filterDeclaredMembers(members []MemberInfo, declared map[string]bool) (kept
 // route rule are recreated each refresh (they may not exist yet on first
 // run). Per-member outbounds are added/updated/left alone — orphans are NOT
 // removed (the UI offers explicit deletion).
-func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffResult) error {
+//
+// Сервер пропускается (а для Existing — снимается из конфига), когда он
+// исключён по тегу ИЛИ отвергнут regex-фильтром по имени. Оба механизма
+// применяются вместе (composable).
+func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffResult, flt *MemberFilter) error {
 	excluded := make(map[string]bool, len(sub.ExcludedTags))
 	for _, t := range sub.ExcludedTags {
 		excluded[t] = true
 	}
+	skip := func(tag, label string) bool { return excluded[tag] || !flt.Allows(label) }
 	for _, n := range diff.New {
-		if excluded[n.Tag] {
-			continue // исключённый сервер не материализуем
+		if skip(n.Tag, n.Out.Label) {
+			continue // исключённый / отфильтрованный сервер не материализуем
 		}
 		jsonWithTag := replaceTag(n.Out.Outbound, n.Tag)
 		if err := s.mutator.AddOutbound(n.Tag, jsonWithTag); err != nil {
@@ -536,7 +611,7 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 		}
 	}
 	for _, e := range diff.Existing {
-		if excluded[e.Tag] {
+		if skip(e.Tag, e.Out.Label) {
 			s.mutator.RemoveOutbound(e.Tag) // на случай, если ранее был активен
 			continue
 		}
@@ -548,14 +623,20 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 
 	memberTags := make([]string, 0, len(diff.New)+len(diff.Existing))
 	for _, n := range diff.New {
-		if !excluded[n.Tag] {
+		if !skip(n.Tag, n.Out.Label) {
 			memberTags = append(memberTags, n.Tag)
 		}
 	}
 	for _, e := range diff.Existing {
-		if !excluded[e.Tag] {
+		if !skip(e.Tag, e.Out.Label) {
 			memberTags = append(memberTags, e.Tag)
 		}
+	}
+
+	// Пустой selector sing-box отвергает — не даём фильтру скрыть всё,
+	// возвращаем понятную ошибку вместо валидационного отказа при flush.
+	if len(memberTags) == 0 {
+		return errors.New("subscription: фильтр и исключения скрывают все серверы подписки; ослабьте фильтр в настройках")
 	}
 
 	// Selector / urltest — remove old (idempotent) then add fresh.
@@ -570,6 +651,23 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 		s.mutator.AddInbound(sub.InboundTag, BuildMixedInbound(sub.InboundTag, sub.ListenPort))
 		s.mutator.AddRouteRule(BuildRouteRule(sub.InboundTag, sub.SelectorTag))
 	}
+
+	// Сводные группы пересобираются в этом же батче. Store ещё хранит
+	// СТАРЫЙ состав подписки (SetMembersExtras пишется после flush из-за
+	// reconcile по DeclaredOutboundTags), поэтому свежий состав передаём
+	// override'ом — группы видят новые member-теги в том же Reload.
+	fresh := make([]MemberInfo, 0, len(memberTags))
+	for _, n := range diff.New {
+		if !skip(n.Tag, n.Out.Label) {
+			fresh = append(fresh, MemberInfo{Tag: n.Tag, Label: n.Out.Label})
+		}
+	}
+	for _, e := range diff.Existing {
+		if !skip(e.Tag, e.Out.Label) {
+			fresh = append(fresh, MemberInfo{Tag: e.Tag, Label: e.Out.Label})
+		}
+	}
+	s.stageGroups(map[string][]MemberInfo{sub.ID: fresh})
 
 	return s.mutator.Reload(ctx)
 }
@@ -595,6 +693,15 @@ func (s *Service) deleteLocked(ctx context.Context, id string) error {
 		return err
 	}
 
+	// Сводные группы: убрать ID подписки из useSubscriptionIds ДО пересборки
+	// групп (stageGroups в reloadWithGroups), иначе группы утащат в конфиг
+	// ссылки на только что снятые member-outbound'ы. Сами группы остаются.
+	if s.groups != nil {
+		if err := s.groups.RemoveSubscriptionRef(id); err != nil {
+			s.logWarn("subscription-delete", id, "failed to drop id from aggregate groups: "+err.Error())
+		}
+	}
+
 	s.mutator.RemoveRouteRule(sub.InboundTag, sub.SelectorTag)
 	s.mutator.RemoveInbound(sub.InboundTag)
 	s.mutator.RemoveOutbound(sub.SelectorTag)
@@ -606,7 +713,7 @@ func (s *Service) deleteLocked(ctx context.Context, id string) error {
 			s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
 		}
 	}
-	if err := s.mutator.Reload(ctx); err != nil {
+	if err := s.reloadWithGroups(ctx); err != nil {
 		return fmt.Errorf("subscription: delete reload: %w", err)
 	}
 	return s.store.Delete(id)
@@ -698,21 +805,56 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 			return nil, errors.New("subscription: cannot clear URL after creation")
 		}
 	}
+	// Валидация regex-фильтров ДО записи в store: битый шаблон не должен
+	// сохраниться (refresh падал бы на каждом цикле). Компилируем итоговую
+	// пару (patch-значение либо текущее) — ошибка одного поля не должна
+	// маскироваться валидностью другого.
+	filterChanged := false
+	if patch.FilterInclude != nil || patch.FilterExclude != nil {
+		current, err := s.store.Get(id)
+		if err != nil {
+			return nil, err
+		}
+		newInclude, newExclude := current.FilterInclude, current.FilterExclude
+		if patch.FilterInclude != nil {
+			newInclude = *patch.FilterInclude
+		}
+		if patch.FilterExclude != nil {
+			newExclude = *patch.FilterExclude
+		}
+		if _, err := CompileMemberFilter(newInclude, newExclude); err != nil {
+			return nil, fmt.Errorf("subscription: %w", err)
+		}
+		filterChanged = newInclude != current.FilterInclude || newExclude != current.FilterExclude
+	}
 	sub, err := s.store.Update(id, patch)
 	if err != nil {
 		return nil, err
 	}
-	// Mode / urltest config changes require a fresh group outbound in
-	// sing-box config and a SIGHUP so the new wrapper takes effect.
-	// URL / headers / refresh-cadence / enabled only mutate metadata.
-	// Label changes mutate store AND must propagate to NDMS Proxy
-	// description so the rename is visible in the router UI.
-	if patch.Mode != nil || patch.URLTest != nil {
+	// Смена фильтра требует полной ре-материализации набора серверов:
+	// URL-подписка — обычный refresh (fetch + diff + rebuild), inline —
+	// принудительный re-parse сохранённого paste-тела (обход short-circuit).
+	// refresh сам пересобирает group outbound, поэтому mode-ветка ниже
+	// в этом случае не нужна.
+	if filterChanged {
+		if _, err := s.refreshLockedOpts(context.Background(), id, true); err != nil {
+			return sub, fmt.Errorf("subscription: применение фильтра: %w", err)
+		}
+		sub, err = s.store.Get(id)
+		if err != nil {
+			return nil, err
+		}
+	} else if patch.Mode != nil || patch.URLTest != nil {
+		// Mode / urltest config changes require a fresh group outbound in
+		// sing-box config and a SIGHUP so the new wrapper takes effect.
+		// URL / headers / refresh-cadence / enabled only mutate metadata.
+		// Label changes mutate store AND must propagate to NDMS Proxy
+		// description so the rename is visible in the router UI.
 		s.mutator.RemoveOutbound(sub.SelectorTag)
 		if err := s.mutator.AddOutbound(sub.SelectorTag, BuildGroupOutbound(*sub, sub.MemberTags, sub.ActiveMember)); err != nil {
 			return sub, fmt.Errorf("rebuild group outbound: %w", err)
 		}
-		if err := s.mutator.Reload(context.Background()); err != nil {
+		if err := s.reloadWithGroups(context.Background()); err != nil {
 			return sub, fmt.Errorf("reload after mode change: %w", err)
 		}
 	}
@@ -922,11 +1064,11 @@ func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*S
 	newMembers = append(newMembers, toMemberInfo(tag, out))
 	rejected := appendRejectedUnique(sub.RejectedMembers, parts.Rejected...)
 	info := mergeInfoItems(sub.InfoItems, filterDismissedInfo(parts.Info, sub.DismissedInfoIDs))
-	if err := s.store.SetMembersExtras(id, newMembers, sub.OrphanTags, rejected, info, nil); err != nil {
+	if err := s.store.SetMembersExtras(id, newMembers, sub.OrphanTags, rejected, info, nil, sub.FilteredMembers); err != nil {
 		return nil, err
 	}
 
-	if err := s.mutator.Reload(ctx); err != nil {
+	if err := s.reloadWithGroups(ctx); err != nil {
 		s.logWarn("subscription-member-add", id, "reload failed: "+err.Error())
 		return nil, fmt.Errorf("reload: %w", err)
 	}
@@ -1023,7 +1165,7 @@ func (s *Service) RemoveMember(ctx context.Context, id, memberTag string) (*Subs
 		_ = s.mutator.SelectClashProxy(updated.SelectorTag, updated.ActiveMember)
 	}
 
-	if err := s.mutator.Reload(ctx); err != nil {
+	if err := s.reloadWithGroups(ctx); err != nil {
 		s.logWarn("subscription-member-remove", id, "reload failed: "+err.Error())
 		return updated, fmt.Errorf("reload: %w", err)
 	}
@@ -1096,7 +1238,7 @@ func (s *Service) ExcludeMembers(ctx context.Context, id string, tags []string) 
 	if sub.ActiveMember != updated.ActiveMember && updated.EffectiveMode() == ModeSelector && updated.ActiveMember != "" {
 		_ = s.mutator.SelectClashProxy(updated.SelectorTag, updated.ActiveMember)
 	}
-	if err := s.mutator.Reload(ctx); err != nil {
+	if err := s.reloadWithGroups(ctx); err != nil {
 		return updated, fmt.Errorf("reload: %w", err)
 	}
 	return updated, nil
@@ -1304,7 +1446,7 @@ func (s *Service) DeleteOrphans(ctx context.Context, id string) error {
 		s.logWarn("subscription-orphans-delete", id, "failed to clear orphan list in store: "+err.Error())
 		return err
 	}
-	if err := s.mutator.Reload(ctx); err != nil {
+	if err := s.reloadWithGroups(ctx); err != nil {
 		s.logWarn("subscription-orphans-delete", id, "reload failed: "+err.Error())
 		return err
 	}
