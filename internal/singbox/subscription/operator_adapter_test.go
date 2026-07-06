@@ -3,6 +3,9 @@ package subscription
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,5 +112,57 @@ func TestOperatorAdapter_AddOutbound_ServiceLinksThenValidShareLinks(t *testing.
 	tags := adapter.DeclaredOutboundTags()
 	if len(tags) != 2 {
 		t.Fatalf("DeclaredOutboundTags = %d %v, want 2 valid servers", len(tags), tags)
+	}
+}
+
+// Коллизия тега подписки с пользовательским слотом (90-user.json)
+// непоправима drop-циклом flush — конфликтующий outbound живёт в слоте,
+// который пишет только сам пользователь. Flush обязан упасть сразу с
+// честной атрибуцией вместо непрозрачного «could not isolate outbound».
+func TestOperatorAdapter_Flush_UserSlotCollisionFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	orch := orchestrator.New(dir, nil)
+	for _, meta := range orchestrator.KnownSlots() {
+		if meta.Slot == orchestrator.SlotUser {
+			if err := orch.Register(meta); err != nil {
+				t.Fatalf("register user slot: %v", err)
+			}
+		}
+	}
+	if err := orch.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	// Пользовательский слот уже объявляет тег и включён.
+	if err := os.WriteFile(filepath.Join(dir, "90-user.json"),
+		[]byte(`{"outbounds":[{"type":"direct","tag":"my-proxy"}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := orch.SetEnabled(orchestrator.SlotUser, true); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := NewOperatorAdapter(orch, nil, nil)
+	ss, _ := json.Marshal(map[string]any{
+		"type":        "shadowsocks",
+		"server":      "198.51.100.10",
+		"server_port": float64(8388),
+		"method":      "2022-blake3-aes-128-gcm",
+		"password":    "secret",
+	})
+	if err := adapter.AddOutbound("my-proxy", ss); err != nil {
+		t.Fatalf("AddOutbound: %v", err)
+	}
+
+	err := adapter.Reload(context.Background())
+	if err == nil {
+		t.Fatal("expected user-slot collision error, got nil")
+	}
+	if !errors.Is(err, ErrValidation) {
+		t.Errorf("want ErrValidation, got %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "90-user.json") || !strings.Contains(msg, `"my-proxy"`) ||
+		!strings.Contains(msg, "редакторе конфигурации") {
+		t.Errorf("error must honestly attribute the user-slot conflict: %s", msg)
 	}
 }

@@ -27,6 +27,7 @@ const (
 	SlotDeviceProxy     Slot = "deviceproxy"      // 30-deviceproxy.json
 	SlotDownloadProxy   Slot = "downloadproxy"    // 35-download-proxy.json
 	SlotSubscriptions   Slot = "subscriptions"    // 40-subscriptions.json
+	SlotUser            Slot = "user"             // 90-user.json — эксперт-редактор
 )
 
 // SlotMeta describes a producer's contract with the orchestrator.
@@ -79,6 +80,13 @@ func KnownSlots() []SlotMeta {
 		{Slot: SlotDeviceProxy, Filename: "30-deviceproxy.json"},
 		{Slot: SlotDownloadProxy, Filename: "35-download-proxy.json"},
 		{Slot: SlotSubscriptions, Filename: "40-subscriptions.json"},
+		// Пользовательский слот эксперт-редактора. НИКАКОЙ продюсер не
+		// пишет в него — только draft-пайплайн (SaveDraft/ApplyDraft) по
+		// явному действию пользователя; массивы (outbounds/inbounds/
+		// dns.servers/route.rules/…) конкатенируются последними, скаляры
+		// dns/route отсюда не переопределить (merge — first-file-wins).
+		// pruneDanglingSelectorRefsLocked этот файл тоже не мутирует.
+		{Slot: SlotUser, Filename: "90-user.json"},
 	}
 }
 

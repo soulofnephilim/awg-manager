@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestProcess_PIDRoundtrip(t *testing.T) {
@@ -294,5 +295,56 @@ func TestProcess_ReloadSIGHUPsWhenNoTun(t *testing.T) {
 	}
 	if got := spawnCount.Load(); got != 0 {
 		t.Errorf("Reload spawned %d times, want 0 (SIGHUP, process still alive)", got)
+	}
+}
+
+// FIX-C (#456): у каждого запуска СВОЯ генерация deliberate-флага.
+// Мгновенный stop→start раньше стирал флаг предшественника (общий
+// atomic.Bool очищался следующим startLocked до того, как exit-монитор
+// предыдущего процесса успевал его прочитать), и наш собственный рестарт
+// классифицировался как падение (ложная запись в ring + возможная ложная
+// OOM-метка). Быстрый цикл stop→start под -race: ни один deliberate-выход
+// не должен прийти в OnExit с deliberate=false.
+func TestProcess_RapidStopStartKeepsDeliberateFlag(t *testing.T) {
+	dir := t.TempDir()
+	p := NewProcess("/bin/sleep", "/dev/null", filepath.Join(dir, "sing-box.pid"))
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		return exec.Command("/bin/sleep", "30"), nil
+	}
+
+	var exits, crashes atomic.Int32
+	p.OnExit = func(_ error, _ string, deliberate bool) {
+		exits.Add(1)
+		if !deliberate {
+			crashes.Add(1)
+		}
+	}
+
+	const rounds = 4
+	for i := 0; i < rounds; i++ {
+		spawned, err := p.StartSpawned()
+		if err != nil {
+			t.Fatalf("round %d: start: %v", i+1, err)
+		}
+		if !spawned {
+			t.Fatalf("round %d: want a fresh spawn", i+1)
+		}
+		// Stop сразу за Start — следующая итерация стартует немедленно,
+		// пока exit-монитор предыдущего процесса ещё может быть в полёте.
+		if err := p.Stop(); err != nil {
+			t.Fatalf("round %d: stop: %v", i+1, err)
+		}
+	}
+
+	// Дожидаемся всех асинхронных OnExit.
+	deadline := time.Now().Add(5 * time.Second)
+	for exits.Load() < rounds && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := exits.Load(); got != rounds {
+		t.Fatalf("OnExit fired %d times, want %d", got, rounds)
+	}
+	if got := crashes.Load(); got != 0 {
+		t.Fatalf("%d deliberate stops misclassified as crashes, want 0", got)
 	}
 }

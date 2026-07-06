@@ -1462,6 +1462,16 @@ export interface SingboxRouterStatus {
 	issues?: SingboxRouterIssue[];
 	/** Последняя fatal-причина sing-box; непусто только при «СБОЙ» (enabled && !active). */
 	lastError?: string;
+	/** Падений sing-box за последние 10 минут (окно анти-crash-loop backoff'а, #456). */
+	crashCount?: number;
+	/** Причина последнего падения в окне (например, распознанный OOM-kill). */
+	lastCrashReason?: string;
+	/**
+	 * RFC3339-время, до которого авто-перезапуск приостановлен backoff'ом
+	 * (анти crash-loop). Пусто/absent, когда не подавлен; ручной
+	 * «Перезапустить» не подавляется и сбрасывает паузу.
+	 */
+	restartSuppressedUntil?: string;
 	/**
 	 * xt_dscp kernel module is available for DSCP matching (issue #371 QoS).
 	 * Strict `false` → QoS classes cannot be applied (UI shows a warning).
@@ -2063,6 +2073,48 @@ export interface RouterStagingStatusResponse {
 export interface RouterStagingValidationError {
 	validation?: RouterValidationDTO;
 	sbCheck?: string;
+}
+
+// === Эксперт-редактор конфигурации sing-box (config.d слоты) ===
+
+/** Один слот config.d в обзоре редактора. */
+export interface ConfigSlotInfo {
+	slot: string;
+	filename: string;
+	/** system — генерируется продюсером; user — 90-user.json эксперт-редактора. */
+	ownership: 'system' | 'user';
+	enabled: boolean;
+	hasDraft: boolean;
+	/** Размер эффективного содержимого (pending → active → disabled), 0 если не сконфигурирован. */
+	size: number;
+	mtime?: string;
+}
+
+export interface ConfigSlotsResponse {
+	slots: ConfigSlotInfo[];
+}
+
+/** Эффективное содержимое слота для просмотра/редактирования. */
+export interface ConfigSlotContentResponse {
+	slot: string;
+	filename: string;
+	content: string;
+	state: 'active' | 'disabled' | 'absent';
+	hasDraft: boolean;
+}
+
+/** Результат POST /singbox/config/user/check (200 и при ok:false — это запрос-вопрос). */
+export interface UserConfigCheckResponse {
+	ok: boolean;
+	errors?: RouterValidationErrorDTO[];
+	/** Advisory-предупреждения (severity=warning): применение не блокируют. */
+	warnings?: RouterValidationErrorDTO[];
+}
+
+/** 200-ответ POST /singbox/config/user/apply — применено, но могут быть предупреждения. */
+export interface UserConfigApplyResponse {
+	ok: boolean;
+	warnings?: RouterValidationErrorDTO[];
 }
 
 // ─────────────────────────────────────────────

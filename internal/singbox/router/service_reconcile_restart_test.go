@@ -1,0 +1,292 @@
+package router
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/hoaxisr/awg-manager/internal/storage"
+)
+
+// newReconcileInstalledService builds the minimal ServiceImpl for
+// reconcileInstalled tests (same shape as TestReconcile_PolicyMarkChanged_
+// Reinstalls): stubbed iptables, no-op preflight, current* seeded so the
+// steady state needs no re-Install.
+func newReconcileInstalledService(t *testing.T, sb *fakeSingbox) *ServiceImpl {
+	t.Helper()
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	return &ServiceImpl{
+		deps: Deps{
+			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
+			IPTables:           ipt,
+			WANIPCollector:     &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}},
+			Singbox:            sb,
+			NetfilterPreflight: func(context.Context) error { return nil },
+		},
+		currentMark:         "0xffffaaa",
+		currentWANIPs:       []string{"203.0.113.207/32"},
+		netfilterStateKnown: true,
+	}
+}
+
+var reconcileInstalledSettings = storage.SingboxRouterSettings{
+	Enabled:       true,
+	PolicyName:    "Policy0",
+	WANAutoDetect: true,
+}
+
+// Мёртвый sing-box при живых iptables (#456): tproxy-reconcile обязан
+// попытаться перезапустить процесс через AutoRestartIfCrashed.
+func TestReconcileInstalled_DeadSingboxRestarted(t *testing.T) {
+	sb := newTestSingbox(t) // IsRunning по умолчанию false — «процесс мёртв»
+	svc := newReconcileInstalledService(t, sb)
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if sb.startCalls != 1 {
+		t.Errorf("restart attempts = %d, want 1 (dead process must be respawned)", sb.startCalls)
+	}
+}
+
+// Живой sing-box не трогаем: ни одного вызова AutoRestartIfCrashed/Start.
+func TestReconcileInstalled_AliveSingboxUntouched(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	autoCalls := 0
+	sb.autoRestartFn = func() (bool, bool, error) { autoCalls++; return true, false, nil }
+	svc := newReconcileInstalledService(t, sb)
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if autoCalls != 0 || sb.startCalls != 0 {
+		t.Errorf("alive process must be untouched: autoRestart=%d start=%d, want 0/0", autoCalls, sb.startCalls)
+	}
+}
+
+// Подавленный перезапуск (ручной Stop или backoff внутри Operator) не
+// валит reconcile и не спавнит процесс: остальная работа (iptables)
+// продолжается штатно.
+func TestReconcileInstalled_SuppressedRestartRespected(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
+	svc := newReconcileInstalledService(t, sb)
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if sb.startCalls != 0 {
+		t.Errorf("suppressed restart must not spawn: startCalls = %d, want 0", sb.startCalls)
+	}
+}
+
+// Ошибка перезапуска логируется и не прерывает reconcile (best-effort,
+// как остальные heal-шаги).
+func TestReconcileInstalled_RestartErrorIsSoft(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.autoRestartFn = func() (bool, bool, error) { return false, false, errors.New("boom") }
+	svc := newReconcileInstalledService(t, sb)
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled must not fail on restart error: %v", err)
+	}
+}
+
+// fakeip drift-heal: подавленный перезапуск (ручной Stop или backoff —
+// решает Operator внутри AutoRestartIfCrashed) не спавнит процесс и не
+// ждёт readiness. Регресс-защита: до #456 drift-heal звал Start() напрямую
+// и воскрешал остановленный пользователем движок.
+func TestReconcileFakeIPTun_DriftHealRespectsSuppression(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	h.log.calls = nil
+
+	sb := h.svc.deps.Singbox.(*fakeSingbox)
+	sb.isRunningFn = func() (bool, int) { return false, 0 } // мёртв весь тест
+	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil }
+
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("reconcileFakeIPTun: %v", err)
+	}
+	if sb.startCalls != 0 {
+		t.Errorf("suppressed drift-heal must not spawn: startCalls = %d, want 0", sb.startCalls)
+	}
+	// Остальной heal (маршруты) продолжается best-effort.
+	if !h.log.has("AddRoute:198.18.0.0:255.254.0.0:OpkgTun0") {
+		t.Errorf("route heal must still run, got %v", h.log.calls)
+	}
+}
+
+// GetStatus прокидывает crash-наблюдаемость (#456) из CrashStats в Status.
+func TestGetStatus_SurfacesCrashStats(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.crashCount = 2
+	sb.lastCrashReason = "sing-box убит OOM-killer'ом"
+	until := time.Date(2026, 7, 6, 12, 34, 56, 0, time.UTC)
+	sb.restartSuppressedUntil = until
+
+	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
+		RoutingMode:   "tproxy",
+		PolicyName:    "Policy0",
+		WANAutoDetect: true,
+	})
+	svc := newTestService(t, Deps{
+		Settings: settingsStore,
+		Singbox:  sb,
+		IPTables: errProbeIPTables(),
+		Policies: &fakeAccessPolicyProvider{},
+	})
+
+	st, err := svc.GetStatus(context.Background())
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if st.CrashCount != 2 {
+		t.Errorf("CrashCount = %d, want 2", st.CrashCount)
+	}
+	if st.LastCrashReason != sb.lastCrashReason {
+		t.Errorf("LastCrashReason = %q, want %q", st.LastCrashReason, sb.lastCrashReason)
+	}
+	if want := until.Format(time.RFC3339); st.RestartSuppressedUntil != want {
+		t.Errorf("RestartSuppressedUntil = %q, want %q", st.RestartSuppressedUntil, want)
+	}
+}
+
+// GetStatus без падений: поля-нули (omitempty на проводе).
+func TestGetStatus_NoCrashesNoFields(t *testing.T) {
+	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
+		RoutingMode:   "tproxy",
+		PolicyName:    "Policy0",
+		WANAutoDetect: true,
+	})
+	svc := newTestService(t, Deps{
+		Settings: settingsStore,
+		Singbox:  newTestSingbox(t),
+		IPTables: errProbeIPTables(),
+		Policies: &fakeAccessPolicyProvider{},
+	})
+
+	st, err := svc.GetStatus(context.Background())
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if st.CrashCount != 0 || st.LastCrashReason != "" || st.RestartSuppressedUntil != "" {
+		t.Errorf("want zero crash fields, got count=%d reason=%q until=%q",
+			st.CrashCount, st.LastCrashReason, st.RestartSuppressedUntil)
+	}
+}
+
+// chainsOnlyDump: цепочки AWGM живы, PREROUTING-джампов нет — состояние
+// «NDMS перетёр PREROUTING», которое jump-heal обычно долечивает.
+func chainsOnlyDump() string {
+	return "-P PREROUTING ACCEPT\n" +
+		"-N " + ChainName + "\n" +
+		"-N " + RedirectChain + "\n"
+}
+
+// FIX-B: движок мёртв и рестарт подавлен (backoff/ручной Stop) → jump-heal
+// НЕ восстанавливает перехват в мёртвый порт: Install не вызывается,
+// существующие правила не трогаются (fail-closed остаётся).
+func TestReconcileInstalled_DeadEngineSkipsJumpHeal(t *testing.T) {
+	sb := newTestSingbox(t)                                                   // IsRunning=false весь тест
+	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
+	svc := newReconcileInstalledService(t, sb)
+	installs := 0
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { installs++; return nil })
+	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) { return chainsOnlyDump(), nil }
+	svc.deps.IPTables = ipt
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if installs != 0 {
+		t.Errorf("Install calls = %d, want 0 (no jump restore into a dead port)", installs)
+	}
+}
+
+// FIX-B контроль: живой движок → jump-heal работает как раньше
+// (отсутствующие PREROUTING-джампы восстанавливаются re-Install'ом).
+func TestReconcileInstalled_AliveEngineStillHealsJumps(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := newReconcileInstalledService(t, sb)
+	installs := 0
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { installs++; return nil })
+	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) { return chainsOnlyDump(), nil }
+	svc.deps.IPTables = ipt
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if installs != 1 {
+		t.Errorf("Install calls = %d, want 1 (jump heal must proceed with a live engine)", installs)
+	}
+}
+
+// FIX-B: мёртвый движок при живом перехвате виден пользователю — GetStatus
+// добавляет issue «Движок остановлен, но перехват трафика активен…» с
+// временем окончания паузы и счётчиком падений.
+func TestGetStatus_DeadEngineWithInterceptionIssue(t *testing.T) {
+	stubListeningProbe(t, func() bool { return false })
+	sb := newTestSingbox(t) // IsRunning=false
+	sb.crashCount = 3
+	sb.restartSuppressedUntil = time.Now().Add(10 * time.Minute)
+
+	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
+		Enabled:       true,
+		RoutingMode:   "tproxy",
+		PolicyName:    "Policy0",
+		WANAutoDetect: true,
+	})
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil }) // jumps present
+	svc := newTestService(t, Deps{
+		Settings: settingsStore,
+		Singbox:  sb,
+		IPTables: ipt,
+		Policies: &fakeAccessPolicyProvider{},
+	})
+
+	st, err := svc.GetStatus(context.Background())
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	var issue *Issue
+	for i := range st.Issues {
+		if st.Issues[i].Kind == "engine-dead-interception" {
+			issue = &st.Issues[i]
+			break
+		}
+	}
+	if issue == nil {
+		t.Fatalf("want engine-dead-interception issue, got %+v", st.Issues)
+	}
+	if issue.Severity != "error" {
+		t.Errorf("severity = %q, want error", issue.Severity)
+	}
+	if !strings.Contains(issue.Message, "Движок остановлен, но перехват трафика активен") {
+		t.Errorf("message = %q, want dead-engine wording", issue.Message)
+	}
+	if !strings.Contains(issue.Message, "приостановлен до") || !strings.Contains(issue.Message, "падений за 10 мин: 3") {
+		t.Errorf("message = %q, want suppression time and crash count", issue.Message)
+	}
+
+	// Контроль: живой движок → issue нет.
+	sb.isRunningFn = func() (bool, int) { return true, 4242 }
+	st, err = svc.GetStatus(context.Background())
+	if err != nil {
+		t.Fatalf("GetStatus (alive): %v", err)
+	}
+	for _, i := range st.Issues {
+		if i.Kind == "engine-dead-interception" {
+			t.Fatalf("alive engine must not carry the issue, got %+v", st.Issues)
+		}
+	}
+}

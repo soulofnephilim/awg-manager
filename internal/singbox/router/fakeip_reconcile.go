@@ -82,13 +82,18 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 				s.appLog.Warn("fakeip-reconcile", iface, "enable slot: "+e.Error())
 			}
 		}
-		// Start the dead process directly (real spawn). This is the actual
-		// recovery — gated on !running above, so it never double-starts.
-		if e := s.deps.Singbox.Start(); e != nil {
-			s.appLog.Warn("fakeip-reconcile", iface, "restart sing-box: "+e.Error())
-		}
-		if e := s.waitForSingbox(ctx, bootWaitWithFloor()); e != nil {
-			s.appLog.Warn("fakeip-reconcile", iface, "sing-box not ready after restart: "+e.Error())
+		// Спавн через общий backoff-гейт (#456) вместо прямого Start():
+		// уважает ручной Stop (раньше drift-heal воскрешал остановленный
+		// пользователем движок) и подавляет crash-loop; сам запуск — тот же
+		// Singbox.Start (без clash-гейта), readiness ждём ниже как раньше.
+		restarted, _, rerr := s.deps.Singbox.AutoRestartIfCrashed(ctx)
+		switch {
+		case rerr != nil:
+			s.appLog.Warn("fakeip-reconcile", iface, "restart sing-box: "+rerr.Error())
+		case restarted:
+			if e := s.waitForSingbox(ctx, bootWaitWithFloor()); e != nil {
+				s.appLog.Warn("fakeip-reconcile", iface, "sing-box not ready after restart: "+e.Error())
+			}
 		}
 	}
 

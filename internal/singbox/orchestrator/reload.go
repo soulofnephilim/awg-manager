@@ -67,6 +67,12 @@ func (o *Orchestrator) Reload() error {
 	pruneLogs := o.pruneDanglingSelectorRefsLocked()
 	res := o.validateLocked()
 	if !res.Ok() {
+		// Запоминаем провал: reload пропущен, движок работает на старом
+		// конфиге, а UI (router status / эксперт-редактор) может показать
+		// причину через LastReloadValidation. Особенно важно для 90-user.json:
+		// его висячие ссылки мы намеренно не чиним автоматически.
+		failed := res
+		o.lastReloadValidation = &failed
 		o.reloading = false
 		o.mu.Unlock()
 		for _, m := range pruneLogs {
@@ -76,6 +82,7 @@ func (o *Orchestrator) Reload() error {
 		o.log("error", msg)
 		return res
 	}
+	o.lastReloadValidation = nil // валидация прошла — прошлый провал неактуален
 	needRunning := o.hasActiveWorkLocked()
 	proc := o.proc
 	shouldRun := o.shouldRun
@@ -175,6 +182,14 @@ func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
 		if _, ok := o.slots[meta.Slot]; !ok || !o.enabled[meta.Slot] {
 			continue
 		}
+		if meta.Slot == SlotUser {
+			// 90-user.json пишет только сам пользователь через эксперт-
+			// редактор — правки пользователя не мутируем молча. Висячая
+			// ссылка в нём остаётся, validateLocked её отловит, reload
+			// пропустится (движок продолжит работать на старом конфиге),
+			// а причина всплывёт через LastReloadValidation в статусе.
+			continue
+		}
 		data, err := o.readActiveBytes(meta.Slot)
 		if err != nil || len(data) == 0 {
 			continue
@@ -235,6 +250,18 @@ func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
 	return logs
 }
 
+// HasActiveWork reports (under the lock) whether sing-box currently has
+// anything to do beyond hosting base/catalog slots — the same predicate
+// Reload uses to decide "ensure running". Exposed for the Operator's
+// watchdog Reconcile (issue #456): a crashed process must be restarted
+// whenever any active slot (router / deviceproxy / subscriptions / user
+// tunnels) needs the daemon, not only when legacy tunnels exist.
+func (o *Orchestrator) HasActiveWork() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.hasActiveWorkLocked()
+}
+
 // hasActiveWorkLocked reports whether sing-box has anything to do
 // beyond hosting base + catalog slots. Two activation paths:
 //
@@ -247,6 +274,10 @@ func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
 // AlwaysOn catalog slots without HasContent (SlotBase, SlotAwg) never
 // activate the daemon on their own — they are infrastructure for
 // other slots, not a reason to keep sing-box running.
+//
+// Исключение — SlotUser: включённый, но содержательно пустой
+// пользовательский слот (90-user.json с «{}») работой не считается,
+// см. userSlotHasMeaningfulContentLocked.
 //
 // Caller MUST hold o.mu.
 func (o *Orchestrator) hasActiveWorkLocked() bool {
@@ -264,7 +295,49 @@ func (o *Orchestrator) hasActiveWorkLocked() bool {
 			}
 			continue
 		}
+		if slot == SlotUser {
+			// Пустой пользовательский слот не должен держать/запускать
+			// процесс: включённый 90-user.json с «{}» (или без содержательных
+			// массивов) — не работа для демона, в отличие от системных слотов,
+			// у которых сам факт включения — сигнал продюсера.
+			if o.userSlotHasMeaningfulContentLocked() {
+				return true
+			}
+			continue
+		}
 		return true
 	}
 	return false
+}
+
+// userSlotHasMeaningfulContentLocked reports whether the user slot's
+// ACTIVE file carries anything sing-box would actually do work for: at
+// least one non-empty array among inbounds / outbounds / dns.servers /
+// dns.rules / route.rules / route.rule_set. Missing, empty or unparseable
+// file → false (битый файл всё равно заблокирует reload на parse-error в
+// validateLocked). Читаем и парсим файл на каждый вызов — reload не
+// горячий путь, кэш не нужен. Caller MUST hold o.mu.
+func (o *Orchestrator) userSlotHasMeaningfulContentLocked() bool {
+	data, err := o.readActiveBytes(SlotUser)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	var c struct {
+		Inbounds  []json.RawMessage `json:"inbounds"`
+		Outbounds []json.RawMessage `json:"outbounds"`
+		DNS       struct {
+			Servers []json.RawMessage `json:"servers"`
+			Rules   []json.RawMessage `json:"rules"`
+		} `json:"dns"`
+		Route struct {
+			Rules   []json.RawMessage `json:"rules"`
+			RuleSet []json.RawMessage `json:"rule_set"`
+		} `json:"route"`
+	}
+	if json.Unmarshal(data, &c) != nil {
+		return false
+	}
+	return len(c.Inbounds) > 0 || len(c.Outbounds) > 0 ||
+		len(c.DNS.Servers) > 0 || len(c.DNS.Rules) > 0 ||
+		len(c.Route.Rules) > 0 || len(c.Route.RuleSet) > 0
 }

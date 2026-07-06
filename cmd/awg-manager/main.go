@@ -929,6 +929,10 @@ func main() {
 	// through SlotTunnels rather than an in-place write that bypasses
 	// the orchestrator's validate / debounced reload.
 	singboxOp.SetOrch(sbOrch)
+	// Предикат перезапуска для watchdog/Reconcile (#456): упавший sing-box
+	// поднимается и когда легаси-туннелей нет, но активны orchestrator-слоты
+	// (router / deviceproxy / subscriptions / пользовательские туннели).
+	singboxOp.SetActiveWorkFn(sbOrch.HasActiveWork)
 
 	// Wire managed-binary installer into Operator. The installer is keyed
 	// by the build-time arch string (e.g. "mipsel-3.4") so it can resolve
@@ -1360,6 +1364,9 @@ func main() {
 	srv.SetSingboxFakeIPConfigHandler(api.NewSingboxFakeIPConfigHandler(routerSvc, loggingService))
 	srv.SetAWGOutboundsHandler(api.NewAWGOutboundsHandler(awgoutboundsSvc))
 	srv.SetSingboxConfigHandler(api.NewSingboxConfigHandler(sbOrch.ConfigDir))
+	// Эксперт-редактор конфигурации: обзор слотов config.d + draft-пайплайн
+	// пользовательского слота 90-user.json (единственный слот без продюсера).
+	srv.SetSingboxConfigEditorHandler(api.NewSingboxConfigEditorHandler(sbOrch))
 	// Зеркало inbound'ов merged-конфига: per-slot чтение config.d с атрибуцией
 	// источника (подписка/группа/туннель/device-proxy/QoS/движок). Резолверы
 	// nil-safe — при частичном bootstrap источник деградирует до слота.

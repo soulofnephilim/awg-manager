@@ -21,9 +21,10 @@
   import SelectiveIpsetSnapshot from './SelectiveIpsetSnapshot.svelte';
   import QosSettingsCard from './QosSettingsCard.svelte';
   import { deriveDeps, deriveIssues } from './drawerData';
+  import { formatSuppressedUntil, CRASH_WORDS } from './crashInfo';
   import { mergeAndSaveSettings, BYPASS_PRESETS } from './settingsActions';
   import { resolveWanAuto, planToggleAutoDetect, planSelectWanInterface, type WanAutoOverride } from './wanMode';
-  import { pluralize, RULE_WORDS } from '$lib/utils/pluralize';
+  import { pluralize, pluralForm, RULE_WORDS } from '$lib/utils/pluralize';
   import { selectiveBypass } from '$lib/stores/selectiveBypass';
   import type { SingboxRouterSettings, SingboxRouterWANInterface } from '$lib/types';
 
@@ -91,6 +92,13 @@
     engineState === 'warn' ? 'warning' as const :
     'muted' as const,
   );
+
+  // ── Падения движка (#456): счётчик за окно backoff'а, причина последнего
+  // падения и пауза авто-перезапуска. Блок виден, пока падения не выйдут из
+  // 10-минутного окна; escape hatch — кнопка «Перезапустить» в футере.
+  let crashCount = $derived(s?.crashCount ?? 0);
+  let crashSuppressedLabel = $derived(formatSuppressedUntil(s?.restartSuppressedUntil));
+  let showCrashInfo = $derived(crashCount > 0 || crashSuppressedLabel !== null);
 
   onMount(async () => {
     void singboxRouterStore.loadAll();
@@ -266,6 +274,30 @@
           <span class="engine-version">{sbVersionLabel}</span>
         </div>
       </div>
+
+      {#if showCrashInfo}
+        <div class="crash-info">
+          <!-- FIX-D: при crashCount 0 (например, серия неудачных стартов до
+               grace-периода без записанных падений) строка счётчика скрыта —
+               «Падений: 0» рядом с активным подавлением только путает. -->
+          {#if crashCount > 0}
+            <div class="crash-line">
+              <span class="crash-label">Падений за 10 мин</span>
+              <span class="crash-value">{crashCount}</span>
+            </div>
+          {/if}
+          {#if s?.lastCrashReason}
+            <p class="crash-reason">Причина: {s.lastCrashReason}</p>
+          {/if}
+          {#if crashSuppressedLabel}
+            <p class="crash-suppressed">
+              Автоперезапуск приостановлен до {crashSuppressedLabel}{#if crashCount > 0}&nbsp;({crashCount}
+              {pluralForm(crashCount, CRASH_WORDS)} за 10 мин){/if}.
+              Кнопка «Перезапустить» ниже запускает движок немедленно.
+            </p>
+          {/if}
+        </div>
+      {/if}
     </section>
 
     <!-- Зависимости -->
@@ -629,6 +661,42 @@
   }
   .selective-warn {
     color: var(--color-warning, #dab856);
+  }
+  .crash-info {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--color-warning, #dab856);
+  }
+  .crash-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .crash-label { color: var(--text-muted); }
+  .crash-value {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+  .crash-reason {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .crash-suppressed {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--color-warning, #dab856);
+    line-height: 1.4;
   }
   .selective-stats {
     display: flex;

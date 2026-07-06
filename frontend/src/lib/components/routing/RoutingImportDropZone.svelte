@@ -2,12 +2,28 @@
 	import { Upload } from 'lucide-svelte';
 
 	interface Props {
-		subject: string;
+		/** Чем наполнен файл — подставляется в стандартное описание
+		 * «Файл .json с {subject}, экспортированными ранее из AWG Manager». */
+		subject?: string;
+		/** Полностью заменяет стандартное описание (когда файл — не экспорт
+		 * AWG Manager). Пустая строка при пустом subject скрывает описание. */
+		description?: string;
+		/** Заголовок дроп-зоны. */
+		dropTitle?: string;
+		/** Значение accept для file input, по умолчанию только .json. */
+		accept?: string;
 		parseError?: string;
 		onfile: (file: File) => void;
 	}
 
-	let { subject, parseError = '', onfile }: Props = $props();
+	let {
+		subject = '',
+		description = '',
+		dropTitle = 'Перетащите .json файл сюда',
+		accept = '.json',
+		parseError = '',
+		onfile,
+	}: Props = $props();
 
 	let dragging = $state(false);
 	let fileInput = $state<HTMLInputElement>(null!);
@@ -30,9 +46,13 @@
 </script>
 
 <div class="import-upload">
-	<p class="import-description">
-		Файл <b class="import-accent">.json</b> с {subject}, экспортированными ранее из AWG Manager.
-	</p>
+	{#if description}
+		<p class="import-description">{description}</p>
+	{:else if subject}
+		<p class="import-description">
+			Файл <b class="import-accent">.json</b> с {subject}, экспортированными ранее из AWG Manager.
+		</p>
+	{/if}
 	<div
 		class="drop-zone"
 		class:dragging
@@ -53,11 +73,11 @@
 	>
 		<Upload size={24} class="drop-icon" strokeWidth={1.5} aria-hidden="true" />
 		<p class="drop-title">
-			Перетащите .json файл сюда<br />
+			{dropTitle}<br />
 			<span class="drop-hint">или нажмите для выбора</span>
 		</p>
 	</div>
-	<input type="file" accept=".json" onchange={handleFile} bind:this={fileInput} class="hidden-input" />
+	<input type="file" {accept} onchange={handleFile} bind:this={fileInput} class="hidden-input" />
 	{#if parseError}
 		<p class="import-error">{parseError}</p>
 	{/if}

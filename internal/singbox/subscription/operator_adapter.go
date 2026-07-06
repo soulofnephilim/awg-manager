@@ -31,9 +31,9 @@ const subscriptionPortMax = 11999
 // slotConfig is the in-memory shape persisted to 40-subscriptions.json.
 // It intentionally omits log/dns/experimental (those are in 00-base.json).
 type slotConfig struct {
-	Inbounds  []any                    `json:"inbounds"`
-	Outbounds []any                    `json:"outbounds"`
-	Route     map[string]any           `json:"route"`
+	Inbounds  []any          `json:"inbounds"`
+	Outbounds []any          `json:"outbounds"`
+	Route     map[string]any `json:"route"`
 }
 
 // ProxyRegistrar is the narrow interface for NDMS ProxyN management. The
@@ -532,6 +532,18 @@ func (a *OperatorAdapter) flush() error {
 		if res.Ok() {
 			break
 		}
+		// Ошибки, атрибутированные user-слоту (90-user.json), drop-циклом
+		// не лечатся: конфликтующий outbound живёт в пользовательском слоте,
+		// который пишет только сам пользователь через эксперт-редактор —
+		// удалять оттуда нечего и нельзя. Честно падаем сразу с понятной
+		// причиной вместо непрозрачного «could not isolate outbound» после
+		// исчерпания ретраев.
+		if ve, ok := userSlotBlockingError(res); ok {
+			if strings.HasPrefix(ve.Kind, "duplicate-") {
+				return fmt.Errorf("%w: конфликт с пользовательским слотом 90-user.json: тег %q уже занят — переименуйте outbound в редакторе конфигурации", ErrValidation, ve.Tag)
+			}
+			return fmt.Errorf("%w: конфликт с пользовательским слотом 90-user.json: %s — правьте в редакторе конфигурации", ErrValidation, ve.Error())
+		}
 		idx, ok := subscriptionsOutboundIndex(res)
 		if !ok {
 			// Not a sing-box index error. It may be a cross-slot
@@ -631,6 +643,21 @@ func cleanCrossSlotUnknownRefs(cfg *slotConfig, res orchestrator.ValidationResul
 		cleaned = append(cleaned, e.Tag)
 	}
 	return cleaned
+}
+
+// userSlotBlockingError returns the first BLOCKING validation error
+// attributed to the user slot (90-user.json). Advisory-предупреждения
+// (SeverityWarning) пропускаются — они не мешают применению. Типичный
+// случай: подписка материализует outbound с тегом, который пользователь
+// уже объявил в эксперт-редакторе — валидатор сканирует user-слот (90-…)
+// после subscriptions (40-…) и вешает duplicate-outbound на user.
+func userSlotBlockingError(res orchestrator.ValidationResult) (orchestrator.ValidationError, bool) {
+	for _, e := range res.Errors {
+		if e.Slot == orchestrator.SlotUser && e.Severity != orchestrator.SeverityWarning {
+			return e, true
+		}
+	}
+	return orchestrator.ValidationError{}, false
 }
 
 // LastFilterDrops returns the outbounds filtered out of the most recent

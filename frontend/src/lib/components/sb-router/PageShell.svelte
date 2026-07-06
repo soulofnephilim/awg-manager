@@ -4,7 +4,7 @@
 
 <script lang="ts">
   import { onMount } from "svelte";
-  import { FileJson, Search, Settings } from "lucide-svelte";
+  import { FileJson, FilePen, Search, Settings } from "lucide-svelte";
   import { mode, setMode, type RouterMode } from "./modeStore";
   import { bindLiveConnectionsStore } from "./liveConnectionsStore";
   import { openDrawer } from "./drawerStore";
@@ -20,11 +20,13 @@
     onOpenInspector?: () => void;
     /** Открыть JSON-конфиг (кнопка в шапке рендерится только если задан). */
     onOpenJson?: () => void;
+    /** Открыть редактор конфигурации config.d (эксперт; рендерится только если задан). */
+    onOpenConfigEditor?: () => void;
     /** Дочерний контент страницы. */
     children: Snippet;
   }
 
-  let { subtitle, onOpenInspector, onOpenJson, children }: Props = $props();
+  let { subtitle, onOpenInspector, onOpenJson, onOpenConfigEditor, children }: Props = $props();
   let currentMode = $derived($mode);
 
   onMount(() => {
@@ -79,6 +81,18 @@
           >
             <span class="action-icon"><FileJson size={16} /></span>
             <span class="action-text">Конфиг</span>
+          </button>
+        {/if}
+        {#if onOpenConfigEditor}
+          <button
+            type="button"
+            class="icon-btn"
+            onclick={onOpenConfigEditor}
+            aria-label="Редактор конфигурации"
+            title="Редактор конфигурации (config.d)"
+          >
+            <span class="action-icon"><FilePen size={16} /></span>
+            <span class="action-text">Редактор</span>
           </button>
         {/if}
       </div>
