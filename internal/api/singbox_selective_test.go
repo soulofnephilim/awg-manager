@@ -39,6 +39,19 @@ func (s *stubSelectiveStatus) LastError() string                        { return
 func (s *stubSelectiveStatus) LastSnapshot() *selective.RebuildSnapshot { return nil }
 func (s *stubSelectiveStatus) Rebuilding() bool                         { return s.rebuilding }
 
+// stubCancellableStatus дополняет stubSelectiveStatus способностью CancelRun
+// (SelectiveRebuildCanceller) — как *selective.Builder в продовой сборке.
+type stubCancellableStatus struct {
+	stubSelectiveStatus
+	active      bool
+	cancelCalls atomic.Int32
+}
+
+func (s *stubCancellableStatus) CancelRun(reason error) bool {
+	s.cancelCalls.Add(1)
+	return s.active
+}
+
 func postRebuild(t *testing.T, h *SelectiveHandler) *httptest.ResponseRecorder {
 	t.Helper()
 	rr := httptest.NewRecorder()
@@ -145,6 +158,49 @@ func TestSelectiveRebuild_MethodAndConfigGuards(t *testing.T) {
 	rr = postRebuild(t, h)
 	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "NOT_CONFIGURED") {
 		t.Fatalf("nil builder POST: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func postCancelRebuild(t *testing.T, h *SelectiveHandler) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/singbox/router/selective/rebuild/cancel", nil)
+	h.CancelRebuild(rr, req)
+	return rr
+}
+
+// TestSelectiveCancelRebuild: активный прогон → 200 {cancelled:true}; без
+// прогона → 200 {cancelled:false} (безопасный no-op); GET → 405; статус без
+// поддержки CancelRun (сторонняя заглушка) → cancelled:false без паники.
+func TestSelectiveCancelRebuild(t *testing.T) {
+	st := &stubCancellableStatus{active: true}
+	h := NewSelectiveHandler(nil, "", nil, st)
+
+	rr := postCancelRebuild(t, h)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"cancelled":true`) {
+		t.Fatalf("active-run cancel: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if st.cancelCalls.Load() != 1 {
+		t.Fatalf("CancelRun calls = %d, want 1", st.cancelCalls.Load())
+	}
+
+	st.active = false
+	rr = postCancelRebuild(t, h)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"cancelled":false`) {
+		t.Fatalf("idle cancel: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	h.CancelRebuild(rr, httptest.NewRequest(http.MethodGet, "/singbox/router/selective/rebuild/cancel", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET cancel: code=%d", rr.Code)
+	}
+
+	// Статус-провайдер без SelectiveRebuildCanceller — честный no-op.
+	hPlain := NewSelectiveHandler(nil, "", nil, &stubSelectiveStatus{rebuilding: true})
+	rr = postCancelRebuild(t, hPlain)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"cancelled":false`) {
+		t.Fatalf("non-canceller status: code=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

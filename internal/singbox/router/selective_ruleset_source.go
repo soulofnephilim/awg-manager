@@ -187,5 +187,5 @@ func (s *ServiceImpl) loadRemoteRuleSetSourceJSON(ctx context.Context, rs RuleSe
 	if strings.HasSuffix(strings.ToLower(path), ".json") || format == "source" {
 		return os.ReadFile(path)
 	}
-	return ruleSetDecompileExec(s.singboxBinary(), path)
+	return ruleSetDecompileExec(ctx, s.singboxBinary(), path)
 }

@@ -12,7 +12,7 @@ func TestRemoteTunCIDRs(t *testing.T) {
 	ruleSetDownload = func(_ context.Context, url, _format string) (string, error) {
 		return "/tmp/fake-" + url + ".srs", nil
 	}
-	ruleSetDecompileExec = func(_binary, _srsPath string) ([]byte, error) {
+	ruleSetDecompileExec = func(_ context.Context, _binary, _srsPath string) ([]byte, error) {
 		return []byte(`{"version":3,"rules":[{"ip_cidr":["149.154.160.0/20","2001:b28::/32"]}]}`), nil
 	}
 
@@ -41,7 +41,7 @@ func TestRemoteTunCIDRs_NonLoopSafeRuleYieldsNothing(t *testing.T) {
 	ruleSetDownload = func(_ context.Context, url, _format string) (string, error) {
 		return "/tmp/fake-" + url + ".srs", nil
 	}
-	ruleSetDecompileExec = func(_binary, _srsPath string) ([]byte, error) {
+	ruleSetDecompileExec = func(_ context.Context, _binary, _srsPath string) ([]byte, error) {
 		return []byte(`{"version":3,"rules":[{"ip_cidr":["149.154.160.0/20"]}]}`), nil
 	}
 

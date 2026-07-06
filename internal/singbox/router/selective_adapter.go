@@ -6,9 +6,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 )
+
+// selectiveRebuildTailTimeout ограничивает пост-обработку успешной пересборки
+// (syncRoutesAfterRebuild: синхронизация overlay-маршрутов + SIGHUP/перезапуск
+// sing-box). Щедро — 10 минут хватает на самый медленный reload; но без
+// потолка зависший heavyop-гейт внутри orchestrator.Reload (другая тяжёлая
+// операция заклинила) держал бы Rebuild — а с ним флаги rebuilding и слот
+// билдера — бесконечно, уже ПОСЛЕ того как stall guard самой пересборки
+// отработал и вернул управление.
+const selectiveRebuildTailTimeout = 10 * time.Minute
 
 // selectiveBuilderAdapter implements SelectiveBuilder by pulling the current
 // router config (rules + rule-sets) and DNS servers from the live service,
@@ -71,8 +81,31 @@ func (a *selectiveBuilderAdapter) Rebuild(ctx context.Context) error {
 	if err := a.b.RebuildOwnedRun(ctx, rules, refs, singboxDNS, nil); err != nil {
 		return err
 	}
-	a.syncRoutesAfterRebuild(ctx)
+	a.boundedSyncRoutesAfterRebuild(ctx)
 	return nil
+}
+
+// boundedSyncRoutesAfterRebuild выполняет пост-обработку успешной пересборки
+// с потолком selectiveRebuildTailTimeout: сам хвост — best-effort (его сбой и
+// раньше лишь логировал warn и взводил lastApplyFailed, успех пересборки не
+// отменяет), но applyNow → orchestrator.Reload берёт heavyop-гейт БЕЗ
+// таймаута — по истечении потолка Rebuild возвращается (флаги rebuilding
+// снимаются), а незавершённый хвост дорабатывает в фоне и, если это был
+// заклинивший гейт, будет честно виден по warn-логу.
+func (a *selectiveBuilderAdapter) boundedSyncRoutesAfterRebuild(ctx context.Context) {
+	tailCtx, cancelTail := context.WithTimeout(ctx, selectiveRebuildTailTimeout)
+	done := make(chan struct{})
+	go func() {
+		defer cancelTail()
+		defer close(done)
+		a.syncRoutesAfterRebuild(tailCtx)
+	}()
+	select {
+	case <-done:
+	case <-tailCtx.Done():
+		a.svc.appLog.Warn("selective-rebuild", "routes",
+			fmt.Sprintf("пост-обработка пересборки (синхронизация маршрутов/перезапуск sing-box) не уложилась в %s — пересборка ipset завершена, хвост дорабатывает в фоне", selectiveRebuildTailTimeout))
+	}
 }
 
 func (a *selectiveBuilderAdapter) syncRoutesAfterRebuild(ctx context.Context) {

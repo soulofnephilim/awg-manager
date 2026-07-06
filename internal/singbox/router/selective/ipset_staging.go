@@ -105,8 +105,14 @@ func addEntriesToSet(ctx context.Context, setName string, cidrs []string) error 
 	if writeRestoreLines(b, setName, cidrs) == 0 {
 		return nil
 	}
+	// Прогресс stall guard'у до и после restore-команды (ProgressTouch —
+	// no-op вне пересборки): «начали операцию» — тоже прогресс, зависание
+	// самой команды ловит её exec-таймаут ipsetRestoreTimeout.
+	touch := ProgressTouch(ctx)
+	touch()
 	res, err := sysexec.RunWithOptions(ctx, bin, []string{"restore", "-exist"},
 		sysexec.Options{Stdin: b, Timeout: ipsetRestoreTimeout})
+	touch()
 	if err != nil {
 		return sysexec.FormatError(res, fmt.Errorf("ipset restore: %w", err))
 	}

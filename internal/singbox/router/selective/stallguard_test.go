@@ -19,18 +19,58 @@ func waitDone(t *testing.T, ctx context.Context, within time.Duration) {
 
 // TestWithStallGuard_ProgressKeepsAlive: регулярный touch держит контекст
 // живым суммарно много дольше stallTimeout — настенного дедлайна нет.
+// Интервалы широкие (touch каждые stall/10 при stall=300 мс), чтобы
+// шедулинг-паузы нагруженного CI не съедали весь запас до stallTimeout.
 func TestWithStallGuard_ProgressKeepsAlive(t *testing.T) {
-	const stall = 80 * time.Millisecond
+	const stall = 300 * time.Millisecond
 	ctx, touch, cancel := WithStallGuard(context.Background(), stall, time.Minute)
 	defer cancel()
 
 	deadline := time.Now().Add(5 * stall) // в 5 раз дольше stallTimeout
 	for time.Now().Before(deadline) {
 		touch()
-		time.Sleep(stall / 8)
+		time.Sleep(stall / 10)
 		if ctx.Err() != nil {
 			t.Fatalf("cancelled despite steady progress: cause=%v", context.Cause(ctx))
 		}
+	}
+}
+
+// TestWithStallGuard_FiresAfterLastTouch закрепляет перезаводимость guard'а:
+// отмена наступает примерно через stallTimeout после ПОСЛЕДНЕГО touch, а не
+// отсчитывается однократно от создания guard'а (регрессия к one-shot-таймеру
+// сделала бы «отмену» посреди живого прогресса либо вовсе не после его
+// остановки).
+func TestWithStallGuard_FiresAfterLastTouch(t *testing.T) {
+	const stall = 200 * time.Millisecond
+	ctx, touch, cancel := WithStallGuard(context.Background(), stall, time.Minute)
+	defer cancel()
+
+	// Держим guard живым устойчивым потоком touch'ей суммарно 3×stall —
+	// one-shot-таймер к этому моменту давно бы сработал.
+	keepAlive := time.Now().Add(3 * stall)
+	for time.Now().Before(keepAlive) {
+		touch()
+		time.Sleep(stall / 10)
+	}
+	touch()
+	lastTouch := time.Now()
+	if ctx.Err() != nil {
+		t.Fatalf("cancelled during steady progress: cause=%v", context.Cause(ctx))
+	}
+
+	// Прекращаем прогресс: отмена должна прийти не раньше stall после
+	// последнего touch и не позже щедрого допуска (медленный CI).
+	waitDone(t, ctx, 10*stall)
+	idle := time.Since(lastTouch)
+	if idle < stall {
+		t.Fatalf("fired too early: %s after last touch < stallTimeout %s", idle, stall)
+	}
+	if idle > 6*stall {
+		t.Fatalf("fired too late: %s after last touch (stallTimeout %s)", idle, stall)
+	}
+	if cause := context.Cause(ctx); !errors.Is(cause, ErrStalled) {
+		t.Fatalf("cause = %v, want ErrStalled", cause)
 	}
 }
 
@@ -131,8 +171,12 @@ func TestIpsetExecTimeouts(t *testing.T) {
 	if ipsetCtlTimeout != 120*time.Second {
 		t.Errorf("ipsetCtlTimeout = %s, want 120s", ipsetCtlTimeout)
 	}
-	// stall guard должен покрывать худший одиночный bounded-шаг конвейера.
-	if rebuildStallTimeout < ipsetRestoreTimeout {
-		t.Errorf("rebuildStallTimeout %s < ipsetRestoreTimeout %s", rebuildStallTimeout, ipsetRestoreTimeout)
+	// stall guard должен покрывать худший одиночный bounded-шаг конвейера
+	// (restore-чанк, touch до и после команды) СТРОГО с запасом ≥30 с: при
+	// равных таймаутах guard и exec-таймаут срабатывают почти одновременно и
+	// почти доделанный чанк ошибочно классифицируется как «нет прогресса».
+	if rebuildStallTimeout < ipsetRestoreTimeout+30*time.Second {
+		t.Errorf("rebuildStallTimeout %s < ipsetRestoreTimeout %s + 30s margin",
+			rebuildStallTimeout, ipsetRestoreTimeout)
 	}
 }

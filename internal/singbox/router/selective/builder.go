@@ -83,6 +83,9 @@ type Builder struct {
 	// lastProgress — последний прогресс текущей пересборки (progressMark);
 	// попадает в сообщение об остановке stall guard'ом (stallGuardError).
 	lastProgress atomic.Value
+	// cancelRun — cancel-cause текущего прогона RebuildOwnedRun (под mu);
+	// nil между прогонами. Дёргается из CancelRun по запросу пользователя.
+	cancelRun context.CancelCauseFunc
 }
 
 // progressMark — компактный снимок последнего прогресса пересборки для
@@ -134,6 +137,10 @@ func (b *Builder) lastProgressInfo() string {
 func (b *Builder) stallGuardError(guardCtx context.Context, err error) error {
 	cause := context.Cause(guardCtx)
 	switch {
+	case errors.Is(cause, ErrCancelledByUser):
+		// Явная отмена через CancelRun: причина от родительского runCtx
+		// пробрасывается в guard-контекст самим context-пакетом.
+		return fmt.Errorf("%w (%s): %w", ErrCancelledByUser, b.lastProgressInfo(), err)
 	case errors.Is(cause, ErrStalled):
 		// Двойной %w: и причина (ErrStalled — для errors.Is), и ошибка шага,
 		// на котором конвейер заметил отмену (для логов).
@@ -144,6 +151,25 @@ func (b *Builder) stallGuardError(guardCtx context.Context, err error) error {
 			formatDurationRu(b.stallHardCapOrDefault()), b.lastProgressInfo(), err)
 	}
 	return err
+}
+
+// CancelRun отменяет текущую пересборку (ограниченный выход из runaway-прогона
+// до истечения rebuildHardCap): работает с момента входа в RebuildOwnedRun,
+// включая ожидание heavy-op гейта. Безопасный no-op, когда прогона нет —
+// возвращает false; true — активный прогон найден и его отмена запрошена.
+// reason == nil трактуется как ErrCancelledByUser.
+func (b *Builder) CancelRun(reason error) bool {
+	if reason == nil {
+		reason = ErrCancelledByUser
+	}
+	b.mu.Lock()
+	cancel := b.cancelRun
+	b.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel(reason)
+	return true
 }
 
 func (b *Builder) opSem() chan struct{} {
@@ -313,6 +339,29 @@ func (b *Builder) RebuildOwnedRun(
 ) error {
 	emit := b.emitter(fn)
 
+	// runCtx делает прогон отменяемым по запросу пользователя (CancelRun):
+	// регистрируется ДО ожидания heavy-op гейта, чтобы отмена работала и на
+	// этом этапе. Причина отмены (ErrCancelledByUser) доезжает до guard-
+	// контекста ниже через штатное распространение context.Cause.
+	runCtx, cancelRun := context.WithCancelCause(parentCtx)
+	defer cancelRun(context.Canceled)
+	b.mu.Lock()
+	b.cancelRun = cancelRun
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.cancelRun = nil
+		b.mu.Unlock()
+	}()
+	// failAcquire различает пользовательскую отмену и занятый гейт/слот на
+	// этапе, когда stall guard ещё не создан.
+	failAcquire := func() error {
+		if errors.Is(context.Cause(runCtx), ErrCancelledByUser) {
+			return b.fail(parentCtx, emit, fmt.Errorf("selective: %w", ErrCancelledByUser))
+		}
+		return b.fail(parentCtx, emit, fmt.Errorf("selective: %w", ErrBusy))
+	}
+
 	// Gate acquisition rides on its own patient timeout (rebuildAcquireTimeout),
 	// NOT on the stall guard below — waiting on the gate is not progress and
 	// must not trip the guard: at boot the orchestrator can legitimately hold
@@ -321,14 +370,14 @@ func (b *Builder) RebuildOwnedRun(
 	// reboot-emptied ipset unpopulated (silent WAN leak). Fast-fail UX for
 	// manual rebuilds is provided by the API handler's TryLock pre-check;
 	// in-run waiting can be patient.
-	acquireCtx, cancelAcquire := context.WithTimeout(parentCtx, rebuildAcquireTimeout)
+	acquireCtx, cancelAcquire := context.WithTimeout(runCtx, rebuildAcquireTimeout)
 	defer cancelAcquire()
 	if err := heavyop.Default.LockWithContext(acquireCtx); err != nil {
-		return b.fail(parentCtx, emit, fmt.Errorf("selective: %w", ErrBusy))
+		return failAcquire()
 	}
 	defer heavyop.Default.Unlock()
 	if err := b.acquireOp(acquireCtx); err != nil {
-		return b.fail(parentCtx, emit, fmt.Errorf("selective: %w", ErrBusy))
+		return failAcquire()
 	}
 	defer b.releaseOp()
 
@@ -337,16 +386,25 @@ func (b *Builder) RebuildOwnedRun(
 	// вызывался rebuildStallTimeout подряд либо истёк rebuildHardCap.
 	// Медленная, но идущая пересборка на MIPS-роутере больше не падает по
 	// «timeout». touch дёргают: каждый emit (смена фазы, per-matcher
-	// прогресс), sink'и статических CIDR и доменных записей, начало и
-	// фиксация каждого restore-чанка, а также завершение каждого DNS-резолва
-	// хоста внутри матчера (onHostResolved в resolveOneQuery).
-	ctx, touch, cancelGuard := WithStallGuard(parentCtx, b.stallTimeoutOrDefault(), b.stallHardCapOrDefault())
+	// прогресс), sink'и статических CIDR и доменных записей, каждая
+	// управляющая ipset-команда и restore-чанк (до и после — runIpsetCtl /
+	// addEntriesToSet), завершение каждого DNS-резолва хоста внутри матчера
+	// (onHostResolved в resolveOneQuery), а также материализация rule-set'ов
+	// и периодический тик geosite/geoip-скана (ProgressTouch через контекст).
+	ctx, touch, cancelGuard := WithStallGuard(runCtx, b.stallTimeoutOrDefault(), b.stallHardCapOrDefault())
 	defer cancelGuard()
+	// touch-хук едет вместе с контекстом в слои, куда прокидывается только
+	// ctx: ipset-команды и материализация rule-set'ов в пакете router.
+	ctx = ContextWithProgressTouch(ctx, touch)
 
 	b.lastProgress.Store(progressMark{})
 	rawEmit := emit
 	emit = func(p Progress) {
-		if p.Phase != PhaseError {
+		// Прогресс фиксируется, только пока guard-контекст жив: emit'ы,
+		// догоняющие уже отменённую пересборку (например, смена фазы на
+		// populating после stall'а в resolving), не должны переписать
+		// lastProgress — иначе сообщение об остановке назовёт не ту фазу.
+		if p.Phase != PhaseError && ctx.Err() == nil {
 			b.lastProgress.Store(progressMark{phase: p.Phase, matcher: p.Matcher, current: p.Current, total: p.Total})
 		}
 		touch()
@@ -562,7 +620,12 @@ func (b *Builder) RebuildOwnedRun(
 	}
 	_ = FlushStagingSet(ctx)
 
-	entryCount := EntryCount(ctx)
+	// После успешного swap пересборка фактически состоялась — счётчик снимаем
+	// на parentCtx (guard мог сработать в зазоре после swap и убить ctx) и
+	// честно различаем «подтверждённый ноль» и «счётчик прочитать не удалось»:
+	// сбой счётчика не должен рождать ложное «ipset пустой — весь трафик в
+	// WAN» при только что залитом наборе.
+	entryCount, entryCountOK := EntryCountChecked(parentCtx)
 	b.setSuccess()
 	b.mu.Lock()
 	b.routes = routes.AddrsByOutbound()
@@ -586,7 +649,11 @@ func (b *Builder) RebuildOwnedRun(
 	go b.deferredConntrackFlush(ctQueue.Drain())
 
 	doneMsg := fmt.Sprintf("ipset обновлён. Записей: %d", entryCount)
-	if entryCount == 0 {
+	if !entryCountOK {
+		// Swap прошёл, но счётчик снять не удалось — успех с неизвестным
+		// количеством, а не сфабрикованный «пустой» набор.
+		doneMsg = "ipset обновлён. Записей: н/д (счётчик прочитать не удалось)"
+	} else if entryCount == 0 {
 		doneMsg = "ipset пустой — правил с IP/доменами нет. Весь трафик идёт в WAN мимо sing-box."
 	}
 	if stats.DroppedMatchers > 0 {

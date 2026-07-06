@@ -12,8 +12,12 @@ import (
 
 // openSelectiveRuleSetJSON returns a streamable JSON file path for a rule-set ref.
 // SRS sources are decompiled to a temp file; callers must invoke cleanup when done.
+// Дорогие ветки (download, decompile, материализация dat→json) подчинены ctx и
+// сигналят прогресс stall guard'у пересборки после каждой завершённой
+// материализации файла (selective.ProgressTouch — no-op вне пересборки).
 func (s *ServiceImpl) openSelectiveRuleSetJSON(ctx context.Context, ref selective.RuleSetRef) (string, func(), error) {
 	noop := func() {}
+	touch := selective.ProgressTouch(ctx)
 
 	if jsonPath := selectiveJSONPath(ref); jsonPath != "" {
 		if _, err := os.Stat(jsonPath); err == nil {
@@ -35,13 +39,16 @@ func (s *ServiceImpl) openSelectiveRuleSetJSON(ctx context.Context, ref selectiv
 			return path, noop, nil
 		}
 		if strings.HasSuffix(strings.ToLower(path), ".srs") {
-			return s.decompileSRSToTemp(s.singboxBinary(), path)
+			return s.decompileSRSToTemp(ctx, s.singboxBinary(), path)
 		}
 	}
 
 	if rs.Type == "remote" && strings.TrimSpace(rs.URL) != "" {
 		if kind, tags, ok := parseDatRuleSetURL(rs.URL); ok {
 			jsonPath, err := s.ensureDatRuleSetJSONPath(ctx, ref.DatDir, kind, tags)
+			if err == nil {
+				touch() // dat rule-set материализован — прогресс
+			}
 			return jsonPath, noop, err
 		}
 		format := rs.Format
@@ -52,10 +59,11 @@ func (s *ServiceImpl) openSelectiveRuleSetJSON(ctx context.Context, ref selectiv
 		if err != nil {
 			return "", noop, fmt.Errorf("download: %w", err)
 		}
+		touch() // скачивание завершено — прогресс
 		if strings.HasSuffix(strings.ToLower(localPath), ".json") || format == "source" {
 			return localPath, noop, nil
 		}
-		return s.decompileSRSToTemp(s.singboxBinary(), localPath)
+		return s.decompileSRSToTemp(ctx, s.singboxBinary(), localPath)
 	}
 
 	if rs.Type == "remote" && ref.DatDir != "" {
@@ -68,11 +76,13 @@ func (s *ServiceImpl) openSelectiveRuleSetJSON(ctx context.Context, ref selectiv
 	return "", noop, nil
 }
 
-func (s *ServiceImpl) decompileSRSToTemp(binary, srsPath string) (string, func(), error) {
-	path, err := ruleSetDecompileToFile(binary, srsPath)
+func (s *ServiceImpl) decompileSRSToTemp(ctx context.Context, binary, srsPath string) (string, func(), error) {
+	path, err := ruleSetDecompileToFile(ctx, binary, srsPath)
 	if err != nil {
 		return "", func() {}, err
 	}
+	// Decompile одного .srs завершён — прогресс для stall guard'а пересборки.
+	selective.ProgressTouch(ctx)()
 	return path, func() { _ = os.Remove(path) }, nil
 }
 

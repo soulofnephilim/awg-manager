@@ -30,9 +30,18 @@ const (
 )
 
 // runIpsetCtl запускает управляющую команду ipset с ipsetCtlTimeout вместо
-// дефолтного таймаута sysexec.
+// дефолтного таймаута sysexec. Прогресс stall guard'у сигналится до И после
+// каждой команды (ProgressTouch — no-op вне пересборки): цепочки ctl-команд
+// (create→create staging→flush в начале прогона, swap→flush→count в конце)
+// иначе шли без единого touch до ~600 с подряд, и на нагруженном MIPS-роутере
+// guard ложно срабатывал посреди populate. Зависание самой команды ловит её
+// exec-таймаут, а не stall guard.
 func runIpsetCtl(ctx context.Context, bin string, args ...string) (*sysexec.Result, error) {
-	return sysexec.RunWithOptions(ctx, bin, args, sysexec.Options{Timeout: ipsetCtlTimeout})
+	touch := ProgressTouch(ctx)
+	touch()
+	res, err := sysexec.RunWithOptions(ctx, bin, args, sysexec.Options{Timeout: ipsetCtlTimeout})
+	touch()
+	return res, err
 }
 
 // ipsetBin returns the path to ipset, or an error if not available.
@@ -93,13 +102,17 @@ func DestroySet(ctx context.Context) error {
 }
 
 // SetExists reports whether the AWGM-SELECTIVE ipset currently exists in
-// the kernel. Uses `ipset list -name` which is fast (no entry output).
+// the kernel. Uses `ipset list -name` which is fast (no entry output), но
+// идёт тем же медленным kernel-путём, что и `list -t`, — дефолтные 30 с
+// sysexec на нагруженном роутере давали ложное «набора нет» (и лишнюю
+// пересборку через NeedsPopulation/ensureSelectiveSetExists), поэтому
+// команда выполняется через runIpsetCtl с ipsetCtlTimeout.
 func SetExists(ctx context.Context) bool {
 	bin, err := ipsetBin()
 	if err != nil {
 		return false
 	}
-	res, err := sysexec.Run(ctx, bin, "list", "-name")
+	res, err := runIpsetCtl(ctx, bin, "list", "-name")
 	if err != nil || res == nil {
 		return false
 	}
@@ -119,13 +132,24 @@ func SetExists(ctx context.Context) bool {
 // megabytes of text piped through a fork on a 128MB router — and this
 // runs on every status request and CDN refresh.
 func EntryCount(ctx context.Context) int {
+	n, _ := EntryCountChecked(ctx)
+	return n
+}
+
+// EntryCountChecked — как EntryCount, но различает подтверждённый ноль и
+// «счётчик получить не удалось» (команда ipset не выполнилась, ctx мёртв,
+// вывод не разобран): ok=false во втором случае. Нужен вызывающим, для
+// которых 0 и «неизвестно» — разные исходы: итоговое сообщение пересборки
+// после успешного swap не должно выдавать сбой счётчика за «ipset пустой —
+// весь трафик в WAN».
+func EntryCountChecked(ctx context.Context) (n int, ok bool) {
 	bin, err := ipsetBin()
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	res, err := runIpsetCtl(ctx, bin, "list", SetName, "-t")
 	if err != nil || res == nil {
-		return 0
+		return 0, false
 	}
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
@@ -134,11 +158,11 @@ func EntryCount(ctx context.Context) int {
 		}
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil {
-			return 0
+			return 0, false
 		}
-		return n
+		return n, true
 	}
-	return 0
+	return 0, false
 }
 
 // normalizeEntry canonicalises a CIDR or bare IPv4 address for ipset.

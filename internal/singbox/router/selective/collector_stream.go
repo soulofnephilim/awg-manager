@@ -30,6 +30,13 @@ type CollectStats struct {
 	DroppedMatchers int
 }
 
+// collectScanTouchInterval — раз в сколько просканированных строк geosite/
+// geoip чистый CPU-скан сигналит прогресс stall guard'у (ProgressTouch из
+// контекста). Скан огромного тега, где ВСЕ строки отфильтрованы или
+// дедуплицированы, не дёргает ни один sink-колбэк и на 580МГц MIPS может
+// молчать минуты — без периодического тика guard ложно счёл бы его stall'ом.
+const collectScanTouchInterval = 10_000
+
 // StreamCollectFromRules walks proxy rules and rule sets, invoking sink callbacks
 // without accumulating full CollectResult slices in memory.
 func StreamCollectFromRules(
@@ -55,6 +62,7 @@ func StreamCollectFromRules(
 	for _, ref := range ruleSetRefs {
 		refsByTag[ref.Tag] = ref
 	}
+	touch := ProgressTouch(ctx)
 	for tag, outbound := range proxySetTags {
 		ref, ok := refsByTag[tag]
 		if !ok {
@@ -63,6 +71,8 @@ func StreamCollectFromRules(
 		if err := streamRuleSetRef(ctx, ref, outbound, geo, openJSON, seen, &sink); err != nil {
 			errs = append(errs, err)
 		}
+		// Полностью пройденный rule-set (материализация + скан) — прогресс.
+		touch()
 	}
 	return CollectStats{DroppedMatchers: seen.droppedMatchers}, errs
 }
@@ -109,7 +119,7 @@ func streamRuleSetRef(
 	sink *CollectSink,
 ) error {
 	if len(ref.DatTags) > 0 && ref.DatKind != "" {
-		return streamDatRuleSet(ref.DatKind, ref.DatTags, outbound, geo, seen, sink)
+		return streamDatRuleSet(ctx, ref.DatKind, ref.DatTags, outbound, geo, seen, sink)
 	}
 	if len(ref.Rules) > 0 {
 		// Walk each in-memory rule map directly. The previous implementation
@@ -143,12 +153,23 @@ func streamRuleSetRef(
 	return streamRuleSetJSONFile(path, outbound, seen, sink)
 }
 
-func streamDatRuleSet(kind string, tags []string, outbound string, geo GeoPaths, seen *deduplicator, sink *CollectSink) error {
+func streamDatRuleSet(ctx context.Context, kind string, tags []string, outbound string, geo GeoPaths, seen *deduplicator, sink *CollectSink) error {
+	// Периодический сигнал прогресса чистого скана: даже когда все строки
+	// тега отфильтрованы/дедуплицированы и sink-колбэки молчат, каждые
+	// collectScanTouchInterval строк stall guard видит движение.
+	touch := ProgressTouch(ctx)
+	var scanned int
+	tick := func() {
+		if scanned++; scanned%collectScanTouchInterval == 0 {
+			touch()
+		}
+	}
 	switch kind {
 	case "geosite":
 		for _, path := range geo.GeoSite {
 			for _, tag := range tags {
 				if err := hydraroute.StreamGeoSiteTagLines(path, tag, func(line string) error {
+					tick()
 					return ingestGeoSiteLine(line, outbound, seen, sink)
 				}); err != nil {
 					if strings.Contains(err.Error(), "not found") {
@@ -162,6 +183,7 @@ func streamDatRuleSet(kind string, tags []string, outbound string, geo GeoPaths,
 		for _, path := range geo.GeoIP {
 			for _, tag := range tags {
 				if err := hydraroute.StreamGeoIPTagLines(path, tag, func(line string) error {
+					tick()
 					if c := normalizeCIDR(line); c != "" {
 						return sink.OnStaticCIDR(c)
 					}

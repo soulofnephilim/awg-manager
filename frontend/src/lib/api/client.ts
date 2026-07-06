@@ -2293,6 +2293,16 @@ class ApiClient {
 		return this.request('/singbox/router/selective/rebuild', { method: 'POST' });
 	}
 
+	/**
+	 * Останавливает текущую пересборку ipset. cancelled=false — пересборки
+	 * не было (безопасный no-op). Завершение отменённой пересборки приходит
+	 * обычным путём: SSE singbox-router:selective-progress (phase=error,
+	 * «пересборка отменена пользователем») / selective-status.
+	 */
+	async singboxRouterSelectiveRebuildCancel(): Promise<{ cancelled: boolean }> {
+		return this.request('/singbox/router/selective/rebuild/cancel', { method: 'POST' });
+	}
+
 	async singboxRouterSelectiveSnapshotMatchers(
 		offset = 0,
 		limit = 100,

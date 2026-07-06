@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -120,6 +121,86 @@ func TestRebuild_StalledResolverFailsWithClearMessage(t *testing.T) {
 	final := events[len(events)-1]
 	if final.Phase != PhaseError || !strings.Contains(final.Message, "нет прогресса") {
 		t.Fatalf("terminal event = %+v, want PhaseError with stall message", final)
+	}
+}
+
+// TestRebuild_CancelRunStopsWithUserMessage: CancelRun посреди прогона
+// останавливает пересборку с понятным сообщением «отменена пользователем»
+// (ошибка, LastError и терминальный PhaseError), НЕ доводя до swap живого
+// набора; вне прогона CancelRun — безопасный no-op (false).
+func TestRebuild_CancelRunStopsWithUserMessage(t *testing.T) {
+	// Пороги guard'а большие: остановить прогон должна именно отмена.
+	ipsetLog := fakeIPSetBinary(t)
+	b := &Builder{
+		cfg:          BuilderConfig{ConfigDir: t.TempDir()},
+		stallTimeout: time.Minute,
+		stallHardCap: time.Minute,
+	}
+
+	if b.CancelRun(nil) {
+		t.Fatal("CancelRun without an active run must be a no-op returning false")
+	}
+
+	resolveStarted := make(chan struct{})
+	var startedOnce sync.Once
+	stubResolveOneQuery(t, nil)
+	resolveOneQueryFn = func(ctx context.Context, query DomainQuery, _ []string, _ func(domain, err string), _ ResolveHostProgressFn, _ bool, _ func()) DomainResolveResult {
+		startedOnce.Do(func() { close(resolveStarted) })
+		<-ctx.Done() // висим до отмены пользователем
+		return DomainResolveResult{Matcher: query.Matcher, Kind: string(query.Kind), Outbound: query.Outbound}
+	}
+
+	cancelResult := make(chan bool, 1)
+	go func() {
+		<-resolveStarted
+		cancelResult <- b.CancelRun(nil)
+	}()
+
+	var mu sync.Mutex
+	var events []Progress
+	err := b.Rebuild(context.Background(), suffixRules(3), nil, nil, func(p Progress) {
+		mu.Lock()
+		events = append(events, p)
+		mu.Unlock()
+	})
+	if err == nil {
+		t.Fatal("cancelled rebuild must fail")
+	}
+	if !errors.Is(err, ErrCancelledByUser) {
+		t.Fatalf("errors.Is(err, ErrCancelledByUser) must hold, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "отменена пользователем") {
+		t.Fatalf("error must name the user cancellation, got: %v", err)
+	}
+	if !<-cancelResult {
+		t.Fatal("CancelRun during an active run must return true")
+	}
+	if le := b.LastError(); !strings.Contains(le, "отменена") {
+		t.Fatalf("LastError = %q, want cancellation message", le)
+	}
+
+	mu.Lock()
+	final := Progress{}
+	if len(events) > 0 {
+		final = events[len(events)-1]
+	}
+	mu.Unlock()
+	if final.Phase != PhaseError || !strings.Contains(final.Message, "отменена") {
+		t.Fatalf("terminal event = %+v, want PhaseError with cancellation message", final)
+	}
+
+	// Отменённый прогон не должен подменять живой набор staging'ом.
+	log, readErr := os.ReadFile(ipsetLog)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(log), "argv: swap") {
+		t.Fatalf("cancelled rebuild swapped staging into the live set:\n%s", log)
+	}
+
+	// После завершения прогона слот отмены очищен — снова no-op.
+	if b.CancelRun(nil) {
+		t.Fatal("CancelRun after the run finished must return false")
 	}
 }
 
