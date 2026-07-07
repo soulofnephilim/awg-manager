@@ -1997,12 +1997,27 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// течь в WAN, пока движок не вернётся. Снимается ниже, когда движок оживёт.
 	wantBlackhole := jumpsMissing && engineDown
 	if wantBlackhole {
+		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
 		bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
+		// Selective guard references the AWGM-SELECTIVE ipset; ensure it exists so
+		// iptables-restore of the blackhole doesn't fail with "Set ... doesn't
+		// exist" (same pre-create the real Install path does below).
+		if sr.SelectiveBypass {
+			if e := ensureSelectiveSetExists(ctx); e != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("pre-create ipset for blackhole: %v", e))
+			}
+		}
+		// Mirror the real interception spec's exclusions (bypass ports + selective
+		// guard) so the blackhole drops EXACTLY what would have been proxied — not
+		// the user's non-selective traffic and not their bypass ports.
 		blackholeSpec := RestoreInputSpec{
-			PolicyMark:  mark,
-			MatchAll:    !policyMode,
-			WANIPs:      wanIPs,
-			BypassCIDRs: bypassSubnets,
+			PolicyMark:     mark,
+			MatchAll:       !policyMode,
+			WANIPs:         wanIPs,
+			BypassCIDRs:    bypassSubnets,
+			BypassUDPPorts: bypassUDP,
+			BypassTCPPorts: bypassTCP,
+			SelectiveIPSet: sr.SelectiveBypass,
 		}
 		s.mu.Lock()
 		err := s.deps.IPTables.InstallBlackhole(ctx, blackholeSpec)
@@ -2091,20 +2106,23 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 		}
 	}
 
-	// Движок вернулся (или джампы целы) — реальный перехват снова главный,
-	// снимаем fail-closed blackhole. Делаем это ПОСЛЕ реального Install (выше),
-	// чтобы между снятием blackhole и восстановлением перехвата не было окна
-	// утечки. Идемпотентно: RemoveBlackhole безопасен и без активного blackhole.
-	if !wantBlackhole {
+	// Снимаем fail-closed blackhole ТОЛЬКО когда движок жив И probe успешен —
+	// тогда реальный перехват гарантированно на месте (steady state с целыми
+	// jumps, либо только что переустановлен выше; при ошибке Install был ранний
+	// return). Делаем ПОСЛЕ реального Install, чтобы не было окна утечки между
+	// снятием blackhole и восстановлением перехвата. Критично: на probe-ОШИБКЕ
+	// (jumpsMissing→false из-за !nil err) или мёртвом движке blackhole СОХРАНЯЕМ,
+	// иначе транзиентная -S ошибка во время NDMS-reload снесла бы DROP при живой
+	// утечке и удалила бы rules-файл, обездвижив и netfilter.d-хук. Идемпотентно.
+	if !engineDown && probeErr == nil {
 		s.mu.Lock()
-		active := s.blackholeActive
-		s.mu.Unlock()
-		if active {
+		if s.blackholeActive {
 			s.deps.IPTables.RemoveBlackhole(ctx)
-			s.mu.Lock()
 			s.blackholeActive = false
 			s.mu.Unlock()
 			s.appLog.Info("reconcile", "", "движок восстановлен — fail-closed blackhole снят")
+		} else {
+			s.mu.Unlock()
 		}
 	}
 

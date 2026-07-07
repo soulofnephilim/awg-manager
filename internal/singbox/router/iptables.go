@@ -453,6 +453,26 @@ func buildBlackholeRestoreInput(spec RestoreInputSpec) string {
 	fmt.Fprintf(&b, ":%s - [0:0]\n", BlackholeChain)
 	// User bypass first — an explicitly excluded subnet must never be dropped.
 	emitUserBypassReturns(&b, BlackholeChain, spec.BypassCIDRs)
+	// User bypass ports (BOTH protocols): traffic the user deliberately keeps off
+	// the proxy (STUN/VoIP/WireGuard/games) must go direct, not be dropped. The
+	// blackhole matches every protocol (connmark on the jump, no -p filter), so it
+	// must honour the TCP ports too — even though real TCP interception lives in
+	// the nat chain, the fail-closed DROP here is the one place TCP policy traffic
+	// is dropped while the engine is down.
+	for _, pr := range spec.BypassUDPPorts {
+		fmt.Fprintf(&b, "-A %s -p udp --dport %s -j RETURN\n", BlackholeChain, pr.String())
+	}
+	for _, pr := range spec.BypassTCPPorts {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport %s -j RETURN\n", BlackholeChain, pr.String())
+	}
+	// Selective mode: only destinations in AWGM-SELECTIVE are proxied; everything
+	// else is SUPPOSED to go direct to WAN. Mirror the interception guard so the
+	// blackhole drops ONLY the selective subset — without it a dead engine would
+	// blackhole the user's entire (mostly non-selective) traffic, taking policy
+	// devices fully offline, which is worse than the fail-open it replaces.
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n", BlackholeChain, selectiveSetName)
+	}
 	// LAN/loopback/CGNAT/multicast + router-owned WAN IPs: reused verbatim from
 	// the interception chain so the exclusion set cannot drift and the blackhole
 	// can never over-block router-local, LAN-to-LAN, or management traffic.

@@ -222,6 +222,30 @@ func TestReconcileInstalled_DeadEngineInstallsBlackhole(t *testing.T) {
 	}
 }
 
+// Regression (ревью lifecycle): probe-ОШИБКА при мёртвом движке НЕ должна
+// снимать blackhole. Иначе транзиентная -S ошибка во время NDMS-reload (ровно
+// когда blackhole и нужен) снесла бы DROP при живой утечке. blackhole сохраняем.
+func TestReconcileInstalled_ProbeErrorPreservesBlackhole(t *testing.T) {
+	sb := newTestSingbox(t)                                                   // dead
+	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
+	svc := newReconcileInstalledService(t, sb)
+	svc.blackholeActive = true // прошлый тик поставил blackhole
+	removed := false
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) {
+		return "", errors.New("iptables -S failed (NDMS reload)")
+	}
+	ipt.cleanupBlackhole = func() { removed = true }
+	svc.deps.IPTables = ipt
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if removed || !svc.blackholeActive {
+		t.Errorf("probe error + dead engine must PRESERVE blackhole: removed=%v active=%v", removed, svc.blackholeActive)
+	}
+}
+
 // Движок вернулся (jumps present, IsRunning=true) → ранее поставленный
 // fail-closed blackhole снимается: cleanupBlackhole вызван, флаг сброшен.
 func TestReconcileInstalled_EngineRecoveryRemovesBlackhole(t *testing.T) {
