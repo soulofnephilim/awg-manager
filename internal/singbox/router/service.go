@@ -401,6 +401,12 @@ type ServiceImpl struct {
 	// After Install succeeds the flag is set to true until Disable resets it.
 	netfilterStateKnown bool
 
+	// blackholeActive tracks whether the fail-closed DROP chain is currently
+	// engaged (installed by reconcileInstalled while sing-box is dead and the
+	// PREROUTING interception jumps were wiped). It is removed the moment the
+	// engine recovers. Guarded by s.mu, like the other current* install state.
+	blackholeActive bool
+
 	// selective tracking
 	currentSelectiveBypass bool // last-applied value of SelectiveBypass
 
@@ -1724,6 +1730,9 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	s.currentSelectiveBypass = false
 	s.currentQoSClasses = nil
 	s.netfilterStateKnown = false
+	// Uninstall already tore down the fail-closed blackhole (if any); clear the
+	// tracking flag so a later reconcile doesn't try to remove it again.
+	s.blackholeActive = false
 
 	if s.deps.Orch != nil {
 		// Move 20-router.json under disabled/ — sing-box's non-recursive
@@ -1979,14 +1988,34 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// during an NDMS reload must not trigger a needless rebuild.
 	_, jumps, probeErr := s.deps.IPTables.Probe(ctx)
 	jumpsMissing := probeErr == nil && !jumps
-	if jumpsMissing && engineDown {
-		// Не восстанавливаем перехват в мёртвый порт (FIX-B): движок не
-		// работает (рестарт подавлен или не удался), и вернуть PREROUTING-
-		// джампы значило бы направить трафик политик (включая hijacked
-		// DNS:53) в никуда на всю паузу backoff'а. Существующие правила НЕ
-		// трогаем — fail-closed остаётся, VPN не должен fail-open'иться;
-		// просто не долечиваем отсутствующие jump'ы на этом тике.
-		s.appLog.Warn("reconcile", "", "PREROUTING jumps missing, но движок не работает — пропускаем восстановление перехвата на этот тик")
+	// wantBlackhole: движок мёртв И PREROUTING-джампы снесены (NDMS перестроил
+	// firewall). Раньше здесь перехват просто не восстанавливался в мёртвый порт
+	// (FIX-B), НО при снесённых джампах это означало fail-OPEN: policy-трафик
+	// уходил в обычный роутинг Keenetic → в WAN мимо proxy/AWG. Теперь ставим
+	// явный fail-closed blackhole — DROP policy-трафика (с теми же RETURN-
+	// исключениями LAN/router/WAN, что и у перехвата), чтобы гарантированно НЕ
+	// течь в WAN, пока движок не вернётся. Снимается ниже, когда движок оживёт.
+	wantBlackhole := jumpsMissing && engineDown
+	if wantBlackhole {
+		bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
+		blackholeSpec := RestoreInputSpec{
+			PolicyMark:  mark,
+			MatchAll:    !policyMode,
+			WANIPs:      wanIPs,
+			BypassCIDRs: bypassSubnets,
+		}
+		s.mu.Lock()
+		err := s.deps.IPTables.InstallBlackhole(ctx, blackholeSpec)
+		if err == nil {
+			s.blackholeActive = true
+		}
+		s.mu.Unlock()
+		if err != nil {
+			s.appLog.Warn("reconcile", "", "не удалось поставить fail-closed blackhole: "+err.Error())
+		} else {
+			s.appLog.Warn("reconcile", "", "движок не работает, PREROUTING jumps снесены — включён fail-closed blackhole (policy-трафик дропается, не течёт в WAN)")
+		}
+		// Реальный перехват в мёртвый порт всё равно не восстанавливаем.
 		jumpsMissing = false
 	}
 	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged || qosChanged
@@ -2059,6 +2088,23 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 			if _, err := s.stripLegacySelectiveRulesFromRouter(ctx); err != nil {
 				s.appLog.Warn("selective", "", fmt.Sprintf("strip legacy selective rules: %v", err))
 			}
+		}
+	}
+
+	// Движок вернулся (или джампы целы) — реальный перехват снова главный,
+	// снимаем fail-closed blackhole. Делаем это ПОСЛЕ реального Install (выше),
+	// чтобы между снятием blackhole и восстановлением перехвата не было окна
+	// утечки. Идемпотентно: RemoveBlackhole безопасен и без активного blackhole.
+	if !wantBlackhole {
+		s.mu.Lock()
+		active := s.blackholeActive
+		s.mu.Unlock()
+		if active {
+			s.deps.IPTables.RemoveBlackhole(ctx)
+			s.mu.Lock()
+			s.blackholeActive = false
+			s.mu.Unlock()
+			s.appLog.Info("reconcile", "", "движок восстановлен — fail-closed blackhole снят")
 		}
 	}
 
