@@ -2948,6 +2948,40 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.SignatureGenerateData:
+    properties:
+      byteSize:
+        example: 344
+        type: integer
+      ok:
+        example: true
+        type: boolean
+      packets:
+        $ref: '#/definitions/api.SignaturePacketsDTO'
+      protocol:
+        example: quic_initial
+        type: string
+      source:
+        example: generated
+        type: string
+    type: object
+  api.SignatureGenerateRequest:
+    properties:
+      mtu:
+        example: 1280
+        type: integer
+      protocol:
+        example: quic_initial
+        type: string
+    type: object
+  api.SignatureGenerateResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SignatureGenerateData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.SignaturePacketsDTO:
     properties:
       i1:
@@ -9955,6 +9989,37 @@ paths:
       security:
       - CookieAuth: []
       summary: Signature capture
+      tags:
+      - signature
+  /signature/generate:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Protocol and optional MTU
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.SignatureGenerateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SignatureGenerateResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Signature generate
       tags:
       - signature
   /singbox/awg-outbounds/tags:
