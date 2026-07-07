@@ -130,12 +130,6 @@ type SingboxController interface {
 	// (stderr FATAL line or exit tail). Empty after a clean start.
 	// Surfaced via Status.LastError so the UI explains «СБОЙ».
 	LastError() string
-	// AutoRestartIfCrashed restarts a dead sing-box through the shared
-	// crash-loop backoff (issue #456). Respects the sticky manual-stop
-	// intent (all-false return). ONLY for automatic reconcile paths —
-	// user actions go through the ungated Control API. Callers still do
-	// their own mode-aware readiness wait after restarted=true.
-	AutoRestartIfCrashed(ctx context.Context) (restarted, suppressed bool, err error)
 	// CrashStats returns crash observability for Status (issue #456):
 	// crashes within the recent window, the reason of the newest one,
 	// and until when auto-restart is suppressed (zero = not suppressed).
@@ -1832,37 +1826,19 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	if err != nil {
 		return err
 	}
-	// Мёртвый sing-box при живых iptables (issue #456): цепочки и
-	// PREROUTING-джампы целы, но процесс упал (OOM и т.п.) — перехваченный
-	// трафик уходит в никуда, а этот reconcile раньше лечил только iptables.
-	// Зеркалим fakeip-ветку (fakeip_reconcile.go): перезапуск через общий
-	// backoff-гейт — ручной Stop и анти-crash-loop пауза уважаются внутри
-	// AutoRestartIfCrashed (подавление логируется там один раз на смену
-	// состояния, не каждый 30s-тик).
-	// engineDown: движок не работает и восстановить его на этом тике не
-	// вышло (рестарт подавлен backoff'ом / ручным Stop, либо сам старт
-	// упал). Ниже это гасит восстановление PREROUTING-джампов (FIX-B):
-	// лечить перехват в мёртвый порт нельзя.
+	// Единственный рестарт-авторитет sing-box — watchdog (Operator.Reconcile,
+	// свой независимый 30s-тик). Router-reconcile больше НЕ рестартит движок
+	// сам: раньше это был второй независимый авторитет (#456), и вся
+	// токен-машинерия backoff'а существовала только чтобы примирить гонку двух
+	// рестартёров. Здесь лишь фиксируем факт смерти движка: engineDown ниже
+	// (а) включит fail-closed blackhole вместо перехвата в мёртвый порт,
+	// (б) погасит heal PREROUTING-джампов. Движок поднимет watchdog своим тиком;
+	// следующий reconcile-тик при живом движке восстановит перехват и снимет
+	// blackhole. Fail-closed держится blackhole'ом всё время, пока движок мёртв.
 	engineDown := false
 	if s.deps.Singbox != nil {
 		if running, _ := s.deps.Singbox.IsRunning(); !running {
-			restarted, _, rerr := s.deps.Singbox.AutoRestartIfCrashed(ctx)
-			switch {
-			case rerr != nil:
-				s.appLog.Warn("reconcile", "", "restart dead sing-box: "+rerr.Error())
-			case restarted:
-				// Дожидаемся inbound-сокетов, чтобы дальнейшие шаги (re-Install
-				// iptables) не направили трафик на порты, которые ещё не слушаются.
-				// Мягкий дедлайн: на таймауте продолжаем, как QoS-heal ниже.
-				if alive, _ := s.deps.Singbox.IsRunning(); alive {
-					if e := s.waitForSingbox(ctx, bootWaitWithFloor()); e != nil {
-						s.appLog.Warn("reconcile", "", "sing-box not ready after restart: "+e.Error())
-					}
-				}
-			}
-			if alive, _ := s.deps.Singbox.IsRunning(); !alive {
-				engineDown = true
-			}
+			engineDown = true
 		}
 	}
 	if sr.SelectiveBypass {
