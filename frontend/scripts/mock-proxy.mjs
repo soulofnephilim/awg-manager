@@ -2821,6 +2821,9 @@ const mockSingboxRules = [
 	{ ip_is_private: true, outbound: 'direct' },
 	{ action: 'route', domain_suffix: ['youtube.com', 'ytimg.com'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-openai'], outbound: 'sub-demo0001' },
+	// Composite «Все AI сервисы» (#450): added + used → its catalog tile is
+	// «добавлено», and member presets (anthropic/gemini/...) get the Layers mark.
+	{ action: 'route', rule_set: ['geosite-category-ai-!cn'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['inline-neo-demo'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-google'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-discord'], outbound: 'manual-eu' },
@@ -2837,6 +2840,13 @@ const mockSingboxRules = [
 
 const mockSingboxRuleSets = [
 	{ tag: 'geosite-cn', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-cn.srs', update_interval: '24h', download_detour: 'direct' },
+	// #450 catalog badges: composite tag from internal/presets/defaults.json
+	// («Все AI сервисы») — added + referenced by a rule above → members get
+	// the «в Все AI сервисы» member mark in the rule-set catalog.
+	{ tag: 'geosite-category-ai-!cn', type: 'remote', format: 'binary', url: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ai-!cn.srs', update_interval: '24h', download_detour: 'direct' },
+	// #450: added but NOT referenced by any route/DNS rule → the Telegram
+	// catalog tile renders the «добавлено, без правил» state.
+	{ tag: 'geosite-telegram', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-telegram.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-youtube', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-youtube.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-openai', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-openai.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-discord', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-discord.srs', update_interval: '24h', download_detour: 'direct' },

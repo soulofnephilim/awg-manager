@@ -1,6 +1,9 @@
 import { api } from '$lib/api/client';
 import type { CatalogPreset, SingboxRouterRuleSet } from '$lib/types';
-import { singboxRouterCatalogPresetFilter } from '$lib/utils/catalog-preset';
+import {
+  isPresetFullyAdded,
+  singboxRouterCatalogPresetFilter,
+} from '$lib/utils/catalog-preset';
 
 export interface ApplyRuleSetsFromCatalogResult {
   added: string[];
@@ -16,10 +19,7 @@ export function fullyAddedPresetNames(
 ): string[] {
   return catalog
     .filter((p) => singboxRouterCatalogPresetFilter(p))
-    .filter((p) => {
-      const refs = p.engines.singbox?.ruleSets ?? [];
-      return refs.length > 0 && refs.every((rs) => existingTags.has(rs.tag));
-    })
+    .filter((p) => isPresetFullyAdded(p, existingTags))
     .map((p) => p.name);
 }
 

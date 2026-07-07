@@ -42,6 +42,7 @@
 	import { datInfo, resolveRuleSetDisplayType } from '$lib/utils/ruleSetType';
 	import { displayRuleSetTag } from '$lib/utils/singboxInlineRules';
 	import { computeRuleSetUsageRefs } from './ruleSetUsageRefs';
+	import { computeRuleSetUsage } from '$lib/components/routing/singboxRouter';
 	import type { SingboxRouterRuleSet, CatalogPreset } from '$lib/types';
 
 	// ── Store sub-stores ───────────────────────────────────────────────────
@@ -86,6 +87,12 @@
 
 	// ── «используется в» (DNS #n · Route #m), 1-based по правилам ─────────
 	const usageRefs = $derived(computeRuleSetUsageRefs($storeDnsRules, $storeRules));
+
+	// Каталог: суммарные счётчики (DNS + route) для различения «добавлено» /
+	// «добавлено, без правил» на задизейбленных плитках.
+	const ruleSetUsageForCatalog = $derived(
+		computeRuleSetUsage([...$storeDnsRules, ...$storeRules]),
+	);
 
 	// ── Колонки-хелперы ──────────────────────────────────────────────────
 	// «тип»: бейдж remote/local/inline/dat + dim-сабкласс binary/source для dat.
@@ -312,6 +319,7 @@
 <SbRouterRuleSetCatalogModal
 	open={rsCatalogOpen}
 	existingRuleSetTags={$storeRuleSets.map((rs) => rs.tag)}
+	ruleSetUsage={ruleSetUsageForCatalog}
 	submitting={rsCatalogBusy}
 	onclose={() => {
 		if (!rsCatalogBusy) rsCatalogOpen = false;
