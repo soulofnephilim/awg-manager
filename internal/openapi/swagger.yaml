@@ -872,6 +872,12 @@ definitions:
       defaultTag:
         example: proxy-01
         type: string
+      degradedOutbound:
+        example: vpn
+        type: string
+      fallbackTag:
+        example: awg-awg10
+        type: string
     type: object
   api.DiagnosticsStatusData:
     properties:

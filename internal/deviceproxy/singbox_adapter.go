@@ -157,6 +157,21 @@ func (a *SingboxAdapter) ApplyDeviceProxyInstances(ctx context.Context, specs []
 	return a.op.ApplyConfig(ctx, cfg)
 }
 
+// AvailableOutboundTags returns the outbound tags declared by ENABLED
+// orchestrator slots other than the device-proxy slot itself — exactly
+// the set pruneDanglingSelectorRefsLocked treats as valid selector
+// members before every reload. Service.buildSpec uses it to keep
+// generated selectors free of dangling refs when a source slot is
+// parked (router engine off → 20-router.json composites gone, issue
+// #465). Returns nil when the orchestrator is not wired (legacy /
+// tests) — nil means "unknown", the caller keeps legacy behaviour.
+func (a *SingboxAdapter) AvailableOutboundTags() map[string]bool {
+	if a.orch == nil {
+		return nil
+	}
+	return a.orch.EnabledOutboundTags(orchestrator.SlotDeviceProxy)
+}
+
 // GetSelectorActive returns the currently-active member of the named
 // selector. Thin pass-through — see singbox.Operator for the contract.
 func (a *SingboxAdapter) GetSelectorActive(ctx context.Context, selectorTag string) (string, error) {

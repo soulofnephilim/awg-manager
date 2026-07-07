@@ -92,11 +92,16 @@ type fakeSingboxOperator struct {
 	lastSpecNR          *ExternalSpec // ApplyDeviceProxyNoReload call
 	lastSelector        string
 	lastMember          string
-	runtimeActive       string // what GetSelectorActive returns
+	runtimeActive       string                 // what GetSelectorActive returns
 	lastInstanceSpecs   []ExternalInstanceSpec // last ApplyDeviceProxyInstances call payload
 	applyInstancesCalls int                    // number of ApplyDeviceProxyInstances invocations
 	applyInstancesErr   error                  // error to return from ApplyDeviceProxyInstances (nil = succeed)
+	availableTags       map[string]bool        // enabled-slot outbound tags; nil = "unknown" (legacy)
 }
+
+// AvailableOutboundTags satisfies availableOutboundTagsProvider — the fake
+// mirrors the production SingboxAdapter: nil means the oracle is unknown.
+func (f *fakeSingboxOperator) AvailableOutboundTags() map[string]bool { return f.availableTags }
 
 func (f *fakeSingboxOperator) ApplyDeviceProxy(_ context.Context, spec ExternalSpec) error {
 	f.lastSpec = &spec
@@ -110,7 +115,7 @@ func (f *fakeSingboxOperator) TunnelTags() []string { return f.tags }
 func (f *fakeSingboxOperator) TunnelOutbounds() []TunnelOutboundInfo {
 	return f.tunnelInfos
 }
-func (f *fakeSingboxOperator) IsRunning() bool      { return f.running }
+func (f *fakeSingboxOperator) IsRunning() bool { return f.running }
 func (f *fakeSingboxOperator) SetSelectorDefault(_ context.Context, selector, member string) error {
 	f.lastSelector, f.lastMember = selector, member
 	return nil

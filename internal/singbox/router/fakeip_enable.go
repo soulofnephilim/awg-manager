@@ -274,11 +274,17 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 			if e := s.deps.Orch.SetEnabled(orchestrator.SlotRouter, prevRouterEnabled); e != nil {
 				s.appLog.Warn("fakeip-rollback", iface, "restore router slot: "+e.Error())
 			}
+			// Rollback вернул прежнюю разметку слотов — device-proxy должен
+			// перегенерировать слот 30 под неё до следующего reload.
+			s.notifyRoutingSlotsChanged()
 		}
 	})
 	if err = s.persistFakeIPConfig(ctx, fcfg); err != nil {
 		return fmt.Errorf("enable fakeip-tun: persist fakeip config: %w", err)
 	}
+	// Slot XOR выше поменял видимость композитов (20 припаркован, 21 активен) —
+	// зависимый слот 30 device-proxy перегенерируется ДО reload ниже (issue #465).
+	s.notifyRoutingSlotsChanged()
 	if err = s.orchestratorApplyNow(); err != nil {
 		return fmt.Errorf("enable fakeip-tun: orchestrator reload: %w", err)
 	}

@@ -906,6 +906,14 @@ export interface DeviceProxyRuntime {
 	alive: boolean;
 	activeTag: string;
 	defaultTag: string;
+	/**
+	 * Выбранный outbound (== defaultTag) сейчас отсутствует в merged-конфиге
+	 * (слот-источник выключен — например, движок маршрутизации). Пусто или
+	 * undefined — деградации нет (issue #465).
+	 */
+	degradedOutbound?: string;
+	/** Через какой тег фактически идёт трафик, пока деградация активна. */
+	fallbackTag?: string;
 }
 
 // #endregion
