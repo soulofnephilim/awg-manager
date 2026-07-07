@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"regexp"
 
@@ -29,7 +32,7 @@ type SignatureCaptureData struct {
 
 // SignatureCaptureResponse is the envelope for GET /signature/capture.
 type SignatureCaptureResponse struct {
-	Success bool                `json:"success" example:"true"`
+	Success bool                 `json:"success" example:"true"`
 	Data    SignatureCaptureData `json:"data"`
 }
 
@@ -79,4 +82,93 @@ func (h *SignatureHandler) Capture(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.Success(w, result)
+}
+
+// ── Generate (POST /signature/generate) ──────────────────────────────────────
+
+// maxGenerateBodyBytes caps the request body — the payload is a tiny JSON object.
+const maxGenerateBodyBytes = 4 << 10
+
+// SignatureGenerateRequest is the POST /signature/generate body.
+type SignatureGenerateRequest struct {
+	Protocol string `json:"protocol" example:"quic_initial"`
+	MTU      int    `json:"mtu,omitempty" example:"1280"`
+}
+
+// SignatureGenerateData is the data field of SignatureGenerateResponse. It
+// mirrors SignatureCaptureData with source="generated" plus the echoed protocol
+// and the summed I1–I5 byte size.
+type SignatureGenerateData struct {
+	OK       bool                `json:"ok" example:"true"`
+	Source   string              `json:"source" example:"generated"`
+	Protocol string              `json:"protocol" example:"quic_initial"`
+	ByteSize int                 `json:"byteSize" example:"344"`
+	Packets  SignaturePacketsDTO `json:"packets"`
+}
+
+// SignatureGenerateResponse is the envelope for POST /signature/generate.
+type SignatureGenerateResponse struct {
+	Success bool                  `json:"success" example:"true"`
+	Data    SignatureGenerateData `json:"data"`
+}
+
+// Generate produces I1–I5 CPS signature packets for a protocol, server-side.
+// It is the API counterpart of the GUI's "Протокол → Сгенерировать" button.
+//
+//	@Summary		Signature generate
+//	@Tags			signature
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			request	body	SignatureGenerateRequest	true	"Protocol and optional MTU"
+//	@Success		200	{object}	SignatureGenerateResponse
+//	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		422	{object}	APIErrorEnvelope
+//	@Router			/signature/generate [post]
+func (h *SignatureHandler) Generate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+
+	var req SignatureGenerateRequest
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxGenerateBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil && err != io.EOF {
+		response.Error(w, "Некорректное тело запроса", "INVALID_BODY")
+		return
+	}
+
+	if req.Protocol == "" {
+		response.Error(w, "Укажите протокол", "MISSING_PROTOCOL")
+		return
+	}
+
+	packets, size, err := signature.Generate(req.Protocol, req.MTU)
+	if err != nil {
+		switch {
+		case errors.Is(err, signature.ErrUnknownProtocol):
+			response.Error(w, "Неизвестный протокол", "UNKNOWN_PROTOCOL")
+		case errors.Is(err, signature.ErrPacketsTooLarge):
+			response.ErrorWithStatus(w, http.StatusUnprocessableEntity,
+				"Не удалось уложить пакеты в лимит размера", "PACKETS_TOO_LARGE")
+		default:
+			response.InternalError(w, "Ошибка генерации сигнатурных пакетов")
+		}
+		return
+	}
+
+	response.Success(w, SignatureGenerateData{
+		OK:       true,
+		Source:   "generated",
+		Protocol: signature.CanonicalProtocol(req.Protocol),
+		ByteSize: size,
+		Packets: SignaturePacketsDTO{
+			I1: packets.I1,
+			I2: packets.I2,
+			I3: packets.I3,
+			I4: packets.I4,
+			I5: packets.I5,
+		},
+	})
 }

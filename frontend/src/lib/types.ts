@@ -201,6 +201,20 @@ export interface SignatureCaptureResult {
 	warning?: string;
 }
 
+export interface SignatureGenerateResult {
+	ok: boolean;
+	source: string;
+	protocol: string;
+	byteSize: number;
+	packets: {
+		i1: string;
+		i2: string;
+		i3: string;
+		i4: string;
+		i5: string;
+	};
+}
+
 // #endregion
 
 // ─────────────────────────────────────────────

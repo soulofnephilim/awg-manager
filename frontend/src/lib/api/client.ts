@@ -25,6 +25,7 @@ import type {
 	DiagEvent,
 	DnsRoute,
 	SignatureCaptureResult,
+	SignatureGenerateResult,
 	StaticRouteList,
 	ResolveResult,
 	WireguardServerConfig,
@@ -1366,6 +1367,13 @@ class ApiClient {
 
 	async captureSignature(domain: string): Promise<SignatureCaptureResult> {
 		return this.request(`/signature/capture?domain=${encodeURIComponent(domain)}`);
+	}
+
+	async generateSignature(protocol: string, mtu?: number): Promise<SignatureGenerateResult> {
+		return this.request('/signature/generate', {
+			method: 'POST',
+			body: JSON.stringify(mtu ? { protocol, mtu } : { protocol }),
+		});
 	}
 
 	// #endregion
