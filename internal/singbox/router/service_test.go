@@ -136,6 +136,19 @@ type fakeSingbox struct {
 	restartSuppressedUntil time.Time
 }
 
+// newReadyTestSingbox returns a fakeSingbox that reads as ALIVE and — via the
+// singboxListeningProbe seam — as bound/ready. That is the state a config-change
+// reinstall requires now that reconcileInstalled gates the iptables install on
+// singboxReady (inbound sockets bound), not bare IsRunning (safety-3). Dead and
+// up-but-unbound cases set their own isRunningFn / probe stub instead.
+func newReadyTestSingbox(t *testing.T) *fakeSingbox {
+	t.Helper()
+	stubListeningProbe(t, func() bool { return true })
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	return sb
+}
+
 func (f *fakeSingbox) Reload() error { return nil }
 func (f *fakeSingbox) IsRunning() (bool, int) {
 	if f.isRunningFn != nil {
@@ -440,7 +453,7 @@ func TestReconcile_PolicyMarkChanged_Reinstalls(t *testing.T) {
 			Policies:       &fakeAccessPolicyProvider{mark: "0xffffaab"},
 			IPTables:       ipt,
 			WANIPCollector: collector,
-			Singbox:        newTestSingbox(t),
+			Singbox:        newReadyTestSingbox(t),
 			// Tests call prepareNetfilter via reconcileInstalled when
 			// needsInstall is true — override to avoid real syscalls.
 			NetfilterPreflight: func(context.Context) error { return nil },
@@ -581,6 +594,9 @@ func TestReconcileInstalled_SelectiveSelfHealWhenFinalNotDirect(t *testing.T) {
 	svc.deps.WANIPCollector = &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}}
 	svc.deps.NetfilterPreflight = func(context.Context) error { return nil }
 	svc.currentSelectiveBypass = true
+	// Ready engine so reconcile's iptables install (which updates
+	// currentSelectiveBypass) runs — it now gates on singboxReady (safety-3).
+	svc.deps.Singbox = newReadyTestSingbox(t)
 
 	// The incompatible config must be APPLIED (not a pending draft): the
 	// self-heal judges only what is actually running.
@@ -816,7 +832,7 @@ func TestReconcile_WANIPsChanged_Reinstalls(t *testing.T) {
 			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:           ipt,
 			WANIPCollector:     collector,
-			Singbox:            newTestSingbox(t),
+			Singbox:            newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error { return nil },
 		},
 		currentMark:   "0xffffaaa",
@@ -1005,7 +1021,7 @@ func TestReconcile_DeviceModeChanged_ReinstallsImmediately(t *testing.T) {
 					Policies:           policies,
 					IPTables:           newStubIPTables(func(_ context.Context, input string) error { restoreInput = input; restoreCalls++; return nil }),
 					WANIPCollector:     &fakeWANIPCollector{},
-					Singbox:            newTestSingbox(t),
+					Singbox:            newReadyTestSingbox(t),
 					NetfilterPreflight: func(context.Context) error { return nil },
 				},
 				currentMark:         tc.currentMark,
@@ -1112,7 +1128,7 @@ func TestReconcile_StateUnknown_ForcesInitialReinstall(t *testing.T) {
 			Policies:       &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:       ipt,
 			WANIPCollector: collector,
-			Singbox:        newTestSingbox(t),
+			Singbox:        newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error {
 				preflightCalls++
 				return nil
@@ -1919,7 +1935,7 @@ func TestReconcile_BypassPresetsChanged_Reinstalls(t *testing.T) {
 			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:           ipt,
 			WANIPCollector:     collector,
-			Singbox:            newTestSingbox(t),
+			Singbox:            newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error { return nil },
 		},
 		currentMark:          "0xffffaaa",
@@ -2061,7 +2077,7 @@ func TestReconcile_IngressChangeTriggersInstall(t *testing.T) {
 			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:           ipt,
 			WANIPCollector:     collector,
-			Singbox:            newTestSingbox(t),
+			Singbox:            newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error { return nil },
 			IngressResolver:    resolver,
 		},

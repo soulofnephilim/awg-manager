@@ -1835,12 +1835,18 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// (б) погасит heal PREROUTING-джампов. Движок поднимет watchdog своим тиком;
 	// следующий reconcile-тик при живом движке восстановит перехват и снимет
 	// blackhole. Fail-closed держится blackhole'ом всё время, пока движок мёртв.
-	engineDown := false
+	//
+	// «Готов» = process + оба inbound-сокета ПРИВЯЗАНЫ (singboxReady, hard-gate
+	// #221), а не просто IsRunning. Процесс может быть жив, но inbound не
+	// привязался (порт занят, отклонённый hot-reload) — тогда установка iptables
+	// REDIRECT/TPROXY в непривязанный сокет заблэкхолила бы весь policy-трафик,
+	// включая DNS:53. Поэтому up-but-unbound трактуем как engineDown: ставим
+	// fail-closed blackhole и НЕ ставим реальный перехват, пока сокеты не встанут.
+	engineReady := true
 	if s.deps.Singbox != nil {
-		if running, _ := s.deps.Singbox.IsRunning(); !running {
-			engineDown = true
-		}
+		engineReady = s.singboxReady(ctx, false)
 	}
+	engineDown := !engineReady
 	if sr.SelectiveBypass {
 		if err := s.validateSelectiveBypassAgainstApplied(sr); err != nil {
 			if errors.Is(err, errSelectiveIncompatible) {
@@ -2010,6 +2016,17 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 		jumpsMissing = false
 	}
 	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged || qosChanged
+
+	// Движок не готов интерсептить (мёртв или inbound-сокеты не привязаны) —
+	// НЕ ставим iptables ни по какому триггеру (#221): REDIRECT/TPROXY в
+	// непривязанный сокет заблэкхолил бы весь policy-трафик, включая DNS:53.
+	// Fail-closed уже держит blackhole (при снесённых джампах) или перехват в
+	// мёртвый порт (при целых). Установку откладываем до готовности — следующий
+	// reconcile-тик поставит iptables, когда сокеты встанут.
+	if needsInstall && engineDown {
+		s.appLog.Warn("reconcile", "", "движок не готов (inbound-сокеты не привязаны) — откладываем установку iptables до готовности")
+		needsInstall = false
+	}
 
 	if needsInstall {
 		if forceInitialSync {
