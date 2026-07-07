@@ -201,6 +201,31 @@ func TestReconcileInstalled_LiveButUnboundInstallsBlackhole(t *testing.T) {
 	}
 }
 
+// safety-3 (покрытие): движок up-but-unbound, но PREROUTING-джампы ЦЕЛЫ →
+// установку iptables откладываем (любой триггер, здесь markChanged), blackhole
+// НЕ ставим — перехват в мёртвый порт сам дропает трафик (fail-closed).
+func TestReconcileInstalled_LiveButUnboundJumpsIntactDefers(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	restores := 0
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { restores++; return nil })
+	// runIPTablesOut по умолчанию = jumpsPresentDump → джампы целы.
+	svc := newReconcileInstalledService(t, sb)
+	svc.deps.IPTables = ipt
+	svc.currentMark = "0xstale" // форсируем markChanged → needsInstall
+	stubListeningProbe(t, func() bool { return false })
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if restores != 0 {
+		t.Errorf("установка должна быть отложена (unbound, джампы целы): restore calls = %d, want 0", restores)
+	}
+	if svc.blackholeActive {
+		t.Error("blackhole не нужен при целых джампах — перехват в мёртвый порт держит fail-closed")
+	}
+}
+
 // Regression (ревью lifecycle): probe-ОШИБКА при мёртвом движке НЕ должна
 // снимать blackhole. Иначе транзиентная -S ошибка во время NDMS-reload (ровно
 // когда blackhole и нужен) снесла бы DROP при живой утечке. blackhole сохраняем.
