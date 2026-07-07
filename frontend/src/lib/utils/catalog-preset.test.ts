@@ -20,6 +20,7 @@ import {
 	resolvePresetManualDomains,
 	singboxRouterCatalogPresetFilter,
 	splitPresetDnsEntries,
+	addedCompositesByMember,
 } from './catalog-preset';
 
 const base = {
@@ -273,6 +274,16 @@ describe('findAddedCompositeForMember (#450)', () => {
 		const tags = new Set(['geosite-category-ai-!cn', 'geosite-solo']);
 		expect(findAddedCompositeForMember('openai-x', catalog, tags)).toBeUndefined();
 		expect(findAddedCompositeForMember('anthropic', [noCovers], tags)).toBeUndefined();
+	});
+
+	it('first-wins is deterministic over the passed catalog order', () => {
+		// Два ДОБАВЛЕННЫХ композита покрывают одного участника: побеждает первый
+		// в переданном (отсортированном вызывающими) порядке каталога.
+		const compA = sbPreset('comp-a', 'А-композит', ['geosite-comp-a'], ['member-x']);
+		const compB = sbPreset('comp-b', 'Б-композит', ['geosite-comp-b'], ['member-x']);
+		const tags = new Set(['geosite-comp-a', 'geosite-comp-b']);
+		expect(addedCompositesByMember([compA, compB], tags).get('member-x')?.id).toBe('comp-a');
+		expect(addedCompositesByMember([compB, compA], tags).get('member-x')?.id).toBe('comp-b');
 	});
 
 	it('never reports a composite as covering itself', () => {

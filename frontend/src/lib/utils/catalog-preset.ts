@@ -202,8 +202,9 @@ export function isPresetFullyAdded(p: CatalogPreset, existingRuleSetTags: Set<st
 	return refs.length > 0 && refs.every((rs) => existingRuleSetTags.has(rs.tag));
 }
 
-/** member preset id → first composite (catalog order) whose covers include it AND
- *  whose own singbox rule sets are already fully present in config. */
+/** member preset id → первый подходящий композит в порядке ПЕРЕДАННОГО каталога
+ *  (вызывающие передают отсортированный по имени список — first-wins детерминирован),
+ *  чьи covers включают участника И чьи собственные singbox rule-set'ы уже в конфиге. */
 export function addedCompositesByMember(
 	catalog: CatalogPreset[],
 	existingRuleSetTags: Set<string>,

@@ -616,7 +616,7 @@
         position: absolute;
         top: 6px;
         right: 6px;
-        max-width: calc(100% - 32px);
+        max-width: calc(100% - 44px);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
