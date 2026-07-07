@@ -10,6 +10,14 @@
     setServiceTemplateSelection,
   } from './templatesStore';
 
+  interface Props {
+    /** rule-set tags already in config: member-of-added-composite mark (#450)
+     *  + non-disabling «набор уже есть» reuse badge (wizard reuses existing sets). */
+    existingRuleSetTags?: string[];
+  }
+
+  let { existingRuleSetTags = [] }: Props = $props();
+
   const initialSelectedIds = $derived(catalogIdsFromTemplatesSelection($templatesSelection));
 
   function handleConfirm(presets: CatalogPreset[]) {
@@ -30,6 +38,7 @@
   multiple
   warnLargeDnsLists={false}
   markExisting={false}
+  {existingRuleSetTags}
   {initialSelectedIds}
   onclose={handleClose}
   onconfirm={handleConfirm}

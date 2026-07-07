@@ -5,16 +5,22 @@
     import { buildRoutingTunnelDropdownOptions } from '$lib/utils/routingTunnelOptions';
     import { pluralize, SERVICE_WORDS } from '$lib/utils/pluralize';
     import {
+        addedCompositesByMember,
         applyPresetToggle,
+        catalogCardMarker,
         catalogPresetCardNotice,
         dnsRouteCatalogPresetFilter,
         findCoveringPreset,
+        isPresetFullyAdded,
+        memberOfAddedCompositeTitle,
         normalizeCatalogSelection,
+        presetAddedBadge,
         presetDnsLargeListRisk,
+        presetSetReuseBadge,
     } from '$lib/utils/catalog-preset';
     import type { RoutingTunnel, CatalogPreset } from '$lib/types';
     import DownloadRouteNote from '$lib/components/downloads/DownloadRouteNote.svelte';
-    import { Search } from 'lucide-svelte';
+    import { Layers, Search } from 'lucide-svelte';
 
     type FooterMode = 'none' | 'tunnel';
 
@@ -26,6 +32,13 @@
         /** Dim/disable tiles already present in the list (NDMS). */
         markExisting?: boolean;
         existingNames?: string[];
+        /** sing-box: rule-set tags already in config. Powers the non-disabling
+         *  «уже входит в добавленный композитный список» mark on member presets (#450)
+         *  and, when not disabled via markExisting, the «набор уже есть» reuse badge. */
+        existingRuleSetTags?: string[];
+        /** sing-box: rule_set tag → number of referencing rules; differentiates
+         *  «добавлено» vs «добавлено, без правил» on disabled tiles. */
+        ruleSetUsage?: Map<string, number>;
         footer?: FooterMode;
         tunnels?: RoutingTunnel[];
         isOS5?: boolean;
@@ -55,6 +68,8 @@
         presetFilter = dnsRouteCatalogPresetFilter,
         markExisting = false,
         existingNames = [],
+        existingRuleSetTags = [],
+        ruleSetUsage = undefined,
         footer = 'none',
         tunnels = [],
         isOS5 = false,
@@ -103,6 +118,12 @@
 
     const sortedPresets = $derived(
         [...catalogPresets].sort((a, b) => a.name.localeCompare(b.name, 'ru')),
+    );
+
+    // Memoized once per catalog/tags change (not per card): tag set + member → added composite.
+    const existingTagsSet = $derived(new Set(existingRuleSetTags));
+    const addedCompositeByMember = $derived(
+        addedCompositesByMember(sortedPresets, existingTagsSet),
     );
 
     function matchesQuery(p: CatalogPreset, q: string): boolean {
@@ -275,6 +296,23 @@
                         {@const isSelected = selected.has(preset.id)}
                         {@const largeDnsWarn = noticeIsLargeList(preset)}
                         {@const cardNotice = noticeText(preset)}
+                        {@const memberComposite = addedCompositeByMember.get(preset.id)}
+                        {@const marker = catalogCardMarker({
+                            added,
+                            coveredBySelection: !!coveredBy,
+                            ownSetAdded: isPresetFullyAdded(preset, existingTagsSet),
+                            memberOfAddedComposite: !!memberComposite,
+                        })}
+                        {@const addedBadge =
+                            marker === 'added' ? presetAddedBadge(preset, ruleSetUsage) : undefined}
+                        {@const reuseBadge =
+                            marker === 'own-set-added' ? presetSetReuseBadge() : undefined}
+                        {@const memberTitle =
+                            marker === 'member-of-added' && memberComposite
+                                ? memberOfAddedCompositeTitle(memberComposite.name)
+                                : undefined}
+                        {@const stateTooltip =
+                            addedBadge?.tooltip ?? reuseBadge?.tooltip ?? memberTitle}
                         <button
                             type="button"
                             class="preset-card"
@@ -283,7 +321,8 @@
                             class:covered={!!coveredBy}
                             title={coveredBy
                                 ? `Уже включено в «${coveredBy.name}»`
-                                : cardNotice || undefined}
+                                : [cardNotice, stateTooltip].filter(Boolean).join('\n\n') ||
+                                  undefined}
                             onclick={() => {
                                 if (!added && !coveredBy) toggle(preset.id);
                             }}
@@ -291,19 +330,38 @@
                         >
                             {#if isSelected}
                                 <span class="preset-check">&#10003;</span>
-                            {:else if added}
-                                <span class="preset-badge">добавлено</span>
+                            {:else if addedBadge}
+                                <span class="preset-badge" title={addedBadge.tooltip}
+                                    >{addedBadge.text}</span>
                             {:else if coveredBy}
                                 <span class="preset-badge">в {coveredBy.name}</span>
+                            {:else if reuseBadge}
+                                <span class="preset-badge preset-badge-help" title={reuseBadge.tooltip}
+                                    >{reuseBadge.text}</span>
+                            {:else if memberTitle && memberComposite}
+                                <span class="preset-badge preset-badge-help" title={memberTitle}
+                                    >в {memberComposite.name}</span>
                             {/if}
-                            {#if largeDnsWarn}
-                                <span
-                                    class="preset-notice-mark preset-notice-mark-danger"
-                                    aria-label="большой DNS-список"
-                                >⚠</span>
-                            {:else if preset.notice}
-                                <span class="preset-notice-mark" aria-label="примечание">⚠</span>
-                            {/if}
+                            <span class="corner-left">
+                                {#if largeDnsWarn}
+                                    <span
+                                        class="preset-notice-mark preset-notice-mark-danger"
+                                        aria-label="большой DNS-список"
+                                    >⚠</span>
+                                {:else if preset.notice}
+                                    <span class="preset-notice-mark" aria-label="примечание">⚠</span>
+                                {/if}
+                                {#if memberTitle}
+                                    <span
+                                        class="preset-member-mark"
+                                        role="img"
+                                        aria-label="уже входит в добавленный композитный список"
+                                        title={memberTitle}
+                                    >
+                                        <Layers size={12} aria-hidden="true" />
+                                    </span>
+                                {/if}
+                            </span>
                             <ServiceIcon name={preset.name} iconSlug={preset.iconSlug} size={40} />
                             <span class="preset-name">{preset.name}</span>
                         </button>
@@ -558,14 +616,29 @@
         position: absolute;
         top: 6px;
         right: 6px;
+        max-width: calc(100% - 32px);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         font-size: 0.5625rem;
         color: var(--color-text-muted);
     }
 
-    .preset-notice-mark {
+    .preset-badge-help {
+        cursor: help;
+    }
+
+    /* Top-left marks stack horizontally when notice ⚠ and member mark coexist. */
+    .corner-left {
         position: absolute;
         top: 6px;
         left: 6px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .preset-notice-mark {
         font-size: 0.875rem;
         color: var(--warning, #f59e0b);
         cursor: help;
@@ -574,6 +647,14 @@
 
     .preset-notice-mark-danger {
         color: var(--color-error, #ef4444);
+    }
+
+    .preset-member-mark {
+        display: inline-flex;
+        align-items: center;
+        color: var(--color-accent);
+        cursor: help;
+        line-height: 1;
     }
 
     .preset-name {

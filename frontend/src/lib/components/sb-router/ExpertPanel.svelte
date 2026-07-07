@@ -334,6 +334,11 @@
       ? new Map<string, number>()
       : computeRuleSetUsage($storeRules, ruleEditIdx)
   );
+  // Catalog «добавлено»-tile differentiation: a set counts as used when ANY rule —
+  // route or DNS — references it (route-only usage would mislabel DNS-only sets).
+  const ruleSetUsageForCatalog = $derived(
+    computeRuleSetUsage([...$storeRules, ...$storeDnsRules])
+  );
   // ruleSetUsage for DNSRuleEditModal: exclude currently edited index
   const ruleSetUsageForDnsAdd = $derived(computeRuleSetUsage($storeDnsRules));
   const ruleSetUsageForDnsEdit = $derived(
@@ -827,6 +832,7 @@
 <SbRouterRuleSetCatalogModal
   open={rsCatalogOpen}
   existingRuleSetTags={$storeRuleSets.map((rs) => rs.tag)}
+  ruleSetUsage={ruleSetUsageForCatalog}
   submitting={rsCatalogBusy}
   onclose={() => {
     if (!rsCatalogBusy) rsCatalogOpen = false;
