@@ -268,6 +268,12 @@ func (a *deviceproxyRouterOutboundsAdapter) ListDeviceProxyRouterOutbounds() []d
 			Tag:    o.Tag,
 			Label:  o.Tag,
 			Detail: detail,
+			// Определение композита нужно device-proxy для graceful-
+			// деградации: когда слот 20 припаркован (движок выключен),
+			// селектор слота 30 подставляет default-член композита
+			// вместо висячей ссылки на его тег (issue #465).
+			DefaultMember: o.Default,
+			Members:       append([]string(nil), o.Outbounds...),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -1168,14 +1174,13 @@ func main() {
 		}
 		return ports
 	})
-	deviceProxyUnsub := deviceProxySvc.SubscribeBus(context.Background())
-	defer deviceProxyUnsub()
-
-	// Initial reconcile on boot — idempotent, brings config.json in sync
-	// with storage + current tunnel set.
-	if err := deviceProxySvc.Reconcile(context.Background()); err != nil {
-		bootLog.Warn("deviceproxy-reconcile", "", err.Error())
-	}
+	// NB: и подписка на шину (SubscribeBus), и начальный boot-Reconcile
+	// device-proxy выполняются НИЖЕ, после SetRouterOutbounds — Reconcile
+	// выключает инстансы с отсутствующими в каталоге outbound'ами, и без
+	// каталога роутера он на каждой загрузке стирал бы выбор router-композита
+	// (vpn/vpn2) у инстансов (issue #465). Ранняя подписка оставляла бы окно:
+	// событие tunnels/subscriptions в нём триггерило бы Reconcile с nil-каталогом
+	// роутера → та же потеря композитов.
 	sharedDownloadSvc := downloader.NewSettingsBackedService(
 		deviceProxySvc,
 		singboxOp,
@@ -1270,6 +1275,18 @@ func main() {
 			p.CachePath = singbox.DefaultCacheDBPath()
 			return p
 		}(),
+		// Синхронный мост «роутер → device-proxy»: после перепарковки слотов
+		// маршрутизации (Enable/Disable/смена режима) слот 30 перегенерируется
+		// ДО ближайшего reload — селекторы device-proxy деградируют ссылки на
+		// недоступные композиты до их default-членов (и восстанавливают их при
+		// включении), вместо того чтобы prune оркестратора молча вырезал
+		// vpn/vpn2 и sing-box увёл трафик в произвольный член (issue #465).
+		OnRoutingSlotsChanged: func() {
+			if err := deviceProxySvc.ApplyInstances(context.Background()); err != nil {
+				logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubDeviceProxy).
+					Warn("router-slots-changed", "", "re-apply device-proxy instances: "+err.Error())
+			}
+		},
 	})
 	// Wire selective-bypass builder. The adapter wraps selective.Builder with the
 	// router service's live config so reconcileInstalled can trigger an ipset
@@ -1330,6 +1347,21 @@ func main() {
 	tunnelService.SetRouterRefChecker(routerSvc)
 	singboxHandler.SetOutboundRefCheckers(deviceProxySvc, routerSvc)
 	deviceProxySvc.SetRouterOutbounds(&deviceproxyRouterOutboundsAdapter{src: routerSvc})
+	// Initial reconcile on boot — idempotent, brings config.json in sync
+	// with storage + current tunnel set. Runs strictly AFTER
+	// SetRouterOutbounds (см. комментарий у SubscribeBus выше): каталог
+	// роутера должен быть виден, иначе Reconcile считает router-композиты
+	// удалёнными и выключает ссылающиеся на них инстансы.
+	if err := deviceProxySvc.Reconcile(context.Background()); err != nil {
+		bootLog.Warn("deviceproxy-reconcile", "", err.Error())
+	}
+	// Подписка на шину — строго ПОСЛЕ SetRouterOutbounds + boot-Reconcile:
+	// ранняя подписка запускала бы Reconcile по событию ещё без каталога
+	// роутера (см. NB выше). События, опубликованные до этой строки, терять
+	// безопасно: это инвалидации состояния (не рёбра), потребители перечитывают
+	// его целиком, а boot-Reconcile строкой выше уже учёл текущее состояние.
+	deviceProxyUnsub := deviceProxySvc.SubscribeBus(context.Background())
+	defer deviceProxyUnsub()
 	routerStartupLog := logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSingboxRouter)
 	go func() {
 		// Startup-only: reap a fakeip OpkgTun orphaned by a crash/incomplete

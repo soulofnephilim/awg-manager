@@ -61,10 +61,15 @@ type ProxyConfigResponse struct {
 }
 
 // DeviceProxyRuntimeData mirrors frontend DeviceProxyRuntime.
+// degradedOutbound/fallbackTag: выбранный outbound (== defaultTag) сейчас
+// отсутствует в merged-конфиге (слот-источник выключен), трафик фактически
+// идёт через fallbackTag. Оба поля пустые, когда деградации нет (issue #465).
 type DeviceProxyRuntimeData struct {
-	Alive      bool   `json:"alive" example:"true"`
-	ActiveTag  string `json:"activeTag" example:"proxy-01"`
-	DefaultTag string `json:"defaultTag" example:"proxy-01"`
+	Alive            bool   `json:"alive" example:"true"`
+	ActiveTag        string `json:"activeTag" example:"proxy-01"`
+	DefaultTag       string `json:"defaultTag" example:"proxy-01"`
+	DegradedOutbound string `json:"degradedOutbound,omitempty" example:"vpn"`
+	FallbackTag      string `json:"fallbackTag,omitempty" example:"awg-awg10"`
 }
 
 // ProxyRuntimeResponse is the envelope for GET /proxy/runtime.

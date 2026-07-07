@@ -300,6 +300,15 @@ type Deps struct {
 	// kernel-имена на сборке спека. Optional — nil → managed:-ref'ы
 	// пропускаются (iface:-ref'ы резолвятся без него).
 	IngressResolver IngressResolver
+	// OnRoutingSlotsChanged, если задан, вызывается СИНХРОННО сразу после
+	// того как Enable / Disable / переключение режима перепарковали слоты
+	// маршрутизации (20-router.json / 21-fakeip.json), но ДО ближайшего
+	// reload sing-box. Production-обвязка (main.go) дергает здесь
+	// device-proxy ApplyInstances: слот 30 перегенерируется с учётом
+	// новой доступности router-композитов, и коалесцированный reload
+	// видит уже корректный файл — prune оркестратора не вырезает ссылки
+	// на vpn/vpn2 молча (issue #465). Optional — nil пропускается.
+	OnRoutingSlotsChanged func()
 	// NetfilterPreflight is an optional override for the module-load /
 	// target-availability check that Enable and reconcileInstalled both
 	// call before every Install. When nil, prepareNetfilter runs the
@@ -605,6 +614,15 @@ func (s *ServiceImpl) persistConfigDirect(ctx context.Context, cfg *RouterConfig
 		return err
 	}
 	return nil
+}
+
+// notifyRoutingSlotsChanged invokes the OnRoutingSlotsChanged hook (see
+// Deps). Must be called AFTER the slot toggle it reports and BEFORE the
+// reload that would otherwise prune the dependents' now-dangling refs.
+func (s *ServiceImpl) notifyRoutingSlotsChanged() {
+	if s.deps.OnRoutingSlotsChanged != nil {
+		s.deps.OnRoutingSlotsChanged()
+	}
 }
 
 // orchestratorApplyNow flushes any debounced reload and applies config.d to
@@ -1145,6 +1163,9 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	if _, err := s.syncQoSRoutesSlot(ctx, qosClasses); err != nil {
 		return fmt.Errorf("sync qos routes slot: %w", err)
 	}
+	// Слот 20 снова активен — зависимые продюсеры (device-proxy) должны
+	// перегенерировать свои слоты (вернуть ссылки на композиты) ДО reload.
+	s.notifyRoutingSlotsChanged()
 	if err := s.orchestratorApplyNow(); err != nil {
 		return fmt.Errorf("orchestrator reload after enable: %w", err)
 	}
@@ -1251,6 +1272,9 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 			// The QoS overlay references qos-* inbounds that just got
 			// parked with the router slot — park it too.
 			_ = s.disableQoSRoutesSlot()
+			// Слот 20 снова выключен — device-proxy должен деградировать
+			// ссылки на композиты до дефолт-членов до ближайшего reload.
+			s.notifyRoutingSlotsChanged()
 		} else {
 			cfg.Inbounds = filterTProxyInbound(cfg.Inbounds)
 			_ = s.persistConfigDirect(ctx, cfg)
@@ -1706,6 +1730,12 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 		if err := s.disableQoSRoutesSlot(); err != nil {
 			s.appLog.Warn("orch-disable", "qos-routes", err.Error())
 		}
+		// Композиты из 20-router.json только что пропали из merged-конфига.
+		// Синхронно даём device-proxy перегенерировать слот 30 (деградация
+		// до default-члена композита) — SetEnabled выше взвёл 250ms debounce,
+		// и один коалесцированный reload увидит уже корректный файл вместо
+		// того, чтобы prune молча вырезал vpn/vpn2 из селекторов (issue #465).
+		s.notifyRoutingSlotsChanged()
 	} else {
 		// Legacy fallback: strip the tproxy inbound in place so
 		// the running sing-box stops accepting on the TPROXY port
