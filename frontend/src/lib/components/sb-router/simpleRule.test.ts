@@ -3,6 +3,7 @@ import {
   classifyRuleSimplicity,
   COMPLEX_RULE_EDIT_MESSAGE,
   isCustomInlineRuleSetTag,
+  isSystemRule,
   singleRuleSetTagFromTemplateId,
   templateIdForExternalRuleSetTag,
 } from './simpleRule';
@@ -23,6 +24,28 @@ const ruleSets: SingboxRouterRuleSet[] = [
   { tag: 'geosite-discord', type: 'remote', url: 'https://example.com/discord.srs' },
   { tag: 'geoip-ru', type: 'local', path: '/data/geoip-ru.srs' },
 ];
+
+describe('isSystemRule', () => {
+  it('recognizes the system route-options UDP-timeout rule', () => {
+    expect(isSystemRule({ action: 'route-options', network: 'udp', udp_timeout: '1h' })).toBe(true);
+  });
+  it('recognizes sniff / hijack-dns / private-bypass', () => {
+    expect(isSystemRule({ action: 'sniff' })).toBe(true);
+    expect(isSystemRule({ action: 'hijack-dns', protocol: 'dns' })).toBe(true);
+    expect(isSystemRule({ ip_is_private: true, outbound: 'direct' })).toBe(true);
+  });
+  it('does not treat a plain user route-options-less rule as system', () => {
+    expect(isSystemRule({ domain_suffix: ['x.com'], outbound: 'proxy' })).toBe(false);
+    // route-options without the udp network scope is not the system rule
+    expect(isSystemRule({ action: 'route-options', network: 'tcp' })).toBe(false);
+  });
+  // A route-options system rule must fall out of the simple editor (expert-only).
+  it('classifies the system route-options rule as complex', () => {
+    expect(classifyRuleSimplicity({ action: 'route-options', network: 'udp', udp_timeout: '1h' })).toEqual({
+      simple: false,
+    });
+  });
+});
 
 describe('classifyRuleSimplicity — простые', () => {
   it('inline-text: domain_suffix', () => {

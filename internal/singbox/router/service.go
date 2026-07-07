@@ -1118,6 +1118,12 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, sr.UDPTimeout)
 	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds)
 	cfg.EnsureSystemRules(sr.SnifferEnabled)
+	// Neutralize sing-box's short per-protocol UDP timeouts (QUIC/DTLS 30s,
+	// STUN/DNS 10s) applied on sniff/port inference — they ignore the inbound
+	// udp_timeout and drop games/VoIP early. Raise them to the effective inbound
+	// value via a route-options rule. Placed after the system prefix, before user
+	// rules, so it runs ahead of any final `route` action.
+	cfg.EnsureUDPTimeoutRule(resolveUDPTimeout(sr.UDPTimeout))
 	// QoS-by-DSCP (issue #371): per-class inbound pairs, derived from the
 	// same settings snapshot the iptables spec below uses so ports/classes
 	// cannot drift between the two. The managed route rules live in their

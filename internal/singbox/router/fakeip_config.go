@@ -193,6 +193,7 @@ func (s *ServiceImpl) ensureFakeIPOverlayFromState(cfg *RouterConfig) error {
 		CachePath:  p.CachePath,
 		RealServer: p.RealServer,
 		Stack:      settings.SingboxRouter.FakeIPStack,
+		UDPTimeout: settings.SingboxRouter.UDPTimeout,
 	}
 	ensureFakeIPOverlay(cfg, spec)
 	return nil

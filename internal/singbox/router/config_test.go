@@ -159,12 +159,12 @@ func TestStripAutoManagedDirect(t *testing.T) {
 		// Proxy kernel ifaces (t2sN) are NEVER stripped: the bindable picker
 		// only ever offers KeenOS-native (non-ours) proxies, so any direct→t2s
 		// here is a user choice to keep (#323). No runtime lookup at strip time.
-		{Type: "direct", Tag: "native-socks", BindInterface: "t2s0"},  // proxy — keep
-		{Type: "direct", Tag: "direct"},                              // no bind_interface — keep
-		{Type: "selector", Tag: "comp", Outbounds: []string{"awg-x"}}, // composite — keep
+		{Type: "direct", Tag: "native-socks", BindInterface: "t2s0"},    // proxy — keep
+		{Type: "direct", Tag: "direct"},                                 // no bind_interface — keep
+		{Type: "selector", Tag: "comp", Outbounds: []string{"awg-x"}},   // composite — keep
 		{Type: "direct", Tag: "managed-awg", BindInterface: "opkgtun0"}, // managed AWG — strip
-		{Type: "direct", Tag: "nwg", BindInterface: "nwg0"},           // NativeWG — strip
-		{Type: "direct", Tag: "ipsec-vpn", BindInterface: "ipsec0"},  // user VPN — keep
+		{Type: "direct", Tag: "nwg", BindInterface: "nwg0"},             // NativeWG — strip
+		{Type: "direct", Tag: "ipsec-vpn", BindInterface: "ipsec0"},     // user VPN — keep
 	}
 	got := stripAutoManagedDirect(in)
 	tags := map[string]bool{}
@@ -450,7 +450,7 @@ func TestInbound_TunFieldsMarshal(t *testing.T) {
 	in := Inbound{
 		Type: "tun", Tag: "tun-in", InterfaceName: "opkgtun10",
 		Address: []string{"172.18.0.1/30", "fdfe:dcba:9876::1/126"},
-		MTU: 1500, Stack: "gvisor",
+		MTU:     1500, Stack: "gvisor",
 	}
 	b, _ := json.Marshal(in)
 	s := string(b)

@@ -841,7 +841,62 @@ func isProxyIface(name string) bool {
 func (r Rule) hasAnyMatcher() bool {
 	return len(r.DomainSuffix) > 0 || len(r.IPCIDR) > 0 || len(r.SourceIPCIDR) > 0 ||
 		len(r.Port) > 0 || len(r.RuleSet) > 0 || r.Protocol != "" || len(r.Rules) > 0 ||
-		r.IPIsPrivate != nil || len(r.Inbound) > 0
+		r.IPIsPrivate != nil || len(r.Inbound) > 0 || r.Network != ""
+}
+
+// isSystemUDPTimeoutRule reports whether r is the system route-options rule that
+// raises the UDP idle timeout (Action "route-options" scoped to Network "udp").
+func isSystemUDPTimeoutRule(r Rule) bool {
+	return r.Action == "route-options" && r.Network == "udp"
+}
+
+// systemPrefixLen counts the leading system rules (sniff / hijack-dns /
+// ip_is_private→direct bypass) that EnsureSystemRules keeps ahead of any
+// user routing rule. It marks the boundary where a non-final system rule
+// (the udp_timeout route-options rule) can be inserted so it still runs
+// before a user's final `route` action stops evaluation.
+func (c *RouterConfig) systemPrefixLen() int {
+	n := 0
+	for _, r := range c.Route.Rules {
+		isSniff := r.Action == "sniff" && !r.hasAnyMatcher()
+		isHijack := r.Action == "hijack-dns" &&
+			(r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or"))
+		isPrivate := r.IPIsPrivate != nil && *r.IPIsPrivate && r.Outbound == "direct"
+		if isSniff || isHijack || isPrivate {
+			n++
+			continue
+		}
+		break
+	}
+	return n
+}
+
+// EnsureUDPTimeoutRule keeps exactly one system route-options rule that raises
+// the UDP idle timeout to `effective`, inserted within the system prefix (before
+// any user routing rule). sing-box applies short per-protocol UDP idle timeouts
+// on sniff/port inference — STUN/DNS 10s, QUIC/DTLS 30s — that ignore the inbound
+// udp_timeout, so games/VoIP sessions drop early; a route-options rule raising
+// the timeout to the inbound value neutralizes them. Idempotent: any prior copy
+// is stripped first so a changed timeout takes effect and re-runs never stack.
+func (c *RouterConfig) EnsureUDPTimeoutRule(effective string) {
+	filtered := c.Route.Rules[:0]
+	for _, r := range c.Route.Rules {
+		if isSystemUDPTimeoutRule(r) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	c.Route.Rules = filtered
+	if effective == "" {
+		return
+	}
+	pos := c.systemPrefixLen()
+	rule := Rule{Action: "route-options", Network: "udp", UDPTimeout: effective}
+	newRules := make([]Rule, 0, len(c.Route.Rules)+1)
+	newRules = append(newRules, c.Route.Rules[:pos]...)
+	newRules = append(newRules, rule)
+	newRules = append(newRules, c.Route.Rules[pos:]...)
+	c.Route.Rules = newRules
 }
 
 // validateCIDROrAddr accepts a value that is either a CIDR prefix or a bare IP
