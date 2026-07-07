@@ -1544,9 +1544,14 @@ export interface SingboxRouterRule {
 	// Optional — sing-box defaults to `route` when omitted. The system
 	// ip_is_private rule omits action because that's how SKeen's
 	// reference config writes it and the backend's `omitempty` mirrors
-	// the same shape.
-	action?: 'route' | 'reject' | 'sniff' | 'hijack-dns';
+	// the same shape. `route-options` is the system UDP-timeout rule.
+	action?: 'route' | 'reject' | 'sniff' | 'hijack-dns' | 'route-options';
 	outbound?: string;
+	// L4 matcher ("tcp" | "udp"). The system route-options rule scopes its
+	// udp_timeout override to "udp".
+	network?: string;
+	// `udp_timeout` route option carried by the system `route-options` rule.
+	udp_timeout?: string;
 	rules?: SingboxRouterRule[];
 }
 

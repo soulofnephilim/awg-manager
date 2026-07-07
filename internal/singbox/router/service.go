@@ -1118,6 +1118,12 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, sr.UDPTimeout)
 	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds)
 	cfg.EnsureSystemRules(sr.SnifferEnabled)
+	// Neutralize sing-box's short per-protocol UDP timeouts (QUIC/DTLS 30s,
+	// STUN/DNS 10s) applied on sniff/port inference — they ignore the inbound
+	// udp_timeout and drop games/VoIP early. Raise them to the effective inbound
+	// value via a route-options rule. Placed after the system prefix, before user
+	// rules, so it runs ahead of any final `route` action.
+	cfg.EnsureUDPTimeoutRule(resolveUDPTimeout(sr.UDPTimeout))
 	// QoS-by-DSCP (issue #371): per-class inbound pairs, derived from the
 	// same settings snapshot the iptables spec below uses so ports/classes
 	// cannot drift between the two. The managed route rules live in their
@@ -1360,11 +1366,13 @@ func (s *ServiceImpl) healTProxyInbound(ctx context.Context, udpTimeout string) 
 // "::" for the same reason.
 const inboundListen = "0.0.0.0"
 
-// DefaultUDPTimeout is the fallback UDP session timeout for tproxy-in when
-// the user has not configured a custom value. 3 minutes matches the original
-// sing-box default, but may cause games and other UDP applications that go
-// quiet for longer than 3 minutes to drop their session unexpectedly.
-const DefaultUDPTimeout = "3m0s"
+// DefaultUDPTimeout is the fallback UDP session timeout when the user has not
+// configured a custom value. It matches sing-box's built-in C.UDPTimeout (5m):
+// fakeip's tun-in previously carried no udp_timeout and thus ran at the engine's
+// 5m, so defaulting to 5m here keeps unconfigured sessions no shorter than
+// before while still letting the user raise it. Shorter values dropped games /
+// VoIP that go quiet mid-session.
+const DefaultUDPTimeout = "5m0s"
 
 // resolveUDPTimeout returns the effective UDP timeout string: the user value
 // when non-empty, otherwise DefaultUDPTimeout.

@@ -225,6 +225,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		CachePath:  p.CachePath,
 		RealServer: p.RealServer,
 		Stack:      sr.FakeIPStack,
+		UDPTimeout: sr.UDPTimeout,
 	}
 	ensureFakeIPOverlay(fcfg, spec)
 

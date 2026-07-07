@@ -277,26 +277,21 @@ func (c *RouterConfig) EnsureSystemRules(snifferEnabled bool) {
 	// clients.
 	hijackIdx := -1
 	for i, r := range c.Route.Rules {
-		if r.Action == "sniff" && !r.hasAnyMatcher() {
+		if isSystemSniffRule(r) {
 			hasSniff = true
 		}
-		// Detect both the legacy (`protocol:dns`) and current
-		// (`logical(or){protocol:dns, port:53}`) system hijack-dns
-		// forms so re-running EnsureSystemRules doesn't stack
-		// duplicates on configs migrated from older versions.
-		if r.Action == "hijack-dns" {
-			if r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or") {
-				hasHijack = true
-				if hijackIdx == -1 {
-					hijackIdx = i
-				}
+		// isSystemHijackRule detects both the legacy (`protocol:dns`) and
+		// current (`logical(or){protocol:dns, port:53}`) forms so re-running
+		// EnsureSystemRules doesn't stack duplicates on migrated configs.
+		if isSystemHijackRule(r) {
+			hasHijack = true
+			if hijackIdx == -1 {
+				hijackIdx = i
 			}
 		}
-		// Any user-authored ip_is_private rule wins over the system
-		// one — we just have to not duplicate. Outbound is intentionally
-		// not checked: a user might point private destinations at a
-		// specific direct-LAN outbound and we should respect that.
-		if r.IPIsPrivate != nil && *r.IPIsPrivate {
+		// Any user-authored ip_is_private rule wins over the system one — we
+		// just have to not duplicate (isSystemPrivateRule ignores outbound).
+		if isSystemPrivateRule(r) {
 			hasPrivateBypass = true
 		}
 	}
@@ -304,7 +299,7 @@ func (c *RouterConfig) EnsureSystemRules(snifferEnabled bool) {
 	if !snifferEnabled && hasSniff {
 		filtered := c.Route.Rules[:0]
 		for _, r := range c.Route.Rules {
-			if r.Action == "sniff" && !r.hasAnyMatcher() {
+			if isSystemSniffRule(r) {
 				continue
 			}
 			filtered = append(filtered, r)
@@ -314,11 +309,9 @@ func (c *RouterConfig) EnsureSystemRules(snifferEnabled bool) {
 		if hijackIdx >= 0 {
 			hijackIdx = -1
 			for i, r := range c.Route.Rules {
-				if r.Action == "hijack-dns" {
-					if r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or") {
-						hijackIdx = i
-						break
-					}
+				if isSystemHijackRule(r) {
+					hijackIdx = i
+					break
 				}
 			}
 		}
@@ -841,7 +834,81 @@ func isProxyIface(name string) bool {
 func (r Rule) hasAnyMatcher() bool {
 	return len(r.DomainSuffix) > 0 || len(r.IPCIDR) > 0 || len(r.SourceIPCIDR) > 0 ||
 		len(r.Port) > 0 || len(r.RuleSet) > 0 || r.Protocol != "" || len(r.Rules) > 0 ||
-		r.IPIsPrivate != nil || len(r.Inbound) > 0
+		r.IPIsPrivate != nil || len(r.Inbound) > 0 || r.Network != ""
+}
+
+// isSystemUDPTimeoutRule reports whether r is the system route-options rule that
+// raises the UDP idle timeout (Action "route-options" scoped to Network "udp").
+func isSystemUDPTimeoutRule(r Rule) bool {
+	return r.Action == "route-options" && r.Network == "udp"
+}
+
+// The three predicates below are the single definition of what counts as a
+// leading "system rule". EnsureSystemRules (detection) and systemPrefixLen
+// (insertion boundary for the route-options rule) both use them so the two can
+// never drift apart.
+
+func isSystemSniffRule(r Rule) bool {
+	return r.Action == "sniff" && !r.hasAnyMatcher()
+}
+
+// isSystemHijackRule matches both the legacy (`protocol:dns`) and current
+// (`logical(or){protocol:dns, port:53}`) system hijack-dns forms.
+func isSystemHijackRule(r Rule) bool {
+	return r.Action == "hijack-dns" &&
+		(r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or"))
+}
+
+// isSystemPrivateRule matches any ip_is_private bypass. Outbound is intentionally
+// NOT checked (mirrors EnsureSystemRules): a user may point private destinations
+// at a specific direct-LAN outbound and that rule is still part of the prefix.
+func isSystemPrivateRule(r Rule) bool {
+	return r.IPIsPrivate != nil && *r.IPIsPrivate
+}
+
+// systemPrefixLen counts the leading system rules (sniff / hijack-dns /
+// ip_is_private bypass) that EnsureSystemRules keeps ahead of any user routing
+// rule. It marks the boundary where a non-final system rule (the udp_timeout
+// route-options rule) can be inserted so it still runs before a user's final
+// `route` action stops evaluation.
+func (c *RouterConfig) systemPrefixLen() int {
+	n := 0
+	for _, r := range c.Route.Rules {
+		if isSystemSniffRule(r) || isSystemHijackRule(r) || isSystemPrivateRule(r) {
+			n++
+			continue
+		}
+		break
+	}
+	return n
+}
+
+// EnsureUDPTimeoutRule keeps exactly one system route-options rule that raises
+// the UDP idle timeout to `effective`, inserted within the system prefix (before
+// any user routing rule). sing-box applies short per-protocol UDP idle timeouts
+// on sniff/port inference — STUN/DNS 10s, QUIC/DTLS 30s — that ignore the inbound
+// udp_timeout, so games/VoIP sessions drop early; a route-options rule raising
+// the timeout to the inbound value neutralizes them. Idempotent: any prior copy
+// is stripped first so a changed timeout takes effect and re-runs never stack.
+func (c *RouterConfig) EnsureUDPTimeoutRule(effective string) {
+	filtered := c.Route.Rules[:0]
+	for _, r := range c.Route.Rules {
+		if isSystemUDPTimeoutRule(r) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	c.Route.Rules = filtered
+	if effective == "" {
+		return
+	}
+	pos := c.systemPrefixLen()
+	rule := Rule{Action: "route-options", Network: "udp", UDPTimeout: effective}
+	newRules := make([]Rule, 0, len(c.Route.Rules)+1)
+	newRules = append(newRules, c.Route.Rules[:pos]...)
+	newRules = append(newRules, rule)
+	newRules = append(newRules, c.Route.Rules[pos:]...)
+	c.Route.Rules = newRules
 }
 
 // validateCIDROrAddr accepts a value that is either a CIDR prefix or a bare IP
