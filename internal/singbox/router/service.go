@@ -1366,11 +1366,13 @@ func (s *ServiceImpl) healTProxyInbound(ctx context.Context, udpTimeout string) 
 // "::" for the same reason.
 const inboundListen = "0.0.0.0"
 
-// DefaultUDPTimeout is the fallback UDP session timeout for tproxy-in when
-// the user has not configured a custom value. 3 minutes matches the original
-// sing-box default, but may cause games and other UDP applications that go
-// quiet for longer than 3 minutes to drop their session unexpectedly.
-const DefaultUDPTimeout = "3m0s"
+// DefaultUDPTimeout is the fallback UDP session timeout when the user has not
+// configured a custom value. It matches sing-box's built-in C.UDPTimeout (5m):
+// fakeip's tun-in previously carried no udp_timeout and thus ran at the engine's
+// 5m, so defaulting to 5m here keeps unconfigured sessions no shorter than
+// before while still letting the user raise it. Shorter values dropped games /
+// VoIP that go quiet mid-session.
+const DefaultUDPTimeout = "5m0s"
 
 // resolveUDPTimeout returns the effective UDP timeout string: the user value
 // when non-empty, otherwise DefaultUDPTimeout.

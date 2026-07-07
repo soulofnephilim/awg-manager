@@ -277,26 +277,21 @@ func (c *RouterConfig) EnsureSystemRules(snifferEnabled bool) {
 	// clients.
 	hijackIdx := -1
 	for i, r := range c.Route.Rules {
-		if r.Action == "sniff" && !r.hasAnyMatcher() {
+		if isSystemSniffRule(r) {
 			hasSniff = true
 		}
-		// Detect both the legacy (`protocol:dns`) and current
-		// (`logical(or){protocol:dns, port:53}`) system hijack-dns
-		// forms so re-running EnsureSystemRules doesn't stack
-		// duplicates on configs migrated from older versions.
-		if r.Action == "hijack-dns" {
-			if r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or") {
-				hasHijack = true
-				if hijackIdx == -1 {
-					hijackIdx = i
-				}
+		// isSystemHijackRule detects both the legacy (`protocol:dns`) and
+		// current (`logical(or){protocol:dns, port:53}`) forms so re-running
+		// EnsureSystemRules doesn't stack duplicates on migrated configs.
+		if isSystemHijackRule(r) {
+			hasHijack = true
+			if hijackIdx == -1 {
+				hijackIdx = i
 			}
 		}
-		// Any user-authored ip_is_private rule wins over the system
-		// one — we just have to not duplicate. Outbound is intentionally
-		// not checked: a user might point private destinations at a
-		// specific direct-LAN outbound and we should respect that.
-		if r.IPIsPrivate != nil && *r.IPIsPrivate {
+		// Any user-authored ip_is_private rule wins over the system one — we
+		// just have to not duplicate (isSystemPrivateRule ignores outbound).
+		if isSystemPrivateRule(r) {
 			hasPrivateBypass = true
 		}
 	}
@@ -304,7 +299,7 @@ func (c *RouterConfig) EnsureSystemRules(snifferEnabled bool) {
 	if !snifferEnabled && hasSniff {
 		filtered := c.Route.Rules[:0]
 		for _, r := range c.Route.Rules {
-			if r.Action == "sniff" && !r.hasAnyMatcher() {
+			if isSystemSniffRule(r) {
 				continue
 			}
 			filtered = append(filtered, r)
@@ -314,11 +309,9 @@ func (c *RouterConfig) EnsureSystemRules(snifferEnabled bool) {
 		if hijackIdx >= 0 {
 			hijackIdx = -1
 			for i, r := range c.Route.Rules {
-				if r.Action == "hijack-dns" {
-					if r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or") {
-						hijackIdx = i
-						break
-					}
+				if isSystemHijackRule(r) {
+					hijackIdx = i
+					break
 				}
 			}
 		}
@@ -850,19 +843,38 @@ func isSystemUDPTimeoutRule(r Rule) bool {
 	return r.Action == "route-options" && r.Network == "udp"
 }
 
+// The three predicates below are the single definition of what counts as a
+// leading "system rule". EnsureSystemRules (detection) and systemPrefixLen
+// (insertion boundary for the route-options rule) both use them so the two can
+// never drift apart.
+
+func isSystemSniffRule(r Rule) bool {
+	return r.Action == "sniff" && !r.hasAnyMatcher()
+}
+
+// isSystemHijackRule matches both the legacy (`protocol:dns`) and current
+// (`logical(or){protocol:dns, port:53}`) system hijack-dns forms.
+func isSystemHijackRule(r Rule) bool {
+	return r.Action == "hijack-dns" &&
+		(r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or"))
+}
+
+// isSystemPrivateRule matches any ip_is_private bypass. Outbound is intentionally
+// NOT checked (mirrors EnsureSystemRules): a user may point private destinations
+// at a specific direct-LAN outbound and that rule is still part of the prefix.
+func isSystemPrivateRule(r Rule) bool {
+	return r.IPIsPrivate != nil && *r.IPIsPrivate
+}
+
 // systemPrefixLen counts the leading system rules (sniff / hijack-dns /
-// ip_is_private→direct bypass) that EnsureSystemRules keeps ahead of any
-// user routing rule. It marks the boundary where a non-final system rule
-// (the udp_timeout route-options rule) can be inserted so it still runs
-// before a user's final `route` action stops evaluation.
+// ip_is_private bypass) that EnsureSystemRules keeps ahead of any user routing
+// rule. It marks the boundary where a non-final system rule (the udp_timeout
+// route-options rule) can be inserted so it still runs before a user's final
+// `route` action stops evaluation.
 func (c *RouterConfig) systemPrefixLen() int {
 	n := 0
 	for _, r := range c.Route.Rules {
-		isSniff := r.Action == "sniff" && !r.hasAnyMatcher()
-		isHijack := r.Action == "hijack-dns" &&
-			(r.Protocol == "dns" || (r.Type == "logical" && r.Mode == "or"))
-		isPrivate := r.IPIsPrivate != nil && *r.IPIsPrivate && r.Outbound == "direct"
-		if isSniff || isHijack || isPrivate {
+		if isSystemSniffRule(r) || isSystemHijackRule(r) || isSystemPrivateRule(r) {
 			n++
 			continue
 		}

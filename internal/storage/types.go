@@ -153,10 +153,10 @@ type SingboxRouterSettings struct {
 	FakeIPPool6 string `json:"fakeipPool6,omitempty"`
 	// FakeIPMTU is the tun MTU (default 1500).
 	FakeIPMTU int `json:"fakeipMtu,omitempty"`
-	// UDPTimeout задаёт таймаут UDP-сессий в tproxy-in inbound (формат Go duration,
-	// например "3m0s", "10m0s"). Пустая строка = использовать значение по умолчанию
-	// (DefaultUDPTimeout). Увеличение помогает при работе игр и других UDP-приложений,
-	// которые могут молчать дольше стандартных 3 минут.
+	// UDPTimeout задаёт таймаут UDP-сессий в tproxy-in / fakeip tun-in inbound
+	// (формат Go duration, например "5m0s", "10m0s"). Пустая строка = значение по
+	// умолчанию (DefaultUDPTimeout, 5m). Увеличение помогает играм и другим
+	// UDP-приложениям, которые могут молчать дольше и терять сессию.
 	UDPTimeout string `json:"udpTimeout,omitempty"`
 	// SelectiveBypass, when true, installs an iptables -m set guard in front
 	// of the TPROXY/REDIRECT catch-all rules so only traffic whose destination
