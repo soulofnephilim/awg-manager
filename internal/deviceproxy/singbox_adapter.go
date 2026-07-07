@@ -158,9 +158,11 @@ func (a *SingboxAdapter) ApplyDeviceProxyInstances(ctx context.Context, specs []
 }
 
 // AvailableOutboundTags returns the outbound tags declared by ENABLED
-// orchestrator slots other than the device-proxy slot itself — exactly
-// the set pruneDanglingSelectorRefsLocked treats as valid selector
-// members before every reload. Service.buildSpec uses it to keep
+// orchestrator slots other than the device-proxy slot itself. NB: это
+// НЕ в точности множество pruneDanglingSelectorRefsLocked — prune строит
+// его без exclude (включая слот 30); здесь слот 30 исключён намеренно,
+// потому что его селекторы — потребители, а не кандидаты в члены.
+// Service.buildSpec uses it to keep
 // generated selectors free of dangling refs when a source slot is
 // parked (router engine off → 20-router.json composites gone, issue
 // #465). Returns nil when the orchestrator is not wired (legacy /

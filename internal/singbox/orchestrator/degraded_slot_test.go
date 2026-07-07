@@ -91,6 +91,42 @@ func TestPrune_DegradedDeviceProxySlot_IsNoOp(t *testing.T) {
 	}
 }
 
+// Вариант FIX-3 (#465): выбранный тег недоступен и НЕ является router-
+// композитом (например, subscription-selector при припаркованном слоте) —
+// генерация не эмитит "default" вовсе. Такой слот 30 тоже обязан пережить
+// prune байт-в-байт: нет default'а — нечего вычищать на каждом reload.
+func TestPrune_DegradedDeviceProxySlot_NoDefault_IsNoOp(t *testing.T) {
+	o, dir := setupDegradedOrch(t)
+	dpJSON := []byte(`{
+  "inbounds": [
+    {"type": "mixed", "tag": "device-proxy-office-in", "listen": "0.0.0.0", "listen_port": 1099}
+  ],
+  "outbounds": [
+    {"type": "selector", "tag": "device-proxy-office-selector", "outbounds": ["direct", "awg-awg10"]}
+  ],
+  "route": {"rules": [{"inbound": ["device-proxy-office-in"], "outbound": "device-proxy-office-selector"}]}
+}`)
+	dpPath := filepath.Join(dir, "30-deviceproxy.json")
+	if err := os.WriteFile(dpPath, dpJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	o.mu.Lock()
+	logs := o.pruneDanglingSelectorRefsLocked()
+	o.mu.Unlock()
+
+	got, err := os.ReadFile(dpPath)
+	if err != nil {
+		t.Fatalf("read after prune: %v", err)
+	}
+	if string(got) != string(dpJSON) {
+		t.Errorf("no-default deviceproxy slot mutated by prune:\nwant %s\ngot  %s\nlogs: %v", dpJSON, got, logs)
+	}
+	if len(logs) != 0 {
+		t.Errorf("prune must be a no-op on the no-default slot, logs: %v", logs)
+	}
+}
+
 // Контроль: НЕдеградированный слот 30 (ссылка на vpn при выключенном
 // роутере) prune по-прежнему чинит — вырезает члена и default. Это
 // защита переходного окна, а не основной путь после FIX #465.

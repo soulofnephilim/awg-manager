@@ -690,7 +690,7 @@ func TestService_BuildSpec_RouterOutboundsBecomeSelectorMembers(t *testing.T) {
 	s := NewService(Deps{Store: store, Singbox: sb, NDMSQuery: ndms})
 	s.SetRouterOutbounds(cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}

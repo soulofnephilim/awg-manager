@@ -80,6 +80,11 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		if s.deps.Orch != nil {
 			if e := s.deps.Orch.SetEnabled(orchestrator.SlotFakeIP, true); e != nil {
 				s.appLog.Warn("fakeip-reconcile", iface, "enable slot: "+e.Error())
+			} else {
+				// Слот вернулся в merged-конфиг — device-proxy должен
+				// восстановить композитные ссылки (ветка reprovision покрыта
+				// через enableLocked, эта — нет).
+				s.notifyRoutingSlotsChanged()
 			}
 		}
 		// Спавн через общий backoff-гейт (#456) вместо прямого Start():

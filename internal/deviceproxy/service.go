@@ -151,6 +151,13 @@ type Service struct {
 	tunnelPorts TunnelInboundPortsFn
 
 	routerOutbounds RouterOutboundsCatalog
+
+	// lastDegradedWarn: instanceID → пара «selected→fallback» последней
+	// залогированной деградации (issue #465). buildSpec вызывается на каждую
+	// регенерацию каждого инстанса (долгий «движок выключен» + churn туннелей
+	// → шквал одинаковых Warn); логируем только смену состояния деградации и
+	// её снятие. Защищён существующим s.mu (buildSpec всегда под ним).
+	lastDegradedWarn map[string]string
 }
 
 // ErrOutboundUnavailable is returned by SelectRuntimeOutbound when the caller
@@ -250,6 +257,9 @@ func (s *Service) DeleteInstance(ctx context.Context, id string) (applied bool, 
 	if err := s.d.Store.DeleteInstance(id); err != nil {
 		return false, err
 	}
+	// Инстанс удалён — состояние дедупликации Warn'ов деградации больше
+	// не нужно (иначе запись висела бы в map навсегда).
+	delete(s.lastDegradedWarn, id)
 	if err := s.applyInstancesLocked(ctx); err != nil {
 		s.appLog.Warn("delete-instance", id, "apply after delete failed: "+err.Error())
 		if s.d.Bus != nil {
@@ -265,7 +275,7 @@ func (s *Service) DeleteInstance(ctx context.Context, id string) (applied bool, 
 func (s *Service) buildInstanceSpec(ctx context.Context, in Instance) (ExternalInstanceSpec, error) {
 	cfg := instanceToConfig(in)
 
-	base, err := s.buildSpec(ctx, cfg)
+	base, err := s.buildSpec(ctx, in.ID, cfg)
 	if err != nil {
 		return ExternalInstanceSpec{}, err
 	}
@@ -458,7 +468,7 @@ func (s *Service) SaveConfig(ctx context.Context, cfg Config) error {
 
 	oldCfg := s.d.Store.Get()
 
-	spec, err := s.buildSpec(ctx, cfg)
+	spec, err := s.buildSpec(ctx, "default", cfg)
 	if err != nil {
 		return err
 	}
@@ -532,7 +542,7 @@ func (s *Service) ForceApply(ctx context.Context) error {
 		}
 	}
 
-	spec, err := s.buildSpec(ctx, cfg)
+	spec, err := s.buildSpec(ctx, "default", cfg)
 	if err != nil {
 		return err
 	}
@@ -576,7 +586,11 @@ func (s *Service) validateLocked(cfg Config) error {
 	return validateConfigRaw(cfg, s.tunnelPorts, nil)
 }
 
-func (s *Service) buildSpec(ctx context.Context, cfg Config) (ExternalSpec, error) {
+// buildSpec собирает ExternalSpec для одного инстанса. instanceID нужен
+// только для дедупликации логов деградации (map на Service); legacy-пути
+// одиночного конфига (SaveConfig/ForceApply) передают "default".
+// Вызывается строго под s.mu.
+func (s *Service) buildSpec(ctx context.Context, instanceID string, cfg Config) (ExternalSpec, error) {
 	spec := ExternalSpec{
 		Enabled:     cfg.Enabled,
 		Port:        cfg.Port,
@@ -608,12 +622,77 @@ func (s *Service) buildSpec(ctx context.Context, cfg Config) (ExternalSpec, erro
 	// sing-box увёл бы трафик в произвольный выживший член. Хранилище
 	// (SelectedOutbound) НЕ трогаем: при включении движка регенерация
 	// вернёт композит на место.
-	if deg := degradationFor(cfg.SelectedOutbound, spec.SBTags, spec.AWGTags, routerInfos, avail); deg != nil {
+	deg := degradationFor(cfg.SelectedOutbound, spec.SBTags, spec.AWGTags, routerInfos, avail)
+	switch {
+	case deg != nil:
 		spec.SelectedTag = deg.FallbackTag
-		s.appLog.Warn("degraded-outbound", deg.SelectedTag,
-			fmt.Sprintf("Выход %q недоступен в текущем конфиге (слот-источник выключен) — прокси временно через %q", deg.SelectedTag, deg.FallbackTag))
+		s.warnDegradationLocked(instanceID, deg)
+	case avail != nil && !selectedTagEmittable(cfg.SelectedOutbound, spec.SBTags, spec.AWGTags):
+		// Недоступный НЕ-router тег (например, subscription-selector при
+		// припаркованном слоте подписок): default не эмитим — иначе
+		// singbox/config.go записал бы в слот 30 висячий "default", который
+		// prune вычищал бы на каждом reload, ломая инвариант «prune никогда
+		// не трогает свежий слот 30». Selector падает на direct; Reconcile
+		// выключит инстанс при следующем событии.
+		spec.SelectedTag = ""
+		// Не «снова доступен» — состояние дедупликации снимаем молча.
+		delete(s.lastDegradedWarn, instanceID)
+	default:
+		s.clearDegradationLocked(instanceID)
 	}
 	return spec, nil
+}
+
+// selectedTagEmittable reports whether the selected tag will actually be
+// present among the emitted selector members. "" и "direct" эмитимы всегда
+// (direct — встроенный член каждого селектора).
+func selectedTagEmittable(selected string, sbTags, awgTags []string) bool {
+	if selected == "" || selected == "direct" {
+		return true
+	}
+	for _, t := range sbTags {
+		if t == selected {
+			return true
+		}
+	}
+	for _, t := range awgTags {
+		if t == selected {
+			return true
+		}
+	}
+	return false
+}
+
+// degradedWarnSep разделяет selected и fallback в значении lastDegradedWarn.
+// NUL не встречается в тегах sing-box.
+const degradedWarnSep = "\x00"
+
+// warnDegradationLocked логирует деградацию один раз на состояние: повторный
+// buildSpec с той же парой selected→fallback молчит. Caller держит s.mu.
+func (s *Service) warnDegradationLocked(instanceID string, deg *OutboundDegradation) {
+	key := deg.SelectedTag + degradedWarnSep + deg.FallbackTag
+	if s.lastDegradedWarn[instanceID] == key {
+		return
+	}
+	if s.lastDegradedWarn == nil {
+		s.lastDegradedWarn = make(map[string]string)
+	}
+	s.lastDegradedWarn[instanceID] = key
+	s.appLog.Warn("degraded-outbound", deg.SelectedTag,
+		fmt.Sprintf("Выход %q недоступен в текущем конфиге (слот-источник выключен) — прокси временно через %q", deg.SelectedTag, deg.FallbackTag))
+}
+
+// clearDegradationLocked снимает состояние деградации и логирует
+// восстановление (Info) — только если деградация была. Caller держит s.mu.
+func (s *Service) clearDegradationLocked(instanceID string) {
+	prev, ok := s.lastDegradedWarn[instanceID]
+	if !ok {
+		return
+	}
+	delete(s.lastDegradedWarn, instanceID)
+	selected, _, _ := strings.Cut(prev, degradedWarnSep)
+	s.appLog.Info("degraded-outbound", selected,
+		fmt.Sprintf("Выход %q снова доступен — прокси снова идёт через него", selected))
 }
 
 // collectSelectorMembers gathers the member-tag universe for device-proxy
@@ -769,6 +848,10 @@ func resolveOutboundFallback(selected string, byTag map[string]RouterOutboundInf
 // трафик через Y» without trusting the live selector.now. Takes s.mu
 // briefly to snapshot collaborators; safe to call without the lock.
 func (s *Service) runtimeDegradation(ctx context.Context, selected string) *OutboundDegradation {
+	// Быстрый выход ДО collectSelectorMembers: для ""/direct деградация
+	// невозможна (direct — встроенный член каждого селектора), а runtime-
+	// endpoint'ы UI опрашивает постоянно — гонять оракул слотов и каталоги
+	// (туннели/подписки/роутер/awg) на каждый poll дорого на MIPS-роутерах.
 	if selected == "" || selected == "direct" {
 		return nil
 	}

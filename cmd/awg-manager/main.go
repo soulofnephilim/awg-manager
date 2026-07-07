@@ -1174,13 +1174,13 @@ func main() {
 		}
 		return ports
 	})
-	deviceProxyUnsub := deviceProxySvc.SubscribeBus(context.Background())
-	defer deviceProxyUnsub()
-
-	// NB: начальный boot-Reconcile device-proxy выполняется НИЖЕ, после
-	// SetRouterOutbounds — Reconcile выключает инстансы с отсутствующими
-	// в каталоге outbound'ами, и без каталога роутера он на каждой загрузке
-	// стирал бы выбор router-композита (vpn/vpn2) у инстансов (issue #465).
+	// NB: и подписка на шину (SubscribeBus), и начальный boot-Reconcile
+	// device-proxy выполняются НИЖЕ, после SetRouterOutbounds — Reconcile
+	// выключает инстансы с отсутствующими в каталоге outbound'ами, и без
+	// каталога роутера он на каждой загрузке стирал бы выбор router-композита
+	// (vpn/vpn2) у инстансов (issue #465). Ранняя подписка оставляла бы окно:
+	// событие tunnels/subscriptions в нём триггерило бы Reconcile с nil-каталогом
+	// роутера → та же потеря композитов.
 	sharedDownloadSvc := downloader.NewSettingsBackedService(
 		deviceProxySvc,
 		singboxOp,
@@ -1355,6 +1355,13 @@ func main() {
 	if err := deviceProxySvc.Reconcile(context.Background()); err != nil {
 		bootLog.Warn("deviceproxy-reconcile", "", err.Error())
 	}
+	// Подписка на шину — строго ПОСЛЕ SetRouterOutbounds + boot-Reconcile:
+	// ранняя подписка запускала бы Reconcile по событию ещё без каталога
+	// роутера (см. NB выше). События, опубликованные до этой строки, терять
+	// безопасно: это инвалидации состояния (не рёбра), потребители перечитывают
+	// его целиком, а boot-Reconcile строкой выше уже учёл текущее состояние.
+	deviceProxyUnsub := deviceProxySvc.SubscribeBus(context.Background())
+	defer deviceProxyUnsub()
 	routerStartupLog := logging.NewScopedLogger(loggingService, logging.GroupRouting, logging.SubSingboxRouter)
 	go func() {
 		// Startup-only: reap a fakeip OpkgTun orphaned by a crash/incomplete

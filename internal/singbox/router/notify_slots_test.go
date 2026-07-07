@@ -67,6 +67,59 @@ func TestDisable_Tproxy_NotifiesRoutingSlotsChanged(t *testing.T) {
 	}
 }
 
+// Drift-heal ветка reconcileFakeIPTun (мёртвый sing-box при живом iface)
+// включает слот 21 напрямую через SetEnabled, минуя enableLocked — хук обязан
+// сработать и здесь, иначе device-proxy не восстановит ссылки на композиты
+// после воскрешения слота.
+func TestReconcileFakeIPTun_DriftHealSlotRevive_NotifiesRoutingSlotsChanged(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+
+	// Слот 21 выключен (например, после сбоя) — drift-heal должен вернуть его.
+	if err := h.svc.deps.Orch.SetEnabled(orchestrator.SlotFakeIP, false); err != nil {
+		t.Fatalf("pre-flip SlotFakeIP off: %v", err)
+	}
+
+	// Мёртвый sing-box: первый IsRunning=false (liveness-проверка drift-heal),
+	// дальше true (waitForSingbox после рестарта).
+	sb := h.svc.deps.Singbox.(*fakeSingbox)
+	calls := 0
+	sb.isRunningFn = func() (bool, int) {
+		calls++
+		if calls == 1 {
+			return false, 0
+		}
+		return true, 1234
+	}
+
+	// Хук ставим ПОСЛЕ Enable — интересуют только вызовы из drift-heal.
+	var notified int
+	var slotEnabledAtNotify bool
+	h.svc.deps.OnRoutingSlotsChanged = func() {
+		notified++
+		slotEnabledAtNotify = slotEnabled(t, h.svc, orchestrator.SlotFakeIP)
+	}
+
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("reconcileFakeIPTun: %v", err)
+	}
+
+	if notified != 1 {
+		t.Fatalf("OnRoutingSlotsChanged calls = %d, want 1", notified)
+	}
+	// Хук должен видеть УЖЕ включённый слот 21 — device-proxy регенерирует
+	// слот 30 по актуальной видимости композитов.
+	if !slotEnabledAtNotify {
+		t.Error("hook fired BEFORE SlotFakeIP became enabled")
+	}
+}
+
 func TestEnable_Tproxy_NotifiesRoutingSlotsChanged(t *testing.T) {
 	svc, dir := newQoSSlotTestService(t, "vpn")
 	ensureDisabledDir(t, dir)

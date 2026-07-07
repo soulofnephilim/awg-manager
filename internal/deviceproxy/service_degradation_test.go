@@ -12,7 +12,10 @@ package deviceproxy
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/hoaxisr/awg-manager/internal/logging"
 )
 
 // degradationFixture: движок выключен — в merged-конфиге есть прямой
@@ -46,7 +49,7 @@ func TestBuildSpec_UnavailableComposite_FallsBackToDefaultMember(t *testing.T) {
 	sb, awg, cat := degradationFixture()
 	s := newDegradationService(t, sb, awg, cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -66,7 +69,7 @@ func TestBuildSpec_AvailableComposite_Unchanged(t *testing.T) {
 	sb.availableTags["vpn2"] = true
 	s := newDegradationService(t, sb, awg, cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -90,7 +93,7 @@ func TestBuildSpec_DefaultMemberUnavailable_FirstAvailableMember(t *testing.T) {
 	cat.items[0] = RouterOutboundInfo{Tag: "vpn", DefaultMember: "ghost", Members: []string{"ghost", "proxy-a"}}
 	s := newDegradationService(t, sb, awg, cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -104,7 +107,7 @@ func TestBuildSpec_AllMembersUnavailable_Direct(t *testing.T) {
 	cat.items = []RouterOutboundInfo{{Tag: "vpn", DefaultMember: "ghost", Members: []string{"ghost", "ghost2"}}}
 	s := newDegradationService(t, sb, awg, cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -122,7 +125,7 @@ func TestBuildSpec_NestedCompositeDefault_ResolvedRecursively(t *testing.T) {
 	}
 	s := newDegradationService(t, sb, awg, cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -139,7 +142,7 @@ func TestBuildSpec_CompositeCycle_FallsBackToDirect(t *testing.T) {
 	}
 	s := newDegradationService(t, sb, awg, cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -153,7 +156,7 @@ func TestBuildSpec_NilAvailabilityOracle_LegacyBehaviour(t *testing.T) {
 	sb.availableTags = nil // нет оркестратора → оракул неизвестен
 	s := newDegradationService(t, sb, awg, cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -168,6 +171,94 @@ func TestBuildSpec_NilAvailabilityOracle_LegacyBehaviour(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("vpn missing from members on legacy path: %v", spec.SBTags)
+	}
+}
+
+// Недоступный НЕ-router тег (subscription-selector при припаркованном слоте):
+// деградации через композит нет (degradationFor → nil), но и висячий default
+// эмитить нельзя — prune вычищал бы его на каждом reload, ломая инвариант
+// «prune никогда не трогает свежий слот 30». SelectedTag обязан очиститься.
+func TestBuildSpec_UnavailableNonRouterTag_NoDefault(t *testing.T) {
+	sb, awg, cat := degradationFixture()
+	s := newDegradationService(t, sb, awg, cat)
+	s.d.SubscriptionOutbounds = &fakeSubscriptionOutboundsCatalog{
+		items: []SubscriptionOutboundInfo{{Tag: "sub-sel", Label: "Sub"}},
+	}
+	// "sub-sel" отсутствует в avail (слот подписок припаркован) и не является
+	// router-композитом.
+
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "sub-sel"})
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	if spec.SelectedTag != "" {
+		t.Fatalf("SelectedTag = %q, want empty (no dangling default for unavailable non-router tag)", spec.SelectedTag)
+	}
+	for _, tag := range spec.SBTags {
+		if tag == "sub-sel" {
+			t.Fatalf("unavailable subscription tag leaked into members: %v", spec.SBTags)
+		}
+	}
+}
+
+// recAppLogger записывает уровни/сообщения для проверки дедупликации Warn'ов.
+type recAppLogger struct {
+	entries []string
+}
+
+func (r *recAppLogger) AppLog(level logging.Level, _, _, action, target, message string) {
+	r.entries = append(r.entries, string(level)+":"+action+":"+target+":"+message)
+}
+
+func (r *recAppLogger) count(substr string) int {
+	n := 0
+	for _, e := range r.entries {
+		if strings.Contains(e, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// Warn деградации не должен повторяться на каждую регенерацию: логируем
+// только смену пары selected→fallback и снятие деградации (Info).
+func TestBuildSpec_DegradationWarn_Deduplicated(t *testing.T) {
+	sb, awg, cat := degradationFixture()
+	log := &recAppLogger{}
+	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
+	s := NewService(Deps{Store: store, Singbox: sb, AWGOutbounds: awg, AppLogger: log})
+	s.SetRouterOutbounds(cat)
+
+	cfg := Config{Enabled: true, ListenAll: true, Port: 1099, SelectedOutbound: "vpn"}
+	for i := 0; i < 3; i++ {
+		if _, err := s.buildSpec(context.Background(), "office", cfg); err != nil {
+			t.Fatalf("buildSpec #%d: %v", i, err)
+		}
+	}
+	if n := log.count("warn:degraded-outbound"); n != 1 {
+		t.Fatalf("degradation warns = %d, want 1 (deduplicated), log: %v", n, log.entries)
+	}
+
+	// Слот снова активен — одно Info о восстановлении, и только один раз.
+	sb.availableTags["vpn"] = true
+	sb.availableTags["vpn2"] = true
+	for i := 0; i < 2; i++ {
+		if _, err := s.buildSpec(context.Background(), "office", cfg); err != nil {
+			t.Fatalf("buildSpec restored #%d: %v", i, err)
+		}
+	}
+	if n := log.count("info:degraded-outbound"); n != 1 {
+		t.Fatalf("restore infos = %d, want 1, log: %v", n, log.entries)
+	}
+
+	// Повторная деградация после восстановления снова логируется.
+	delete(sb.availableTags, "vpn")
+	delete(sb.availableTags, "vpn2")
+	if _, err := s.buildSpec(context.Background(), "office", cfg); err != nil {
+		t.Fatalf("buildSpec re-degraded: %v", err)
+	}
+	if n := log.count("warn:degraded-outbound"); n != 2 {
+		t.Fatalf("degradation warns after re-degrade = %d, want 2, log: %v", n, log.entries)
 	}
 }
 
