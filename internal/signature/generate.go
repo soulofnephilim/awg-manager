@@ -3,6 +3,7 @@ package signature
 import (
 	crand "crypto/rand"
 	"encoding/binary"
+	hexenc "encoding/hex"
 	"errors"
 	"fmt"
 	mrand "math/rand"
@@ -35,6 +36,11 @@ const maxGenerateAttempts = 4
 
 // defaultGenerateMTU matches generateSignaturePackets(protocol, mtu=1280).
 const defaultGenerateMTU = 1280
+
+// minGenerateMTU is the floor an explicit MTU is clamped up to. Below the classic
+// 576-byte minimum the padding-range math (e.g. mkDNS rnd(64, mtu-20)) inverts,
+// and such a tiny MTU is meaningless for a WireGuard tunnel anyway.
+const minGenerateMTU = 576
 
 // ivMedium is the intensity value for the fixed "medium" intensity (imap.medium).
 const ivMedium = 2
@@ -110,6 +116,8 @@ func generate(protocol string, mtu int, r *mrand.Rand) (GeneratedPackets, int, e
 	}
 	if mtu <= 0 {
 		mtu = defaultGenerateMTU
+	} else if mtu < minGenerateMTU {
+		mtu = minGenerateMTU
 	}
 
 	g := &generator{r: r, mtu: mtu}
@@ -190,17 +198,17 @@ func (g *generator) rnd(a, b int) int {
 	return g.r.Intn(b-a+1) + a
 }
 
-// rh returns n bytes of random lowercase hex (2*n chars).
+// rh returns n bytes of random lowercase hex (2*n chars). One Intn(256) draw
+// per byte, matching the TS rh() RNG consumption order.
 func (g *generator) rh(n int) string {
-	if n < 0 {
-		n = 0
+	if n <= 0 {
+		return ""
 	}
-	var sb strings.Builder
-	sb.Grow(n * 2)
-	for i := 0; i < n; i++ {
-		fmt.Fprintf(&sb, "%02x", g.r.Intn(256))
+	buf := make([]byte, n)
+	for i := range buf {
+		buf[i] = byte(g.r.Intn(256))
 	}
-	return sb.String()
+	return hexenc.EncodeToString(buf)
 }
 
 // hexPad renders value as hex padded/truncated to exactly byteLen bytes.
@@ -250,7 +258,7 @@ func (g *generator) calcPaddingEntropy(headerB, extraB int) int {
 	if maxPad < 0 {
 		maxPad = 0
 	}
-	return min3(g.rnd(20, 80)*ivMedium, 500, maxPad)
+	return min(g.rnd(20, 80)*ivMedium, 500, maxPad)
 }
 
 func (g *generator) host(poolKey string) string {
@@ -275,7 +283,7 @@ func (g *generator) mkQUICi() string {
 	if g.rnd(0, 1) != 0 {
 		tokenLen = g.rnd(8, 32)
 	}
-	sniRc := minInt(len(host)+g.rnd(0, 6), 64)
+	sniRc := min(len(host)+g.rnd(0, 6), 64)
 
 	hex := assertEvenHex(
 		hexPad(0xc0|g.rnd(0, 3), 1) +
@@ -299,7 +307,7 @@ func (g *generator) mkQUIC0() string {
 	host := g.host("quic_0rtt")
 	dcid := g.rnd(8, 20)
 	scid := g.rnd(0, 20)
-	ticketHint := minInt(len(host)+g.rnd(4, 16), 48)
+	ticketHint := min(len(host)+g.rnd(4, 16), 48)
 
 	hex := assertEvenHex(
 		hexPad(0xd0|g.rnd(0, 3), 1) +
@@ -321,16 +329,16 @@ func (g *generator) mkQUIC0() string {
 func (g *generator) mkTLS() string {
 	host := g.host("tls_client_hello")
 	sniExt := 2 + 2 + 2 + 1 + 2 + len(host)
-	sniRc := minInt(sniExt, 64)
+	sniRc := min(sniExt, 64)
 
 	baseLen := g.rnd(300, 550)
 	recLen := baseLen // non-Chromium profile: no 128-byte alignment
 	hsLen := recLen - g.rnd(4, 9)
 
-	rLen := min3(
+	rLen := min(
 		g.rnd(20, 60)*ivMedium,
 		300,
-		maxInt(0, g.mtu-44-sniRc-tagOverhead))
+		max(0, g.mtu-44-sniRc-tagOverhead))
 
 	hex := assertEvenHex(
 		"160301" +
@@ -351,7 +359,7 @@ func (g *generator) mkNoise() string {
 	headerB := 148 // Noise_IK fixed size
 
 	extraB := rcLen + tagOverhead
-	pad := min3(g.rnd(10, 40)*ivMedium, 200, maxInt(0, g.mtu-headerB-extraB))
+	pad := min(g.rnd(10, 40)*ivMedium, 200, max(0, g.mtu-headerB-extraB))
 
 	return "<b 0x01000000" + g.rh(4) + ">" +
 		"<b 0x" + g.rh(32) + ">" +
@@ -366,7 +374,7 @@ func (g *generator) mkNoise() string {
 func (g *generator) mkDTLS() string {
 	host := g.host("dtls")
 	fragLen := g.rnd(100, 300)
-	sniRc := minInt(len(host)+g.rnd(2, 8), 60)
+	sniRc := min(len(host)+g.rnd(2, 8), 60)
 	epoch := g.rnd(0, 255)
 
 	hex := assertEvenHex(
@@ -396,7 +404,7 @@ func (g *generator) mkHTTP3() string {
 	ptypes := []int{0xc0, 0xc1, 0xc2, 0xc3, 0xe0, 0xe1, 0xe2}
 	dcid := g.rnd(8, 20)
 	scid := g.rnd(0, 20)
-	sniLen := minInt(len(host)+9+g.rnd(0, 6), 64)
+	sniLen := min(len(host)+9+g.rnd(0, 6), 64)
 
 	hex := assertEvenHex(
 		hexPad(ptypes[g.rnd(0, len(ptypes)-1)], 1) +
@@ -417,26 +425,23 @@ func (g *generator) mkHTTP3() string {
 
 func (g *generator) mkSIP() string {
 	host := g.host("sip")
-	var hostHex strings.Builder
-	for i := 0; i < len(host); i++ {
-		fmt.Fprintf(&hostHex, "%02x", host[i])
-	}
+	hostHex := hexenc.EncodeToString([]byte(host))
 
-	hex := assertEvenHex(
+	packet := assertEvenHex(
 		"524547495354455220736970" + // "REGISTER sip"
 			"3a" + // ":"
-			hostHex.String() +
+			hostHex +
 			"20" + // " "
 			g.rh(4))
 
-	headerB := len(hex) / 2
-	rcVal := minInt(len(host)+g.rnd(8, 24)*ivMedium, 150)
-	rLen := min3(
+	headerB := len(packet) / 2
+	rcVal := min(len(host)+g.rnd(8, 24)*ivMedium, 150)
+	rLen := min(
 		g.rnd(5, 30)*ivMedium,
 		120,
-		maxInt(0, g.mtu-headerB-rcVal-tagOverhead))
+		max(0, g.mtu-headerB-rcVal-tagOverhead))
 
-	return "<b 0x" + hex + ">" +
+	return "<b 0x" + packet + ">" +
 		fmt.Sprintf("<rc %d>", rcVal) +
 		"<t>" +
 		splitPad(rLen, "r")
@@ -448,16 +453,12 @@ func (g *generator) mkDNS() string {
 	var queryName strings.Builder
 	for _, label := range strings.Split(host, ".") {
 		fmt.Fprintf(&queryName, "%02x", len(label))
-		for i := 0; i < len(label); i++ {
-			fmt.Fprintf(&queryName, "%02x", label[i])
-		}
+		queryName.WriteString(hexenc.EncodeToString([]byte(label)))
 	}
 	queryName.WriteString("00")
 
-	qtype := "001c"
-	if ivMedium%2 == 0 {
-		qtype = "0001"
-	}
+	// TS picks AAAA (001c) for odd iv, A (0001) for even; iv is fixed at medium (2).
+	qtype := "0001"
 
 	dnsQueryHex := g.rh(2) + // transaction ID
 		"0100" + // flags: standard query, recursion desired
@@ -471,12 +472,12 @@ func (g *generator) mkDNS() string {
 
 	hex := assertEvenHex(dnsQueryHex)
 	headerB := len(hex) / 2
-	targetSize := g.rnd(64, minInt(512, g.mtu-20))
-	rLen := maxInt(0, targetSize-headerB)
+	targetSize := g.rnd(64, min(512, g.mtu-20))
+	rLen := max(0, targetSize-headerB)
 
 	out := "<b 0x" + hex + ">"
 	if rLen > 0 {
-		out += splitPad(minInt(rLen, 200), "r")
+		out += splitPad(min(rLen, 200), "r")
 	}
 	out += "<t>"
 	return out
@@ -492,7 +493,7 @@ func (g *generator) mkEntropy(idx int) string {
 		baseLen = g.rnd(200, 500)
 		capLimit = 500
 	}
-	rLen := min3(baseLen*ivMedium, capLimit, maxInt(0, g.mtu-20-tagOverhead))
+	rLen := min(baseLen*ivMedium, capLimit, max(0, g.mtu-20-tagOverhead))
 
 	rcLen := g.rnd(4, 12)
 	rdLen := g.rnd(4, 8)
@@ -556,22 +557,4 @@ func ByteSize(pattern string) int {
 // TotalByteSize sums ByteSize across I1–I5.
 func TotalByteSize(p GeneratedPackets) int {
 	return ByteSize(p.I1) + ByteSize(p.I2) + ByteSize(p.I3) + ByteSize(p.I4) + ByteSize(p.I5)
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min3(a, b, c int) int {
-	return minInt(minInt(a, b), c)
 }

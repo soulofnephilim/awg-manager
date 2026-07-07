@@ -96,8 +96,9 @@ type SignatureGenerateRequest struct {
 }
 
 // SignatureGenerateData is the data field of SignatureGenerateResponse. It
-// mirrors SignatureCaptureData with source="generated" plus the echoed protocol
-// and the summed I1–I5 byte size.
+// mirrors SignatureCaptureData with source="generated" plus the canonical
+// protocol key (the "tls" alias resolves to "tls_client_hello") and the summed
+// I1–I5 byte size.
 type SignatureGenerateData struct {
 	OK       bool                `json:"ok" example:"true"`
 	Source   string              `json:"source" example:"generated"`

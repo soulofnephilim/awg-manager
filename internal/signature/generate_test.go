@@ -129,6 +129,24 @@ func TestGenerate_DefaultMTU(t *testing.T) {
 	}
 }
 
+// A pathologically small MTU must be clamped to minGenerateMTU so no padding
+// range inverts (mkDNS rnd(64, mtu-20) would otherwise flip). Every protocol
+// must still yield a valid, non-empty, in-limit chain.
+func TestGenerate_TinyMTUClamped(t *testing.T) {
+	r := testRand()
+	for _, mtu := range []int{1, 20, 84, 200, 575} {
+		for _, proto := range SupportedProtocols {
+			p, size, err := generate(proto, mtu, r)
+			if err != nil {
+				t.Fatalf("mtu=%d %q: %v", mtu, proto, err)
+			}
+			if p.I1 == "" || size <= 0 || size > MaxSignatureBytes {
+				t.Fatalf("mtu=%d %q: i1=%q size=%d", mtu, proto, p.I1, size)
+			}
+		}
+	}
+}
+
 // The public Generate seeds its own RNG; smoke-test that it succeeds for all
 // protocols and stays within the ceiling.
 func TestGenerate_PublicEntrypoint(t *testing.T) {
