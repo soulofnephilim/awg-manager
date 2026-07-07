@@ -387,7 +387,10 @@ func (p *Process) Reload() error {
 		return err
 	}
 	time.Sleep(150 * time.Millisecond)
-	if !isAlive(pid) {
+	// Full liveness+identity check, not a bare kill(0): if the SIGHUP'd process
+	// exited and its pid was recycled within the window, isAlive alone would
+	// pass on a foreign process. pidMatch closes that stale-pid hazard.
+	if !isAlive(pid) || !p.pidMatch(pid) {
 		_, err := p.startLocked()
 		return err
 	}
@@ -403,14 +406,20 @@ func (p *Process) IsRunning() (bool, int) {
 	if !isAlive(pid) {
 		return false, pid
 	}
+	if !p.pidMatch(pid) {
+		return false, pid
+	}
+	return true, pid
+}
+
+// pidMatch reports whether pid is our sing-box, using the test seam
+// (matchBinaryFn) when set, otherwise the real /proc cmdline check.
+func (p *Process) pidMatch(pid int) bool {
 	match := p.matchBinaryFn
 	if match == nil {
 		match = p.matchesBinary
 	}
-	if !match(pid) {
-		return false, pid
-	}
-	return true, pid
+	return match(pid)
 }
 
 // matchesBinary reports whether pid's /proc cmdline actually names our
@@ -426,10 +435,13 @@ func (p *Process) matchesBinary(pid int) bool {
 	}
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
-		// Process vanished between the kill(0) probe and the read, or /proc
-		// is unavailable — treat unreadable as not-ours only when the file
-		// is truly gone.
-		return !os.IsNotExist(err)
+		// Cannot verify identity: the pid vanished between the kill(0) probe
+		// and the read (ENOENT), or the cmdline is unreadable (a permission
+		// error — which for a daemon we spawn as our own user means the pid was
+		// recycled to a foreign process). Neither is provably ours, so fail
+		// closed: report not-ours rather than suppress a restart or signal an
+		// unverified pid.
+		return false
 	}
 	argv0, _, _ := strings.Cut(string(b), "\x00")
 	if argv0 == "" {
