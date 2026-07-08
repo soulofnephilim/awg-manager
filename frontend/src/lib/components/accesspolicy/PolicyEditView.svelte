@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { AccessPolicy, PolicyDevice, PolicyGlobalInterface } from '$lib/types';
 	import { api } from '$lib/api/client';
+	import { errorMessage } from '$lib/utils/errorMessage';
 	import { notifications } from '$lib/stores/notifications';
 	import { Toggle, Badge } from '$lib/components/ui';
 	import { ArrowLeft, X } from 'lucide-svelte';
@@ -52,8 +53,8 @@
 		try {
 			await api.setAccessPolicyDescription(policy.name, description.trim());
 			await onupdate();
-		} catch (e: any) {
-			notifications.error(`Ошибка: ${e.message}`);
+		} catch (e) {
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		}
 	}
 
@@ -62,8 +63,8 @@
 		try {
 			await api.setAccessPolicyStandalone(policy.name, checked);
 			await onupdate();
-		} catch (e: any) {
-			notifications.error(`Ошибка: ${e.message}`);
+		} catch (e) {
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		}
 	}
 
@@ -71,8 +72,8 @@
 		try {
 			await api.permitPolicyInterface(policy.name, iface, order);
 			await onupdate();
-		} catch (e: any) {
-			notifications.error(`Ошибка: ${e.message}`);
+		} catch (e) {
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		}
 	}
 
@@ -80,8 +81,8 @@
 		try {
 			await api.denyPolicyInterface(policy.name, iface);
 			await onupdate();
-		} catch (e: any) {
-			notifications.error(`Ошибка: ${e.message}`);
+		} catch (e) {
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		}
 	}
 
@@ -90,8 +91,8 @@
 			const policyName = policy.name;
 			await api.permitPolicyInterface(policyName, iface, newOrder);
 			await onupdate();
-		} catch (e: any) {
-			notifications.error(`Ошибка: ${e.message}`);
+		} catch (e) {
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		}
 	}
 
@@ -100,9 +101,9 @@
 		try {
 			await api.assignDeviceToPolicy(mac, policy.name);
 			ondeviceassigned(mac, policy.name);
-		} catch (e: any) {
+		} catch (e) {
 			dragOver = false;
-			notifications.error(`Ошибка: ${e.message}`);
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		}
 	}
 
@@ -110,8 +111,8 @@
 		try {
 			await api.unassignDeviceFromPolicy(mac);
 			ondeviceunassigned(mac, policy.name);
-		} catch (e: any) {
-			notifications.error(`Ошибка: ${e.message}`);
+		} catch (e) {
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		}
 	}
 

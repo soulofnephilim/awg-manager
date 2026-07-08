@@ -25,7 +25,7 @@ function createLocalStorageMock(): Storage {
 		setItem: (key: string, value: string) => {
 			data.set(key, value);
 		},
-	} as Storage;
+	};
 }
 
 function installMatchMediaMock(initialPrefersLight: boolean): void {

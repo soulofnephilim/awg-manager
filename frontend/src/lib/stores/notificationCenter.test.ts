@@ -11,7 +11,7 @@ function createLocalStorageMock(): Storage {
     key: (i: number) => Array.from(data.keys())[i] ?? null,
     removeItem: (k: string) => { data.delete(k); },
     setItem: (k: string, v: string) => { data.set(k, v); },
-  } as Storage;
+  };
 }
 
 const MIN = 60_000;

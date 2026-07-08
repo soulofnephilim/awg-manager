@@ -1,5 +1,6 @@
 <script lang="ts">
     import { api } from '$lib/api/client';
+    import { errorMessage } from '$lib/utils/errorMessage';
     import type { StaticRouteList, RoutingTunnel } from '$lib/types';
     import { ConfirmModal, StoreStatusBadge, Button, Dropdown, type DropdownOption } from '$lib/components/ui';
     import { IpRouteCard, IpRouteEditModal, IpRouteImportModal } from '$lib/components/routing';
@@ -85,8 +86,8 @@
 
             ipCreateOpen = false;
             editingIpRoute = null;
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка сохранения');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка сохранения'));
         } finally {
             ipSaving = false;
         }
@@ -97,8 +98,8 @@
         try {
             await api.setStaticRouteEnabled(id, enabled);
 
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка'));
         } finally {
             ipToggling = null;
         }
@@ -112,8 +113,8 @@
             await api.deleteStaticRoute(id);
 
             notifications.success('IP-маршрут удалён');
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка удаления');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка удаления'));
         }
     }
 
@@ -379,8 +380,8 @@
             try {
                 await api.updateStaticRoute({ ...route, iconUrl: newUrl ?? undefined });
                 notifications.success(newUrl ? 'Иконка изменена' : 'Иконка сброшена');
-            } catch (e: any) {
-                notifications.error(e?.message || 'Не удалось обновить иконку');
+            } catch (e) {
+                notifications.error(errorMessage(e, 'Не удалось обновить иконку'));
             }
         }}
     />

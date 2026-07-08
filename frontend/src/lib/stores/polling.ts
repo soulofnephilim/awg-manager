@@ -1,5 +1,8 @@
 import { writable, get, type Readable } from 'svelte/store';
 
+/** Matches Svelte's store invalidation callback (`(value?: T) => void`). */
+type Invalidator<T> = (value?: T) => void;
+
 export type PollingState<T> = {
     data: T | null;
     status: 'idle' | 'loading' | 'fresh' | 'stale' | 'error';
@@ -9,7 +12,10 @@ export type PollingState<T> = {
 };
 
 export interface PollingStore<T> extends Readable<PollingState<T>> {
-    subscribe: (run: (value: PollingState<T>) => void, invalidate?: any) => () => void;
+    subscribe: (
+        run: (value: PollingState<T>) => void,
+        invalidate?: Invalidator<PollingState<T>>,
+    ) => () => void;
     refetch: () => Promise<void>;
     invalidate: () => void;
     applyMutationResponse: (data: T) => void;

@@ -10,7 +10,7 @@ const members: SubscriptionPreviewMember[] = [
 ];
 
 function checkboxes(container: HTMLElement): HTMLInputElement[] {
-	return Array.from(container.querySelectorAll('.list input[type="checkbox"]')) as HTMLInputElement[];
+	return Array.from(container.querySelectorAll('.list input[type="checkbox"]'));
 }
 
 describe('SubscriptionImportPreview', () => {
@@ -62,7 +62,7 @@ describe('SubscriptionImportPreview', () => {
 		expect(boxes[1].checked).toBe(false);
 		expect(boxes[2].checked).toBe(true);
 
-		const rows = Array.from(container.querySelectorAll('.row')) as HTMLElement[];
+		const rows = Array.from(container.querySelectorAll('.row'));
 		expect(rows[1].classList.contains('dropped')).toBe(true);
 		expect(rows[0].classList.contains('dropped')).toBe(false);
 	});
@@ -86,7 +86,7 @@ describe('SubscriptionImportPreview', () => {
 
 		// server match, case-insensitive
 		await fireEvent.input(input, { target: { value: 'DE.EXAMPLE' } });
-		const rows = Array.from(container.querySelectorAll('.row .addr')) as HTMLElement[];
+		const rows = Array.from(container.querySelectorAll('.row .addr'));
 		expect(rows).toHaveLength(1);
 		expect(rows[0].textContent).toContain('de.example.com');
 

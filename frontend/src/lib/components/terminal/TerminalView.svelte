@@ -1,5 +1,7 @@
 <script lang="ts">
 	import '@xterm/xterm/css/xterm.css';
+	import type { Terminal } from '@xterm/xterm';
+	import type { FitAddon } from '@xterm/addon-fit';
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { theme, resolveThemeTokens } from '$lib/stores/theme';
@@ -14,8 +16,8 @@
 	let { onclose, onerror, onreconnect }: Props = $props();
 
 	let containerEl: HTMLDivElement;
-	let termInstance: any = $state(null);
-	let fitAddonRef: any = null;
+	let termInstance: Terminal | null = $state(null);
+	let fitAddonRef: FitAddon | null = null;
 	let ws: WebSocket | null = $state(null);
 	let observer: ResizeObserver | null = null;
 	let themeUnsub: (() => void) | null = null;
@@ -39,7 +41,7 @@
 		socket.send(msg.buffer);
 	}
 
-	function attachSocketHandlers(socket: WebSocket, term: any, fitAddon: any) {
+	function attachSocketHandlers(socket: WebSocket, term: Terminal, fitAddon: FitAddon) {
 		socket.onopen = () => {
 			socket.send(JSON.stringify({ AuthToken: '' }));
 			sendResize(socket, term.cols, term.rows);
@@ -78,7 +80,7 @@
 		};
 	}
 
-	function connectSocket(term: any, fitAddon: any): Promise<WebSocket> {
+	function connectSocket(term: Terminal, fitAddon: FitAddon): Promise<WebSocket> {
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		const wsUrl = `${protocol}//${window.location.host}/api/terminal/ws`;
 

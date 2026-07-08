@@ -153,11 +153,13 @@ export function parseConnectedEvent(data: string): { ok?: boolean; instanceId?: 
 export function connectSSE(handlers: SSEEventHandlers): () => void {
 	const es = new EventSource('/api/events');
 
-	const handle = (type: string, handler?: (data: any) => void) => {
+	const handle = <T>(type: string, handler?: (data: T) => void) => {
 		if (!handler) return;
 		es.addEventListener(type, ((e: MessageEvent) => {
 			try {
-				handler(JSON.parse(e.data));
+				// SSE payloads arrive as JSON strings; each handler declares its own
+				// data shape on SSEEventHandlers, so narrow at this trust boundary.
+				handler(JSON.parse(e.data) as T);
 			} catch {
 				/* ignore parse errors */
 			}
