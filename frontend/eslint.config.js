@@ -14,7 +14,8 @@ export default tseslint.config(
 			'static/',
 			'scripts/',
 			'**/*.cjs',
-			'src/app.d.ts',
+			// Генерированный вывод npm run gen:api — не линтится, как и любой codegen.
+			'src/lib/api/schemas.gen.ts',
 		],
 	},
 	{
@@ -52,16 +53,6 @@ export default tseslint.config(
 		},
 		rules: {
 			'@typescript-eslint/no-explicit-any': 'error',
-		},
-	},
-	{
-		// Test files legitimately build partial mocks and stub subscribers, where
-		// forcing a full typed shape (or an `as unknown as T` double-cast) adds
-		// noise without buying real safety. Keep `any` visible as a warning so it
-		// stays discouraged and greppable, but don't fail the lint on it.
-		files: ['**/*.test.ts', '**/*.spec.ts'],
-		rules: {
-			'@typescript-eslint/no-explicit-any': 'warn',
 		},
 	},
 );
