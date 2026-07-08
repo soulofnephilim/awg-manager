@@ -44,7 +44,7 @@
     bare = false,
   }: Props = $props();
 
-  type ActionLabel = 'SNIFF' | 'HIJACK' | 'BYPASS' | 'REJECT' | 'ROUTE';
+  type ActionLabel = 'SNIFF' | 'HIJACK' | 'BYPASS' | 'REJECT' | 'ROUTE' | 'UDP TTL';
   type ActionVariant = 'default' | 'accent' | 'success' | 'error' | 'warning' | 'info' | 'muted';
 
   interface RowData {
@@ -88,6 +88,7 @@
   function actionDisplay(r: SingboxRouterRule): { label: ActionLabel; variant: ActionVariant } {
     if (r.action === 'sniff') return { label: 'SNIFF', variant: 'default' };
     if (r.action === 'hijack-dns') return { label: 'HIJACK', variant: 'default' };
+    if (r.action === 'route-options') return { label: 'UDP TTL', variant: 'info' };
     if (r.ip_is_private && r.action === 'route' && (!r.outbound || r.outbound === 'direct')) {
       return { label: 'BYPASS', variant: 'default' };
     }
@@ -97,7 +98,7 @@
 
   function outboundForRule(r: SingboxRouterRule): OutboundDisplay | null {
     const action = mapRuleAction(r);
-    if (action === 'sniff' || action === 'hijack-dns') return null;
+    if (action === 'sniff' || action === 'hijack-dns' || action === 'udp-timeout') return null;
     if (action === 'route' && !r.outbound) return null;
     return resolveOutboundDisplay(
       r.outbound,

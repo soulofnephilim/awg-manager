@@ -534,6 +534,25 @@ describe('singboxRuleToCard', () => {
     expect(card.tooltip).toMatch(/LAN/);
   });
 
+  it('route-options UDP-timeout system rule — не как route/direct, а UDP TIMEOUT', () => {
+    const card = singboxRuleToCard(
+      { action: 'route-options', network: 'udp', udp_timeout: '1h' },
+      3,
+      [],
+      {},
+    );
+    expect(card.isSystem).toBe(true);
+    expect(card.action).toBe('udp-timeout');
+    expect(card.title).toBe('UDP таймаут');
+    expect(card.subtitle).toBe('udp · timeout=1h');
+    expect(card.outbound.kind).toBe('udp-timeout');
+    expect(card.outbound.label).toBe('UDP TIMEOUT');
+    // НЕ должно выглядеть как обычный route в direct
+    expect(card.outbound.kind).not.toBe('direct');
+    expect(card.tooltip).toMatch(/таймаут/i);
+    expect(card.tooltip).toContain('1h');
+  });
+
   it('custom-N inline uses first domain as title and catalog icon', () => {
     const card = singboxRuleToCard(
       { rule_set: ['custom-1'], outbound: 'warp' },

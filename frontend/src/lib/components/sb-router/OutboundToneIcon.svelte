@@ -8,6 +8,7 @@
     Rss,
     OctagonAlert,
     ScanEye,
+    Timer,
     TriangleAlert,
     Waypoints,
   } from 'lucide-svelte';
@@ -58,6 +59,8 @@
 {:else if tone === 'system'}
   {#if kind === 'hijack-dns'}
     <Network {...iconProps} />
+  {:else if kind === 'udp-timeout'}
+    <Timer {...iconProps} />
   {:else}
     <ScanEye {...iconProps} />
   {/if}
