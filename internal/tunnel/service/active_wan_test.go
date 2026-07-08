@@ -125,7 +125,7 @@ func (m *mockOp) Start(ctx context.Context, cfg tunnel.Config) error {
 	return m.startError
 }
 
-func (m *mockOp) GetSystemName(_ context.Context, ndmsID string) string { return ndmsID }
+func (m *mockOp) GetSystemName(_ context.Context, ndmsID string) string         { return ndmsID }
 func (m *mockOp) SetDefaultRoute(ctx context.Context, ndmsName string) error    { return nil }
 func (m *mockOp) RemoveDefaultRoute(ctx context.Context, ndmsName string) error { return nil }
 func (m *mockOp) Suspend(ctx context.Context, tunnelID string) error            { return nil }

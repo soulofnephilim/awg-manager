@@ -285,4 +285,3 @@ func TestOperatorOS4_GetTrackedEndpointIP_NoOp(t *testing.T) {
 		t.Errorf("GetTrackedEndpointIP() = %q, want empty (no-op on OS4)", got)
 	}
 }
-

@@ -217,5 +217,3 @@ func (m *Model) IsPopulated() bool {
 	defer m.mu.RUnlock()
 	return m.populated
 }
-
-

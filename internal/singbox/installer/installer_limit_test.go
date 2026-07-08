@@ -8,10 +8,10 @@ func TestDownloadByteLimit(t *testing.T) {
 		reserve  = 16 << 20
 	)
 	cases := []struct {
-		name    string
-		free    int64
-		freeOK  bool
-		want    int64
+		name   string
+		free   int64
+		freeOK bool
+		want   int64
 	}{
 		{"free unknown → fallback", 0, false, fallback},
 		{"plenty (external storage, GBs)", 4 << 30, true, (4 << 30) - reserve},

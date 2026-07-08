@@ -21,4 +21,3 @@ type Manager interface {
 	// Use for operations (Start, Stop, WAN events) that need authoritative state.
 	GetState(ctx context.Context, tunnelID string) tunnel.StateInfo
 }
-

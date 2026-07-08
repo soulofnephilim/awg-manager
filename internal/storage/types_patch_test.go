@@ -15,4 +15,3 @@ func TestLoggingSettingsPatchZeroValuesAreOptional(t *testing.T) {
 		t.Fatalf("zero LoggingSettingsPatch should keep optional fields nil: %#v", p)
 	}
 }
-

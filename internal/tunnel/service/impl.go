@@ -72,7 +72,7 @@ type AWGSyncer interface {
 func (s *ServiceImpl) SetAWGSyncer(sync AWGSyncer) { s.awgSyncer = sync }
 
 func (s *ServiceImpl) SetDeviceProxyRefChecker(c DeviceProxyRefChecker) { s.deviceProxyRefs = c }
-func (s *ServiceImpl) SetRouterRefChecker(c RouterRefChecker)            { s.routerRefs = c }
+func (s *ServiceImpl) SetRouterRefChecker(c RouterRefChecker)           { s.routerRefs = c }
 
 func (s *ServiceImpl) notifyAWGSyncer(ctx context.Context) {
 	if s.awgSyncer == nil {

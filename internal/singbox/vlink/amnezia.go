@@ -83,9 +83,9 @@ func amneziaVlessToOutbound(ob xrayOutbound, tag string) (*ParsedOutbound, error
 	user := v.Users[0]
 
 	var stream struct {
-		Network         string `json:"network"`
-		Security        string `json:"security"`
-		TLSSettings     struct {
+		Network     string `json:"network"`
+		Security    string `json:"security"`
+		TLSSettings struct {
 			ServerName  string   `json:"serverName"`
 			ALPN        []string `json:"alpn"`
 			Fingerprint string   `json:"fingerprint"`

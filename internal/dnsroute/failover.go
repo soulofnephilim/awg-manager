@@ -28,16 +28,16 @@ type AffectedListsLookup func(tunnelID string, action string) []AffectedList
 // FailoverManager tracks which tunnels have failed and need DNS route failover.
 // In-memory only — state resets on restart (reconcile rebuilds from primary targets).
 type FailoverManager struct {
-	mu             sync.RWMutex
-	failedSet      map[string]struct{}
-	reconcileFn    func() error // returns error so we can rollback / retry
+	mu          sync.RWMutex
+	failedSet   map[string]struct{}
+	reconcileFn func() error // returns error so we can rollback / retry
 	// dirty is a global "best-effort retry" flag, not a per-tunnel retry queue.
 	// Set when any reconcile fails; cleared on the next successful reconcile.
 	// While dirty, the next event force-retries even on duplicate (alreadyFailed)
 	// tunnels. A success for tunnel B clears the flag and won't retry tunnel A —
 	// but A's next pingcheck event will see alreadyFailed=false (after rollback)
 	// and proceed normally, so self-healing works via the periodic event stream.
-	dirty bool
+	dirty          bool
 	stopCh         chan struct{}
 	stopped        chan struct{}
 	bus            *events.Bus

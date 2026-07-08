@@ -237,11 +237,11 @@ func TestFacade_MinInterval(t *testing.T) {
 // (fail or success counter > 0) the warming label gives way to the real state.
 func TestNwgCardStatus_WarmupVsRealStates(t *testing.T) {
 	cases := []struct {
-		name                       string
-		status                     string
-		failCount, successCount    int
-		bound, restartDetected     bool
-		want                       string
+		name                    string
+		status                  string
+		failCount, successCount int
+		bound, restartDetected  bool
+		want                    string
 	}{
 		{"fresh warmup fail/0/0", "fail", 0, 0, true, false, "warming"},
 		{"warmup empty status", "", 0, 0, true, false, "warming"},

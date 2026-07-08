@@ -7,11 +7,11 @@ import (
 
 // mockSettings implements SettingsGetter for testing.
 type mockSettings struct {
-	enabled        bool
-	maxAge         int
-	logLevel       string
-	appMaxEntries  int
-	sbMaxEntries   int
+	enabled       bool
+	maxAge        int
+	logLevel      string
+	appMaxEntries int
+	sbMaxEntries  int
 }
 
 func (m *mockSettings) IsLoggingEnabled() bool {

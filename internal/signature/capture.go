@@ -135,7 +135,6 @@ func captureQUIC(domain, ip string, timeout time.Duration) ([][]byte, error) {
 	return packets, nil
 }
 
-
 // buildQUICInitial constructs a properly AEAD-encrypted QUIC v1 Initial packet
 // containing a real TLS 1.3 ClientHello with the given domain as SNI.
 // Encryption follows RFC 9001: Initial keys derived from DCID via HKDF,
@@ -177,7 +176,7 @@ func buildQUICInitial(domain string) ([]byte, error) {
 	// Payload to encrypt = CRYPTO frame + PADDING (to reach 1200 bytes minimum)
 	// We need to calculate header size first to know how much padding we need
 	headerSizeEstimate := 1 + 4 + 1 + len(dcid) + 1 + 1 + 2 + pktNumLen // flags+ver+dcid+scid+token+length+pn
-	minPayloadBytes := 1200 - headerSizeEstimate - 16                     // minus AEAD tag
+	minPayloadBytes := 1200 - headerSizeEstimate - 16                   // minus AEAD tag
 	plaintext := cryptoFrame
 	if len(plaintext) < minPayloadBytes {
 		plaintext = append(plaintext, make([]byte, minPayloadBytes-len(plaintext))...)

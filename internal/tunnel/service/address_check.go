@@ -46,4 +46,3 @@ func checkStoredAddressConflicts(store *storage.AWGTunnelStore, address, exclude
 	}
 	return warnings
 }
-

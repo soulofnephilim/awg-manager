@@ -104,4 +104,3 @@ func TestPolicyCommands_UnassignDevice(t *testing.T) {
 		t.Errorf("unassign: %#v", pol)
 	}
 }
-
