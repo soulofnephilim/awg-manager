@@ -24,15 +24,22 @@ export function parseSnapshot(
 	clientsByIP: Map<string, string>,
 ): ConnectionsSnapshot {
 	const rawConns = raw.connections ?? [];
-	const connections: Connection[] = rawConns.map((c) => {
-		const ip = c.metadata.sourceIP.toLowerCase();
-		const clientName = clientsByIP.get(ip);
-		return {
-			...c,
-			clientName,
-			outboundLabel: chainOutboundLabel(c.chains),
-		};
-	});
+	const connections: Connection[] = rawConns
+		// Снапшот приходит по WS без проверки формы: одна битая запись
+		// (metadata/sourceIP/chains не той формы) не должна ронять весь
+		// live-поток шапки и FlowGraph — пропускаем её, остальные живут.
+		.filter(
+			(c) => typeof c?.metadata?.sourceIP === 'string' && Array.isArray(c.chains),
+		)
+		.map((c) => {
+			const ip = c.metadata.sourceIP.toLowerCase();
+			const clientName = clientsByIP.get(ip);
+			return {
+				...c,
+				clientName,
+				outboundLabel: chainOutboundLabel(c.chains),
+			};
+		});
 	return {
 		connections,
 		downloadTotal: raw.downloadTotal ?? 0,

@@ -2,7 +2,7 @@
 	import { page } from '$app/stores';
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api/client';
-	import type { Subscription } from '$lib/types';
+	import type { Subscription, SubscriptionMember } from '$lib/types';
 	import { PageContainer, PageHeader, LoadingSpinner } from '$lib/components/layout';
 	import { Tabs, LayoutViewToggle } from '$lib/components/ui';
 	import SubscriptionMembersTab from '$lib/components/subscriptions/SubscriptionMembersTab.svelte';
@@ -111,8 +111,23 @@
 		let streamDone = false;
 		let fallbackTried = false;
 
+		// SSE-события парсятся без проверки формы, а хендлеры ниже читают их
+		// структурно (spread в Subscription, member.tag): битое событие не
+		// должно убивать прогрессивную загрузку — оно молча пропускается.
+		const parseEventObject = (e: Event): Record<string, unknown> | null => {
+			try {
+				const parsed: unknown = JSON.parse((e as MessageEvent).data);
+				return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+					? (parsed as Record<string, unknown>)
+					: null;
+			} catch {
+				return null;
+			}
+		};
+
 		evtSrc.addEventListener('meta', (e) => {
-			const meta = JSON.parse((e as MessageEvent).data);
+			const meta = parseEventObject(e) as (Partial<Subscription> & { total?: number }) | null;
+			if (!meta) return;
 			subscription = {
 				...meta,
 				members: [],
@@ -125,20 +140,22 @@
 				excludedMembers: [],
 				filteredMembers: [],
 			} as Subscription;
-			progressTotal = meta.total ?? 0;
+			progressTotal = typeof meta.total === 'number' ? meta.total : 0;
 		});
 
 		evtSrc.addEventListener('member', (e) => {
 			if (!subscription) return;
-			const { member } = JSON.parse((e as MessageEvent).data);
+			const payload = parseEventObject(e);
+			const member = payload?.member as SubscriptionMember | undefined;
+			if (!member || typeof member !== 'object' || typeof member.tag !== 'string') return;
 			subscription.members = [...(subscription.members ?? []), member];
 			subscription.memberTags = [...subscription.memberTags, member.tag];
 			progressLoaded += 1;
 		});
 
 		evtSrc.addEventListener('done', (e) => {
-			if (subscription) {
-				const data = JSON.parse((e as MessageEvent).data);
+			const data = parseEventObject(e) as Partial<Subscription> | null;
+			if (subscription && data) {
 				subscription.orphanTags = data.orphanTags ?? [];
 				subscription.activeMember = data.activeMember ?? '';
 				subscription.rejectedMembers = data.rejectedMembers ?? subscription.rejectedMembers ?? [];
