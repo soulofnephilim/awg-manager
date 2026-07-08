@@ -159,9 +159,9 @@ func (h *TerminalHandler) Stop(w http.ResponseWriter, r *http.Request) {
 //
 //	@Summary		Terminal WebSocket
 //	@Tags			terminal
-//	@Produce		json
+//	@Produce		plain
 //	@Security		CookieAuth
-//	@Success		200	{string}	string	"WebSocket upgrade"
+//	@Success		101	{string}	string	"Switching Protocols (WebSocket upgrade)"
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/terminal/ws [get]

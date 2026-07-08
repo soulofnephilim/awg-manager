@@ -377,7 +377,7 @@ func (h *ServersHandler) ToggleServerPeer(w http.ResponseWriter, r *http.Request
 //	@Security		CookieAuth
 //	@Param			name	path		string	true	"Interface name (e.g. Wireguard0)"
 //	@Param			pubkey	path		string	true	"Peer public key"
-//	@Success		200		{object}	map[string]string
+//	@Success		200		{object}	PeerConfResponse
 //	@Failure		404		{object}	APIErrorEnvelope
 //	@Failure		500		{object}	APIErrorEnvelope
 //	@Router			/servers/{name}/peers/{pubkey}/conf [get]

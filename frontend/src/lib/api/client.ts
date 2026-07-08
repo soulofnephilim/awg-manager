@@ -112,6 +112,7 @@ import type {
 } from '$lib/types';
 import { sanitizeDnsServerForApi } from '$lib/utils/dnsServerDetour';
 import { isMockDevMode as envIsMockDevMode } from '$lib/env';
+import { validateApiResponse } from './validate';
 
 export type TrafficPeriod = '5m' | '10m' | '30m' | '1h' | '3h' | '6h' | '12h' | '24h';
 
@@ -255,6 +256,10 @@ class ApiClient {
 			throw err;
 		}
 
+		// Runtime-проверка конверта по схеме из swagger: каст `as T` ниже
+		// подкреплён фактической валидацией, а не доверием.
+		validateApiResponse(options.method ?? 'GET', endpoint, data);
+
 		return data.data as T;
 	}
 
@@ -348,6 +353,11 @@ class ApiClient {
 		}
 		const data = (await res.json()) as ApiResponse<T>;
 		if (data.error) throw new Error(data.message || 'Ошибка удаления');
+		validateApiResponse(
+			options.method ?? 'POST',
+			url.startsWith(this.baseUrl) ? url.slice(this.baseUrl.length) : url,
+			data,
+		);
 		return data.data as T;
 	}
 
