@@ -38,10 +38,10 @@ type IPCheckService struct {
 // SpeedTestResult from test/speed endpoint.
 type SpeedTestResult struct {
 	Server      string  `json:"server"`
-	Direction   string  `json:"direction"`   // "download" or "upload"
-	Bandwidth   float64 `json:"bandwidth"`   // Mbps
+	Direction   string  `json:"direction"` // "download" or "upload"
+	Bandwidth   float64 `json:"bandwidth"` // Mbps
 	Bytes       int64   `json:"bytes"`
-	Duration    float64 `json:"duration"`    // seconds
+	Duration    float64 `json:"duration"` // seconds
 	Retransmits int     `json:"retransmits"`
 }
 

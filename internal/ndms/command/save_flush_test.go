@@ -128,4 +128,3 @@ func TestSaveCoordinatorFlushDoesNotInvalidateOnFailure(t *testing.T) {
 		t.Fatalf("invalidator count = %d, want 0", invalidator.count)
 	}
 }
-

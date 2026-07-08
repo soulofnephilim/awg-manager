@@ -10,9 +10,9 @@ import (
 
 func TestAWGTunnelIDFromTag(t *testing.T) {
 	tests := []struct {
-		tag       string
-		wantID    string
-		wantSys   bool
+		tag     string
+		wantID  string
+		wantSys bool
 	}{
 		{"awg-awg11", "awg11", false},
 		{"awg-sys-Wireguard0", "Wireguard0", true},

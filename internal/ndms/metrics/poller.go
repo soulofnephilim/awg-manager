@@ -45,8 +45,8 @@ type Poller struct {
 	interval    time.Duration
 	log         Logger
 
-	mu          sync.Mutex
-	prev        map[string]peerDigest
+	mu   sync.Mutex
+	prev map[string]peerDigest
 	// emptyUntil holds per-interface cooldown timestamps. Once an
 	// interface is observed with zero peers, we skip polling it for
 	// emptyCooldown — no point hitting NDMS every 5s for an empty

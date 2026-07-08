@@ -103,12 +103,12 @@ func TestDefaultsCatalogCovers(t *testing.T) {
 		}
 	}
 	wantParents := map[string]int{
-		"category-ai":     6,
-		"category-games":  10,
-		"category-media":  12,
-		"meta":            4,
-		"dev-tools":       3,
-		"google":          2,
+		"category-ai":    6,
+		"category-games": 10,
+		"category-media": 12,
+		"meta":           4,
+		"dev-tools":      3,
+		"google":         2,
 	}
 	for id, n := range wantParents {
 		var found *Preset

@@ -1098,4 +1098,3 @@ func allInterfaceLabel(ifaceType, kernelName, description string) string {
 	}
 	return kernelName
 }
-

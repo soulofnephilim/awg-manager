@@ -143,8 +143,6 @@ func (m *ManagerImpl) GetState(ctx context.Context, tunnelID string) tunnel.Stat
 	return info
 }
 
-
-
 // sysfsDeviceExists checks if a network device exists (via sysfs).
 func (m *ManagerImpl) sysfsDeviceExists(ifaceName string) bool {
 	_, err := os.Stat(fmt.Sprintf("/sys/class/net/%s", ifaceName))

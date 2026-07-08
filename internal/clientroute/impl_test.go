@@ -31,25 +31,43 @@ func (m *mockCatalog) GetKernelIface(_ context.Context, tunnelID string) (string
 // --- Mock Operator ---
 
 type mockOperator struct {
-	setupCalls   []struct{ iface string; table int }
-	addCalls     []struct{ ip string; table int }
-	removeCalls  []struct{ ip string; table int }
+	setupCalls []struct {
+		iface string
+		table int
+	}
+	addCalls []struct {
+		ip    string
+		table int
+	}
+	removeCalls []struct {
+		ip    string
+		table int
+	}
 	cleanupCalls []int
 	usedTables   []int
 }
 
 func (m *mockOperator) SetupClientRouteTable(_ context.Context, kernelIface string, tableNum int) error {
-	m.setupCalls = append(m.setupCalls, struct{ iface string; table int }{kernelIface, tableNum})
+	m.setupCalls = append(m.setupCalls, struct {
+		iface string
+		table int
+	}{kernelIface, tableNum})
 	return nil
 }
 
 func (m *mockOperator) AddClientRule(_ context.Context, clientIP string, tableNum int) error {
-	m.addCalls = append(m.addCalls, struct{ ip string; table int }{clientIP, tableNum})
+	m.addCalls = append(m.addCalls, struct {
+		ip    string
+		table int
+	}{clientIP, tableNum})
 	return nil
 }
 
 func (m *mockOperator) RemoveClientRule(_ context.Context, clientIP string, tableNum int) error {
-	m.removeCalls = append(m.removeCalls, struct{ ip string; table int }{clientIP, tableNum})
+	m.removeCalls = append(m.removeCalls, struct {
+		ip    string
+		table int
+	}{clientIP, tableNum})
 	return nil
 }
 
@@ -489,7 +507,7 @@ func TestOnTunnelDelete_CleansEverything(t *testing.T) {
 	store.routes = []ClientRoute{
 		{ID: "cr-td1", ClientIP: "192.168.1.10", TunnelID: "tun1", Fallback: "drop", Enabled: true},
 		{ID: "cr-td2", ClientIP: "192.168.1.11", TunnelID: "tun1", Fallback: "bypass", Enabled: true},
-		{ID: "cr-td3", ClientIP: "192.168.1.12", TunnelID: "tun1", Fallback: "drop", Enabled: false}, // disabled, no rule to remove
+		{ID: "cr-td3", ClientIP: "192.168.1.12", TunnelID: "tun1", Fallback: "drop", Enabled: false},  // disabled, no rule to remove
 		{ID: "cr-other", ClientIP: "192.168.1.99", TunnelID: "tun2", Fallback: "drop", Enabled: true}, // different tunnel
 	}
 	store.tables["tun1"] = 400

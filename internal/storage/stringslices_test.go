@@ -28,4 +28,3 @@ func TestContains(t *testing.T) {
 		t.Fatal("contains should not find z")
 	}
 }
-

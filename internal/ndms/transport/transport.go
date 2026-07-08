@@ -16,4 +16,3 @@ var sharedTransport = &http.Transport{
 	IdleConnTimeout:     90 * time.Second,
 	DisableKeepAlives:   false,
 }
-

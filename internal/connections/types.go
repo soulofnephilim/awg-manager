@@ -2,19 +2,19 @@ package connections
 
 // Connection represents a single conntrack entry with resolved tunnel and client info.
 type Connection struct {
-	Protocol   string `json:"protocol"`
-	Src        string `json:"src"`
-	Dst        string `json:"dst"`
-	SrcPort    int    `json:"srcPort"`
-	DstPort    int    `json:"dstPort"`
-	State      string `json:"state"`
-	Packets    int64  `json:"packets"`
-	Bytes      int64  `json:"bytes"`
-	Interface  string `json:"interface"`
-	TunnelID   string `json:"tunnelId"`
-	TunnelName string `json:"tunnelName"`
-	ClientMAC  string `json:"clientMac"`
-	ClientName string `json:"clientName"`
+	Protocol   string    `json:"protocol"`
+	Src        string    `json:"src"`
+	Dst        string    `json:"dst"`
+	SrcPort    int       `json:"srcPort"`
+	DstPort    int       `json:"dstPort"`
+	State      string    `json:"state"`
+	Packets    int64     `json:"packets"`
+	Bytes      int64     `json:"bytes"`
+	Interface  string    `json:"interface"`
+	TunnelID   string    `json:"tunnelId"`
+	TunnelName string    `json:"tunnelName"`
+	ClientMAC  string    `json:"clientMac"`
+	ClientName string    `json:"clientName"`
 	Rules      []RuleHit `json:"rules,omitempty"`
 }
 

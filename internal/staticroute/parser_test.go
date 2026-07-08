@@ -106,9 +106,9 @@ func TestParseBatTooFewFields(t *testing.T) {
 
 func TestMaskToCIDR(t *testing.T) {
 	tests := []struct {
-		mask    string
-		want    int
-		wantOK  bool
+		mask   string
+		want   int
+		wantOK bool
 	}{
 		{"255.255.255.255", 32, true},
 		{"255.255.255.0", 24, true},

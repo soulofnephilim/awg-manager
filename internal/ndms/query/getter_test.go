@@ -77,4 +77,3 @@ func TestFakeGetterPostHandler(t *testing.T) {
 		t.Fatalf("Post() = %s", string(got))
 	}
 }
-

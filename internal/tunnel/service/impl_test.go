@@ -33,33 +33,39 @@ func (m *MockStateManager) SetState(tunnelID string, state tunnel.StateInfo) {
 
 // MockOperator is a mock operator.
 type MockOperator struct {
-	createError        error
-	startError         error
-	stopError          error
-	deleteError        error
-	recoverError       error
-	applyConfigError   error
-	setMTUError        error
+	createError      error
+	startError       error
+	stopError        error
+	deleteError      error
+	recoverError     error
+	applyConfigError error
+	setMTUError      error
 
 	// SetupEndpointRouteIP is the IP returned by SetupEndpointRoute.
 	SetupEndpointRouteIP string
 	// TrackedEndpointIPs maps tunnelID -> IP for GetTrackedEndpointIP.
 	TrackedEndpointIPs map[string]string
 
-	CreateCalls              []tunnel.Config
-	StartCalls               []tunnel.Config
-	StopCalls                []string
-	DeleteCalls              []string
-	RecoverCalls             []struct{ ID string; State tunnel.StateInfo }
-	ReconcileCalls           []tunnel.Config
-	ApplyConfigCalls         []struct{ ID, Path string }
-	SetupEndpointRouteCalls  []struct{ ID, Endpoint, ISP string }
-	CleanupEndpointRouteCalls []string
+	CreateCalls  []tunnel.Config
+	StartCalls   []tunnel.Config
+	StopCalls    []string
+	DeleteCalls  []string
+	RecoverCalls []struct {
+		ID    string
+		State tunnel.StateInfo
+	}
+	ReconcileCalls               []tunnel.Config
+	ApplyConfigCalls             []struct{ ID, Path string }
+	SetupEndpointRouteCalls      []struct{ ID, Endpoint, ISP string }
+	CleanupEndpointRouteCalls    []string
 	RestoreEndpointTrackingCalls []struct{ ID, Endpoint string }
-	SetMTUCalls              []struct{ ID string; MTU int }
-	UpdateDescriptionCalls   []struct{ ID, Desc string }
-	SyncDNSCalls             [][]string
-	SyncAddressCalls         []struct{ ID, Addr, IPv6 string }
+	SetMTUCalls                  []struct {
+		ID  string
+		MTU int
+	}
+	UpdateDescriptionCalls []struct{ ID, Desc string }
+	SyncDNSCalls           [][]string
+	SyncAddressCalls       []struct{ ID, Addr, IPv6 string }
 }
 
 func (m *MockOperator) Create(ctx context.Context, cfg tunnel.Config) error {
@@ -88,7 +94,10 @@ func (m *MockOperator) Delete(ctx context.Context, stored *storage.AWGTunnel) er
 }
 
 func (m *MockOperator) Recover(ctx context.Context, tunnelID string, state tunnel.StateInfo) error {
-	m.RecoverCalls = append(m.RecoverCalls, struct{ ID string; State tunnel.StateInfo }{tunnelID, state})
+	m.RecoverCalls = append(m.RecoverCalls, struct {
+		ID    string
+		State tunnel.StateInfo
+	}{tunnelID, state})
 	return m.recoverError
 }
 
@@ -125,7 +134,10 @@ func (m *MockOperator) GetTrackedEndpointIP(tunnelID string) string {
 }
 
 func (m *MockOperator) SetMTU(ctx context.Context, tunnelID string, mtu int) error {
-	m.SetMTUCalls = append(m.SetMTUCalls, struct{ ID string; MTU int }{tunnelID, mtu})
+	m.SetMTUCalls = append(m.SetMTUCalls, struct {
+		ID  string
+		MTU int
+	}{tunnelID, mtu})
 	return m.setMTUError
 }
 

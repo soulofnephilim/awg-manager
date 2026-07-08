@@ -31,4 +31,3 @@ func TestIsAtLeast501A3(t *testing.T) {
 		})
 	}
 }
-
