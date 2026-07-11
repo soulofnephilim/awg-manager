@@ -608,6 +608,18 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 		return nil, err
 	}
 	s.logInfo("subscription-refresh", id, fmt.Sprintf("done added=%d updated=%d orphaned=%d skipped_dup=%d skipped_vmess=%d skipped_other=%d parse_errors=%d", res.Added, res.Updated, res.Orphaned, res.SkippedDuplicate, res.SkippedVmess, res.SkippedOther, len(res.ParseErrors)))
+	// Итог с изменениями зеркалится в app-журнал (routing/subscription):
+	// подробная строка выше живёт в sing-box бакете, а пользователь смотрит
+	// главный журнал. Без изменений не дублируем — иначе плановые тики
+	// снова превращаются в шум.
+	if s.appLog != nil && (res.Added > 0 || res.Updated > 0 || res.Orphaned > 0) {
+		label := sub.Label
+		if label == "" {
+			label = id
+		}
+		s.appLog.Info("refresh", label,
+			fmt.Sprintf("Subscription refreshed: +%d new, %d updated, %d removed", res.Added, res.Updated, res.Orphaned))
+	}
 	return res, nil
 }
 

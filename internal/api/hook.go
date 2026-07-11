@@ -41,6 +41,7 @@ type HookHandler struct {
 	wanModel       HookWANModel   // may be nil until SetWANModel is called
 	refreshTunnels TunnelHookInvalidator
 	log            *logging.ScopedLogger
+	wanLog         *logging.ScopedLogger
 	// selfCreateGate counts in-flight awg-manager-initiated NDMS interface
 	// creations. While > 0, ifcreated hook events suppress their automatic
 	// snapshot rebroadcast — the caller (importer / Create path) is
@@ -68,6 +69,9 @@ func NewHookHandler(svc TunnelService, orch *orchestrator.Orchestrator, appLogge
 		svc:  svc,
 		orch: orch,
 		log:  logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubBoot),
+		// Переходы WAN — отдельная подгруппа: их ищут при разборе обрывов,
+		// не смешивая с потоком NDMS-хуков.
+		wanLog: logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubWan),
 	}
 }
 
@@ -231,6 +235,14 @@ func (h *HookHandler) handleWANLayerEvent(e events.Event) {
 	// Sync WAN model update — must happen before the orch decides
 	// whether any WAN is up. SetUp handles hot-plug via repopulateFn.
 	h.wanModel.SetUp(kernelName, up)
+
+	if h.wanLog != nil {
+		if up {
+			h.wanLog.Info("wan-state", kernelName, "WAN interface up")
+		} else {
+			h.wanLog.Warn("wan-state", kernelName, "WAN interface down")
+		}
+	}
 
 	if h.orch == nil {
 		return

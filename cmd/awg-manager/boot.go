@@ -63,6 +63,12 @@ func populateWANModel(ctx context.Context, queries *ndmsquery.Queries, model *wa
 func (a *app) startBootSequence() {
 	// Boot vs restart detection
 	a.uptime = getUptime()
+	tunnelCount := 0
+	if list, err := a.awgStore.List(); err == nil {
+		tunnelCount = len(list)
+	}
+	a.bootLog.Info("startup", "",
+		fmt.Sprintf("awg-manager %s started (uptime %ds, tunnels in config: %d)", version, int(a.uptime), tunnelCount))
 	const bootDetectionMax = 300 // 5 minutes
 	isBoot := (a.uptime > 0 && a.uptime < bootDetectionMax) || a.forceBoot
 	if isBoot {

@@ -640,6 +640,11 @@ func (o *Operator) autoRestartIfCrashed(ctx context.Context, waitClash bool) (re
 		}
 		return false, true, nil
 	}
+	if o.runtimeLogger != nil {
+		// Явное подтверждение восстановления: падение видно по Warn выше,
+		// но без этой строки успешный исход авто-рестарта был невидим.
+		o.runtimeLogger.Info("auto-restart", "", "process restored")
+	}
 	return true, false, nil
 }
 
