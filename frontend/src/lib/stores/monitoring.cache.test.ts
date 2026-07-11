@@ -81,4 +81,20 @@ describe('monitoring.loadCached — недоверенный localStorage', () =
 		expect(() => monitoring.loadCached()).not.toThrow();
 		expect(get(monitoring).snapshot).toBeNull();
 	});
+
+	it('null-слайсы (Go nil без omitempty, пустой роутер) валидны и нормализуются в []', () => {
+		// Бэкенд-DTO маршалит nil-слайсы в null: {"targets":null,...} — это
+		// легитимный кэш текущей версии, а не мусор.
+		localStorage.setItem(
+			CACHE_KEY,
+			JSON.stringify({ targets: null, tunnels: null, cells: null, updatedAt: '2026-07-08T10:00:00Z' }),
+		);
+		monitoring.loadCached();
+		const s = get(monitoring);
+		expect(s.snapshot).not.toBeNull();
+		expect(s.snapshot?.targets).toEqual([]);
+		expect(s.snapshot?.tunnels).toEqual([]);
+		expect(s.snapshot?.cells).toEqual([]);
+		expect(s.stale).toBe(true);
+	});
 });

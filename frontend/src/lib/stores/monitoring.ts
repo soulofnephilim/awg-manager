@@ -9,30 +9,37 @@ const CACHE_KEY = 'awgm_monitoring_snapshot_v1';
 // приводил бы к падению матрицы на deref'ах до первого свежего снапшота.
 // Валидируются поля, которые UI читает структурно; лишние ключи допустимы
 // (looseObject), несовпадение — кэш молча игнорируется (self-heal).
+// Массивы nullable: Go-DTO без omitempty маршалит nil-слайс в null (пустой
+// роутер отдаёт {"targets":null,...}) — это валидный кэш, а не мусор;
+// null нормализуется в [] в loadCached, потому что UI ждёт массивы.
 const cachedSnapshotSchema = v.looseObject({
-	targets: v.array(
-		v.looseObject({ id: v.string(), host: v.string(), name: v.string() }),
+	targets: v.nullable(
+		v.array(v.looseObject({ id: v.string(), host: v.string(), name: v.string() })),
 	),
-	tunnels: v.array(
-		v.looseObject({
-			id: v.string(),
-			name: v.string(),
-			ifaceName: v.string(),
-			pingcheckTarget: v.string(),
-			selfTarget: v.string(),
-			selfMethod: v.string(),
-		}),
+	tunnels: v.nullable(
+		v.array(
+			v.looseObject({
+				id: v.string(),
+				name: v.string(),
+				ifaceName: v.string(),
+				pingcheckTarget: v.string(),
+				selfTarget: v.string(),
+				selfMethod: v.string(),
+			}),
+		),
 	),
-	cells: v.array(
-		v.looseObject({
-			targetId: v.string(),
-			tunnelId: v.string(),
-			latencyMs: v.nullable(v.number()),
-			ok: v.boolean(),
-			activeForRestart: v.boolean(),
-			isSelf: v.boolean(),
-			ts: v.string(),
-		}),
+	cells: v.nullable(
+		v.array(
+			v.looseObject({
+				targetId: v.string(),
+				tunnelId: v.string(),
+				latencyMs: v.nullable(v.number()),
+				ok: v.boolean(),
+				activeForRestart: v.boolean(),
+				isSelf: v.boolean(),
+				ts: v.string(),
+			}),
+		),
 	),
 	updatedAt: v.string(),
 });
@@ -63,7 +70,14 @@ function createMonitoringStore() {
 				if (!raw) return;
 				const result = v.safeParse(cachedSnapshotSchema, JSON.parse(raw));
 				if (!result.success) return;
-				const snap = result.output as MonitoringSnapshot;
+				const out = result.output;
+				const snap: MonitoringSnapshot = {
+					...out,
+					targets: out.targets ?? [],
+					tunnels: out.tunnels ?? [],
+					cells: out.cells ?? [],
+					updatedAt: out.updatedAt,
+				};
 				update((s) => ({
 					...s,
 					snapshot: snap,
