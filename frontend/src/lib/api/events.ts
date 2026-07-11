@@ -144,7 +144,9 @@ export interface SSEEventHandlers {
 
 export function parseConnectedEvent(data: string): { ok?: boolean; instanceId?: string } | undefined {
 	try {
-		return JSON.parse(data) as { ok?: boolean; instanceId?: string };
+		const parsed: unknown = JSON.parse(data);
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+		return parsed;
 	} catch {
 		return undefined;
 	}

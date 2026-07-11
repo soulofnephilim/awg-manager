@@ -5,9 +5,30 @@ import {
   buildServerPeerDropdownOptions,
 } from './serverPeerOptions';
 import type { ServersSnapshot } from '$lib/stores/servers';
+import type { ManagedServer, WireguardServer } from '$lib/types';
 
 function snap(over: Partial<ServersSnapshot> = {}): ServersSnapshot {
   return { servers: [], managed: [], managedStats: {}, ...over };
+}
+
+// Фикстуры покрывают только поля, которые читает buildServerPeerDropdownOptions
+// (id/interfaceName/description/peers); один явный каст в фабрике вместо
+// рассыпанных as any.
+function sysServer(p: {
+  id: string;
+  interfaceName: string;
+  description: string;
+  peers: Array<{ publicKey: string; description: string; confAvailable?: boolean }>;
+}): WireguardServer {
+  return p as unknown as WireguardServer;
+}
+
+function mngServer(p: {
+  interfaceName: string;
+  description: string;
+  peers: Array<{ publicKey: string; description: string }>;
+}): ManagedServer {
+  return p as unknown as ManagedServer;
 }
 
 describe('serverPeerOptions value codec', () => {
@@ -30,7 +51,7 @@ describe('buildServerPeerDropdownOptions', () => {
   it('filters system peers by confAvailable, keeps managed peers always', () => {
     const s = snap({
       servers: [
-        {
+        sysServer({
           id: 'sys1',
           interfaceName: 'Wireguard0',
           description: 'Sys',
@@ -39,14 +60,14 @@ describe('buildServerPeerDropdownOptions', () => {
             { publicKey: 'SYS_NO', description: 'no', confAvailable: false },
             { publicKey: 'SYS_UNDEF', description: 'undef' },
           ],
-        } as any,
+        }),
       ],
       managed: [
-        {
+        mngServer({
           interfaceName: 'awg-mng0',
           description: 'Mng',
           peers: [{ publicKey: 'MNG1', description: 'm1' }],
-        } as any,
+        }),
       ],
     });
 
@@ -67,12 +88,12 @@ describe('buildServerPeerDropdownOptions', () => {
     // values so a swap is caught here, not only at runtime.
     const s = snap({
       servers: [
-        {
+        sysServer({
           id: 'sys1',
           interfaceName: 'Wireguard0',
           description: 'Sys',
           peers: [{ publicKey: 'SYS_OK', description: 'ok', confAvailable: true }],
-        } as any,
+        }),
       ],
     });
     const opt = buildServerPeerDropdownOptions(s)[0];

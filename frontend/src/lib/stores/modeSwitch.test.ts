@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
+import type { SingboxRouterStatus, SingboxRouterSettings } from '$lib/types';
+
+// Тесты кормят currentMode и стор частичными фикстурами (читаются только
+// enabled/routingMode); один явный каст в хелпере вместо рассыпанных as any.
+const asStatus = (p: Partial<SingboxRouterStatus>) => p as SingboxRouterStatus;
+const asSettings = (p: Partial<SingboxRouterSettings>) => p as SingboxRouterSettings;
 
 // vi.hoisted: vi.mock factories are hoisted above these declarations, so the
 // shared spy fns must be hoisted too (vitest only auto-hoists `mock*`-prefixed
@@ -10,14 +16,27 @@ const { switchMode, begin, fail, reset, loadAll, refs } = vi.hoisted(() => ({
 	fail: vi.fn(),
 	reset: vi.fn(),
 	loadAll: vi.fn().mockResolvedValue(undefined),
-	refs: { statusVal: null as any, settingsVal: null as any },
+	refs: {
+		statusVal: null as Partial<SingboxRouterStatus> | null,
+		settingsVal: null as Partial<SingboxRouterSettings> | null,
+	},
 }));
 vi.mock('$lib/api/client', () => ({ api: { singboxRouterSwitchMode: (m: string) => switchMode(m) } }));
 vi.mock('$lib/stores/fakeipTransition', () => ({ fakeipTransition: { begin, fail, reset } }));
 vi.mock('$lib/stores/singboxRouter', () => ({
 	singboxRouter: {
-		status: { subscribe: (run: any) => { run(refs.statusVal); return () => {}; } },
-		settings: { subscribe: (run: any) => { run(refs.settingsVal); return () => {}; } },
+		status: {
+			subscribe: (run: (v: Partial<SingboxRouterStatus> | null) => void) => {
+				run(refs.statusVal);
+				return () => {};
+			},
+		},
+		settings: {
+			subscribe: (run: (v: Partial<SingboxRouterSettings> | null) => void) => {
+				run(refs.settingsVal);
+				return () => {};
+			},
+		},
 		loadAll,
 	},
 }));
@@ -34,13 +53,17 @@ beforeEach(() => {
 
 describe('currentMode', () => {
 	it('off when not enabled (ignores stale routingMode)', () => {
-		expect(currentMode({ enabled: false } as any, { routingMode: 'fakeip-tun' } as any)).toBe('off');
+		expect(
+			currentMode(asStatus({ enabled: false }), asSettings({ routingMode: 'fakeip-tun' })),
+		).toBe('off');
 	});
 	it('routingMode when enabled', () => {
-		expect(currentMode({ enabled: true } as any, { routingMode: 'tproxy' } as any)).toBe('tproxy');
+		expect(currentMode(asStatus({ enabled: true }), asSettings({ routingMode: 'tproxy' }))).toBe(
+			'tproxy',
+		);
 	});
 	it('defaults to tproxy when enabled but routingMode missing', () => {
-		expect(currentMode({ enabled: true } as any, {} as any)).toBe('tproxy');
+		expect(currentMode(asStatus({ enabled: true }), asSettings({}))).toBe('tproxy');
 	});
 });
 
