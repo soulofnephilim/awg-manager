@@ -88,7 +88,8 @@ type SingboxRouterSettingsData struct {
 	WANAutoDetect bool   `json:"wanAutoDetect" example:"false"`
 	WANInterface  string `json:"wanInterface,omitempty" example:"ppp0"`
 	// BypassPresets lists active named port-bypass presets.
-	// Valid values: "l2tp", "ntp", "netbios-smb".
+	// Valid values: "l2tp", "ntp", "netbios-smb" (port-based), "keendns"
+	// (destination-IP 78.47.125.180, KeenDNS/CrazeDNS).
 	BypassPresets []string `json:"bypassPresets,omitempty" example:"l2tp"`
 	// BypassExtraPorts is a user-defined comma-separated list of extra
 	// port exclusions in "PORT UDP|TCP" format (e.g. "51820 UDP, 1194 TCP").

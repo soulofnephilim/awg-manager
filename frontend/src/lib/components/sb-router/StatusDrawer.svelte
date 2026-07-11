@@ -476,9 +476,9 @@
         onPatch={(patch) => applyPatch(patch)}
       />
 
-      <!-- Исключения портов -->
+      <!-- Исключения: порт-пресеты + IP-пресеты (keendns) + ручные порты/подсети -->
       <section class="sec">
-        <div class="sec-cap">Исключения портов</div>
+        <div class="sec-cap">Исключения</div>
         <div class="chips">
           {#each BYPASS_PRESETS as p (p.id)}
             {@const active = (cfg.bypassPresets ?? []).includes(p.id)}
