@@ -2236,31 +2236,6 @@
 {/if}
 
 <style>
-	/* Комбинированная сводка дашборда (issue #353): липкий блок «тулбар +
-	   сводка» под AppHeader — тот же паттерн, что sticky-header в
-	   TunnelEditHeader.svelte. */
-
-
-	/* На мобильном тулбар складывается в несколько рядов — прилипший блок
-	   съедал бы половину вьюпорта, поэтому ниже 760px он статичен. */
-	@media (max-width: 760px) {
-	}
-
-	/* Обёртка карточки в сплошном/теговом дашборде: карточка + футер
-	   (грип ручного порядка + чипы тегов). */
-
-
-
-
-
-
-	/* Ручной порядок включён, но dnd заблокирован (поиск/фильтр/загрузка
-	   данных): грип виден, но неактивен — не исчезает молча. */
-
-	/* ── D7: drag-reorder (общее pointer-ядро sb-router/reorderDrag).
-	   Движок вертикальный, поэтому на время активного drag сетка
-	   схлопывается в одну колонку — индексы вставки и индикатор
-	   становятся однозначными на любой плотности. ── */
 
 	/* Ghost-токен drag-переупорядочивания: бейдж вида + имя. */
 	.drag-ghost-token {
@@ -2298,21 +2273,6 @@
 		min-width: 0;
 	}
 
-	/* Во время drag строки компактные — слот источника и раскрытый
-	   drop-скелетон ужимаются до высоты ряда, а не исходной карточки
-	   (--drop-height меряется на pointerdown по полной карточке). */
-
-
-
-
-
-
-
-
-
-
-
-
 	.dashboard-drag-ghost {
 		position: fixed;
 		z-index: 10000;
@@ -2325,56 +2285,6 @@
 		user-select: none;
 		cursor: grabbing;
 	}
-
-	/* Toolbar (count + actions row above the tunnel grid) */
-
-
-
-
-
-
-	/* Empty-state ghost terminal — page-specific */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-	/* Backend selector — chip-like toggles for nativewg/kernel */
-
-
-
-
-
-
-	/* Drag-over / importing overlays */
-
-
-	/* Empty-state kind picker — three clickable cards opening the wizard
-	   on the matching step 2. Mirrors the wizard's step-1 visual so the
-	   transition into the modal feels continuous. */
-	@media (min-width: 600px) {
-	}
-	:global(.empty-kind-icon) { color: var(--color-primary, #3b82f6); }
-
-	/* "About AmneziaWG / Sing-box" info card — page-specific */
-
-
-
-
-
-
-
-
 
 	/* "Kernel module unavailable" full-screen overlay — page-specific */
 	.unsupported-overlay {
@@ -2454,8 +2364,6 @@
 		color: #fff;
 		border-color: var(--color-accent);
 	}
-
-
 
 	@media (max-width: 760px) {
 	}
