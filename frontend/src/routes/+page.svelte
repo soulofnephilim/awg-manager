@@ -48,6 +48,7 @@
 	import AddTunnelWizard from '$lib/components/subscriptions/AddTunnelWizard.svelte';
 	import SubscriptionActiveCard from '$lib/components/subscriptions/SubscriptionActiveCard.svelte';
 	import SubscriptionGroupsSection from '$lib/components/subscriptions/SubscriptionGroupsSection.svelte';
+	import SubscriptionsTabSection from '$lib/components/subscriptions/SubscriptionsTabSection.svelte';
 	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem } from '$lib/types';
 	import { formatBitRate, formatBytes, formatDuration, formatRelativeTime, secondsSince } from '$lib/utils/format';
 	import { showOutboundReferencedError } from '$lib/utils/outboundReferenced';
@@ -2999,308 +3000,34 @@
 			/>
 		{/if}
 		{#if showSubscriptionsBlock}
-			{#if subscriptionsInitialLoading}
-				<div class="loading-centered">
-					<LoadingSpinner size="md" message="Загружаем подписки..." />
-				</div>
-			{:else if subscriptionsFetchFailed}
-				<EmptyState
-					title="Не удалось загрузить подписки"
-					description={subscriptionsState.error ?? 'Проверьте соединение с роутером и обновите страницу.'}
-				/>
-			{:else}
-				{#if !dashboardOn && !singboxStatusLoading}
-					<SingboxInstallBanner />
-				{/if}
-
-				{#if singboxStatusLoading || singboxInstalled}
-					{#if !dashboardOn}
-					<div class="tunnels-toolbar">
-						<span class="tunnel-count">
-							{subscriptionsList.length}
-							{pluralForm(subscriptionsList.length, SUBSCRIPTION_WORDS)}
-						</span>
-						<div class="toolbar-actions">
-							<TunnelToolbarViewRow
-								sourceRowCount={singboxSubscriptionsSourceRowCount}
-								showViewToggle={subscriptionsList.length > 0}
-								searchQuery={singboxSubscriptionsSearchQuery}
-								onSearchChange={(value) => (singboxSubscriptionsSearchQuery = value)}
-							>
-								{#snippet viewToggle()}
-									<LayoutViewToggle
-										value={singboxSubscriptionsLayoutMode}
-										showListOption={showSingboxGridListToggle}
-										ariaLabel="Вид подписок"
-										onchange={(v) => (singboxSubscriptionsLayoutMode = v)}
-									/>
-								{/snippet}
-							</TunnelToolbarViewRow>
-							<Button
-								variant="primary"
-								size="md"
-								onclick={() => openWizard('url')}
-								iconBefore={createIcon}
-							>
-								Добавить
-							</Button>
-						</div>
-					</div>
-					{/if}
-					{#if subscriptionsList.length === 0}
-						<div class="subscription-empty">
-							<div class="subscription-empty-title">Нет подписок</div>
-							<p class="subscription-empty-desc">
-								Добавьте подписку — мастер скачает список серверов и создаст selector-туннель.
-							</p>
-							<Button
-								variant="primary"
-								size="md"
-								onclick={() => openWizard('url')}
-								iconBefore={createIcon}
-							>
-								Добавить подписку
-							</Button>
-						</div>
-					{:else}
-						{#if !dashboardOn}
-							<div class="awg-summary-row">
-								<StatStrip>
-									<Stat
-										value={`${singboxSubscriptionsTrafficStats.activeCount}/${singboxSubscriptionsTrafficStats.count}`}
-										label={pluralForm(singboxSubscriptionsTrafficStats.activeCount, SUBSCRIPTION_WORDS)}
-										sub={formatRunningSub(
-											singboxSubscriptionsTrafficStats.activeCount,
-											singboxSubscriptionsTrafficStats.count,
-										)}
-									/>
-									<Stat
-										value={formatBytes(
-											singboxSubscriptionsTrafficStats.down + singboxSubscriptionsTrafficStats.up,
-										)}
-										label="Суммарный трафик"
-										sub={`↓ ${formatBytes(singboxSubscriptionsTrafficStats.down)} · ↑ ${formatBytes(singboxSubscriptionsTrafficStats.up)}`}
-									/>
-									<Stat
-										value={singboxSubscriptionsTrafficStats.avgDelayMs !== null
-											? `${singboxSubscriptionsTrafficStats.avgDelayMs} ms`
-											: '—'}
-										label="Средний delay"
-										sub={singboxSubscriptionsTrafficStats.delaySamples > 0
-											? `по ${singboxSubscriptionsTrafficStats.delaySamples} активным подпискам`
-											: 'нет активных замеров'}
-									/>
-									<Stat
-										value={singboxSubscriptionsTrafficStats.leaderBytes > 0
-											? formatBytes(singboxSubscriptionsTrafficStats.leaderBytes)
-											: '—'}
-										label="Лидер по трафику"
-										sub={singboxSubscriptionsTrafficStats.leaderBytes > 0
-											? `${singboxSubscriptionsTrafficStats.leaderName} · ${singboxSubscriptionsTrafficStats.leaderSharePct}% всего`
-											: '—'}
-									/>
-								</StatStrip>
-							</div>
-						{/if}
-						{#if effectiveSingboxSubscriptionsRenderMode === 'table'}
-						<div class="tunnel-table-wrap">
-							<table class="tunnel-data-table singbox-sub-table">
-								<colgroup>
-									<col class="col-delay" />
-									<col class="col-name" />
-									<col class="col-active" />
-									<col class="col-traffic" />
-									<col class="col-ping" />
-									<col class="col-actions" />
-								</colgroup>
-								<thead>
-									<tr>
-										<th aria-sort={ariaSort($singboxSubscriptionTableSort.sortBy, 'delay', $singboxSubscriptionTableSort.sortAsc)}>
-											<TableSortHeader label="Delay" sortKey={'delay'} activeSortKey={$singboxSubscriptionTableSort.sortBy} sortAsc={$singboxSubscriptionTableSort.sortAsc} onchange={(key) => handleSubscriptionSortChange(key as SubscriptionSortKey)} />
-										</th>
-										<th aria-sort={ariaSort($singboxSubscriptionTableSort.sortBy, 'label', $singboxSubscriptionTableSort.sortAsc)}>
-											<TableSortHeader label="Подписка" sortKey={'label'} activeSortKey={$singboxSubscriptionTableSort.sortBy} sortAsc={$singboxSubscriptionTableSort.sortAsc} onchange={(key) => handleSubscriptionSortChange(key as SubscriptionSortKey)} />
-										</th>
-										<th aria-sort={ariaSort($singboxSubscriptionTableSort.sortBy, 'active', $singboxSubscriptionTableSort.sortAsc)}>
-											<TableSortHeader label="Активный сервер" sortKey={'active'} activeSortKey={$singboxSubscriptionTableSort.sortBy} sortAsc={$singboxSubscriptionTableSort.sortAsc} onchange={(key) => handleSubscriptionSortChange(key as SubscriptionSortKey)} />
-										</th>
-										<th aria-sort={ariaSort($singboxSubscriptionTableSort.sortBy, 'traffic', $singboxSubscriptionTableSort.sortAsc)}>
-											<TableSortHeader label="Трафик" sortKey={'traffic'} activeSortKey={$singboxSubscriptionTableSort.sortBy} sortAsc={$singboxSubscriptionTableSort.sortAsc} onchange={(key) => handleSubscriptionSortChange(key as SubscriptionSortKey)} />
-										</th>
-										<th aria-sort={ariaSort($singboxSubscriptionTableSort.sortBy, 'ping', $singboxSubscriptionTableSort.sortAsc)}>
-											<TableSortHeader label="Ping" sortKey={'ping'} activeSortKey={$singboxSubscriptionTableSort.sortBy} sortAsc={$singboxSubscriptionTableSort.sortAsc} onchange={(key) => handleSubscriptionSortChange(key as SubscriptionSortKey)} />
-										</th>
-										<th class="col-actions">Действия</th>
-									</tr>
-								</thead>
-								<tbody>
-							{#if sortedFilteredSubscriptionsActiveCards.length > 0}
-								{#each sortedFilteredSubscriptionsActiveCards as card, i (card.subscription.id)}
-									<SubscriptionActiveCard
-										subscription={card.subscription}
-										activeMember={card.activeMember}
-										autoDelayCheckNonce={singboxAutoDelayCheckNonce}
-										autoDelayCheckDelayMs={i * 180}
-										layout="list"
-										renderMode="table"
-										ondetail={(tag) => openSingboxDetail(tag)}
-									/>
-								{/each}
-							{/if}
-							{#if sortedFilteredSubscriptionsListRows.length > 0}
-								{#if dashboardSectionsLayout}
-									<TunnelSectionHeader
-										variant="table-row"
-										title="Остановлено"
-										count={sortedFilteredSubscriptionsListRows.length}
-										countLabel={pluralForm(sortedFilteredSubscriptionsListRows.length, SUBSCRIPTION_WORDS)}
-										colspan={6}
-									/>
-								{:else}
-									<tr class="tunnel-section-row">
-										<td colspan="6">Остановлено · {sortedFilteredSubscriptionsListRows.length}</td>
-									</tr>
-								{/if}
-								{#each sortedFilteredSubscriptionsListRows as sub (sub.id)}
-									<SubscriptionCard
-										subscription={sub}
-										liveActiveMember={liveActives[sub.id] || null}
-										layout="list"
-										renderMode="table"
-										ondelete={requestSubscriptionDelete}
-										ondetail={(tag) => openSingboxDetail(tag)}
-									/>
-								{/each}
-							{/if}
-							{#if singboxSubscriptionsSearchEmpty}
-								<tr class="tunnel-empty-row">
-									<td colspan="6">Ничего не найдено</td>
-								</tr>
-							{/if}
-								</tbody>
-							</table>
-						</div>
-						{:else if effectiveSingboxSubscriptionsRenderMode === 'list-card'}
-						{#snippet subscriptionActiveListCards()}
-							{#each sortedFilteredSubscriptionsActiveCards as card, i (card.subscription.id)}
-								<SubscriptionActiveCard
-									subscription={card.subscription}
-									activeMember={card.activeMember}
-									autoDelayCheckNonce={singboxAutoDelayCheckNonce}
-									autoDelayCheckDelayMs={i * 180}
-									layout="list"
-									renderMode="list-card"
-									ondetail={(tag) => openSingboxDetail(tag)}
-								/>
-							{/each}
-						{/snippet}
-						{#snippet subscriptionStoppedListCards()}
-							{#each sortedFilteredSubscriptionsListRows as sub (sub.id)}
-								<SubscriptionCard
-									subscription={sub}
-									liveActiveMember={liveActives[sub.id] || null}
-									layout="list"
-									renderMode="list-card"
-									ondelete={requestSubscriptionDelete}
-									ondetail={(tag) => openSingboxDetail(tag)}
-								/>
-							{/each}
-						{/snippet}
-						{#if dashboardOn}
-							{#if sortedFilteredSubscriptionsActiveCards.length > 0}
-								<div class="tunnel-grid tunnel-grid--list">
-									{@render subscriptionActiveListCards()}
-								</div>
-							{/if}
-							{#if sortedFilteredSubscriptionsListRows.length > 0}
-								{#if dashboardSectionsLayout}
-									<TunnelSectionHeader
-										nested
-										title="Остановлено"
-										count={sortedFilteredSubscriptionsListRows.length}
-										countLabel={pluralForm(sortedFilteredSubscriptionsListRows.length, SUBSCRIPTION_WORDS)}
-									/>
-								{/if}
-								<div class="tunnel-grid tunnel-grid--list">
-									{@render subscriptionStoppedListCards()}
-								</div>
-							{/if}
-						{:else}
-						<div class="tunnel-grid tunnel-grid--list">
-							{@render subscriptionActiveListCards()}
-							{@render subscriptionStoppedListCards()}
-						</div>
-						{/if}
-						{#if singboxSubscriptionsSearchEmpty}
-							<p class="tunnel-list-empty">Ничего не найдено</p>
-						{/if}
-						{:else}
-						{#if subscriptionsActiveCards.length > 0}
-							<div
-								class="tunnel-grid"
-								class:tunnel-grid--dense={effectiveSingboxSubscriptionsEffectiveLayout === 'dense'}
-								class:tunnel-grid--compact={effectiveSingboxSubscriptionsEffectiveLayout === 'compact'}
-							>
-								{#each sortedFilteredSubscriptionsActiveCards as card, i (card.subscription.id)}
-									<SubscriptionActiveCard
-										subscription={card.subscription}
-										activeMember={card.activeMember}
-										autoDelayCheckNonce={singboxAutoDelayCheckNonce}
-										autoDelayCheckDelayMs={i * 180}
-										layout={effectiveSingboxSubscriptionsEffectiveLayout}
-										renderMode={effectiveSingboxSubscriptionsRenderMode}
-										ondetail={(tag) => openSingboxDetail(tag)}
-									/>
-								{/each}
-							</div>
-						{/if}
-						{#if sortedFilteredSubscriptionsListRows.length > 0}
-							{#snippet subscriptionStoppedGrid()}
-								<div
-									class="tunnel-grid"
-									class:tunnel-grid--dense={effectiveSingboxSubscriptionsEffectiveLayout === 'dense'}
-									class:tunnel-grid--compact={effectiveSingboxSubscriptionsEffectiveLayout === 'compact'}
-								>
-									{#each sortedFilteredSubscriptionsListRows as sub (sub.id)}
-										<SubscriptionCard
-											subscription={sub}
-											liveActiveMember={liveActives[sub.id] || null}
-											layout={effectiveSingboxSubscriptionsEffectiveLayout}
-											renderMode={effectiveSingboxSubscriptionsRenderMode}
-											ondelete={requestSubscriptionDelete}
-											ondetail={(tag) => openSingboxDetail(tag)}
-										/>
-									{/each}
-								</div>
-							{/snippet}
-							{#if dashboardSectionsLayout}
-								<TunnelSectionHeader
-									nested
-									title="Остановлено"
-									count={sortedFilteredSubscriptionsListRows.length}
-									countLabel={pluralForm(sortedFilteredSubscriptionsListRows.length, SUBSCRIPTION_WORDS)}
-								/>
-								{@render subscriptionStoppedGrid()}
-							{:else}
-								<div
-									class="external-section"
-									class:singbox-sub-inactive-section={sortedFilteredSubscriptionsActiveCards.length === 0}
-								>
-									<h2 class="section-title">Остановлено</h2>
-									{@render subscriptionStoppedGrid()}
-								</div>
-							{/if}
-						{/if}
-						{#if singboxSubscriptionsSearchEmpty}
-							<p class="tunnel-list-empty">Ничего не найдено</p>
-						{/if}
-						{/if}
-					{/if}
-					{#if !dashboardOn}
-						<SubscriptionGroupsSection subscriptions={subscriptionsList} />
-					{/if}
-				{/if}
-			{/if}
+			<SubscriptionsTabSection
+				{loading}
+				{dashboardOn}
+				{dashboardSectionsLayout}
+				{subscriptionsInitialLoading}
+				{subscriptionsFetchFailed}
+				subscriptionsError={subscriptionsState.error ?? null}
+				{subscriptionsList}
+				{subscriptionsActiveCards}
+				{sortedFilteredSubscriptionsActiveCards}
+				{sortedFilteredSubscriptionsListRows}
+				{singboxSubscriptionsTrafficStats}
+				{singboxSubscriptionsSourceRowCount}
+				{singboxSubscriptionsSearchEmpty}
+				{singboxInstalled}
+				{singboxStatusLoading}
+				{singboxAutoDelayCheckNonce}
+				{showSingboxGridListToggle}
+				{effectiveSingboxSubscriptionsEffectiveLayout}
+				{effectiveSingboxSubscriptionsRenderMode}
+				{liveActives}
+				bind:singboxSubscriptionsSearchQuery
+				bind:singboxSubscriptionsLayoutMode
+				{handleSubscriptionSortChange}
+				{openSingboxDetail}
+				{openWizard}
+				{requestSubscriptionDelete}
+			/>
 		{/if}
 	{/if}
 </PageContainer>
