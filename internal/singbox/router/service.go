@@ -3008,7 +3008,14 @@ func (s *ServiceImpl) UnbindDevice(ctx context.Context, mac string) error {
 func (s *ServiceImpl) inspectSlotConfig() (*RouterConfig, orchestrator.Slot, error) {
 	mode := ""
 	if s.deps.Settings != nil {
-		if settings, err := s.deps.Settings.Load(); err == nil && settings != nil {
+		settings, err := s.deps.Settings.Load()
+		if err != nil {
+			// Fail loud, not wrong: silently falling back to the tproxy slot
+			// on a transient settings read error would reproduce the very
+			// #488 bug (inspector explains decisions by the parked slot).
+			return nil, orchestrator.SlotRouter, fmt.Errorf("inspector: load settings: %w", err)
+		}
+		if settings != nil {
 			mode = settings.SingboxRouter.RoutingMode
 		}
 	}
