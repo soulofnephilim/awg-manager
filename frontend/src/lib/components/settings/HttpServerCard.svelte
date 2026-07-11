@@ -16,6 +16,8 @@
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
+	import { ChevronDown } from 'lucide-svelte';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
 	import { ConfirmModal } from '$lib/components/ui';
@@ -30,6 +32,44 @@
 	let selected = $state<string[]>([]);
 	let busy = $state(false);
 	let confirmOpen = $state(false);
+
+	// Выбор интерфейсов свёрнут по умолчанию: типичный сценарий — «все
+	// интерфейсы», а полный список на роутере длинный и в основном
+	// нерелевантный (rai*, apcli*...). Состояние переживает перезагрузку.
+	const IFACES_OPEN_KEY = 'awgm.settings.httpserver.ifacesOpen';
+	let ifacesOpen = $state(false);
+	if (browser) {
+		ifacesOpen = localStorage.getItem(IFACES_OPEN_KEY) === '1';
+	}
+	$effect(() => {
+		if (!browser) return;
+		localStorage.setItem(IFACES_OPEN_KEY, ifacesOpen ? '1' : '0');
+	});
+
+	// Порядок чипов — по релевантности для веб-интерфейса: бридж-сегменты
+	// локальной сети (br*), потом WireGuard-туннели (nwg*), потом всё
+	// остальное (радио rai*/apcli*, usb-модемы и прочее слушать обычно
+	// незачем). Внутри группы — натуральная сортировка (br1 < br10).
+	function ifaceRank(name: string): number {
+		if (name.startsWith('br')) return 0;
+		if (name.startsWith('nwg')) return 1;
+		return 2;
+	}
+	const sortedIfaces = $derived(
+		[...ifaces].sort(
+			(a, b) =>
+				ifaceRank(a.name) - ifaceRank(b.name) ||
+				a.name.localeCompare(b.name, undefined, { numeric: true }),
+		),
+	);
+
+	const selectionSummary = $derived.by(() => {
+		if (allIfaces) return 'Все интерфейсы (0.0.0.0)';
+		if (selected.length === 0) return 'ничего не выбрано';
+		return [...selected]
+			.sort((a, b) => ifaceRank(a) - ifaceRank(b) || a.localeCompare(b, undefined, { numeric: true }))
+			.join(', ');
+	});
 
 	const port = $derived(Number(portDraft));
 	const portValid = $derived(Number.isInteger(port) && port >= 1 && port <= 65535);
@@ -131,28 +171,38 @@
 			{/if}
 		</div>
 
-		<div class="row">
-			<span class="lbl">Интерфейсы</span>
-			<div class="chips">
-				<button type="button" class="chip" class:active={allIfaces} onclick={() => (allIfaces = true)}>
-					<span class="chip-label">Все интерфейсы</span>
-					<span class="chip-desc">0.0.0.0</span>
-				</button>
-				{#each ifaces as i (i.name)}
-					<button
-						type="button"
-						class="chip"
-						class:active={!allIfaces && selected.includes(i.name)}
-						onclick={() => {
-							allIfaces = false;
-							toggleIface(i.name);
-						}}
-					>
-						<span class="chip-label">{i.name}</span>
-						{#if i.label}<span class="chip-desc">{i.label}</span>{/if}
+		<div class="row iface-row">
+			<span class="lbl iface-lbl">Интерфейсы</span>
+			<details class="iface-box" bind:open={ifacesOpen}>
+				<summary class="iface-summary">
+					<span class="iface-current" class:iface-none={!allIfaces && selected.length === 0}>
+						{selectionSummary}
+					</span>
+					<span class="iface-chevron" class:open={ifacesOpen} aria-hidden="true">
+						<ChevronDown size={14} strokeWidth={2} />
+					</span>
+				</summary>
+				<div class="chips">
+					<button type="button" class="chip" class:active={allIfaces} onclick={() => (allIfaces = true)}>
+						<span class="chip-label">Все интерфейсы</span>
+						<span class="chip-desc">0.0.0.0</span>
 					</button>
-				{/each}
-			</div>
+					{#each sortedIfaces as i (i.name)}
+						<button
+							type="button"
+							class="chip"
+							class:active={!allIfaces && selected.includes(i.name)}
+							onclick={() => {
+								allIfaces = false;
+								toggleIface(i.name);
+							}}
+						>
+							<span class="chip-label">{i.name}</span>
+							{#if i.label}<span class="chip-desc">{i.label}</span>{/if}
+						</button>
+					{/each}
+				</div>
+			</details>
 		</div>
 
 		<p class="hint">
@@ -227,10 +277,59 @@
 		color: var(--color-warning, #d97706);
 		font-size: 0.8125rem;
 	}
+	.iface-row {
+		align-items: flex-start;
+	}
+	.iface-lbl {
+		/* Выравнивание по строке summary, а не по центру раскрытого блока. */
+		padding-top: 0.15rem;
+	}
+	.iface-box {
+		flex: 1;
+		min-width: 0;
+	}
+	.iface-summary {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		max-width: 100%;
+		cursor: pointer;
+		list-style: none;
+		user-select: none;
+		color: var(--text-secondary);
+		font-size: 0.8125rem;
+	}
+	.iface-summary::-webkit-details-marker {
+		display: none;
+	}
+	.iface-summary:hover {
+		color: var(--text-primary);
+	}
+	.iface-current {
+		font-family: var(--font-mono);
+		color: var(--text-primary);
+		overflow-wrap: anywhere;
+	}
+	.iface-current.iface-none {
+		color: var(--color-warning, #d97706);
+		font-family: inherit;
+	}
+	.iface-chevron {
+		display: inline-flex;
+		width: 14px;
+		height: 14px;
+		flex-shrink: 0;
+		color: var(--text-muted);
+		transition: transform var(--t-fast, 0.15s) ease;
+	}
+	.iface-chevron.open {
+		transform: rotate(180deg);
+	}
 	.chips {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.5rem;
+		margin-top: 0.6rem;
 	}
 	.chip {
 		display: flex;
