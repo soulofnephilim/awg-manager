@@ -151,12 +151,12 @@ func TestOperator_AutoRestartIfCrashed_BackoffSuppression(t *testing.T) {
 
 	ctx := context.Background()
 	for i := 0; i < restartFreeBudget; i++ {
-		restarted, suppressed, err := op.AutoRestartIfCrashed(ctx)
+		restarted, suppressed, err := op.autoRestartIfCrashed(ctx, false)
 		if err != nil || !restarted || suppressed {
 			t.Fatalf("attempt %d: restarted=%v suppressed=%v err=%v, want restart", i+1, restarted, suppressed, err)
 		}
 	}
-	restarted, suppressed, err := op.AutoRestartIfCrashed(ctx)
+	restarted, suppressed, err := op.autoRestartIfCrashed(ctx, false)
 	if err != nil || restarted || !suppressed {
 		t.Fatalf("over-budget: restarted=%v suppressed=%v err=%v, want suppressed", restarted, suppressed, err)
 	}
@@ -169,7 +169,7 @@ func TestOperator_AutoRestartIfCrashed_BackoffSuppression(t *testing.T) {
 	}
 	// Ручной сброс (как Control("restart")) → снова можно.
 	op.restartBackoff.Reset()
-	restarted, suppressed, err = op.AutoRestartIfCrashed(ctx)
+	restarted, suppressed, err = op.autoRestartIfCrashed(ctx, false)
 	if err != nil || !restarted || suppressed {
 		t.Fatalf("after reset: restarted=%v suppressed=%v err=%v, want restart", restarted, suppressed, err)
 	}
@@ -182,7 +182,7 @@ func TestOperator_AutoRestartIfCrashed_ManualStopNoop(t *testing.T) {
 	_, plainStarts := seedStartSeam(op)
 	op.manuallyStopped.Store(true)
 
-	restarted, suppressed, err := op.AutoRestartIfCrashed(context.Background())
+	restarted, suppressed, err := op.autoRestartIfCrashed(context.Background(), false)
 	if err != nil || restarted || suppressed {
 		t.Fatalf("manual stop: restarted=%v suppressed=%v err=%v, want all-false", restarted, suppressed, err)
 	}
@@ -369,7 +369,7 @@ func TestOperator_AutoRestart_ManualStopDuringStartWins(t *testing.T) {
 		return true, nil
 	}
 
-	restarted, suppressed, err := op.AutoRestartIfCrashed(context.Background())
+	restarted, suppressed, err := op.autoRestartIfCrashed(context.Background(), false)
 	if err != nil || restarted || !suppressed {
 		t.Fatalf("restarted=%v suppressed=%v err=%v, want suppressed (manual stop during start)", restarted, suppressed, err)
 	}
@@ -427,7 +427,7 @@ func TestOperator_AutoRestart_StartFailureRecordsCrash(t *testing.T) {
 		return false, errors.New("sing-box exited during startup: FATAL boom")
 	}
 
-	_, _, err := op.AutoRestartIfCrashed(context.Background())
+	_, _, err := op.autoRestartIfCrashed(context.Background(), false)
 	if err == nil {
 		t.Fatalf("want start error")
 	}
@@ -450,7 +450,7 @@ func TestOperator_AutoRestart_StartFailureNoDoubleCount(t *testing.T) {
 		return true, errors.New("clash API not ready after 60s")
 	}
 
-	_, _, err := op.AutoRestartIfCrashed(context.Background())
+	_, _, err := op.autoRestartIfCrashed(context.Background(), false)
 	if err == nil {
 		t.Fatalf("want start error")
 	}
@@ -474,7 +474,7 @@ func TestOperator_AutoRestart_NoSpawnRefundsBudget(t *testing.T) {
 	ctx := context.Background()
 	// Вдвое больше бюджета «проигранных гонок» — ни одна не должна жечь Allow.
 	for i := 0; i < restartFreeBudget*2; i++ {
-		restarted, suppressed, err := op.AutoRestartIfCrashed(ctx)
+		restarted, suppressed, err := op.autoRestartIfCrashed(ctx, false)
 		if err != nil || restarted || suppressed {
 			t.Fatalf("no-op attempt %d: restarted=%v suppressed=%v err=%v, want all-false", i+1, restarted, suppressed, err)
 		}
@@ -482,12 +482,12 @@ func TestOperator_AutoRestart_NoSpawnRefundsBudget(t *testing.T) {
 	// Бюджет цел: настоящие спавны всё ещё разрешены в полном объёме.
 	spawned = true
 	for i := 0; i < restartFreeBudget; i++ {
-		restarted, suppressed, err := op.AutoRestartIfCrashed(ctx)
+		restarted, suppressed, err := op.autoRestartIfCrashed(ctx, false)
 		if err != nil || !restarted || suppressed {
 			t.Fatalf("real attempt %d: restarted=%v suppressed=%v err=%v, want restart (budget must be intact)", i+1, restarted, suppressed, err)
 		}
 	}
-	if _, suppressed, _ := op.AutoRestartIfCrashed(ctx); !suppressed {
+	if _, suppressed, _ := op.autoRestartIfCrashed(ctx, false); !suppressed {
 		t.Fatalf("over-budget: want suppressed after %d real spawns", restartFreeBudget)
 	}
 	if starts != restartFreeBudget*3 {

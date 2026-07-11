@@ -37,91 +37,33 @@ var reconcileInstalledSettings = storage.SingboxRouterSettings{
 	WANAutoDetect: true,
 }
 
-// Мёртвый sing-box при живых iptables (#456): tproxy-reconcile обязан
-// попытаться перезапустить процесс через AutoRestartIfCrashed.
-func TestReconcileInstalled_DeadSingboxRestarted(t *testing.T) {
+// Единственный рестарт-авторитет — watchdog (Operator.Reconcile). Мёртвый
+// sing-box: tproxy-reconcile НЕ рестартит сам (раньше это был второй авторитет,
+// #456). Fail-closed при этом держит blackhole (при снесённых джампах) или
+// перехват в мёртвый порт (при целых). Движок поднимет watchdog своим тиком.
+func TestReconcileInstalled_DeadSingboxNotRestartedByReconcile(t *testing.T) {
 	sb := newTestSingbox(t) // IsRunning по умолчанию false — «процесс мёртв»
 	svc := newReconcileInstalledService(t, sb)
 
 	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
 		t.Fatalf("reconcileInstalled: %v", err)
 	}
-	if sb.startCalls != 1 {
-		t.Errorf("restart attempts = %d, want 1 (dead process must be respawned)", sb.startCalls)
+	if sb.startCalls != 0 {
+		t.Errorf("reconcile must NOT restart (watchdog is the sole authority): startCalls = %d, want 0", sb.startCalls)
 	}
 }
 
-// Живой sing-box не трогаем: ни одного вызова AutoRestartIfCrashed/Start.
+// Живой sing-box не трогаем: ни рестарта, ни спавна.
 func TestReconcileInstalled_AliveSingboxUntouched(t *testing.T) {
 	sb := newTestSingbox(t)
 	sb.isRunningFn = func() (bool, int) { return true, 1234 }
-	autoCalls := 0
-	sb.autoRestartFn = func() (bool, bool, error) { autoCalls++; return true, false, nil }
-	svc := newReconcileInstalledService(t, sb)
-
-	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
-		t.Fatalf("reconcileInstalled: %v", err)
-	}
-	if autoCalls != 0 || sb.startCalls != 0 {
-		t.Errorf("alive process must be untouched: autoRestart=%d start=%d, want 0/0", autoCalls, sb.startCalls)
-	}
-}
-
-// Подавленный перезапуск (ручной Stop или backoff внутри Operator) не
-// валит reconcile и не спавнит процесс: остальная работа (iptables)
-// продолжается штатно.
-func TestReconcileInstalled_SuppressedRestartRespected(t *testing.T) {
-	sb := newTestSingbox(t)
-	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
 	svc := newReconcileInstalledService(t, sb)
 
 	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
 		t.Fatalf("reconcileInstalled: %v", err)
 	}
 	if sb.startCalls != 0 {
-		t.Errorf("suppressed restart must not spawn: startCalls = %d, want 0", sb.startCalls)
-	}
-}
-
-// Ошибка перезапуска логируется и не прерывает reconcile (best-effort,
-// как остальные heal-шаги).
-func TestReconcileInstalled_RestartErrorIsSoft(t *testing.T) {
-	sb := newTestSingbox(t)
-	sb.autoRestartFn = func() (bool, bool, error) { return false, false, errors.New("boom") }
-	svc := newReconcileInstalledService(t, sb)
-
-	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
-		t.Fatalf("reconcileInstalled must not fail on restart error: %v", err)
-	}
-}
-
-// fakeip drift-heal: подавленный перезапуск (ручной Stop или backoff —
-// решает Operator внутри AutoRestartIfCrashed) не спавнит процесс и не
-// ждёт readiness. Регресс-защита: до #456 drift-heal звал Start() напрямую
-// и воскрешал остановленный пользователем движок.
-func TestReconcileFakeIPTun_DriftHealRespectsSuppression(t *testing.T) {
-	h := newFakeIPEnableHarness(t, "")
-	if err := h.svc.Enable(context.Background()); err != nil {
-		t.Fatalf("Enable: %v", err)
-	}
-	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
-	h.log.calls = nil
-
-	sb := h.svc.deps.Singbox.(*fakeSingbox)
-	sb.isRunningFn = func() (bool, int) { return false, 0 } // мёртв весь тест
-	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil }
-
-	all, _ := h.store.Load()
-	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
-	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
-		t.Fatalf("reconcileFakeIPTun: %v", err)
-	}
-	if sb.startCalls != 0 {
-		t.Errorf("suppressed drift-heal must not spawn: startCalls = %d, want 0", sb.startCalls)
-	}
-	// Остальной heal (маршруты) продолжается best-effort.
-	if !h.log.has("AddRoute:198.18.0.0:255.254.0.0:OpkgTun0") {
-		t.Errorf("route heal must still run, got %v", h.log.calls)
+		t.Errorf("alive process must be untouched: start=%d, want 0", sb.startCalls)
 	}
 }
 
@@ -197,8 +139,7 @@ func chainsOnlyDump() string {
 // blackhole-DROP policy-трафика, чтобы он не утёк в WAN. Ровно один restore —
 // blackhole-блоб, не реальный перехват; флаг blackholeActive выставлен.
 func TestReconcileInstalled_DeadEngineInstallsBlackhole(t *testing.T) {
-	sb := newTestSingbox(t)                                                   // IsRunning=false весь тест
-	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
+	sb := newTestSingbox(t) // IsRunning=false весь тест
 	svc := newReconcileInstalledService(t, sb)
 	var restores []string
 	ipt := newStubIPTables(func(_ context.Context, in string) error { restores = append(restores, in); return nil })
@@ -226,8 +167,7 @@ func TestReconcileInstalled_DeadEngineInstallsBlackhole(t *testing.T) {
 // снимать blackhole. Иначе транзиентная -S ошибка во время NDMS-reload (ровно
 // когда blackhole и нужен) снесла бы DROP при живой утечке. blackhole сохраняем.
 func TestReconcileInstalled_ProbeErrorPreservesBlackhole(t *testing.T) {
-	sb := newTestSingbox(t)                                                   // dead
-	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
+	sb := newTestSingbox(t) // dead
 	svc := newReconcileInstalledService(t, sb)
 	svc.blackholeActive = true // прошлый тик поставил blackhole
 	removed := false
