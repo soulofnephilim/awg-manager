@@ -8,6 +8,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/httpprobe"
 	"github.com/hoaxisr/awg-manager/internal/icmpprobe"
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/exec"
 )
@@ -16,6 +17,9 @@ import (
 func (s *Service) CheckConnectivity(ctx context.Context, tunnelID string) (*ConnectivityResult, error) {
 	if err := s.CheckTunnelRunning(tunnelID); err != nil {
 		s.appLog.Debug("connectivity-check", tunnelID, "Tunnel not running")
+		// Сброс серии: после перезапуска туннеля первый отказ снова
+		// логируется как Warn, а не как «повтор».
+		s.connTracker.Forget(tunnelID)
 		return &ConnectivityResult{Connected: false, Reason: ReasonTunnelNotRunning}, nil
 	}
 
@@ -27,16 +31,47 @@ func (s *Service) CheckConnectivity(ctx context.Context, tunnelID string) (*Conn
 
 	s.appLog.Full("connectivity-check", tunnelID, fmt.Sprintf("Starting connectivity check with method: %s", method))
 
+	var result *ConnectivityResult
+	var err error
 	switch method {
 	case "ping":
-		return s.checkPing(ctx, tunnelID, stored)
+		result, err = s.checkPing(ctx, tunnelID, stored)
 	case "handshake":
-		return s.checkHandshake(tunnelID)
+		result, err = s.checkHandshake(tunnelID)
 	case "disabled":
 		s.appLog.Debug("connectivity-check", tunnelID, "Check disabled, returning OK")
 		return &ConnectivityResult{Connected: true, Reason: "check disabled"}, nil
 	default:
-		return s.checkHTTP(ctx, tunnelID)
+		result, err = s.checkHTTP(ctx, tunnelID)
+	}
+	if err == nil && result != nil {
+		s.logConnectivityOutcome(method, tunnelID, result)
+	}
+	return result, err
+}
+
+// logConnectivityOutcome логирует исход проверки по переходной модели:
+// повторяющиеся периодические проверки (авто-чеки фронта) не спамят журнал —
+// Warn пишется на переходе в отказ, Info на восстановлении с длиной серии,
+// повторы того же исхода видны только на debug.
+func (s *Service) logConnectivityOutcome(method, tunnelID string, res *ConnectivityResult) {
+	action := method + "-check"
+	if method == "http" {
+		action = "http-check"
+	}
+	latency := ""
+	if res.Latency != nil {
+		latency = fmt.Sprintf(", latency=%dms", *res.Latency)
+	}
+	switch obs := s.connTracker.Observe(tunnelID, res.Connected); obs.Kind {
+	case logging.TransitionNowFailing:
+		s.appLog.Warn(action, tunnelID, fmt.Sprintf("Connectivity check failed: %s", res.Reason))
+	case logging.TransitionStillFailing:
+		s.appLog.Debug(action, tunnelID, fmt.Sprintf("Connectivity check still failing (%d in a row): %s", obs.Failures, res.Reason))
+	case logging.TransitionRecovered:
+		s.appLog.Info(action, tunnelID, fmt.Sprintf("Connectivity restored after %d failed checks%s", obs.Failures, latency))
+	default: // FirstOK / StillOK
+		s.appLog.Debug(action, tunnelID, fmt.Sprintf("Connectivity check ok%s", latency))
 	}
 }
 
@@ -54,7 +89,6 @@ func (s *Service) checkHTTP(ctx context.Context, tunnelID string) (*Connectivity
 	res, err := httpprobe.ByInterface(ctx, iface, checkURL, nil)
 	if err != nil {
 		errDetail := err.Error()
-		s.appLog.Warn("http-check", tunnelID, fmt.Sprintf("HTTP check failed: %s", errDetail))
 		return &ConnectivityResult{Connected: false, Reason: ReasonConnectionFailed + ": " + errDetail}, nil
 	}
 
@@ -62,12 +96,10 @@ func (s *Service) checkHTTP(ctx context.Context, tunnelID string) (*Connectivity
 
 	latencyMs := res.LatencyMs
 	if httpprobe.SuccessCode(res.HTTPCode) {
-		s.appLog.Debug("http-check", tunnelID, fmt.Sprintf("HTTP check successful: code=%d, latency=%dms", res.HTTPCode, latencyMs))
 		return &ConnectivityResult{Connected: true, Latency: &latencyMs}, nil
 	}
 
-	s.appLog.Warn("http-check", tunnelID, fmt.Sprintf("HTTP check returned unexpected code: %d", res.HTTPCode))
-	return &ConnectivityResult{Connected: false, Reason: ReasonUnexpectedResponse, HTTPCode: &res.HTTPCode}, nil
+	return &ConnectivityResult{Connected: false, Reason: fmt.Sprintf("%s: code=%d", ReasonUnexpectedResponse, res.HTTPCode), HTTPCode: &res.HTTPCode}, nil
 }
 
 // checkPing performs connectivity check using ICMP ping through the tunnel interface.
@@ -82,7 +114,6 @@ func (s *Service) checkPing(ctx context.Context, tunnelID string, stored *storag
 		target = autoDetectGateway(stored)
 	}
 	if target == "" {
-		s.appLog.Warn("ping-check", tunnelID, "No ping target configured for tunnel "+tunnelID)
 		return &ConnectivityResult{Connected: false, Reason: "no ping target configured"}, nil
 	}
 
@@ -94,11 +125,9 @@ func (s *Service) checkPing(ctx context.Context, tunnelID string, stored *storag
 
 	res, err := icmpprobe.ByInterface(pingCtx, iface, target, nil)
 	if err != nil {
-		s.appLog.Warn("ping-check", tunnelID, fmt.Sprintf("Ping failed: target=%s: %v", target, err))
 		return &ConnectivityResult{Connected: false, Reason: "ping failed: " + target + " - " + err.Error()}, nil
 	}
 
-	s.appLog.Debug("ping-check", tunnelID, fmt.Sprintf("Ping successful: target=%s, latency=%dms", target, res.LatencyMs))
 	return &ConnectivityResult{Connected: true, Latency: intPtr(res.LatencyMs)}, nil
 }
 
@@ -148,7 +177,7 @@ func (s *Service) checkHandshake(tunnelID string) (*ConnectivityResult, error) {
 	defer cancel()
 	result, err := exec.Run(ctx, "/opt/sbin/awg", "show", iface)
 	if err != nil {
-		s.appLog.Warn("handshake-check", tunnelID, fmt.Sprintf("Cannot read WG state: %v, stdout=%s, stderr=%s", err, result.Stdout, result.Stderr))
+		s.appLog.Debug("handshake-check", tunnelID, fmt.Sprintf("Cannot read WG state: %v, stdout=%s, stderr=%s", err, result.Stdout, result.Stderr))
 		return &ConnectivityResult{Connected: false, Reason: "cannot read WG state"}, nil
 	}
 
@@ -161,26 +190,22 @@ func (s *Service) checkHandshake(tunnelID string) (*ConnectivityResult, error) {
 		}
 		hs := strings.TrimSpace(strings.TrimPrefix(line, "latest handshake:"))
 		if hs == "(none)" || hs == "" {
-			s.appLog.Warn("handshake-check", tunnelID, "No handshake found")
 			return &ConnectivityResult{Connected: false, Reason: "no handshake"}, nil
 		}
 		if strings.Contains(hs, "hour") || strings.Contains(hs, "day") {
-			s.appLog.Warn("handshake-check", tunnelID, fmt.Sprintf("Handshake stale: %s", hs))
 			return &ConnectivityResult{Connected: false, Reason: "handshake stale: " + hs}, nil
 		}
 		if strings.Contains(hs, "minute") {
 			var mins int
 			fmt.Sscanf(hs, "%d minute", &mins)
 			if mins >= 3 {
-				s.appLog.Warn("handshake-check", tunnelID, fmt.Sprintf("Handshake stale: %s (%d min)", hs, mins))
 				return &ConnectivityResult{Connected: false, Reason: "handshake stale: " + hs}, nil
 			}
 		}
-		s.appLog.Info("handshake-check", tunnelID, fmt.Sprintf("Handshake recent: %s", hs))
+		s.appLog.Debug("handshake-check", tunnelID, fmt.Sprintf("Handshake recent: %s", hs))
 		return &ConnectivityResult{Connected: true}, nil
 	}
 
-	s.appLog.Warn("handshake-check", tunnelID, "No handshake info found in awg show output")
 	return &ConnectivityResult{Connected: false, Reason: "no handshake info"}, nil
 }
 
