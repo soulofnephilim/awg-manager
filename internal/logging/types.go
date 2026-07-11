@@ -75,6 +75,7 @@ const (
 	SubKmod           = "kmod"         // awg_proxy kernel module load/add/remove
 	SubStorage        = "storage"      // tunnel store + settings persistence
 	SubHTTP           = "http"         // HTTP server lifecycle and listener events
+	SubMonitoring     = "monitoring"   // matrix probe transitions (ok→fail / restore)
 
 	// Singbox bucket subgroups
 	SubSBInbound  = "inbound"
@@ -123,7 +124,7 @@ var KnownSubgroups = map[string][]string{
 	GroupSystem: {
 		SubBoot, SubAuth, SubSettings, SubUpdate, SubWan, SubSystemTunnel,
 		SubCleanup, SubDnsCheck, SubConnections, SubTraffic, SubDiagnostics,
-		SubProfiling, SubRCI, SubNDMS, SubStorage,
+		SubProfiling, SubRCI, SubNDMS, SubStorage, SubMonitoring,
 	},
 	GroupSingbox: {
 		SubSBProcess, SubSBInbound, SubSBOutbound, SubSBDNS, SubSBRouter, SubSBRuntime,

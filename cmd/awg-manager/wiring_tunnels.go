@@ -10,6 +10,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	ndmscommand "github.com/hoaxisr/awg-manager/internal/ndms/command"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
 	"github.com/hoaxisr/awg-manager/internal/presets"
@@ -203,6 +204,7 @@ func (a *app) setupServices() {
 	// existing sessions.
 	a.keeneticClient = auth.NewKeeneticClient()
 	a.sessionStore = auth.NewSessionStore(a.settingsStore.GetSessionTTL)
+	a.sessionStore.SetLogger(logging.NewScopedLogger(a.loggingService, logging.GroupSystem, logging.SubAuth))
 	a.deferOnExit(a.sessionStore.Stop)
 
 	a.operator.SetAppLogger(a.loggingService)

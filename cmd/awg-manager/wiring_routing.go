@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/connectivity"
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
 	"github.com/hoaxisr/awg-manager/internal/events"
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
 	"github.com/hoaxisr/awg-manager/internal/monitoring"
 	ndmsevents "github.com/hoaxisr/awg-manager/internal/ndms/events"
@@ -92,6 +94,7 @@ func (a *app) setupOrchestrator() {
 		}
 		return nil
 	})
+	a.dnsFailover.SetLogger(dnsFailoverJournal{log: logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubDnsRoute)})
 	a.dnsRouteService.SetHydraRoute(a.hydraService)
 	a.dnsRouteService.SetFailoverManager(a.dnsFailover)
 	a.dnsFailover.SetAffectedListsLookup(a.dnsRouteService.LookupAffectedLists)
@@ -223,4 +226,17 @@ func (a *app) setupEventWiring() {
 	connMonitor.Start()
 	a.deferOnExit(connMonitor.Stop)
 
+}
+
+// dnsFailoverJournal адаптирует журнал приложения к минимальному
+// Logger-интерфейсу failover-менеджера (до сих пор он подключался только
+// в тестах — срабатывания failover в проде не оставляли следа).
+type dnsFailoverJournal struct{ log *logging.ScopedLogger }
+
+func (j dnsFailoverJournal) Warnf(format string, args ...interface{}) {
+	j.log.Warn("failover", "", fmt.Sprintf(format, args...))
+}
+
+func (j dnsFailoverJournal) Infof(format string, args ...interface{}) {
+	j.log.Info("failover", "", fmt.Sprintf(format, args...))
 }

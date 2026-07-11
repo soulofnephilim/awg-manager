@@ -196,7 +196,7 @@ func (a *app) setupSingbox() {
 		a.eventBus,
 	)
 	a.singboxHandler = api.NewSingboxHandler(a.singboxOp, a.eventBus, delayChecker, a.testService, a.loggingService)
-	singboxMigrator := singbox.NewMigrator(a.singboxOp, a.settingsStore)
+	singboxMigrator := singbox.NewMigrator(a.singboxOp, a.settingsStore, a.loggingService)
 	a.singboxHandler.SetNDMSProxyMigrator(singboxMigrator, a.settingsStore)
 	a.clashProxy = api.NewClashProxy(a.singboxOp)
 	a.singboxConnsHandler = api.NewSingboxConnectionsHandler(a.ndmsQueries.Hotspot)

@@ -79,3 +79,17 @@ func (t *TransitionTracker) Forget(target string) {
 	defer t.mu.Unlock()
 	delete(t.last, target)
 }
+
+// Retain оставляет только перечисленные цели — остальные забываются.
+// Используется циклами, наблюдающими изменяющееся множество объектов
+// (мониторинг туннелей): удалённый объект не должен продолжать серию
+// после пересоздания.
+func (t *TransitionTracker) Retain(keep map[string]bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for target := range t.last {
+		if !keep[target] {
+			delete(t.last, target)
+		}
+	}
+}

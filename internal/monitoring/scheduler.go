@@ -131,6 +131,10 @@ type Scheduler struct {
 	probeTimeout time.Duration
 	workerLimit  int
 	history      *History
+	// transitions классифицирует self-пробы по туннелям: в журнал попадают
+	// только переходы ok→fail (Warn) и восстановления (Info) — сами пробы
+	// каждые 60 секунд журнал не трогают.
+	transitions *logging.TransitionTracker
 
 	mu       sync.RWMutex
 	lastSnap Snapshot
@@ -147,6 +151,7 @@ func NewScheduler(deps SchedulerDeps, history *History) *Scheduler {
 		probeTimeout: 5 * time.Second,
 		workerLimit:  10,
 		history:      history,
+		transitions:  logging.NewTransitionTracker(),
 		stopCh:       make(chan struct{}),
 	}
 }
@@ -280,6 +285,8 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 				latency, ok := s.runProbeCell(ctx, t, tn, self)
 				now := time.Now()
 
+				s.logProbeTransition(tn, t, ok)
+
 				sample := Sample{TS: now, OK: ok}
 				if ok {
 					l := latency
@@ -324,9 +331,34 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 		keepIDs[t.ID] = true
 	}
 	s.history.PruneTunnels(keepIDs)
+	// Удалённый/остановленный туннель не должен продолжать серию после
+	// пересоздания — его следующий отказ снова даст Warn, а не «повтор».
+	s.transitions.Retain(keepIDs)
 
 	if s.deps.Bus != nil {
 		s.deps.Bus.Publish("monitoring:matrix-update", snap)
+	}
+}
+
+// logProbeTransition пишет в журнал только смену состояния self-пробы:
+// недостижимость — Warn, восстановление — Info с длиной серии. Пробы
+// выполняются раз в минуту на туннель; стабильное состояние журнал
+// не трогает.
+func (s *Scheduler) logProbeTransition(tn Tunnel, t Target, ok bool) {
+	if s.deps.Log == nil {
+		return
+	}
+	name := tn.Name
+	if name == "" {
+		name = tn.ID
+	}
+	switch obs := s.transitions.Observe(tn.ID, ok); obs.Kind {
+	case logging.TransitionNowFailing:
+		s.deps.Log.AppLog(logging.LevelWarn, logging.GroupSystem, logging.SubMonitoring,
+			"probe", name, fmt.Sprintf("monitoring probe unreachable: %s", t.Host))
+	case logging.TransitionRecovered:
+		s.deps.Log.AppLog(logging.LevelInfo, logging.GroupSystem, logging.SubMonitoring,
+			"probe", name, fmt.Sprintf("monitoring probe reachable again (%s) after %d failed cycles", t.Host, obs.Failures))
 	}
 }
 

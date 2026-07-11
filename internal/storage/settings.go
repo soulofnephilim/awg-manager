@@ -79,6 +79,7 @@ func (s *SettingsStore) Load() (*Settings, error) {
 			return nil, fmt.Errorf("parse %s (quarantined to %s, backup also corrupt: %v): %w", s.path, quarantine, bakErr, err)
 		}
 		fmt.Fprintf(os.Stderr, "settings: %s was corrupt (%v), quarantined to %s, restored from backup\n", s.path, err, quarantine)
+		recordNotice("backup-restore", s.path, fmt.Sprintf("settings file corrupt (%v), quarantined to %s, RESTORED FROM BACKUP — recent settings changes may be lost", err, quarantine))
 		restoredFromBackup = true
 	}
 

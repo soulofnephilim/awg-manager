@@ -53,6 +53,11 @@ func (a *app) setupCore() {
 
 	// Logging service (created early — injected into tunnel service, pingcheck, dnsroute, operator, state, firewall, nwg)
 	a.loggingService = logging.NewService(a.settingsStore)
+	// События восстановления хранилищ (карантин битых файлов, откат к .bak)
+	// произошли до появления журнала — выгружаем отложенный буфер.
+	for _, n := range storage.DrainNotices() {
+		a.loggingService.AppLog(logging.LevelWarn, logging.GroupSystem, logging.SubStorage, n.Action, n.Target, n.Message)
+	}
 	a.deferOnExit(a.loggingService.Stop)
 
 	// bootLog: UI-visible scoped logger for all bootstrap diagnostics. Replaces

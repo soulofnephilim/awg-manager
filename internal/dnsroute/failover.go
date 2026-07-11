@@ -7,9 +7,9 @@ import (
 )
 
 // Logger is the minimal logger interface used by FailoverManager.
-// (Will be filled in by Task 2 — for now just a type stub.)
 type Logger interface {
 	Warnf(format string, args ...interface{})
+	Infof(format string, args ...interface{})
 }
 
 // AffectedList describes a DNS route list affected by a tunnel state change.
@@ -142,6 +142,13 @@ func (fm *FailoverManager) MarkFailed(tunnelID string) error {
 	}
 	fm.mu.Unlock()
 
+	if fm.log != nil {
+		if err != nil {
+			fm.log.Warnf("failover: DNS lists switch off failed tunnel %s did not apply: %v", tunnelID, err)
+		} else {
+			fm.log.Warnf("failover: tunnel %s failed, DNS lists switched to backup", tunnelID)
+		}
+	}
 	fm.publishFailoverEvents(tunnelID, "switched", err)
 	return err
 }
@@ -182,6 +189,13 @@ func (fm *FailoverManager) MarkRecovered(tunnelID string) error {
 	}
 	fm.mu.Unlock()
 
+	if fm.log != nil {
+		if err != nil {
+			fm.log.Warnf("failover: DNS lists restore to recovered tunnel %s did not apply: %v", tunnelID, err)
+		} else {
+			fm.log.Infof("failover: tunnel %s recovered, DNS lists restored", tunnelID)
+		}
+	}
 	fm.publishFailoverEvents(tunnelID, "restored", err)
 	return err
 }
