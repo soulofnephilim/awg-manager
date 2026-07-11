@@ -192,23 +192,77 @@ func chainsOnlyDump() string {
 		"-N " + RedirectChain + "\n"
 }
 
-// FIX-B: движок мёртв и рестарт подавлен (backoff/ручной Stop) → jump-heal
-// НЕ восстанавливает перехват в мёртвый порт: Install не вызывается,
-// существующие правила не трогаются (fail-closed остаётся).
-func TestReconcileInstalled_DeadEngineSkipsJumpHeal(t *testing.T) {
+// Fail-closed: движок мёртв, рестарт подавлен И PREROUTING-джампы снесены
+// (chainsOnlyDump) → НЕ восстанавливаем перехват в мёртвый порт, а ставим
+// blackhole-DROP policy-трафика, чтобы он не утёк в WAN. Ровно один restore —
+// blackhole-блоб, не реальный перехват; флаг blackholeActive выставлен.
+func TestReconcileInstalled_DeadEngineInstallsBlackhole(t *testing.T) {
 	sb := newTestSingbox(t)                                                   // IsRunning=false весь тест
 	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
 	svc := newReconcileInstalledService(t, sb)
-	installs := 0
-	ipt := newStubIPTables(func(_ context.Context, _ string) error { installs++; return nil })
+	var restores []string
+	ipt := newStubIPTables(func(_ context.Context, in string) error { restores = append(restores, in); return nil })
 	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) { return chainsOnlyDump(), nil }
 	svc.deps.IPTables = ipt
 
 	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
 		t.Fatalf("reconcileInstalled: %v", err)
 	}
-	if installs != 0 {
-		t.Errorf("Install calls = %d, want 0 (no jump restore into a dead port)", installs)
+	if len(restores) != 1 {
+		t.Fatalf("restore calls = %d, want 1 (blackhole only, no real interception)", len(restores))
+	}
+	if !strings.Contains(restores[0], "-A "+BlackholeChain+" -j DROP") {
+		t.Errorf("restored blob is not the fail-closed blackhole:\n%s", restores[0])
+	}
+	if strings.Contains(restores[0], ChainName) {
+		t.Errorf("must NOT restore real interception (%s) into a dead port:\n%s", ChainName, restores[0])
+	}
+	if !svc.blackholeActive {
+		t.Error("blackholeActive must be set after installing the fail-closed blackhole")
+	}
+}
+
+// Regression (ревью lifecycle): probe-ОШИБКА при мёртвом движке НЕ должна
+// снимать blackhole. Иначе транзиентная -S ошибка во время NDMS-reload (ровно
+// когда blackhole и нужен) снесла бы DROP при живой утечке. blackhole сохраняем.
+func TestReconcileInstalled_ProbeErrorPreservesBlackhole(t *testing.T) {
+	sb := newTestSingbox(t)                                                   // dead
+	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
+	svc := newReconcileInstalledService(t, sb)
+	svc.blackholeActive = true // прошлый тик поставил blackhole
+	removed := false
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) {
+		return "", errors.New("iptables -S failed (NDMS reload)")
+	}
+	ipt.cleanupBlackhole = func() { removed = true }
+	svc.deps.IPTables = ipt
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if removed || !svc.blackholeActive {
+		t.Errorf("probe error + dead engine must PRESERVE blackhole: removed=%v active=%v", removed, svc.blackholeActive)
+	}
+}
+
+// Движок вернулся (jumps present, IsRunning=true) → ранее поставленный
+// fail-closed blackhole снимается: cleanupBlackhole вызван, флаг сброшен.
+func TestReconcileInstalled_EngineRecoveryRemovesBlackhole(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 4242 } // alive
+	svc := newReconcileInstalledService(t, sb)
+	svc.blackholeActive = true // как будто прошлый тик поставил blackhole
+	removed := false
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	ipt.cleanupBlackhole = func() { removed = true }
+	svc.deps.IPTables = ipt
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if !removed || svc.blackholeActive {
+		t.Errorf("engine recovery must drop the blackhole: cleanup=%v active=%v", removed, svc.blackholeActive)
 	}
 }
 

@@ -429,8 +429,11 @@ func TestWriteNetfilterHookContainsPidofGuard(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	body := string(data)
-	if !strings.Contains(body, "pidof sing-box >/dev/null 2>&1 || exit 0") {
-		t.Errorf("hook missing pidof guard:\n%s", body)
+	// The pidof guard now branches (alive → real interception, dead → fail-closed
+	// blackhole) instead of `|| exit 0`, so interception is only restored for a
+	// live engine while a dead engine still re-asserts the blackhole.
+	if !strings.Contains(body, "if pidof sing-box >/dev/null 2>&1; then") {
+		t.Errorf("hook missing pidof branch guard:\n%s", body)
 	}
 	if !strings.Contains(body, "iptables-restore --noflush") {
 		t.Errorf("hook missing restore line:\n%s", body)
