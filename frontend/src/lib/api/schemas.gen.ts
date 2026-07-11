@@ -1470,6 +1470,7 @@ const api_SingboxRouterSettingsData: v.GenericSchema = v.looseObject({
 	fakeipMtu: v.optional(v.nullable(v.number())),
 	fakeipPool4: v.optional(v.nullable(v.string())),
 	fakeipPool6: v.optional(v.nullable(v.string())),
+	fakeipRealServer: v.optional(v.nullable(v.string())),
 	fakeipStack: v.optional(v.nullable(v.string())),
 	ingressInterfaces: v.optional(v.nullable(v.array(v.string()))),
 	policyName: v.optional(v.nullable(v.string())),

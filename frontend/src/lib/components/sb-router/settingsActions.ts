@@ -1,4 +1,3 @@
-import { get } from 'svelte/store';
 import type { SingboxRouterSettings } from '$lib/types';
 import { api } from '$lib/api/client';
 import { singboxRouter } from '$lib/stores/singboxRouter';
@@ -18,11 +17,13 @@ export const BYPASS_PRESETS: readonly BypassPresetMeta[] = [
 export async function mergeAndSaveSettings(
   patch: Partial<SingboxRouterSettings>,
 ): Promise<void> {
-  const current = get(singboxRouter.settings);
-  const merged: SingboxRouterSettings = {
-    ...(current ?? ({} as SingboxRouterSettings)),
-    ...patch,
-  };
+  // База для merge — СВЕЖИЙ GET с сервера, а не значение стора: настройки
+  // меняются и вне settings-форм (fakeipRealServer пишет бэкенд при правке
+  // адреса DNS-сервера «real» — #487; selectiveBypass гасит
+  // reconcile-самолечение — #486), а PUT уносит полный объект, поэтому эхо
+  // устаревшего стора молча откатывало такие изменения.
+  const current = await api.singboxRouterGetSettings();
+  const merged: SingboxRouterSettings = { ...current, ...patch };
   await api.singboxRouterPutSettings(merged);
   await singboxRouter.loadAll();
 }

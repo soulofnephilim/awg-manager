@@ -36,6 +36,12 @@ var (
 	// default_domain_resolver, or the hijack-dns rule). Surfaced as 4xx.
 	ErrFakeIPLockedField = errors.New("fakeip-tun config field is engine-locked")
 
+	// ErrFakeIPRealServerInvalid rejects an edit of the "real" DNS server whose
+	// new upstream is not a plain IP address (the fakeip topology resolves every
+	// domain through "real" itself, so a domain upstream could never bootstrap).
+	// Mapped to 400 by the API.
+	ErrFakeIPRealServerInvalid = errors.New("upstream of dns server \"real\" must be an IP address")
+
 	// ErrQoSClassesInvalid wraps every QoS-class validation failure from
 	// NormalizeSingboxRouterSettings (DSCP out of 0-63, duplicate DSCP,
 	// class limit exceeded, empty outbound, name too long) and the

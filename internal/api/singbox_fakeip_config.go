@@ -38,6 +38,8 @@ func (h *SingboxFakeIPConfigHandler) handleErr(w http.ResponseWriter, action str
 	switch {
 	case errors.Is(err, router.ErrFakeIPLockedField):
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "FAKEIP_LOCKED_FIELD")
+	case errors.Is(err, router.ErrFakeIPRealServerInvalid):
+		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "FAKEIP_REAL_SERVER_INVALID")
 	case errors.Is(err, router.ErrRuleSetReferenced),
 		errors.Is(err, router.ErrOutboundReferenced),
 		errors.Is(err, router.ErrRuleSetTagConflict),

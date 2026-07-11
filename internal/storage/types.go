@@ -153,6 +153,13 @@ type SingboxRouterSettings struct {
 	FakeIPPool6 string `json:"fakeipPool6,omitempty"`
 	// FakeIPMTU is the tun MTU (default 1500).
 	FakeIPMTU int `json:"fakeipMtu,omitempty"`
+	// FakeIPRealServer is the true upstream resolver the engine-managed "real"
+	// DNS server forwards to (default "1.1.1.1"). Must be a plain IP address —
+	// the fakeip topology resolves every domain through "real" itself, so a
+	// domain upstream could never bootstrap. Captured from a user edit of the
+	// "real" server address in the fakeip DNS panel (issue #487) or set
+	// directly via the settings API.
+	FakeIPRealServer string `json:"fakeipRealServer,omitempty"`
 	// UDPTimeout задаёт таймаут UDP-сессий в tproxy-in / fakeip tun-in inbound
 	// (формат Go duration, например "5m0s", "10m0s"). Пустая строка = значение по
 	// умолчанию (DefaultUDPTimeout, 5m). Увеличение помогает играм и другим

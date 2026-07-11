@@ -1397,6 +1397,10 @@ export interface SingboxRouterSettings {
 	fakeipPool4?: string;
 	fakeipPool6?: string;
 	fakeipMtu?: number;
+	// Upstream резолвера "real" (default "1.1.1.1"). Правится через адрес
+	// сервера «real» в DNS-панели fakeip (бэкенд перехватывает правку в это
+	// поле — issue #487); строго IP-адрес.
+	fakeipRealServer?: string;
 	// UDP session timeout for tproxy-in. Go duration string (e.g. "3m0s", "10m0s").
 	// Empty = backend default (3m0s). Increase to fix dropped sessions in games.
 	udpTimeout?: string;

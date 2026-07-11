@@ -4059,6 +4059,14 @@ definitions:
           "" disables v6.
         example: fc00::/18
         type: string
+      fakeipRealServer:
+        description: |-
+          FakeIPRealServer is the upstream resolver the engine-managed "real" DNS
+          server forwards to (default "1.1.1.1"). Must be a plain IP address. Also
+          captured from a user edit of the "real" server address in the fakeip DNS
+          panel.
+        example: 1.1.1.1
+        type: string
       fakeipStack:
         description: |-
           --- fakeip-tun engine settings (user-editable) ---

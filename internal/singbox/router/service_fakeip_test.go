@@ -445,12 +445,13 @@ func TestEnableFakeIPTun_UsesPersistedEngineSettings(t *testing.T) {
 	store := h.svc.deps.Settings
 	all, _ := store.Load()
 	all.SingboxRouter = storage.SingboxRouterSettings{
-		RoutingMode:   "fakeip-tun",
-		WANAutoDetect: true,
-		FakeIPStack:   "system",
-		FakeIPPool4:   "10.64.0.0/12",
-		FakeIPPool6:   "fc00::/7",
-		FakeIPMTU:     1280,
+		RoutingMode:      "fakeip-tun",
+		WANAutoDetect:    true,
+		FakeIPStack:      "system",
+		FakeIPPool4:      "10.64.0.0/12",
+		FakeIPPool6:      "fc00::/7",
+		FakeIPMTU:        1280,
+		FakeIPRealServer: "9.9.9.9",
 	}
 	normalized, err := NormalizeSingboxRouterSettings(all.SingboxRouter)
 	if err != nil {
@@ -523,6 +524,10 @@ func TestEnableFakeIPTun_UsesPersistedEngineSettings(t *testing.T) {
 	}
 	if fakeipSrv.Inet4Range != "10.64.0.0/12" || fakeipSrv.Inet6Range != "fc00::/7" {
 		t.Errorf("fakeip DNS server ranges = %q/%q, want overridden", fakeipSrv.Inet4Range, fakeipSrv.Inet6Range)
+	}
+	// The real-upstream override flows into the "real" DNS server (issue #487).
+	if realSrv := findDNSServerByTag(&cfg, "real"); realSrv == nil || realSrv.Server != "9.9.9.9" {
+		t.Errorf("real DNS server = %+v, want Server=9.9.9.9", realSrv)
 	}
 }
 
