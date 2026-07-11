@@ -2999,23 +2999,48 @@ func (s *ServiceImpl) UnbindDevice(ctx context.Context, mac string) error {
 	return s.deps.Policies.UnassignDevice(ctx, mac)
 }
 
+// inspectSlotConfig returns the EFFECTIVE config the inspector must walk —
+// the slot that is live under the CURRENT routing mode — plus that slot for
+// draft reporting. Issue #488: the inspector always walked the tproxy slot
+// (20-router.json), so in fakeip-tun mode it explained decisions by DNS/route
+// rules and rule-set names sing-box wasn't even running; the live rules were
+// in the fakeip slot (21-fakeip.json).
+func (s *ServiceImpl) inspectSlotConfig() (*RouterConfig, orchestrator.Slot, error) {
+	mode := ""
+	if s.deps.Settings != nil {
+		if settings, err := s.deps.Settings.Load(); err == nil && settings != nil {
+			mode = settings.SingboxRouter.RoutingMode
+		}
+	}
+	slot := orchestrator.SlotRouter
+	if mode == "fakeip-tun" {
+		slot = orchestrator.SlotFakeIP
+	}
+	cfg, err := s.loadRouterConfigForMode(mode)
+	if err != nil {
+		return nil, slot, err
+	}
+	if cfg == nil {
+		cfg = NewEmptyConfig()
+	}
+	return cfg, slot, nil
+}
+
 // Inspect simulates which router rule would match the given input
 // (a domain or an IP). The matcher walk is purely Go; only rule_set
 // matchers shell out to `sing-box rule-set match` to consult the
-// binary or downloaded JSON list. Reads the current persisted config so
-// the result reflects what the user would observe at runtime.
+// binary or downloaded JSON list. Reads the persisted config of the
+// ACTIVE routing mode (tproxy or fakeip-tun slot) so the result reflects
+// what the user would observe at runtime.
 //
 // When the sing-box binary is unavailable (dev machine, fresh install
 // before the user has installed the package) rule_set matchers degrade
 // to no-match and a Note is appended to the result — the rest of the
 // inspector still works.
 func (s *ServiceImpl) Inspect(ctx context.Context, input InspectInput) (InspectResult, error) {
-	cfg, err := s.loadRouterConfig()
+	cfg, _, err := s.inspectSlotConfig()
 	if err != nil {
 		return InspectResult{}, err
-	}
-	if cfg == nil {
-		cfg = NewEmptyConfig()
 	}
 	final := cfg.Route.Final
 	if final == "" {
@@ -3036,14 +3061,12 @@ func (s *ServiceImpl) Inspect(ctx context.Context, input InspectInput) (InspectR
 // real → upstream / local → router). It is the DNS-resolution branch that
 // precedes the route inspector: a domain that gets a fakeip is then routed
 // by Inspect. The matcher walk is purely Go; only rule_set matchers shell
-// out to `sing-box rule-set match`. Reads the current persisted config.
+// out to `sing-box rule-set match`. Reads the persisted config of the
+// ACTIVE routing mode (tproxy or fakeip-tun slot).
 func (s *ServiceImpl) InspectDNS(ctx context.Context, input InspectDNSInput) (InspectDNSResult, error) {
-	cfg, err := s.loadRouterConfig()
+	cfg, _, err := s.inspectSlotConfig()
 	if err != nil {
 		return InspectDNSResult{}, err
-	}
-	if cfg == nil {
-		cfg = NewEmptyConfig()
 	}
 	dnsRules := s.ruleSetMaterializer().restoreConfig(cfg).DNS.Rules
 	binary := ""
@@ -3074,13 +3097,10 @@ func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-
 		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{Phase: "load_config", Message: "Загружаем конфигурацию маршрутизации…"}}) {
 			return
 		}
-		cfg, err := s.loadRouterConfig()
+		cfg, slot, err := s.inspectSlotConfig()
 		if err != nil {
 			emitEvent(InspectStreamEvent{Type: "inspect-error", Error: err.Error()})
 			return
-		}
-		if cfg == nil {
-			cfg = NewEmptyConfig()
 		}
 		final := cfg.Route.Final
 		if final == "" {
@@ -3088,7 +3108,7 @@ func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-
 		}
 		usingDraft := false
 		if s.deps.Orch != nil {
-			usingDraft = s.deps.Orch.DraftInfo(orchestrator.SlotRouter).HasDraft
+			usingDraft = s.deps.Orch.DraftInfo(slot).HasDraft
 		}
 		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{
 			Phase:        "config_loaded",
