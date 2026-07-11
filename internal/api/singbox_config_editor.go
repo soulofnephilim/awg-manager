@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 )
@@ -20,11 +21,16 @@ import (
 // не пишет в user-слот — единственный владелец содержимого здесь.
 type SingboxConfigEditorHandler struct {
 	orch *orchestrator.Orchestrator
+	log  *logging.ScopedLogger
 }
 
 // NewSingboxConfigEditorHandler constructs the handler.
-func NewSingboxConfigEditorHandler(orch *orchestrator.Orchestrator) *SingboxConfigEditorHandler {
-	return &SingboxConfigEditorHandler{orch: orch}
+// appLogger may be nil — the scoped logger is nil-safe.
+func NewSingboxConfigEditorHandler(orch *orchestrator.Orchestrator, appLogger logging.AppLogger) *SingboxConfigEditorHandler {
+	return &SingboxConfigEditorHandler{
+		orch: orch,
+		log:  logging.NewScopedLogger(appLogger, logging.GroupSingbox, logging.SubSBRuntime),
+	}
 }
 
 // ConfigSlotInfo describes one config.d slot for the slots browser.
@@ -281,6 +287,7 @@ func (h *SingboxConfigEditorHandler) PutUserConfig(w http.ResponseWriter, r *htt
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("user-config-save", "90-user.json", "user config draft saved")
 	response.Success(w, OkData{Ok: true})
 }
 
@@ -381,6 +388,7 @@ func (h *SingboxConfigEditorHandler) ApplyUserConfig(w http.ResponseWriter, r *h
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("user-config-apply", "90-user.json", "user config draft applied")
 	out := UserConfigApplyResponse{Ok: true}
 	_, out.Warnings = splitUserValidationDTO(res)
 	response.Success(w, out)
@@ -406,6 +414,7 @@ func (h *SingboxConfigEditorHandler) DiscardUserConfig(w http.ResponseWriter, r 
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("user-config-discard", "90-user.json", "user config draft discarded")
 	response.Success(w, OkData{Ok: true})
 }
 
@@ -437,5 +446,10 @@ func (h *SingboxConfigEditorHandler) EnableUserConfig(w http.ResponseWriter, r *
 		response.InternalError(w, err.Error())
 		return
 	}
+	state := "disabled"
+	if req.Enabled {
+		state = "enabled"
+	}
+	h.log.Info("user-config-enable", "90-user.json", "user config slot "+state)
 	response.Success(w, OkData{Ok: true})
 }

@@ -349,6 +349,7 @@ func (a *app) setupRouter() {
 		a.singboxOp.ConfigDir(),
 		selectiveAdapter,
 		selectiveBuilder,
+		a.loggingService,
 	))
 	selectiveCDNRefresh := selective.StartCDNRefreshLoop(
 		selective.CDNRefreshInterval,
@@ -436,7 +437,7 @@ func (a *app) setupRouter() {
 	a.srv.SetSingboxConfigHandler(api.NewSingboxConfigHandler(a.sbOrch.ConfigDir))
 	// Эксперт-редактор конфигурации: обзор слотов config.d + draft-пайплайн
 	// пользовательского слота 90-user.json (единственный слот без продюсера).
-	a.srv.SetSingboxConfigEditorHandler(api.NewSingboxConfigEditorHandler(a.sbOrch))
+	a.srv.SetSingboxConfigEditorHandler(api.NewSingboxConfigEditorHandler(a.sbOrch, a.loggingService))
 	// Зеркало inbound'ов merged-конфига: per-slot чтение config.d с атрибуцией
 	// источника (подписка/группа/туннель/device-proxy/QoS/движок). Резолверы
 	// nil-safe — при частичном bootstrap источник деградирует до слота.
@@ -500,7 +501,7 @@ func (a *app) setupListen() {
 	if err := dnsRewriteSvc.Resync(); err != nil {
 		a.bootLog.Warn("dnsrewrite-resync", "", err.Error())
 	}
-	a.srv.SetDNSRewritesHandler(api.NewDNSRewritesHandler(dnsRewriteSvc))
+	a.srv.SetDNSRewritesHandler(api.NewDNSRewritesHandler(dnsRewriteSvc, a.loggingService))
 
 	// Boot status: 0 = booting, 1 = done. Used by /api/system/info.
 	a.srv.SetBootStatusFunc(func() bool { return atomic.LoadInt32(&a.bootDone) == 0 })

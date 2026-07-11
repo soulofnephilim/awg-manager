@@ -2,7 +2,9 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/dnsrewrite"
 )
@@ -53,10 +55,16 @@ type DNSRewritesService interface {
 
 type DNSRewritesHandler struct {
 	svc DNSRewritesService
+	log *logging.ScopedLogger
 }
 
-func NewDNSRewritesHandler(svc DNSRewritesService) *DNSRewritesHandler {
-	return &DNSRewritesHandler{svc: svc}
+// NewDNSRewritesHandler constructs the handler.
+// appLogger may be nil — the scoped logger is nil-safe.
+func NewDNSRewritesHandler(svc DNSRewritesService, appLogger logging.AppLogger) *DNSRewritesHandler {
+	return &DNSRewritesHandler{
+		svc: svc,
+		log: logging.NewScopedLogger(appLogger, logging.GroupRouting, logging.SubSingboxRouter),
+	}
 }
 
 // List returns all DNS rewrites in priority order.
@@ -113,6 +121,7 @@ func (h *DNSRewritesHandler) Add(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, err.Error())
 		return
 	}
+	h.log.Info("dns-rewrite-add", rw.Pattern, "DNS rewrite added: "+rw.Pattern)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -146,6 +155,7 @@ func (h *DNSRewritesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, err.Error())
 		return
 	}
+	h.log.Info("dns-rewrite-update", req.Rewrite.Pattern, "DNS rewrite updated: "+req.Rewrite.Pattern)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -178,6 +188,7 @@ func (h *DNSRewritesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, err.Error())
 		return
 	}
+	h.log.Info("dns-rewrite-delete", strconv.Itoa(req.Index), "DNS rewrite deleted at index "+strconv.Itoa(req.Index))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -211,5 +222,7 @@ func (h *DNSRewritesHandler) Move(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, err.Error())
 		return
 	}
+	h.log.Info("dns-rewrite-move", strconv.Itoa(req.From),
+		"DNS rewrite moved from index "+strconv.Itoa(req.From)+" to "+strconv.Itoa(req.To))
 	response.Success(w, map[string]bool{"ok": true})
 }

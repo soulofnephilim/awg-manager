@@ -70,6 +70,7 @@ func (h *SingboxRouterHandler) createPolicy(w http.ResponseWriter, r *http.Reque
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("policy-create", policy.Name, "NDMS policy created: "+policy.Name)
 	response.Success(w, policy)
 }
 
@@ -136,6 +137,7 @@ func (h *SingboxRouterHandler) BindDevice(w http.ResponseWriter, r *http.Request
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("device-bind", req.MAC, "device bound to policy "+req.PolicyName)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -168,5 +170,6 @@ func (h *SingboxRouterHandler) UnbindDevice(w http.ResponseWriter, r *http.Reque
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("device-unbind", req.MAC, "device policy binding removed")
 	response.Success(w, map[string]bool{"ok": true})
 }
