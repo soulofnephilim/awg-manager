@@ -286,6 +286,54 @@ func (o *Orchestrator) CheckMerged(slot Slot, jsonBytes []byte) (ValidationResul
 	return o.checkMergedLocked(slot, jsonBytes)
 }
 
+// CheckSlotAlone runs `sing-box check` over a tmpdir containing ONLY the
+// given slot's candidate bytes — no sibling slots, no cross-slot logical
+// validation. Intra-slot decode/initialize errors surface with the same
+// outbound-index attribution as CheckMerged, at a fraction of the cost:
+// no snapshot of every enabled slot and no parse of their contents per
+// invocation.
+//
+// Built for the subscription adapter's iterative drop loop (issue #491):
+// public share-link lists routinely carry dozens of entries sing-box
+// rejects, and the loop spawns one check per rejected entry — with
+// CheckMerged each spawn also re-parsed every other slot, which on a
+// MIPS/ARM router turned a large-subscription Create into minutes of
+// silent spinner. Cross-slot classes (duplicate tags vs 90-user, dangling
+// group refs) are NOT visible here — callers must finish with one
+// CheckMerged.
+func (o *Orchestrator) CheckSlotAlone(slot Slot, jsonBytes []byte) (ValidationResult, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	meta, ok := o.slots[slot]
+	if !ok {
+		return ValidationResult{}, ErrUnknownSlot
+	}
+	res := ValidationResult{}
+	if o.validator == nil {
+		return res, nil
+	}
+	tmpdir, err := os.MkdirTemp(o.configDir, ".alone-check-*")
+	if err != nil {
+		return ValidationResult{}, fmt.Errorf("CheckSlotAlone tmpdir: %w", err)
+	}
+	defer os.RemoveAll(tmpdir)
+	if err := writeAtomic(filepath.Join(tmpdir, meta.Filename), jsonBytes); err != nil {
+		return ValidationResult{}, fmt.Errorf("CheckSlotAlone write target: %w", err)
+	}
+	if err := o.validator.Validate(context.Background(), tmpdir); err != nil {
+		ve := ValidationError{
+			Slot:    slot,
+			Kind:    "sing-box check",
+			Message: err.Error(),
+		}
+		if s, idx, ok := o.attributeOutboundIndex(err.Error(), tmpdir); ok {
+			ve.OutboundSlot, ve.OutboundIndex = s, &idx
+		}
+		res.Errors = append(res.Errors, ve)
+	}
+	return res, nil
+}
+
 // checkMergedLocked is the shared body for SaveAndValidate / CheckMerged.
 // Caller MUST hold o.mu.
 func (o *Orchestrator) checkMergedLocked(slot Slot, jsonBytes []byte) (ValidationResult, error) {
