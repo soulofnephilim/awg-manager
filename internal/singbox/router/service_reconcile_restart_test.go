@@ -16,6 +16,11 @@ import (
 // steady state needs no re-Install.
 func newReconcileInstalledService(t *testing.T, sb *fakeSingbox) *ServiceImpl {
 	t.Helper()
+	// singboxReady (tproxy) gates on the inbound-socket probe; stub it "bound"
+	// by default so an alive engine reads as ready. Dead-engine cases short-
+	// circuit on IsRunning before the probe; the up-but-unbound case overrides
+	// this stub to return false.
+	stubListeningProbe(t, func() bool { return true })
 	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
 	return &ServiceImpl{
 		deps: Deps{
@@ -160,6 +165,64 @@ func TestReconcileInstalled_DeadEngineInstallsBlackhole(t *testing.T) {
 	}
 	if !svc.blackholeActive {
 		t.Error("blackholeActive must be set after installing the fail-closed blackhole")
+	}
+}
+
+// safety-3: движок ЖИВ, но inbound-сокеты НЕ привязаны (up-but-unbound, порт
+// занят / отклонённый hot-reload). reconcile трактует это как «не готов»:
+// НЕ ставит реальный перехват (REDIRECT/TPROXY в непривязанный сокет
+// заблэкхолил бы весь policy-трафик, вкл. DNS:53), а при снесённых джампах
+// включает fail-closed blackhole.
+func TestReconcileInstalled_LiveButUnboundInstallsBlackhole(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 } // процесс жив
+	var restores []string
+	ipt := newStubIPTables(func(_ context.Context, in string) error { restores = append(restores, in); return nil })
+	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) { return chainsOnlyDump(), nil } // джампы снесены
+	svc := newReconcileInstalledService(t, sb)
+	svc.deps.IPTables = ipt
+	// ПОСЛЕ харнесса (тот стабит probe=true) переопределяем: сокеты не привязаны.
+	stubListeningProbe(t, func() bool { return false })
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if len(restores) != 1 {
+		t.Fatalf("restore calls = %d, want 1 (blackhole only, no real interception into an unbound socket)", len(restores))
+	}
+	if !strings.Contains(restores[0], "-A "+BlackholeChain+" -j DROP") {
+		t.Errorf("restored blob is not the fail-closed blackhole:\n%s", restores[0])
+	}
+	if strings.Contains(restores[0], ChainName) {
+		t.Errorf("must NOT install real interception (%s) while sockets are unbound:\n%s", ChainName, restores[0])
+	}
+	if !svc.blackholeActive {
+		t.Error("blackholeActive must be set for an up-but-unbound engine")
+	}
+}
+
+// safety-3 (покрытие): движок up-but-unbound, но PREROUTING-джампы ЦЕЛЫ →
+// установку iptables откладываем (любой триггер, здесь markChanged), blackhole
+// НЕ ставим — перехват в мёртвый порт сам дропает трафик (fail-closed).
+func TestReconcileInstalled_LiveButUnboundJumpsIntactDefers(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	restores := 0
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { restores++; return nil })
+	// runIPTablesOut по умолчанию = jumpsPresentDump → джампы целы.
+	svc := newReconcileInstalledService(t, sb)
+	svc.deps.IPTables = ipt
+	svc.currentMark = "0xstale" // форсируем markChanged → needsInstall
+	stubListeningProbe(t, func() bool { return false })
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if restores != 0 {
+		t.Errorf("установка должна быть отложена (unbound, джампы целы): restore calls = %d, want 0", restores)
+	}
+	if svc.blackholeActive {
+		t.Error("blackhole не нужен при целых джампах — перехват в мёртвый порт держит fail-closed")
 	}
 }
 
