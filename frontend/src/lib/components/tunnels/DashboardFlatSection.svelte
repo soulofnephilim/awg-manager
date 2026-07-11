@@ -354,9 +354,9 @@
 		user-select: none;
 	}
 
-	/* Компактный ряд на время drag и ghost-токен: бейдж вида + имя. */
-	.dashboard-reorder-row,
-	.drag-ghost-token {
+	/* Компактный ряд на время drag: бейдж вида + имя (ghost-токен остался в
+	   странице вместе со своим fixed-слоем и дублем этого правила). */
+	.dashboard-reorder-row {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;

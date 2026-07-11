@@ -32,6 +32,13 @@ import { resolveSubscriptionMemberTag } from '$lib/utils/subscriptionMember';
 type TrafficMap = Map<string, SingboxTraffic>;
 type DelayHistoryMap = Map<string, number[]>;
 
+// Последний положительный замер задержки; пустая история и нулевые/отрицательные
+// значения (проба не удалась) считаются отсутствием данных.
+function latestPositiveDelay(history: number[]): number | null {
+	const latest = history.length > 0 ? history[history.length - 1] : null;
+	return latest && latest > 0 ? latest : null;
+}
+
 // --- статусные хелперы карточек/таблиц ---
 
 export function tunnelStatusBucket(status: string): 'running' | 'broken' | 'starting' | 'stopped' | 'disabled' | 'other' {
@@ -249,9 +256,7 @@ export function buildSingboxDelayMap(
 ): Map<string, number | null> {
 	const map = new Map<string, number | null>();
 	for (const tunnel of list) {
-		const history = delayHistory.get(tunnel.tag) ?? [];
-		const latest = history.length > 0 ? history[history.length - 1] : null;
-		map.set(tunnel.tag, latest && latest > 0 ? latest : null);
+		map.set(tunnel.tag, latestPositiveDelay(delayHistory.get(tunnel.tag) ?? []));
 	}
 	return map;
 }
@@ -261,8 +266,8 @@ export function sortFilterSingboxTunnels(
 	rawQuery: string,
 	sortBy: SingboxTunnelSortKey | null,
 	asc: boolean,
-	delayValues: Map<string, number | null>,
-	traffic: TrafficMap,
+	getDelayValues: () => Map<string, number | null>,
+	getTraffic: () => TrafficMap,
 ): SingboxTunnel[] {
 	const query = rawQuery.trim().toLowerCase();
 	const filtered = list.filter((tunnel) =>
@@ -280,12 +285,16 @@ export function sortFilterSingboxTunnels(
 		),
 	);
 	if (!sortBy) return filtered;
+	// Карты читаются лениво — только когда активная сортировка их требует,
+	// иначе каждый poll трафика/задержек инвалидировал бы отсортированный
+	// список даже без сортировки по этим колонкам.
+	const delayValues = sortBy === 'delay' || sortBy === 'ping' ? getDelayValues() : null;
+	const traffic = sortBy === 'traffic' ? getTraffic() : null;
 	return [...filtered].sort((a, b) => {
 		switch (sortBy) {
 			case 'delay':
-				return compareDelayLike(delayValues.get(a.tag), delayValues.get(b.tag), asc);
 			case 'ping':
-				return compareDelayLike(delayValues.get(a.tag), delayValues.get(b.tag), asc);
+				return compareDelayLike(delayValues!.get(a.tag), delayValues!.get(b.tag), asc);
 			case 'name':
 				return applyDirection(compareString(a.tag, b.tag), asc);
 			case 'protocol':
@@ -297,8 +306,8 @@ export function sortFilterSingboxTunnels(
 			case 'traffic':
 				return applyDirection(
 					compareNullableNumber(
-						(traffic.get(a.tag)?.download ?? 0) + (traffic.get(a.tag)?.upload ?? 0),
-						(traffic.get(b.tag)?.download ?? 0) + (traffic.get(b.tag)?.upload ?? 0),
+						(traffic!.get(a.tag)?.download ?? 0) + (traffic!.get(a.tag)?.upload ?? 0),
+						(traffic!.get(b.tag)?.download ?? 0) + (traffic!.get(b.tag)?.upload ?? 0),
 						false,
 					),
 					asc,
@@ -317,9 +326,7 @@ export function subscriptionTrafficBytes(traffic: TrafficMap, activeTag: string 
 
 export function subscriptionDelayValue(delayHistory: DelayHistoryMap, activeTag: string | null): number | null {
 	if (!activeTag) return null;
-	const history = delayHistory.get(activeTag) ?? [];
-	const latest = history.length > 0 ? history[history.length - 1] : null;
-	return latest && latest > 0 ? latest : null;
+	return latestPositiveDelay(delayHistory.get(activeTag) ?? []);
 }
 
 export function sortFilterSubscriptionsActiveCards(
@@ -327,8 +334,8 @@ export function sortFilterSubscriptionsActiveCards(
 	rawQuery: string,
 	sortBy: SubscriptionSortKey | null,
 	asc: boolean,
-	traffic: TrafficMap,
-	delayHistory: DelayHistoryMap,
+	getTraffic: () => TrafficMap,
+	getDelayHistory: () => DelayHistoryMap,
 ): SubscriptionActiveCardVM[] {
 	const query = rawQuery.trim().toLowerCase();
 	const filtered = cards.filter(({ subscription, activeMember }) =>
@@ -348,12 +355,13 @@ export function sortFilterSubscriptionsActiveCards(
 		),
 	);
 	if (!sortBy) return filtered;
+	const delayHistory = sortBy === 'delay' || sortBy === 'ping' ? getDelayHistory() : null;
+	const traffic = sortBy === 'traffic' ? getTraffic() : null;
 	return [...filtered].sort((a, b) => {
 		switch (sortBy) {
 			case 'delay':
-				return compareDelayLike(subscriptionDelayValue(delayHistory, a.activeMember.tag), subscriptionDelayValue(delayHistory, b.activeMember.tag), asc);
 			case 'ping':
-				return compareDelayLike(subscriptionDelayValue(delayHistory, a.activeMember.tag), subscriptionDelayValue(delayHistory, b.activeMember.tag), asc);
+				return compareDelayLike(subscriptionDelayValue(delayHistory!, a.activeMember.tag), subscriptionDelayValue(delayHistory!, b.activeMember.tag), asc);
 			case 'label':
 				return applyDirection(compareString(a.subscription.label, b.subscription.label), asc);
 			case 'mode':
@@ -361,7 +369,7 @@ export function sortFilterSubscriptionsActiveCards(
 			case 'active':
 				return applyDirection(compareString(a.activeMember.label || a.activeMember.tag, b.activeMember.label || b.activeMember.tag), asc);
 			case 'traffic':
-				return applyDirection(compareNullableNumber(subscriptionTrafficBytes(traffic, a.activeMember.tag), subscriptionTrafficBytes(traffic, b.activeMember.tag), false), asc);
+				return applyDirection(compareNullableNumber(subscriptionTrafficBytes(traffic!, a.activeMember.tag), subscriptionTrafficBytes(traffic!, b.activeMember.tag), false), asc);
 			case 'updated':
 				return applyDirection(compareNullableNumber(
 					a.subscription.lastFetched ? new Date(a.subscription.lastFetched).getTime() : null,
@@ -377,8 +385,8 @@ export function sortFilterSubscriptionsListRows(
 	sortBy: SubscriptionSortKey | null,
 	asc: boolean,
 	liveActives: Record<string, string>,
-	traffic: TrafficMap,
-	delayHistory: DelayHistoryMap,
+	getTraffic: () => TrafficMap,
+	getDelayHistory: () => DelayHistoryMap,
 ): Subscription[] {
 	const query = rawQuery.trim().toLowerCase();
 	const filtered = rows.filter((subscription) => {
@@ -400,6 +408,8 @@ export function sortFilterSubscriptionsListRows(
 		);
 	});
 	if (!sortBy) return filtered;
+	const delayHistory = sortBy === 'delay' || sortBy === 'ping' ? getDelayHistory() : null;
+	const traffic = sortBy === 'traffic' ? getTraffic() : null;
 	return [...filtered].sort((a, b) => {
 		const activeA = liveActives[a.id] || resolveSubscriptionMemberTag(a, null);
 		const activeB = liveActives[b.id] || resolveSubscriptionMemberTag(b, null);
@@ -407,9 +417,8 @@ export function sortFilterSubscriptionsListRows(
 		const memberB = b.members?.find((m) => m.tag === activeB) ?? null;
 		switch (sortBy) {
 			case 'delay':
-				return compareDelayLike(subscriptionDelayValue(delayHistory, activeA), subscriptionDelayValue(delayHistory, activeB), asc);
 			case 'ping':
-				return compareDelayLike(subscriptionDelayValue(delayHistory, activeA), subscriptionDelayValue(delayHistory, activeB), asc);
+				return compareDelayLike(subscriptionDelayValue(delayHistory!, activeA), subscriptionDelayValue(delayHistory!, activeB), asc);
 			case 'label':
 				return applyDirection(compareString(a.label, b.label), asc);
 			case 'mode':
@@ -417,7 +426,7 @@ export function sortFilterSubscriptionsListRows(
 			case 'active':
 				return applyDirection(compareString(memberA?.label || memberA?.tag, memberB?.label || memberB?.tag), asc);
 			case 'traffic':
-				return applyDirection(compareNullableNumber(subscriptionTrafficBytes(traffic, activeA), subscriptionTrafficBytes(traffic, activeB), false), asc);
+				return applyDirection(compareNullableNumber(subscriptionTrafficBytes(traffic!, activeA), subscriptionTrafficBytes(traffic!, activeB), false), asc);
 			case 'updated':
 				return applyDirection(compareNullableNumber(
 					a.lastFetched ? new Date(a.lastFetched).getTime() : null,
@@ -521,9 +530,8 @@ export function computeSingboxTunnelListStats(
 				leaderName = t.tag;
 			}
 		}
-		const h = delayHistory.get(t.tag) ?? [];
-		const last = h.length > 0 ? h[h.length - 1] : 0;
-		if (typeof last === 'number' && last > 0) {
+		const last = latestPositiveDelay(delayHistory.get(t.tag) ?? []);
+		if (last !== null) {
 			delaySum += last;
 			delayN++;
 		}
@@ -568,9 +576,8 @@ export function computeSubscriptionsTrafficStats(
 		}
 
 		if (sampleDelay) {
-			const history = delayHistory.get(tag) ?? [];
-			const lastDelay = history.length > 0 ? history[history.length - 1] : 0;
-			if (typeof lastDelay === 'number' && lastDelay > 0) {
+			const lastDelay = latestPositiveDelay(delayHistory.get(tag) ?? []);
+			if (lastDelay !== null) {
 				delaySum += lastDelay;
 				delaySamples += 1;
 			}

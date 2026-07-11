@@ -7,9 +7,6 @@
 	import { notifications } from '$lib/stores/notifications';
 	import { api } from '$lib/api/client';
 	import {
-		TunnelCard,
-		ExternalTunnelCard,
-		SystemTunnelCard,
 		TunnelListTrafficCell,
 		TunnelPingButton,
 		TunnelTitleRow,
@@ -20,7 +17,6 @@
 	import { TunnelListActions } from '$lib/components/ui';
 	import { PageContainer, PageHeader, LoadingSpinner, EmptyState, WelcomeBanner } from '$lib/components/layout';
 	import {
-		StoreStatusBadge,
 		TrafficSparkline,
 		Badge,
 		Tabs,
@@ -32,14 +28,10 @@
 		TableSortHeader,
 	} from '$lib/components/ui';
 	import { singboxDelayHistory, singboxStatus, singboxTraffic, singboxTunnels } from '$lib/stores/singbox';
-	import { SingboxInstallBanner, SingboxTunnelCard } from '$lib/components/singbox';
 	import { feedTraffic, getTrafficRates, getTrafficSparklineSeries, subscribeTraffic } from '$lib/stores/traffic';
 	import { usageLevel } from '$lib/stores/settings';
 	import { isSectionVisible, isTunnelDashboardAvailable } from '$lib/types/usageLevel';
 	import { subscriptionsStore } from '$lib/stores/subscriptions';
-	import SubscriptionCard from '$lib/components/subscriptions/SubscriptionCard.svelte';
-	import SubscriptionActiveCard from '$lib/components/subscriptions/SubscriptionActiveCard.svelte';
-	import SubscriptionGroupsSection from '$lib/components/subscriptions/SubscriptionGroupsSection.svelte';
 	import SubscriptionsTabSection from '$lib/components/subscriptions/SubscriptionsTabSection.svelte';
 	import SingboxTunnelsTabSection from '$lib/components/singbox/SingboxTunnelsTabSection.svelte';
 	import AwgTunnelsTabSection from '$lib/components/tunnels/AwgTunnelsTabSection.svelte';
@@ -90,12 +82,8 @@
 		type TunnelRenderMode,
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode as getIsMockDevMode } from '$lib/env';
-	import { Eye, EyeOff, GripVertical, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert } from 'lucide-svelte';
-	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
+	import { Eye, EyeOff, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert } from 'lucide-svelte';
 	import { formatRunningSub, pluralForm, SUBSCRIPTION_WORDS, TUNNEL_WORDS } from '$lib/utils/pluralize';
-	import DashboardToolbar from '$lib/components/tunnels/DashboardToolbar.svelte';
-	import DashboardSummary from '$lib/components/tunnels/DashboardSummary.svelte';
-	import TunnelTagChips from '$lib/components/tunnels/TunnelTagChips.svelte';
 	import TunnelSectionHeader from '$lib/components/tunnels/TunnelSectionHeader.svelte';
 	import {
 		tunnelDashboardLayout,
@@ -109,7 +97,7 @@
 		tunnelDashboardTags,
 	} from '$lib/stores/tunnelDashboardPrefs';
 	import { applyManualOrder, mergeManualOrder, reorder } from '$lib/utils/tunnelDashboardOrder';
-	import { filterItemsByTag, getItemTags, groupFlatItemsByTag } from '$lib/utils/tunnelDashboardTags';
+	import { filterItemsByTag, groupFlatItemsByTag } from '$lib/utils/tunnelDashboardTags';
 	import { createReorderDrag } from '$lib/components/sb-router/reorderDrag.svelte';
 	import { buildFlatDashboardItems, type TunnelDashboardFlatItem } from '$lib/utils/tunnelDashboardFlat';
 	import {
@@ -120,13 +108,6 @@
 		type SingboxTunnelSortKey,
 		type SubscriptionSortKey,
 	} from '$lib/stores/tunnelTableSort';
-	import {
-		applyDirection,
-		compareBool,
-		compareDelayLike,
-		compareNullableNumber,
-		compareString,
-	} from '$lib/utils/tunnelTableSort';
 
 	type TunnelTab = 'awg' | 'singbox' | 'subscriptions';
 	type AwgTunnelViewMode = 'cards' | 'compact' | 'list';
@@ -1073,8 +1054,8 @@
 			effectiveSingboxTunnelsSearchQuery,
 			$singboxTunnelTableSort.sortBy,
 			$singboxTunnelTableSort.sortAsc,
-			singboxTunnelDelayValue,
-			$singboxTraffic,
+			() => singboxTunnelDelayValue,
+			() => $singboxTraffic,
 		),
 	);
 
@@ -1084,8 +1065,8 @@
 			effectiveSubscriptionsSearchQuery,
 			$singboxSubscriptionTableSort.sortBy,
 			$singboxSubscriptionTableSort.sortAsc,
-			$singboxTraffic,
-			$singboxDelayHistory,
+			() => $singboxTraffic,
+			() => $singboxDelayHistory,
 		),
 	);
 
@@ -1096,8 +1077,8 @@
 			$singboxSubscriptionTableSort.sortBy,
 			$singboxSubscriptionTableSort.sortAsc,
 			liveActives,
-			$singboxTraffic,
-			$singboxDelayHistory,
+			() => $singboxTraffic,
+			() => $singboxDelayHistory,
 		),
 	);
 
@@ -1439,7 +1420,6 @@
 	// Live-контекст flat-дашборда (см. dashboardFlatContext.ts).
 	const dashboardFlatCtx: DashboardFlatContext = {
 		get DASHBOARD_KIND_LABELS() { return DASHBOARD_KIND_LABELS; },
-		get dashboardOn() { return dashboardOn; },
 		get dashboardDndEnabled() { return dashboardDndEnabled; },
 		get dashboardFilterEmpty() { return dashboardFilterEmpty; },
 		get dashboardFlatCardMode() { return dashboardFlatCardMode; },
@@ -1457,9 +1437,7 @@
 		get effectiveSingboxSubscriptionsRenderMode() { return effectiveSingboxSubscriptionsRenderMode; },
 		get showSingboxListOption() { return showSingboxListOption; },
 		get showSingboxSections() { return showSingboxSections; },
-		get loading() { return loading; },
 		get exporting() { return exporting; },
-		get adoptingInterface() { return adoptingInterface; },
 		get awgAutoConnectivityNonce() { return awgAutoConnectivityNonce; },
 		get singboxAutoDelayCheckNonce() { return singboxAutoDelayCheckNonce; },
 		get deleteLoading() { return deleteLoading; },
@@ -1467,19 +1445,13 @@
 		get liveActives() { return liveActives; },
 		get flatDrag() { return flatDrag; },
 		get flatRowEls() { return flatRowEls; },
-		get adoptDialogOpen() { return adoptDialogOpen; },
-		set adoptDialogOpen(v) { adoptDialogOpen = v; },
-		get adoptError() { return adoptError; },
-		set adoptError(v) { adoptError = v; },
-		get adoptLoading() { return adoptLoading; },
-		set adoptLoading(v) { adoptLoading = v; },
 		get dashboardSearchQuery() { return dashboardSearchQuery; },
 		set dashboardSearchQuery(v) { dashboardSearchQuery = v; },
 		get dashboardTagFilter() { return dashboardTagFilter; },
 		set dashboardTagFilter(v) { dashboardTagFilter = v; },
 		get flatGridEl() { return flatGridEl; },
 		set flatGridEl(v) { flatGridEl = v; },
-		handleAdopt, handleAdoptClick, handleExportAll, handleGripKeydown, handleGripPointerDown, handleToggleOnOff, markAsServer, openAwgDiagnostics, openDetail, openSingboxDetail, openWizard, requestDelete, requestSubscriptionDelete,
+		handleAdoptClick, handleExportAll, handleGripKeydown, handleGripPointerDown, handleToggleOnOff, markAsServer, openAwgDiagnostics, openDetail, openSingboxDetail, openWizard, requestDelete, requestSubscriptionDelete,
 	};
 
 	// Live-контекст модалок страницы (см. tunnelPageModalsContext.ts).
@@ -1519,10 +1491,6 @@
 		handleAdopt, handleDelete, confirmSubscriptionDelete, closeDetail, closeSingboxDetail, closeAwgDiagnostics, closeConnectivitySettings,
 	};
 </script>
-
-{#snippet createIcon()}
-	<CreateIcon />
-{/snippet}
 
 <svelte:head>
 	<title>Туннели - AWG Manager</title>
@@ -1800,8 +1768,5 @@
 		background: var(--color-accent);
 		color: #fff;
 		border-color: var(--color-accent);
-	}
-
-	@media (max-width: 760px) {
 	}
 </style>

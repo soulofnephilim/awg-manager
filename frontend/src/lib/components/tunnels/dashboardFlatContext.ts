@@ -1,11 +1,9 @@
 // Контекст flat-режима дашборда (класс 2 декомпозиции +page.svelte):
 // страница собирает объект с live-геттерами поверх своих $state/$derived
 // и передаёт одним пропом в DashboardFlatSection.
-import type { TunnelListItem, SystemTunnel, ExternalTunnel } from '$lib/types';
 import type { TunnelDashboardFlatItem } from '$lib/utils/tunnelDashboardFlat';
 import type { SingboxLayoutMode, TunnelRenderMode } from '$lib/constants/singboxLayout';
 import type { createReorderDrag } from '$lib/components/sb-router/reorderDrag.svelte';
-import type { SubscriptionActiveCardVM } from '$lib/components/subscriptions/subscriptionVMs';
 
 export interface DashboardTagGroupEntry {
 	item: TunnelDashboardFlatItem;
@@ -15,7 +13,6 @@ export interface DashboardTagGroupEntry {
 export interface DashboardFlatContext {
 	// --- derived ---
 	readonly DASHBOARD_KIND_LABELS: Record<TunnelDashboardFlatItem['kind'], string>;
-	readonly dashboardOn: boolean;
 	readonly dashboardDndEnabled: boolean;
 	readonly dashboardFilterEmpty: boolean;
 	readonly dashboardFlatCardMode: boolean;
@@ -33,9 +30,7 @@ export interface DashboardFlatContext {
 	readonly effectiveSingboxSubscriptionsRenderMode: TunnelRenderMode;
 	readonly showSingboxListOption: boolean;
 	readonly showSingboxSections: boolean;
-	readonly loading: boolean;
 	readonly exporting: boolean;
-	readonly adoptingInterface: string;
 	readonly awgAutoConnectivityNonce: number;
 	readonly singboxAutoDelayCheckNonce: number;
 	readonly deleteLoading: Record<string, boolean>;
@@ -44,14 +39,10 @@ export interface DashboardFlatContext {
 	readonly flatDrag: ReturnType<typeof createReorderDrag>;
 	readonly flatRowEls: Array<HTMLElement | null>;
 	// --- state с записью из секции ---
-	adoptDialogOpen: boolean;
-	adoptError: string;
-	adoptLoading: boolean;
 	dashboardSearchQuery: string;
 	dashboardTagFilter: string | null;
 	flatGridEl: HTMLElement | null;
 	// --- обработчики ---
-	handleAdopt(data: { content: string; name: string }): Promise<void>;
 	handleAdoptClick(interfaceName: string): void;
 	handleExportAll(): Promise<void>;
 	handleGripKeydown(index: number, event: KeyboardEvent): void;
@@ -65,4 +56,3 @@ export interface DashboardFlatContext {
 	requestDelete(id: string): void;
 	requestSubscriptionDelete(id: string): void;
 }
-export type { TunnelListItem, SystemTunnel, ExternalTunnel, SubscriptionActiveCardVM };

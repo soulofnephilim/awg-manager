@@ -71,10 +71,10 @@ describe('статусные хелперы', () => {
 	});
 
 	it('awgStatusRank даёт порядок running < starting < broken < stopped < disabled', () => {
-		const ranks = ['running', 'starting', 'broken', 'stopped', 'disabled'].map((s) =>
+		const ranks = ['running', 'starting', 'broken', 'stopped', 'disabled', '???'].map((s) =>
 			awgStatusRank(awg({ status: s })),
 		);
-		expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
+		expect(ranks).toEqual([0, 1, 2, 3, 4, 5]);
 	});
 
 	it('isManagedTunnelOn true для running/starting/broken', () => {
@@ -129,11 +129,12 @@ describe('sortFilterAwgList', () => {
 describe('sortFilterSystemList / sortFilterExternalList', () => {
 	it('system: фильтр по описанию, сортировка по handshake', () => {
 		const list = [
-			sys({ id: 'wg1', description: 'Moscow', peer: { lastHandshake: '2026-01-02T00:00:00Z' } as SystemTunnel['peer'] }),
 			sys({ id: 'wg2', description: 'Piter', peer: { lastHandshake: '2026-01-03T00:00:00Z' } as SystemTunnel['peer'] }),
+			sys({ id: 'wg1', description: 'Moscow', peer: { lastHandshake: '2026-01-02T00:00:00Z' } as SystemTunnel['peer'] }),
 		];
 		expect(sortFilterSystemList(list, 'mosc', null, true).map((t) => t.id)).toEqual(['wg1']);
 		expect(sortFilterSystemList(list, '', 'handshake', true).map((t) => t.id)).toEqual(['wg1', 'wg2']);
+		expect(sortFilterSystemList(list, '', 'handshake', false).map((t) => t.id)).toEqual(['wg2', 'wg1']);
 	});
 
 	it('external: фильтр по awg/wg метке', () => {
@@ -153,14 +154,13 @@ describe('sing-box туннели', () => {
 
 	it('сортировка по delay: null-задержки в конец', () => {
 		const dm = buildSingboxDelayMap(list, delays([['a-fast', [50]], ['b-slow', []]]));
-		const sorted = sortFilterSingboxTunnels(list, '', 'delay', true, dm, traffic([]));
+		const sorted = sortFilterSingboxTunnels(list, '', 'delay', true, () => dm, () => traffic([]));
 		expect(sorted.map((t) => t.tag)).toEqual(['a-fast', 'b-slow']);
 	});
 
 	it('сортировка по трафику', () => {
 		const tr = traffic([['a-fast', 10, 0], ['b-slow', 100, 5]]);
-		const dm = new Map<string, number | null>();
-		const sorted = sortFilterSingboxTunnels(list, '', 'traffic', false, dm, tr);
+		const sorted = sortFilterSingboxTunnels(list, '', 'traffic', false, () => new Map(), () => tr);
 		expect(sorted.map((t) => t.tag)).toEqual(['b-slow', 'a-fast']);
 	});
 });
@@ -177,12 +177,12 @@ describe('подписки', () => {
 
 	it('активные карточки: фильтр по member-тегу и сортировка по updated', () => {
 		expect(
-			sortFilterSubscriptionsActiveCards([cardA, cardB], 'm2', null, true, traffic([]), delays([])).map(
+			sortFilterSubscriptionsActiveCards([cardA, cardB], 'm2', null, true, () => traffic([]), () => delays([])).map(
 				(c) => c.subscription.id,
 			),
 		).toEqual(['s2']);
 		expect(
-			sortFilterSubscriptionsActiveCards([cardA, cardB], '', 'updated', true, traffic([]), delays([])).map(
+			sortFilterSubscriptionsActiveCards([cardB, cardA], '', 'updated', true, () => traffic([]), () => delays([])).map(
 				(c) => c.subscription.id,
 			),
 		).toEqual(['s1', 's2']);
@@ -196,8 +196,8 @@ describe('подписки', () => {
 		const sorted = sortFilterSubscriptionsListRows(
 			rows, '', 'delay', true,
 			{ s1: 'a', s2: 'b' },
-			traffic([]),
-			delays([['a', [200]], ['b', [30]]]),
+			() => traffic([]),
+			() => delays([['a', [200]], ['b', [30]]]),
 		);
 		expect(sorted.map((s) => s.id)).toEqual(['s2', 's1']);
 	});
