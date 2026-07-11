@@ -1463,14 +1463,6 @@ func main() {
 	var bootDone int32
 	srv.SetBootStatusFunc(func() bool { return atomic.LoadInt32(&bootDone) == 0 })
 
-	// Determine bind IP from settings
-	bindIface := settings.Server.Interface
-	ip := netif.FirstIPv4(bindIface)
-	if ip == "" {
-		fmt.Fprintf(os.Stderr, "Warning: could not get IP for interface %s, binding to all interfaces\n", bindIface)
-		ip = "0.0.0.0"
-	}
-
 	// Get port from settings, with fallback logic
 	selectedPort := settings.Server.Port
 	if selectedPort == 0 || !server.IsPortFree(selectedPort) {
@@ -1489,13 +1481,11 @@ func main() {
 		_ = settingsStore.Save(settings)
 	}
 
-	listenAddr := fmt.Sprintf("%s:%d", ip, selectedPort)
-	srv.SetListenAddr(listenAddr)
-
-	// Add loopback listener for reverse proxy support (nginx on 127.0.0.1)
-	if ip != "0.0.0.0" && ip != "127.0.0.1" {
-		srv.SetLoopbackAddr(fmt.Sprintf("127.0.0.1:%d", selectedPort))
-	}
+	// Bind-адреса применяет мультилистенер-менеджер (server/listen.go):
+	// по IPv4 на каждый интерфейс из настроек (пусто = 0.0.0.0) +
+	// безусловный loopback (реверс-прокси NDMS, health-пробы, спасательный
+	// люк). Интерфейс без IP на boot пропускается — heal-тикер добиндит.
+	srv.SetListenSpec(server.ListenSpec{Port: selectedPort, Interfaces: settings.Server.Interfaces})
 
 	// DNS routing diagnostics
 	dnsCheckService := dnscheck.NewService(
@@ -1510,7 +1500,8 @@ func main() {
 	dnsCheckService.EnsureIPHost(context.Background())
 	srv.SetDnsCheckService(dnsCheckService)
 
-	logStartup(bootLog, version, string(osdetect.Get()), listenAddr, settings)
+	logStartup(bootLog, version, string(osdetect.Get()),
+		fmt.Sprintf("port %d, interfaces: %s", selectedPort, describeListenInterfaces(settings.Server.Interfaces)), settings)
 
 	// Shutdown context — cancelled on shutdown
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
@@ -1864,6 +1855,14 @@ func (a *storeAdapter) Exists(id string) bool {
 }
 
 // logStartup logs system startup information.
+// describeListenInterfaces renders the configured bind scope for logs.
+func describeListenInterfaces(ifaces []string) string {
+	if len(ifaces) == 0 {
+		return "all (0.0.0.0)"
+	}
+	return strings.Join(ifaces, ", ")
+}
+
 func logStartup(appLog *logging.ScopedLogger, version, osVersion, listenAddr string, settings *storage.Settings) {
 	appLog.Info("startup", "", fmt.Sprintf("AWG Manager v%s started", version))
 	appLog.Info("startup", "", fmt.Sprintf("Keenetic OS: %s", osVersion))

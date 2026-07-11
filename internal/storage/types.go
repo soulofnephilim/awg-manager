@@ -274,8 +274,17 @@ type ManagedPeer struct {
 
 // ServerSettings contains HTTP server configuration.
 type ServerSettings struct {
-	Port      int    `json:"port"`
+	Port int `json:"port"`
+	// Interface is the legacy single bind interface. Superseded by
+	// Interfaces (migrateToV30 copies it there); kept populated so a
+	// downgrade to an older release still binds where it used to.
+	// New code must read Interfaces only.
 	Interface string `json:"interface"`
+	// Interfaces lists kernel interface names (e.g. "br0") whose IPv4
+	// addresses the HTTP server binds to (one listener per interface, plus
+	// an always-on 127.0.0.1 listener for the NDMS reverse proxy and health
+	// probes). Empty = bind all interfaces (0.0.0.0).
+	Interfaces []string `json:"interfaces,omitempty"`
 }
 
 // PingCheckSettings contains global ping check configuration.

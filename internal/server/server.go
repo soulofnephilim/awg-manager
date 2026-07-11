@@ -64,10 +64,8 @@ const (
 
 // Config holds server configuration.
 type Config struct {
-	ListenAddr         string
-	LoopbackListenAddr string // optional: 127.0.0.1:port for reverse proxy support
-	FrontendFS         fs.FS
-	Version            string
+	FrontendFS fs.FS
+	Version    string
 
 	// PprofStandaloneAddr, if non-empty, starts an additional listener that
 	// serves only Go's /debug/pprof/* endpoints (recommended: 127.0.0.1:6060).
@@ -136,7 +134,12 @@ type Server struct {
 	dnsCheckService            *dnscheck.Service
 	authMiddleware             *auth.Middleware
 	httpServer                 *http.Server
-	loopbackListener           net.Listener // optional loopback listener for reverse proxy
+
+	// listen владеет всеми HTTP-листенерами (по адресам из ListenSpec +
+	// безусловный loopback) и confirm-окном живой смены адреса. См. listen.go.
+	listen         listenState
+	listenDone     chan struct{} // закрывается в Shutdown — отпускает Start
+	listenDoneOnce sync.Once
 
 	ndmsDispatcher api.HookDispatcher
 	ndmsTransport  *ndmstransport.Client
@@ -424,18 +427,8 @@ func IsPortFree(port int) bool {
 	return true
 }
 
-// SetListenAddr sets the listen address after port selection.
-func (s *Server) SetListenAddr(addr string) {
-	s.config.ListenAddr = addr
-}
-
-// SetLoopbackAddr sets the loopback listen address for reverse proxy support.
 func (s *Server) SetBootStatusFunc(fn func() bool) {
 	s.bootStatusFn = fn
-}
-
-func (s *Server) SetLoopbackAddr(addr string) {
-	s.config.LoopbackListenAddr = addr
 }
 
 // Start starts the HTTP server.
@@ -478,37 +471,38 @@ func (s *Server) Start() error {
 		// Individual handlers use context timeouts where needed.
 	}
 
-	listener, err := net.Listen("tcp", s.config.ListenAddr)
-	if err != nil {
-		return err
+	// Мультилистенеры (listen.go): по одному на IPv4 каждого выбранного
+	// интерфейса + безусловный loopback. Boot — best-effort: интерфейс без
+	// IP пропускается (heal-тикер добиндит, когда IP появится); фатально
+	// только «не открылся ни один листенер».
+	s.listenDone = make(chan struct{})
+	s.listen.mu.Lock()
+	addrs, _ := s.resolveListenAddrs(s.listen.spec, false)
+	n, _ := s.applyListenLocked(addrs, true)
+	s.listen.mu.Unlock()
+	if n == 0 {
+		return fmt.Errorf("не удалось открыть ни одного HTTP-листенера (порт %d)", s.listen.spec.Port)
 	}
+	s.startListenHeal()
 
-	// Start loopback listener for reverse proxy support (e.g. Keenetic nginx)
-	if s.config.LoopbackListenAddr != "" {
-		ln, err := net.Listen("tcp", s.config.LoopbackListenAddr)
-		if err != nil {
-			s.appLog.Warn("loopback-listener", s.config.LoopbackListenAddr, "failed to start: "+err.Error())
-		} else {
-			s.loopbackListener = ln
-			loopbackSrv := &http.Server{
-				Handler:           handler,
-				ReadHeaderTimeout: 5 * time.Second,
-				IdleTimeout:       120 * time.Second,
-				MaxHeaderBytes:    8192,
-			}
-			go loopbackSrv.Serve(ln)
-			s.appLog.Info("loopback-listener", s.config.LoopbackListenAddr, "started")
-		}
-	}
-
-	return s.httpServer.Serve(listener)
+	// Блокируемся до Shutdown — контракт прежнего Serve-вызова для main.go.
+	<-s.listenDone
+	return http.ErrServerClosed
 }
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.loopbackListener != nil {
-		s.loopbackListener.Close()
+	s.listen.mu.Lock()
+	if s.listen.healStop != nil {
+		close(s.listen.healStop)
+		s.listen.healStop = nil
 	}
+	if s.listen.pendingTimer != nil {
+		s.listen.pendingTimer.Stop()
+	}
+	s.clearPendingLocked()
+	s.listen.mu.Unlock()
+
 	if s.pprofServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		_ = s.pprofServer.Shutdown(shutdownCtx)
@@ -518,7 +512,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
 	}
-	return s.httpServer.Shutdown(ctx)
+	// httpServer.Shutdown закрывает все листенеры (Serve-горутины выходят)
+	// и дожидается соединений; после него отпускаем заблокированный Start.
+	err := s.httpServer.Shutdown(ctx)
+	if s.listenDone != nil {
+		s.listenDoneOnce.Do(func() { close(s.listenDone) })
+	}
+	return err
 }
 
 // AddShutdownHook registers a function to call before syscall.Exec restart.
@@ -733,6 +733,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/system/all-interfaces", guarded(systemHandler.AllInterfaces))
 	mux.HandleFunc("/api/system/hydraroute-status", guarded(systemHandler.HydraRouteStatus))
 	mux.HandleFunc("/api/system/hydraroute-control", guarded(systemHandler.HydraRouteControl))
+
+	// HTTP-listen management (live rebind + confirm-or-revert, listen.go).
+	// confirm нарочно БЕЗ session-гарда: его аутентифицирует одноразовый
+	// 256-битный токен из /change — cookie сессии привязана к хосту и смену
+	// интерфейса не переживает.
+	serverListenHandler := api.NewServerListenHandler(s, s.settings, appLog)
+	mux.HandleFunc("/api/server/listen", guarded(serverListenHandler.State))
+	mux.HandleFunc("/api/server/listen/change", guarded(serverListenHandler.Change))
+	mux.HandleFunc("/api/server/listen/confirm", serverListenHandler.Confirm)
 	downloadHandler := api.NewDownloadHandler(s.downloadSvc)
 	mux.HandleFunc("/api/download/outbounds", guarded(downloadHandler.ListOutbounds))
 

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion        = 29
+	CurrentSchemaVersion        = 30
 	DefaultPort                 = 2222
 	DefaultInterface            = "br0"
 	DefaultPingCheckTarget      = "8.8.8.8"
@@ -174,6 +174,9 @@ func (s *SettingsStore) Load() (*Settings, error) {
 		if settings.SchemaVersion < 29 {
 			s.migrateToV29(&settings)
 		}
+		if settings.SchemaVersion < 30 {
+			s.migrateToV30(&settings)
+		}
 	}
 
 	// Self-heal duplicated managed servers — see dedupManagedServers comment.
@@ -213,8 +216,9 @@ func (s *SettingsStore) defaultSettings() *Settings {
 		SessionTtlHours: DefaultSessionTTLHours,
 		UsageLevel:      UsageLevelBasic,
 		Server: ServerSettings{
-			Port:      DefaultPort,
-			Interface: DefaultInterface,
+			Port:       DefaultPort,
+			Interface:  DefaultInterface,
+			Interfaces: []string{DefaultInterface},
 		},
 		PingCheck: PingCheckSettings{
 			Enabled: false,
@@ -541,6 +545,18 @@ func (s *SettingsStore) migrateToV29(settings *Settings) {
 		settings.SessionTtlHours = DefaultSessionTTLHours
 	}
 	settings.SchemaVersion = 29
+}
+
+// migrateToV30 lifts the legacy single Server.Interface into the new
+// Server.Interfaces list (HTTP-listen settings). The old field keeps its
+// value so a downgraded binary still binds where it used to; new code
+// reads Interfaces only. An explicitly empty legacy Interface ("" = bind
+// all) migrates to an empty list — same 0.0.0.0 semantics.
+func (s *SettingsStore) migrateToV30(settings *Settings) {
+	if len(settings.Server.Interfaces) == 0 && settings.Server.Interface != "" {
+		settings.Server.Interfaces = []string{settings.Server.Interface}
+	}
+	settings.SchemaVersion = 30
 }
 
 // dedupManagedServers returns servers with duplicate InterfaceName entries

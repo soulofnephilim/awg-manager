@@ -690,7 +690,28 @@ export interface TerminalStatus {
 
 export interface ServerSettings {
 	port: number;
+	// Легаси-одиночный интерфейс (downgrade-совместимость); новый код
+	// читает interfaces.
 	interface: string;
+	// kernel-имена интерфейсов, на IPv4 которых слушает HTTP-сервер;
+	// пусто = все (0.0.0.0). Живая смена — через /server/listen/change.
+	interfaces?: string[];
+}
+
+// GET /server/listen — текущее состояние HTTP-листенеров.
+export interface ServerListenState {
+	port: number;
+	interfaces: string[];
+	boundAddrs: string[];
+	pendingConfirm: boolean;
+	confirmDeadline?: string;
+}
+
+// POST /server/listen/change — живая смена адреса (confirm-or-revert).
+export interface ServerListenChangeResult {
+	confirmToken: string;
+	confirmDeadline: string;
+	boundAddrs: string[];
 }
 
 export interface PingCheckDefaults {
