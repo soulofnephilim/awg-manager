@@ -157,7 +157,8 @@ func (s *Server) buildRouteHandlers() *routeHandlers {
 }
 
 // registerCoreRoutes — auth, health, OpenAPI spec, SSE events, NDM hooks, WAN status.
-func (s *Server) registerCoreRoutes(mux *http.ServeMux, h *routeHandlers) { // Auth endpoints (public)
+func (s *Server) registerCoreRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Auth endpoints (public)
 	mux.HandleFunc("/api/auth/login", h.authHandler.Login)
 	mux.HandleFunc("/api/auth/logout", h.authHandler.Logout)
 	mux.HandleFunc("/api/auth/status", h.authHandler.Status)
@@ -206,7 +207,8 @@ func (s *Server) registerCoreRoutes(mux *http.ServeMux, h *routeHandlers) { // A
 }
 
 // registerTunnelRoutes — tunnels CRUD, control operations, testing.
-func (s *Server) registerTunnelRoutes(mux *http.ServeMux, h *routeHandlers) { // Tunnels CRUD (protected + boot guarded)
+func (s *Server) registerTunnelRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Tunnels CRUD (protected + boot guarded)
 	mux.HandleFunc("/api/tunnels/list", h.guarded(h.tunnelsHandler.List))
 	mux.HandleFunc("/api/tunnels/all", h.guarded(h.tunnelsHandler.GetAll))
 	mux.HandleFunc("/api/tunnels/get", h.guarded(h.tunnelsHandler.Get))
@@ -237,7 +239,8 @@ func (s *Server) registerTunnelRoutes(mux *http.ServeMux, h *routeHandlers) { //
 }
 
 // registerSystemRoutes — system info, HTTP-listen management, HydraRoute, updates.
-func (s *Server) registerSystemRoutes(mux *http.ServeMux, h *routeHandlers) { // System (protected + boot guarded)
+func (s *Server) registerSystemRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// System (protected + boot guarded)
 	mux.HandleFunc("/api/system/info", h.guarded(h.systemHandler.Info))
 	mux.HandleFunc("/api/system/restart", h.guarded(h.systemHandler.RestartDaemon))
 	mux.HandleFunc("/api/system/wan-interfaces", h.guarded(h.systemHandler.WANInterfaces))
@@ -283,7 +286,8 @@ func (s *Server) registerSystemRoutes(mux *http.ServeMux, h *routeHandlers) { //
 }
 
 // registerRoutingRoutes — DNS routes, static routes, routing catalog/sections, resolve.
-func (s *Server) registerRoutingRoutes(mux *http.ServeMux, h *routeHandlers) { // DNS routes (NDMS backend on OS5, HydraRoute on any OS)
+func (s *Server) registerRoutingRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// DNS routes (NDMS backend on OS5, HydraRoute on any OS)
 	mux.HandleFunc("/api/dns-routes/list", h.guarded(h.dnsRouteHandler.List))
 	mux.HandleFunc("/api/dns-routes/get", h.guarded(h.dnsRouteHandler.Get))
 	mux.HandleFunc("/api/dns-routes/create", h.guarded(h.dnsRouteHandler.Create))
@@ -327,7 +331,8 @@ func (s *Server) registerRoutingRoutes(mux *http.ServeMux, h *routeHandlers) { /
 }
 
 // registerSettingsRoutes — settings, ping check, monitoring matrix, NDMS ping-check.
-func (s *Server) registerSettingsRoutes(mux *http.ServeMux, h *routeHandlers) { // Settings (protected + boot guarded)
+func (s *Server) registerSettingsRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Settings (protected + boot guarded)
 	mux.HandleFunc("/api/settings/get", h.guarded(h.settingsHandler.Get))
 	mux.HandleFunc("/api/settings/update", h.guarded(h.settingsHandler.Update))
 	mux.HandleFunc("/api/settings/regenerate-api-key", h.guarded(h.settingsHandler.RegenerateApiKey))
@@ -358,7 +363,8 @@ func (s *Server) registerSettingsRoutes(mux *http.ServeMux, h *routeHandlers) { 
 }
 
 // registerDeviceProxyRoutes — device proxy incl. multi-instance endpoints.
-func (s *Server) registerDeviceProxyRoutes(mux *http.ServeMux, h *routeHandlers) { // Device proxy (protected + boot guarded)
+func (s *Server) registerDeviceProxyRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Device proxy (protected + boot guarded)
 	deviceProxyHandler := api.NewDeviceProxyHandler(s.deviceProxySvc, h.appLog)
 	mux.HandleFunc("/api/proxy/config", h.guarded(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -398,7 +404,8 @@ func (s *Server) registerDeviceProxyRoutes(mux *http.ServeMux, h *routeHandlers)
 }
 
 // registerLogsImportRoutes — logging, import, external tunnels, system WireGuard tunnels.
-func (s *Server) registerLogsImportRoutes(mux *http.ServeMux, h *routeHandlers) { // Logging (protected + boot guarded)
+func (s *Server) registerLogsImportRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Logging (protected + boot guarded)
 	mux.HandleFunc("/api/logs", h.guarded(h.loggingHandler.GetLogs))
 	mux.HandleFunc("/api/logs/clear", h.guarded(h.loggingHandler.ClearLogs))
 	mux.HandleFunc("/api/logs/subgroups", h.guarded(h.loggingHandler.GetSubgroups))
@@ -431,7 +438,8 @@ func (s *Server) registerLogsImportRoutes(mux *http.ServeMux, h *routeHandlers) 
 }
 
 // registerServerRoutes — VPN servers, managed WG servers, signature capture, terminal.
-func (s *Server) registerServerRoutes(mux *http.ServeMux, h *routeHandlers) { // VPN Servers (protected + boot guarded)
+func (s *Server) registerServerRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// VPN Servers (protected + boot guarded)
 	h.serverHandler = api.NewServersHandler(s.ndmsQueries, s.settings, s.tunnels, h.appLog)
 	h.serverHandler.SetCommands(s.ndmsCommands)
 	h.serverHandler.SetEventBus(s.bus)
@@ -487,7 +495,8 @@ func (s *Server) registerServerRoutes(mux *http.ServeMux, h *routeHandlers) { //
 }
 
 // registerPolicyRoutes — access policies, client routes, routing polling aliases.
-func (s *Server) registerPolicyRoutes(mux *http.ServeMux, h *routeHandlers) { // Access policies — handler created outside block for shared endpoints
+func (s *Server) registerPolicyRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Access policies — handler created outside block for shared endpoints
 	h.accessPolicyHandler = api.NewAccessPolicyHandler(s.accessPolicyService)
 
 	// Devices endpoint uses hotspot RCI — works on both OS4 and OS5
@@ -541,7 +550,8 @@ func (s *Server) registerPolicyRoutes(mux *http.ServeMux, h *routeHandlers) { //
 }
 
 // registerDiagnosticsRoutes — diagnostics, DNS proxy info, connections viewer, boot status.
-func (s *Server) registerDiagnosticsRoutes(mux *http.ServeMux, h *routeHandlers) { // Diagnostics (protected + boot guarded)
+func (s *Server) registerDiagnosticsRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Diagnostics (protected + boot guarded)
 	mux.HandleFunc("/api/diagnostics/run", h.guarded(h.diagHandler.Run))
 	mux.HandleFunc("/api/diagnostics/status", h.guarded(h.diagHandler.Status))
 	mux.HandleFunc("/api/diagnostics/result", h.guarded(h.diagHandler.Result))
@@ -572,7 +582,8 @@ func (s *Server) registerDiagnosticsRoutes(mux *http.ServeMux, h *routeHandlers)
 }
 
 // wireCrossHandlers — event-bus and cross-handler wiring (no route registrations of its own except hook aliases).
-func (s *Server) wireCrossHandlers(mux *http.ServeMux, h *routeHandlers) { // Wire event bus to CRUD handlers for SSE publishing
+func (s *Server) wireCrossHandlers(mux *http.ServeMux, h *routeHandlers) {
+	// Wire event bus to CRUD handlers for SSE publishing
 	h.tunnelsHandler.SetEventBus(s.bus)
 	h.tunnelsHandler.SetCatalog(s.catalog)
 	h.dnsRouteHandler.SetEventBus(s.bus)
@@ -649,7 +660,8 @@ func (s *Server) wireCrossHandlers(mux *http.ServeMux, h *routeHandlers) { // Wi
 }
 
 // registerSingboxRoutes — the sing-box integration surface.
-func (s *Server) registerSingboxRoutes(mux *http.ServeMux, h *routeHandlers) { // Sing-box integration (protected + boot guarded)
+func (s *Server) registerSingboxRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Sing-box integration (protected + boot guarded)
 	if s.singboxHandler != nil {
 		s.singboxHandler.SetSettingsStore(s.settings)
 		mux.HandleFunc("/api/singbox/status", h.guarded(s.singboxHandler.Status))
@@ -861,7 +873,8 @@ func (s *Server) registerSingboxRoutes(mux *http.ServeMux, h *routeHandlers) { /
 }
 
 // registerStaticRoutes — preset catalog and the SPA static handler (must stay last).
-func (s *Server) registerStaticRoutes(mux *http.ServeMux, h *routeHandlers) { // Unified preset catalog (protected, read-only in U0)
+func (s *Server) registerStaticRoutes(mux *http.ServeMux, h *routeHandlers) {
+	// Unified preset catalog (protected, read-only in U0)
 	if s.presetCatalog != nil {
 		presetsHandler := api.NewPresetsHandler(s.presetCatalog)
 		mux.HandleFunc("/api/presets", h.guarded(presetsHandler.List))
