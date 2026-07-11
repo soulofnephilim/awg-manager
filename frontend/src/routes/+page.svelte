@@ -50,6 +50,8 @@
 	import SubscriptionGroupsSection from '$lib/components/subscriptions/SubscriptionGroupsSection.svelte';
 	import SubscriptionsTabSection from '$lib/components/subscriptions/SubscriptionsTabSection.svelte';
 	import SingboxTunnelsTabSection from '$lib/components/singbox/SingboxTunnelsTabSection.svelte';
+	import AwgTunnelsTabSection from '$lib/components/tunnels/AwgTunnelsTabSection.svelte';
+	import type { AwgTabContext } from '$lib/components/tunnels/awgTabContext';
 	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem } from '$lib/types';
 	import { formatBitRate, formatBytes, formatDuration, formatRelativeTime, secondsSince } from '$lib/utils/format';
 	import { showOutboundReferencedError } from '$lib/utils/outboundReferenced';
@@ -1851,6 +1853,57 @@
 			},
 		];
 	});
+
+	// Live-контекст AWG-вкладки: геттеры замыкают $state/$derived страницы,
+	// сеттеры мутируют её состояние (см. awgTabContext.ts).
+	const awgTabCtx: AwgTabContext = {
+		get awgList() { return awgList; },
+		get systemList() { return systemList; },
+		get visibleSystemList() { return visibleSystemList; },
+		get externalList() { return externalList; },
+		get sortedFilteredAwgList() { return sortedFilteredAwgList; },
+		get sortedFilteredSystemList() { return sortedFilteredSystemList; },
+		get sortedFilteredExternalList() { return sortedFilteredExternalList; },
+		get awgConnectivityMap() { return awgConnectivityMap; },
+		get statusLine() { return statusLine; },
+		get sysInfo() { return sysInfo; },
+		get awgSummaryActive() { return awgSummaryActive; },
+		get awgSummaryPeak() { return awgSummaryPeak; },
+		get awgSummaryRx() { return awgSummaryRx; },
+		get awgSummaryTx() { return awgSummaryTx; },
+		get awgSummaryTotal() { return awgSummaryTotal; },
+		get awgTrafficLeader() { return awgTrafficLeader; },
+		get nativewgHint() { return nativewgHint; },
+		get dashboardOn() { return dashboardOn; },
+		get dashboardSectionsLayout() { return dashboardSectionsLayout; },
+		get dashboardNothingAtAll() { return dashboardNothingAtAll; },
+		get awgSearchEmpty() { return awgSearchEmpty; },
+		get awgSourceRowCount() { return awgSourceRowCount; },
+		get showAwgViewModeSwitch() { return showAwgViewModeSwitch; },
+		get effectiveAwgCardViewMode() { return effectiveAwgCardViewMode; },
+		get effectiveAwgEffectiveViewMode() { return effectiveAwgEffectiveViewMode; },
+		get effectiveAwgRenderMode() { return effectiveAwgRenderMode; },
+		get awgAutoConnectivityNonce() { return awgAutoConnectivityNonce; },
+		get deleteLoading() { return deleteLoading; },
+		get dragOver() { return dragOver; },
+		get exporting() { return exporting; },
+		get importing() { return importing; },
+		get pingChecking() { return pingChecking; },
+		get toggleLoading() { return toggleLoading; },
+		get adoptDialogOpen() { return adoptDialogOpen; },
+		set adoptDialogOpen(v) { adoptDialogOpen = v; },
+		get adoptingInterface() { return adoptingInterface; },
+		set adoptingInterface(v) { adoptingInterface = v; },
+		get awgListSearchQuery() { return awgListSearchQuery; },
+		set awgListSearchQuery(v) { awgListSearchQuery = v; },
+		get awgViewMode() { return awgViewMode; },
+		set awgViewMode(v) { awgViewMode = v; },
+		get selectedBackend() { return selectedBackend; },
+		set selectedBackend(v) { selectedBackend = v; },
+		get fileInput() { return fileInput; },
+		set fileInput(v) { fileInput = v; },
+		endpointHost, endpointPort, endpointVisible, toggleEndpointVisible, externalStatusLabel, externalStatusVariant, systemStatusLabel, systemStatusVariant, isManagedTunnelOn, managedRouteMeta, showManagedPing, latestRate, sparklineSeries, handleAdoptClick, handleAwgSortChange, handleDragLeave, handleDragOver, handleDrop, handleFileSelect, openAwgDiagnostics, openConnectivitySettings, openDetail, requestDelete, markAsServer, handleToggleOnOff, checkPing, handleExportAll,
+	};
 </script>
 
 {#snippet createIcon()}
@@ -2120,666 +2173,7 @@
 			/>
 		{/if}
 		{#if showAwgBlock}
-		{#if (!dashboardOn || dashboardNothingAtAll) && awgList.length === 0 && systemList.length === 0}
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div
-			class="ghost-terminal"
-			class:drag-over={dragOver}
-			ondrop={handleDrop}
-			ondragover={handleDragOver}
-			ondragleave={handleDragLeave}
-		>
-			{#if dragOver}
-				<div class="drop-overlay">
-					<Upload size={40} strokeWidth={1.5} aria-hidden="true" />
-					<span class="drop-text">Отпустите для импорта</span>
-				</div>
-			{:else if importing}
-				<div class="drop-overlay">
-					<div class="spinner"></div>
-					<span class="drop-text">Импорт...</span>
-				</div>
-			{:else}
-				<div class="term-status">
-					<span class="term-prompt">$ awg status</span>
-					{#if statusLine}
-						<span class="term-info">{statusLine}</span>
-					{/if}
-				</div>
-
-				<div class="term-action-group">
-					<div class="term-drop-hint">
-						<Upload size={28} strokeWidth={1.5} aria-hidden="true" />
-						<span>Перетащите .conf сюда</span>
-					</div>
-
-					<div class="term-backend-selector">
-						<button
-							type="button"
-							class="term-backend-btn"
-							class:selected={selectedBackend === 'nativewg'}
-							class:disabled={sysInfo !== null && !sysInfo.backendAvailability?.nativewg}
-							disabled={sysInfo !== null && !sysInfo.backendAvailability?.nativewg}
-							title={nativewgHint}
-							onclick={() => selectedBackend = 'nativewg'}
-						>
-							NativeWG
-						</button>
-						<button
-							type="button"
-							class="term-backend-btn"
-							class:selected={selectedBackend === 'kernel'}
-							class:disabled={sysInfo !== null && !sysInfo.backendAvailability?.kernel}
-							disabled={sysInfo !== null && !sysInfo.backendAvailability?.kernel}
-							onclick={() => selectedBackend = 'kernel'}
-						>
-							Kernel
-						</button>
-					</div>
-					{#if nativewgHint}
-						<p class="term-backend-hint">{nativewgHint}</p>
-					{/if}
-
-					<div class="term-commands">
-						{#if externalList.length > 0}
-							<span class="term-found">
-								найдено {externalList.length} внешних интерфейс{externalList.length === 1 ? '' : 'а'}
-							</span>
-							<button class="term-cmd term-cmd-primary" onclick={() => {
-								adoptingInterface = externalList[0].interfaceName;
-								adoptDialogOpen = true;
-							}}>
-								<span class="term-arrow">{'>'}</span> подхватить интерфейсы
-							</button>
-						{/if}
-						<button class="term-cmd" onclick={() => fileInput?.click()}>
-							<span class="term-arrow">{'>'}</span> импортировать файл
-						</button>
-						<button class="term-cmd" onclick={() => goto('/tunnels/new?tab=vpn')}>
-							<span class="term-arrow">{'>'}</span> импортировать ссылку
-						</button>
-					</div>
-				</div>
-
-				<input
-					type="file"
-					accept=".conf"
-					bind:this={fileInput}
-					onchange={handleFileSelect}
-					style="display: none"
-				/>
-			{/if}
-		</div>
-
-		<div class="info-card">
-			<h3 class="info-title">Об AmneziaWG</h3>
-			<p class="info-section-desc">
-				Форк WireGuard с обфускацией трафика. Три поколения протокола:
-			</p>
-			<div class="info-versions">
-				<div class="info-version">
-					<Badge variant="accent" size="sm" mono>AWG 1.0</Badge>
-					<span class="info-version-desc">Базовая обфускация: модификация заголовков (H1–H4), junk-пакеты (Jc/Jmin/Jmax), размеры сообщений (S1–S2).</span>
-				</div>
-				<div class="info-version">
-					<Badge variant="info" size="sm" mono>AWG 1.5</Badge>
-					<span class="info-version-desc">Мимикрия протоколов: initiation-пакеты (I1–I5) маскируют соединение под QUIC, DTLS, STUN, DNS.</span>
-				</div>
-				<div class="info-version">
-					<Badge variant="success" size="sm" mono>AWG 2.0</Badge>
-					<span class="info-version-desc">Рандомизация заголовков: H1–H4 задаются диапазонами, генерируются при каждом хэндшейке.</span>
-				</div>
-			</div>
-			<p class="info-text info-kernel">
-				Работает через <strong>модуль ядра</strong> — трафик обрабатывается напрямую в ядре Linux, что снижает нагрузку на CPU.
-			</p>
-		</div>
-
-		{:else}
-			{@const totalCount = awgSummaryTotal}
-			{#if !dashboardOn}
-			<div class="tunnels-toolbar">
-				<div class="count-group">
-					<span class="tunnel-count">{totalCount} {pluralForm(totalCount, TUNNEL_WORDS)}</span>
-					<StoreStatusBadge store={tunnels} />
-				</div>
-				<div class="toolbar-actions">
-					<TunnelToolbarViewRow
-						sourceRowCount={awgSourceRowCount}
-						showViewToggle={showAwgViewModeSwitch}
-						searchQuery={awgListSearchQuery}
-						onSearchChange={(value) => (awgListSearchQuery = value)}
-					>
-						{#snippet viewToggle()}
-							<LayoutViewToggle
-								value={awgViewMode}
-								denseValue="cards"
-								ariaLabel="Вид туннелей"
-								onchange={(mode) => (awgViewMode = mode)}
-							/>
-						{/snippet}
-					</TunnelToolbarViewRow>
-					<Button variant="secondary" size="md" onclick={handleExportAll} disabled={exporting} iconBefore={exportIcon}>
-						Экспорт
-					</Button>
-					<Button variant="primary" size="md" onclick={() => goto('/tunnels/new')} iconBefore={createIcon}>
-						Создать
-					</Button>
-				</div>
-			</div>
-			{/if}
-			{#if !dashboardOn}
-				<div class="awg-summary-row">
-					<StatStrip>
-						<Stat
-							value={`${awgSummaryActive}/${awgSummaryTotal}`}
-							label={pluralForm(awgSummaryActive, TUNNEL_WORDS)}
-							sub={`AWG ${awgList.length} · system ${visibleSystemList.length} · external ${externalList.length}`}
-						/>
-						<Stat
-							value={formatBitRate(awgSummaryPeak.rate)}
-							label="Пиковая скорость"
-							sub={awgSummaryPeak.name}
-						/>
-						<Stat
-							value={formatBytes(awgSummaryRx + awgSummaryTx)}
-							label="Суммарный обмен"
-							sub={`↓ ${formatBytes(awgSummaryRx)} · ↑ ${formatBytes(awgSummaryTx)}`}
-						/>
-						<Stat
-							value={awgTrafficLeader.bytes > 0 ? formatBytes(awgTrafficLeader.bytes) : '—'}
-							label="Лидер по трафику"
-							sub={awgTrafficLeader.name}
-						/>
-					</StatStrip>
-				</div>
-			{/if}
-			{#if effectiveAwgRenderMode === 'table'}
-				<div class="awg-list-table">
-					<div class="awg-list-table-track">
-					<div class="awg-list-row awg-list-row--head">
-						<span></span>
-						<span role="columnheader" aria-sort={ariaSort($awgTunnelTableSort.sortBy, 'name', $awgTunnelTableSort.sortAsc)}>
-							<TableSortHeader
-								label="Туннель"
-								sortKey={'name'}
-								activeSortKey={$awgTunnelTableSort.sortBy}
-								sortAsc={$awgTunnelTableSort.sortAsc}
-								onchange={(key) => handleAwgSortChange(key as AwgTunnelSortKey)}
-							/>
-						</span>
-						<span role="columnheader" aria-sort={ariaSort($awgTunnelTableSort.sortBy, 'status', $awgTunnelTableSort.sortAsc)}>
-							<TableSortHeader
-								label="Статус"
-								sortKey={'status'}
-								activeSortKey={$awgTunnelTableSort.sortBy}
-								sortAsc={$awgTunnelTableSort.sortAsc}
-								onchange={(key) => handleAwgSortChange(key as AwgTunnelSortKey)}
-							/>
-						</span>
-						<span role="columnheader" aria-sort={ariaSort($awgTunnelTableSort.sortBy, 'endpoint', $awgTunnelTableSort.sortAsc)}>
-							<TableSortHeader
-								label="Endpoint"
-								sortKey={'endpoint'}
-								activeSortKey={$awgTunnelTableSort.sortBy}
-								sortAsc={$awgTunnelTableSort.sortAsc}
-								onchange={(key) => handleAwgSortChange(key as AwgTunnelSortKey)}
-							/>
-						</span>
-						<span role="columnheader" aria-sort={ariaSort($awgTunnelTableSort.sortBy, 'traffic', $awgTunnelTableSort.sortAsc)}>
-							<TableSortHeader
-								label="Трафик"
-								sortKey={'traffic'}
-								activeSortKey={$awgTunnelTableSort.sortBy}
-								sortAsc={$awgTunnelTableSort.sortAsc}
-								onchange={(key) => handleAwgSortChange(key as AwgTunnelSortKey)}
-							/>
-						</span>
-						<span class="awg-list-head-actions">Действия</span>
-					</div>
-
-				{#each sortedFilteredAwgList as tunnel (tunnel.id)}
-					{@const connectivity = awgConnectivityMap.get(tunnel.id)}
-					{@const isEndpointShown = endpointVisible('managed', tunnel.id)}
-					{@const rate = latestRate(tunnel.id)}
-					{@const spark = sparklineSeries(tunnel.id)}
-					{@const isActive = isManagedTunnelOn(tunnel)}
-					{@const checkDisabled = (tunnel.connectivityCheck?.method ?? 'http') === 'disabled'}
-					{@const connState = !isActive ? 'idle'
-						: connectivity === undefined ? 'checking'
-						: connectivity.connected ? 'connected' : 'disconnected'}
-					{@const statusDot = awgManagedStatusDot(tunnel, connectivity)}
-					{@const pingStatusNote = awgPingStatusNote(tunnel, 'short')}
-					{@const showPing = showManagedPing(tunnel, connectivity) || pingStatusNote !== null}
-					{@const showConnectivityRow = awgShowConnectivityRow(tunnel.status)}
-						<div class="awg-list-row">
-						<div class="awg-list-cell awg-list-cell-toggle" data-label="Старт">
-							<Toggle
-								checked={isManagedTunnelOn(tunnel)}
-								size="sm"
-								variant="flip"
-								tint={awgToggleTint(tunnel, connectivity)}
-								disabled={(toggleLoading[tunnel.id] ?? false) || tunnel.hasAddressConflict === true}
-								onchange={() => handleToggleOnOff(tunnel.id)}
-							/>
-						</div>
-							<div class="awg-list-cell awg-list-cell-name" data-label="Туннель">
-								<div class="tunnel-list-name-stack">
-									<TunnelTitleRow
-										title={tunnel.name}
-										showDot={false}
-										onTitleClick={() => openDetail(tunnel.id)}
-									>
-										{#snippet badges()}
-											<DefaultRouteBadge defaultRoute={tunnel.defaultRoute} />
-											{#if tunnel.backend}
-												<span class="awg-inline-badge">{tunnel.backend}</span>
-											{/if}
-											{#if tunnel.awgVersion}
-												<span class="awg-inline-badge awg-inline-badge--muted">{tunnel.awgVersion}</span>
-											{/if}
-										{/snippet}
-									</TunnelTitleRow>
-									<TunnelMetaText>
-										{tunnel.address || '—'}
-										<span class="meta-dot" aria-hidden="true">·</span>
-										{tunnel.interfaceName || tunnel.id}
-										<span class="meta-dot" aria-hidden="true">·</span>
-										MTU {tunnel.mtu ?? '—'}
-									</TunnelMetaText>
-									<TunnelMetaText mono>
-										Uptime {tunnel.startedAt ? formatDuration(secondsSince(tunnel.startedAt)) : '—'}
-									</TunnelMetaText>
-								</div>
-							</div>
-							<div class="awg-list-cell awg-list-cell-status" data-label="Статус">
-								<div class="awg-list-status-stack">
-									<div class="awg-list-status-line">
-									<StatusDot
-										variant={statusDot.variant}
-										pulse={statusDot.pulse}
-										ariaLabel={statusDot.label}
-									/>
-									<span class="awg-list-status-text">{statusDot.label}</span>
-									</div>
-									<div class="awg-list-sub awg-list-handshake">
-										Handshake {tunnel.lastHandshake ? formatRelativeTime(tunnel.lastHandshake) : '—'}
-									</div>
-									{#if tunnel.hasAddressConflict}
-								<div class="awg-list-sub awg-list-sub--error">Дублирует адрес уже запущенного туннеля</div>
-							{:else if showConnectivityRow}
-								<div
-									class="awg-list-connectivity-row"
-									class:recovering={awgRecoveringVisual(tunnel)}
-								>
-									{#if showPing}
-										<TunnelPingButton
-											layout="list"
-											connectivity={connState}
-											latencyMs={connectivity?.latency ?? null}
-											statusNote={pingStatusNote?.text}
-											statusNoteTone={pingStatusNote?.tone}
-											checking={pingChecking[tunnel.id] ?? false}
-											onclick={() => checkPing(tunnel.id)}
-										/>
-									{/if}
-									<button
-										type="button"
-										class="awg-connectivity-gear"
-										onclick={() => openConnectivitySettings(tunnel)}
-										title="Настройки проверки связности"
-									>
-										<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-											<path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" />
-										</svg>
-									</button>
-								</div>
-							{:else if isActive && checkDisabled}
-								<div class="awg-list-sub">Проверка связи выключена</div>
-							{/if}
-							</div>
-							</div>
-							<div class="awg-list-cell" data-label="Endpoint">
-								<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
-									<span class="awg-endpoint-value" title={isEndpointShown ? endpointHost(tunnel.endpoint) : ''}>
-										{#if tunnel.endpoint}
-											{isEndpointShown ? endpointHost(tunnel.endpoint) : '•••••••••'}
-										{:else}
-											—
-										{/if}
-									</span>
-									{#if tunnel.endpoint}
-										<button
-											type="button"
-											class="awg-endpoint-eye"
-											onclick={() => toggleEndpointVisible('managed', tunnel.id)}
-											title={isEndpointShown ? 'Скрыть' : 'Показать'}
-										>
-											{#if isEndpointShown}
-												<Eye size={14} aria-hidden="true" />
-											{:else}
-												<EyeOff size={14} aria-hidden="true" />
-											{/if}
-										</button>
-									{/if}
-									{#if endpointPort(tunnel.endpoint)}
-										<span class="awg-endpoint-port">:{endpointPort(tunnel.endpoint)}</span>
-									{/if}
-								</div>
-								<div class="awg-list-sub">{managedRouteMeta(tunnel)}</div>
-							</div>
-							<div class="awg-list-cell awg-list-cell-rate" data-label="Трафик">
-								<TunnelListTrafficCell
-									rxRate={rate.rx}
-									txRate={rate.tx}
-									rxData={spark.rx}
-									txData={spark.tx}
-									onclick={() => openDetail(tunnel.id)}
-									title="Открыть детали туннеля"
-								/>
-							</div>
-							<div class="awg-list-cell awg-list-cell-actions tunnel-list-cell--actions" data-label="Действия">
-								<TunnelListActions
-									editHref="/tunnels/{tunnel.id}"
-									editTitle="Изменить туннель «{tunnel.name}»"
-									onTest={() => openAwgDiagnostics(tunnel.id, tunnel.name)}
-									testTitle="Тест туннеля «{tunnel.name}»"
-									onDelete={() => requestDelete(tunnel.id)}
-									deleteTitle="Удалить туннель «{tunnel.name}»"
-									deleting={deleteLoading[tunnel.id] ?? false}
-								/>
-							</div>
-						</div>
-					{/each}
-
-					{#if sortedFilteredSystemList.length > 0}
-						{#if dashboardSectionsLayout}
-							<TunnelSectionHeader
-								nested
-								title="Системные"
-								count={sortedFilteredSystemList.length}
-								countLabel={pluralForm(sortedFilteredSystemList.length, TUNNEL_WORDS)}
-							/>
-						{:else}
-							<div class="awg-list-row awg-list-row--section">
-								<div class="awg-list-section-title">Системные · {sortedFilteredSystemList.length}</div>
-							</div>
-						{/if}
-						{#each sortedFilteredSystemList as tunnel (tunnel.id)}
-							{@const isEndpointShown = endpointVisible('system', tunnel.id)}
-							{@const rate = latestRate(tunnel.id)}
-							{@const spark = sparklineSeries(tunnel.id)}
-							<div class="awg-list-row">
-								<div class="awg-list-cell awg-list-cell-toggle" data-label="Тип">
-									<span class="awg-row-placeholder">SYS</span>
-								</div>
-								<div class="awg-list-cell awg-list-cell-name" data-label="Туннель">
-									<div class="tunnel-list-name-stack">
-										<TunnelTitleRow
-											title={tunnel.description || tunnel.id}
-											showDot={false}
-											onTitleClick={() => openDetail(tunnel.id)}
-										>
-											{#snippet badges()}
-												<span class="awg-inline-badge awg-inline-badge--muted">system</span>
-											{/snippet}
-										</TunnelTitleRow>
-										<TunnelMetaText mono>
-											{tunnel.interfaceName}
-											{#if tunnel.address}
-												<span class="meta-dot" aria-hidden="true">·</span>
-												{tunnel.address}
-											{/if}
-											<span class="meta-dot" aria-hidden="true">·</span>
-											MTU {tunnel.mtu}
-										</TunnelMetaText>
-										<TunnelMetaText mono>
-											Uptime {tunnel.status === 'up' && tunnel.uptime ? formatDuration(tunnel.uptime) : '—'}
-										</TunnelMetaText>
-									</div>
-								</div>
-								<div class="awg-list-cell awg-list-cell-status" data-label="Статус">
-									<div class="awg-list-status-line">
-										<StatusDot
-											variant={systemStatusVariant(tunnel)}
-											ariaLabel={systemStatusLabel(tunnel)}
-										/>
-										<span class="awg-list-status-text">{systemStatusLabel(tunnel)}</span>
-									</div>
-									<div class="awg-list-sub awg-list-handshake">
-										Handshake {tunnel.peer?.lastHandshake ? formatRelativeTime(tunnel.peer.lastHandshake) : '—'}
-									</div>
-									<div class="awg-list-sub">{tunnel.peer?.via || 'Маршрут не определён'}</div>
-								</div>
-								<div class="awg-list-cell" data-label="Endpoint">
-								<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
-									<span class="awg-endpoint-value" title={isEndpointShown ? endpointHost(tunnel.peer?.endpoint) : ''}>
-										{#if tunnel.peer?.endpoint}
-											{isEndpointShown ? endpointHost(tunnel.peer.endpoint) : '•••••••••'}
-										{:else}
-											—
-										{/if}
-									</span>
-									{#if tunnel.peer?.endpoint}
-										<button
-											type="button"
-											class="awg-endpoint-eye"
-											onclick={() => toggleEndpointVisible('system', tunnel.id)}
-											title={isEndpointShown ? 'Скрыть' : 'Показать'}
-										>
-											{#if isEndpointShown}
-												<Eye size={14} aria-hidden="true" />
-											{:else}
-												<EyeOff size={14} aria-hidden="true" />
-											{/if}
-										</button>
-									{/if}
-									{#if endpointPort(tunnel.peer?.endpoint)}
-										<span class="awg-endpoint-port">:{endpointPort(tunnel.peer?.endpoint)}</span>
-									{/if}
-								</div>
-									<div class="awg-list-sub">{tunnel.address || '—'}</div>
-								</div>
-								<div class="awg-list-cell awg-list-cell-rate" data-label="Трафик">
-									<TunnelListTrafficCell
-										rxRate={rate.rx}
-										txRate={rate.tx}
-										rxData={spark.rx}
-										txData={spark.tx}
-										onclick={() => openDetail(tunnel.id)}
-										title="Открыть детали туннеля"
-									/>
-								</div>
-								<div class="awg-list-cell awg-list-cell-actions tunnel-list-cell--actions" data-label="Действия">
-									<TunnelListActions
-										editHref="/system-tunnels/{tunnel.id}"
-										editTitle="Изменить туннель «{tunnel.description || tunnel.id}»"
-										onTest={() => openAwgDiagnostics(tunnel.id, tunnel.description || tunnel.id, 'system')}
-										testTitle="Тест туннеля «{tunnel.description || tunnel.id}»"
-									>
-										{#snippet extra()}
-											<button
-												type="button"
-												class="tunnel-list-actions__btn tunnel-list-actions__btn--primary"
-												title="Перенести туннель «{tunnel.description || tunnel.id}» в серверы"
-												aria-label="Перенести туннель «{tunnel.description || tunnel.id}» в серверы"
-												onclick={() => markAsServer(tunnel.id)}
-											>
-												<Server size={14} aria-hidden="true" />
-											</button>
-										{/snippet}
-									</TunnelListActions>
-								</div>
-							</div>
-						{/each}
-					{/if}
-
-					{#if sortedFilteredExternalList.length > 0}
-						{#if dashboardSectionsLayout}
-							<TunnelSectionHeader
-								nested
-								title="Внешние"
-								count={sortedFilteredExternalList.length}
-								countLabel={pluralForm(sortedFilteredExternalList.length, TUNNEL_WORDS)}
-							/>
-						{:else}
-							<div class="awg-list-row awg-list-row--section">
-								<div class="awg-list-section-title">Внешние · {sortedFilteredExternalList.length}</div>
-							</div>
-						{/if}
-						{#each sortedFilteredExternalList as tunnel (tunnel.interfaceName)}
-							{@const isEndpointShown = endpointVisible('external', tunnel.interfaceName)}
-							<div class="awg-list-row">
-								<div class="awg-list-cell awg-list-cell-toggle" data-label="Тип">
-									<span class="awg-row-placeholder">ext</span>
-								</div>
-								<div class="awg-list-cell awg-list-cell-name" data-label="Туннель">
-									<div class="awg-list-name-line">
-										<span class="awg-list-name-static">{tunnel.interfaceName}</span>
-										<span class="awg-inline-badge awg-inline-badge--muted">external</span>
-										{#if tunnel.isAWG}
-											<span class="awg-inline-badge">AWG</span>
-										{/if}
-									</div>
-									<div class="awg-list-sub">
-										{#if tunnel.publicKey}
-											{tunnel.publicKey.slice(0, 16)}…
-											<span class="awg-list-dot">·</span>
-										{/if}
-										#{tunnel.tunnelNumber}
-									</div>
-								</div>
-								<div class="awg-list-cell awg-list-cell-status" data-label="Статус">
-									<div class="awg-list-status-line">
-										<StatusDot
-											variant={externalStatusVariant(tunnel)}
-											ariaLabel={externalStatusLabel(tunnel)}
-										/>
-										<span class="awg-list-status-text">{externalStatusLabel(tunnel)}</span>
-									</div>
-									<div class="awg-list-sub awg-list-handshake">
-										Handshake {tunnel.lastHandshake ? formatRelativeTime(tunnel.lastHandshake) : '—'}
-									</div>
-									<div class="awg-list-sub">Не управляется AWG Manager</div>
-								</div>
-								<div class="awg-list-cell" data-label="Endpoint">
-									<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
-										<span class="awg-endpoint-value" title={isEndpointShown ? endpointHost(tunnel.endpoint) : ''}>
-											{#if tunnel.endpoint}
-												{isEndpointShown ? endpointHost(tunnel.endpoint) : '•••••••••'}
-											{:else}
-												—
-											{/if}
-										</span>
-										{#if tunnel.endpoint}
-											<button
-												type="button"
-												class="awg-endpoint-eye"
-												onclick={() => toggleEndpointVisible('external', tunnel.interfaceName)}
-												title={isEndpointShown ? 'Скрыть' : 'Показать'}
-											>
-												{#if isEndpointShown}
-													<Eye size={14} aria-hidden="true" />
-												{:else}
-													<EyeOff size={14} aria-hidden="true" />
-												{/if}
-											</button>
-										{/if}
-										{#if endpointPort(tunnel.endpoint)}
-											<span class="awg-endpoint-port">:{endpointPort(tunnel.endpoint)}</span>
-										{/if}
-									</div>
-									<div class="awg-list-sub">WG интерфейс</div>
-								</div>
-								<div class="awg-list-cell awg-list-cell-rate" data-label="Трафик">
-									<div class="awg-list-rate-stack awg-list-mono">
-										<div class="traffic-rate rx">↓ {formatBytes(tunnel.rxBytes)}</div>
-										<TrafficSparkline rxData={[]} txData={[]} responsive height={18} />
-										<div class="traffic-rate tx">↑ {formatBytes(tunnel.txBytes)}</div>
-									</div>
-								</div>
-								<div class="awg-list-cell awg-list-cell-actions" data-label="Действия">
-									<Button variant="primary" size="sm" onclick={() => handleAdoptClick(tunnel.interfaceName)}>
-										Взять под управление
-									</Button>
-								</div>
-							</div>
-						{/each}
-					{/if}
-					{#if awgSearchEmpty}
-						<div class="awg-list-row awg-list-row--section">
-							<div class="awg-list-section-title">Ничего не найдено</div>
-						</div>
-					{/if}
-					</div>
-				</div>
-			{:else}
-				{@const awgGridView = effectiveAwgRenderMode === 'list-card' ? 'list' : effectiveAwgCardViewMode}
-				<div
-					class="tunnel-grid"
-					class:tunnel-grid--list={effectiveAwgRenderMode === 'list-card'}
-					class:tunnel-grid--dense={effectiveAwgRenderMode !== 'list-card' && effectiveAwgEffectiveViewMode === 'cards'}
-					class:tunnel-grid--compact={effectiveAwgRenderMode !== 'list-card' && effectiveAwgEffectiveViewMode === 'compact'}
-				>
-					{#each sortedFilteredAwgList as tunnel, i (tunnel.id)}
-						<TunnelCard
-							{tunnel}
-							view={awgGridView}
-							toggleLoading={toggleLoading[tunnel.id] ?? false}
-							deleteLoading={deleteLoading[tunnel.id] ?? false}
-							autoConnectivityNonce={awgAutoConnectivityNonce}
-							autoConnectivityDelayMs={i * 180}
-							onToggleOnOff={() => handleToggleOnOff(tunnel.id)}
-							ondelete={() => requestDelete(tunnel.id)}
-							ondetail={(id) => openDetail(id)}
-						/>
-					{/each}
-					{#each sortedFilteredSystemList as tunnel (tunnel.id)}
-						<SystemTunnelCard
-							{tunnel}
-							view={awgGridView}
-							onMarkServer={markAsServer}
-							ondetail={(id) => openDetail(id)}
-							ontest={(id, name) => openAwgDiagnostics(id, name, 'system')}
-						/>
-					{/each}
-				</div>
-
-				{#if sortedFilteredExternalList.length > 0}
-					<div
-						class:external-section={!dashboardSectionsLayout}
-					>
-						{#if dashboardSectionsLayout}
-							<TunnelSectionHeader
-								nested
-								title="Внешние"
-								count={sortedFilteredExternalList.length}
-								countLabel={pluralForm(sortedFilteredExternalList.length, TUNNEL_WORDS)}
-							/>
-						{:else}
-							<h2 class="section-title">Внешние туннели</h2>
-						{/if}
-						<div
-							class="tunnel-grid"
-							class:tunnel-grid--list={effectiveAwgRenderMode === 'list-card'}
-							class:tunnel-grid--dense={effectiveAwgRenderMode !== 'list-card' && effectiveAwgEffectiveViewMode === 'cards'}
-							class:tunnel-grid--compact={effectiveAwgRenderMode !== 'list-card' && effectiveAwgEffectiveViewMode === 'compact'}
-						>
-							{#each sortedFilteredExternalList as extTunnel (extTunnel.interfaceName)}
-								<ExternalTunnelCard
-									tunnel={extTunnel}
-									view={awgGridView}
-									onadopt={(name) => handleAdoptClick(name)}
-								/>
-							{/each}
-						</div>
-					</div>
-				{/if}
-				{#if awgSearchEmpty}
-					<p class="tunnel-list-empty">Ничего не найдено</p>
-				{/if}
-			{/if}
-		{/if}
+			<AwgTunnelsTabSection ctx={awgTabCtx} />
 		{/if}
 
 		{#if dashboardTypeSections && dashboardSingboxTunnels.length > 0}
@@ -3574,9 +2968,6 @@
 		border-top: 1px solid var(--color-border);
 	}
 
-	.info-kernel strong {
-		color: var(--color-text-primary);
-	}
 
 	/* "Kernel module unavailable" full-screen overlay — page-specific */
 	.unsupported-overlay {
