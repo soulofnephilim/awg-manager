@@ -23,13 +23,15 @@
 
 	let listen = $state<ServerListenState | null>(null);
 	let ifaces = $state<RouterInterface[]>([]);
-	let portDraft = $state('');
+	// number|string: Svelte на <input type="number"> присваивает в bind число,
+	// а начальное/пустое значение — строка; никаких строковых методов ниже.
+	let portDraft = $state<number | string>('');
 	let allIfaces = $state(true);
 	let selected = $state<string[]>([]);
 	let busy = $state(false);
 	let confirmOpen = $state(false);
 
-	const port = $derived(Number(portDraft.trim()));
+	const port = $derived(Number(portDraft));
 	const portValid = $derived(Number.isInteger(port) && port >= 1 && port <= 65535);
 	const dirty = $derived.by(() => {
 		if (!listen) return false;

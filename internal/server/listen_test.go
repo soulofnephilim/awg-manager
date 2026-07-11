@@ -199,3 +199,35 @@ func TestResolveListenAddrs(t *testing.T) {
 		t.Fatal("strict resolve must fail for interface without IPv4")
 	}
 }
+
+// Zero-listener guard: если на откате прежний адрес уже занят другим
+// процессом, текущие листенеры сохраняются — демон не остаётся без единого
+// листенера (heal сойдётся к желаемому spec, когда адрес освободится).
+func TestListen_RevertKeepsCurrentWhenOldAddrStolen(t *testing.T) {
+	s := newListenTestServer(t)
+	defer shutdownListeners(s)
+	p1, p2 := freeTCPPort(t), freeTCPPort(t)
+	bindInitial(t, s, p1)
+
+	token, _, _, err := s.BeginListenChange(p2, nil)
+	if err != nil {
+		t.Fatalf("BeginListenChange: %v", err)
+	}
+	// «Крадём» старый порт, пока окно открыто.
+	blocker, err := net.Listen("tcp", fmt.Sprintf(":%d", p1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+
+	s.revertListen(token)
+
+	if !dialOK(t, p2) {
+		t.Fatal("new port lost: revert with stolen old port must keep current listeners")
+	}
+	// spec при этом — желаемый (прежний): heal добиндит p1, когда освободится.
+	port, _, _, pending, _ := s.ListenState()
+	if port != p1 || pending {
+		t.Fatalf("state after guarded revert: port=%d pending=%v, want %d/false", port, pending, p1)
+	}
+}

@@ -144,6 +144,23 @@ func (s *Server) applyListenLocked(want []string, bestEffort bool) (int, error) 
 		opened[addr] = ln
 	}
 
+	// Zero-listener guard (best-effort пути: revert/heal): если ни один
+	// желаемый адрес не выжил (все бинды упали, пересечения с текущими нет —
+	// например, старый порт заняли за confirm-окно), НЕ закрываем текущие
+	// листенеры — недостижимый демон хуже задержавшегося отката. spec при
+	// этом остаётся желаемым: heal-тикер сойдётся к нему, когда адрес
+	// освободится, и тогда же закроет лишние.
+	survivors := len(opened)
+	for addr := range s.listen.listeners {
+		if _, ok := wantSet[addr]; ok {
+			survivors++
+		}
+	}
+	if survivors == 0 && len(s.listen.listeners) > 0 {
+		s.appLog.Warn("listen", "", "ни один желаемый адрес не забиндился — прежние листенеры сохранены до следующей попытки heal")
+		return len(s.listen.listeners), nil
+	}
+
 	// Новые слушают до закрытия старых — make-before-break.
 	for addr, ln := range opened {
 		s.listen.listeners[addr] = ln
@@ -152,7 +169,7 @@ func (s *Server) applyListenLocked(want []string, bestEffort bool) (int, error) 
 	}
 	for addr, ln := range s.listen.listeners {
 		if _, ok := wantSet[addr]; ok {
-			continue
+			continue // включает только что открытые: их адреса из want
 		}
 		ln.Close() // установленные соединения переживают закрытие листенера
 		delete(s.listen.listeners, addr)
