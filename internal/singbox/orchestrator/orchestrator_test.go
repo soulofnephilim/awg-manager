@@ -527,15 +527,21 @@ func TestBootstrapResolvesBothLocationsConflict(t *testing.T) {
 	}
 }
 
-func TestBootstrap_SweepsStaleApplyCheckDirs(t *testing.T) {
+func TestBootstrap_SweepsStaleCheckDirs(t *testing.T) {
 	dir := t.TempDir()
-	// Pre-create a leftover from a crashed Apply.
-	stale := filepath.Join(dir, ".apply-check-abc123")
-	if err := os.MkdirAll(stale, 0755); err != nil {
-		t.Fatal(err)
+	// Pre-create leftovers from crashed Apply / CheckMerged / CheckSlotAlone runs.
+	stale := []string{
+		filepath.Join(dir, ".apply-check-abc123"),
+		filepath.Join(dir, ".save-check-def456"),
+		filepath.Join(dir, ".alone-check-ghi789"),
 	}
-	if err := os.WriteFile(filepath.Join(stale, "20-router.json"), []byte(`{}`), 0644); err != nil {
-		t.Fatal(err)
+	for _, s := range stale {
+		if err := os.MkdirAll(s, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(s, "20-router.json"), []byte(`{}`), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	o := New(dir, nil)
@@ -544,8 +550,10 @@ func TestBootstrap_SweepsStaleApplyCheckDirs(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Errorf("stale .apply-check-* dir not swept: %v", err)
+	for _, s := range stale {
+		if _, err := os.Stat(s); !os.IsNotExist(err) {
+			t.Errorf("stale check dir %s not swept: %v", filepath.Base(s), err)
+		}
 	}
 }
 

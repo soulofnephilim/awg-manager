@@ -168,10 +168,10 @@ func (o *Orchestrator) Bootstrap() error {
 	if err := o.ensureDirs(); err != nil {
 		return err
 	}
-	if err := o.sweepStaleApplyCheckDirs(); err != nil {
+	if err := o.sweepStaleCheckDirs(); err != nil {
 		// Sweep failure is non-fatal — log and continue. Stale dirs
 		// are harmless cosmetic noise.
-		o.log("warn", fmt.Sprintf("orchestrator: sweep .apply-check: %v", err))
+		o.log("warn", fmt.Sprintf("orchestrator: sweep check dirs: %v", err))
 	}
 	if err := o.sweepStaleTempFiles(); err != nil {
 		// Same best-effort treatment: a crash between AtomicWrite's temp write
@@ -224,10 +224,17 @@ func (o *Orchestrator) removeDisabledCopy(meta SlotMeta) error {
 	return removeIfExists(o.disabledPath(meta))
 }
 
-// sweepStaleApplyCheckDirs removes leftover .apply-check-* directories
-// from crashed Apply runs. Tmpdir creation uses MkdirTemp with a
-// well-known prefix; cleanup is best-effort.
-func (o *Orchestrator) sweepStaleApplyCheckDirs() error {
+// checkDirPrefixes are the MkdirTemp prefixes of every validation tmpdir
+// the orchestrator creates inside configDir (ApplyDraft, CheckMerged /
+// SaveAndValidate, CheckSlotAlone). The sweep must know them all: a crash
+// between MkdirTemp and the deferred RemoveAll strands the dir on flash
+// storage forever otherwise.
+var checkDirPrefixes = []string{".apply-check-", ".save-check-", ".alone-check-"}
+
+// sweepStaleCheckDirs removes leftover validation tmpdirs from crashed
+// check runs. Tmpdir creation uses MkdirTemp with a well-known prefix;
+// cleanup is best-effort.
+func (o *Orchestrator) sweepStaleCheckDirs() error {
 	entries, err := os.ReadDir(o.configDir)
 	if err != nil {
 		return err
@@ -237,7 +244,14 @@ func (o *Orchestrator) sweepStaleApplyCheckDirs() error {
 		if !e.IsDir() {
 			continue
 		}
-		if !strings.HasPrefix(e.Name(), ".apply-check-") {
+		stale := false
+		for _, p := range checkDirPrefixes {
+			if strings.HasPrefix(e.Name(), p) {
+				stale = true
+				break
+			}
+		}
+		if !stale {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(o.configDir, e.Name())); err != nil && firstErr == nil {

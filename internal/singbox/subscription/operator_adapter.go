@@ -644,6 +644,13 @@ func (a *OperatorAdapter) flush() error {
 // по построению — merged-цикл в flush() по-прежнему владеет ими: выход по
 // Ok или по неиндексируемой ошибке возвращает управление ему. Budget-cap:
 // патологический список падает с честной ошибкой вместо перемалывания.
+//
+// Известное ограничение: standalone строже merged для outbound с detour
+// на тег ЧУЖОГО слота (возможно только в sb-JSON подписке, вручную
+// сшитой под конкретный router/user-конфиг) — такой outbound здесь
+// отбросится с причиной в LastFilterDrops, хотя merged-проверка его бы
+// приняла. Встроенные парсеры (vlink/mieru/Clash) внешних detour не
+// порождают; отказ не тихий, поэтому осознанно принимаем.
 func (a *OperatorAdapter) drainStandaloneRejects(dropped *[]DropReason) error {
 	deadline := time.Now().Add(dropLoopBudget)
 	for iter := 0; iter < dropLoopMaxDrops; iter++ {
