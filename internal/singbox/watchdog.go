@@ -86,7 +86,12 @@ func (w *Watchdog) tick(ctx context.Context) {
 
 	running, _ := w.op.proc.IsRunning()
 	if !running {
-		w.log.Info("watchdog: sing-box not running, reconciling")
+		// Debug, not Info: sing-box is legitimately down on a manual stop, a
+		// fresh install with no config, or any idle-but-installed state, and
+		// Reconcile then no-ops — an Info line here fires 2880×/day and reads
+		// as "reconciling" when nothing happens. Real restart/suppression
+		// events are logged by autoRestartIfCrashed on state change.
+		w.log.Debug("watchdog: sing-box not running, reconciling")
 		if err := w.op.Reconcile(ctx); err != nil {
 			w.log.Warn("watchdog reconcile failed", "err", err)
 		}

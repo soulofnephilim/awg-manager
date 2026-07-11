@@ -598,22 +598,38 @@ func (s *ServiceImpl) persistConfigDirect(ctx context.Context, cfg *RouterConfig
 		// Test-only legacy fallback: reuse the in-place writer.
 		return s.persistConfig(ctx, cfg)
 	}
+	return s.persistSlotDirect(orchestrator.SlotRouter, cfg, false)
+}
+
+// persistSlotDirect materializes cfg and, when the serialized bytes differ from
+// what is already on disk, writes them to the slot's active file via the
+// orchestrator (scheduling a debounced reload). The active path is resolved
+// from the orchestrator so it stays in sync with the slot's registered
+// filename instead of a hardcoded literal. checkCycles runs the composite-cycle
+// guard before writing. Orch must be non-nil; the caller must have arranged for
+// the slot to be enabled. Shared by persistConfigDirect and persistFakeIPConfig.
+func (s *ServiceImpl) persistSlotDirect(slot orchestrator.Slot, cfg *RouterConfig, checkCycles bool) error {
 	materialized, err := s.ruleSetMaterializer().materializeConfig(cfg)
 	if err != nil {
 		return err
 	}
+	if checkCycles {
+		if err := validateNoCompositeCycles(materialized.Outbounds); err != nil {
+			return err
+		}
+	}
 	data, err := json.MarshalIndent(materialized, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal router config: %w", err)
+		return fmt.Errorf("marshal %s config: %w", slot, err)
 	}
-	activePath := filepath.Join(s.deps.Orch.ConfigDir(), "20-router.json")
+	activePath, err := s.deps.Orch.ActivePath(slot)
+	if err != nil {
+		return err
+	}
 	if existing, err := os.ReadFile(activePath); err == nil && bytes.Equal(existing, data) {
 		return nil
 	}
-	if err := s.deps.Orch.Save(orchestrator.SlotRouter, data); err != nil {
-		return err
-	}
-	return nil
+	return s.deps.Orch.Save(slot, data)
 }
 
 // notifyRoutingSlotsChanged invokes the OnRoutingSlotsChanged hook (see
