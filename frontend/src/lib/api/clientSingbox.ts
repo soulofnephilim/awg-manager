@@ -12,11 +12,9 @@ import type {
 	SingboxInboundsList,
 	SingboxStatus,
 	SingboxTunnel,
-	Subscription,
 	UserConfigApplyResponse,
 	UserConfigCheckResponse
 } from '$lib/types';
-import { isMockDevMode as envIsMockDevMode } from '$lib/env';
 import { RoutingClient } from './clientRouting';
 
 export class SingboxClient extends RoutingClient {
