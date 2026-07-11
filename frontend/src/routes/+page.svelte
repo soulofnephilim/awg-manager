@@ -51,6 +51,8 @@
 	import SubscriptionsTabSection from '$lib/components/subscriptions/SubscriptionsTabSection.svelte';
 	import SingboxTunnelsTabSection from '$lib/components/singbox/SingboxTunnelsTabSection.svelte';
 	import AwgTunnelsTabSection from '$lib/components/tunnels/AwgTunnelsTabSection.svelte';
+	import DashboardFlatSection from '$lib/components/tunnels/DashboardFlatSection.svelte';
+	import type { DashboardFlatContext } from '$lib/components/tunnels/dashboardFlatContext';
 	import type { AwgTabContext } from '$lib/components/tunnels/awgTabContext';
 	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem } from '$lib/types';
 	import { formatBitRate, formatBytes, formatDuration, formatRelativeTime, secondsSince } from '$lib/utils/format';
@@ -1904,108 +1906,56 @@
 		set fileInput(v) { fileInput = v; },
 		endpointHost, endpointPort, endpointVisible, toggleEndpointVisible, externalStatusLabel, externalStatusVariant, systemStatusLabel, systemStatusVariant, isManagedTunnelOn, managedRouteMeta, showManagedPing, latestRate, sparklineSeries, handleAdoptClick, handleAwgSortChange, handleDragLeave, handleDragOver, handleDrop, handleFileSelect, openAwgDiagnostics, openConnectivitySettings, openDetail, requestDelete, markAsServer, handleToggleOnOff, checkPing, handleExportAll,
 	};
+
+	// Live-контекст flat-дашборда (см. dashboardFlatContext.ts).
+	const dashboardFlatCtx: DashboardFlatContext = {
+		get DASHBOARD_KIND_LABELS() { return DASHBOARD_KIND_LABELS; },
+		get dashboardOn() { return dashboardOn; },
+		get dashboardDndEnabled() { return dashboardDndEnabled; },
+		get dashboardFilterEmpty() { return dashboardFilterEmpty; },
+		get dashboardFlatCardMode() { return dashboardFlatCardMode; },
+		get dashboardFlatLayout() { return dashboardFlatLayout; },
+		get dashboardGridClass() { return dashboardGridClass; },
+		get dashboardGroupByTags() { return dashboardGroupByTags; },
+		get dashboardRenderItems() { return dashboardRenderItems; },
+		get dashboardSummaryStats() { return dashboardSummaryStats; },
+		get dashboardTagGroups() { return dashboardTagGroups; },
+		get effectiveAwgCardViewMode() { return effectiveAwgCardViewMode; },
+		get effectiveAwgRenderMode() { return effectiveAwgRenderMode; },
+		get effectiveSingboxTunnelsEffectiveLayout() { return effectiveSingboxTunnelsEffectiveLayout; },
+		get effectiveSingboxTunnelsRenderMode() { return effectiveSingboxTunnelsRenderMode; },
+		get effectiveSingboxSubscriptionsEffectiveLayout() { return effectiveSingboxSubscriptionsEffectiveLayout; },
+		get effectiveSingboxSubscriptionsRenderMode() { return effectiveSingboxSubscriptionsRenderMode; },
+		get showSingboxListOption() { return showSingboxListOption; },
+		get showSingboxSections() { return showSingboxSections; },
+		get loading() { return loading; },
+		get exporting() { return exporting; },
+		get adoptingInterface() { return adoptingInterface; },
+		get awgAutoConnectivityNonce() { return awgAutoConnectivityNonce; },
+		get singboxAutoDelayCheckNonce() { return singboxAutoDelayCheckNonce; },
+		get deleteLoading() { return deleteLoading; },
+		get toggleLoading() { return toggleLoading; },
+		get liveActives() { return liveActives; },
+		get flatDrag() { return flatDrag; },
+		get flatRowEls() { return flatRowEls; },
+		get adoptDialogOpen() { return adoptDialogOpen; },
+		set adoptDialogOpen(v) { adoptDialogOpen = v; },
+		get adoptError() { return adoptError; },
+		set adoptError(v) { adoptError = v; },
+		get adoptLoading() { return adoptLoading; },
+		set adoptLoading(v) { adoptLoading = v; },
+		get dashboardSearchQuery() { return dashboardSearchQuery; },
+		set dashboardSearchQuery(v) { dashboardSearchQuery = v; },
+		get dashboardTagFilter() { return dashboardTagFilter; },
+		set dashboardTagFilter(v) { dashboardTagFilter = v; },
+		get flatGridEl() { return flatGridEl; },
+		set flatGridEl(v) { flatGridEl = v; },
+		handleAdopt, handleAdoptClick, handleExportAll, handleGripKeydown, handleGripPointerDown, handleToggleOnOff, markAsServer, openAwgDiagnostics, openDetail, openSingboxDetail, openWizard, requestDelete, requestSubscriptionDelete,
+	};
 </script>
 
 {#snippet createIcon()}
 	<CreateIcon />
-{/snippet}
-
-{#snippet dashboardFlatCard(item: TunnelDashboardFlatItem, suppressAutoCheck: boolean = false)}
-	{#if item.kind === 'awg-managed'}
-		<TunnelCard
-			tunnel={item.tunnel}
-			view={effectiveAwgRenderMode === 'list-card' ? 'list' : effectiveAwgCardViewMode}
-			toggleLoading={toggleLoading[item.tunnel.id] ?? false}
-			deleteLoading={deleteLoading[item.tunnel.id] ?? false}
-			autoConnectivityNonce={suppressAutoCheck ? 0 : awgAutoConnectivityNonce}
-			autoConnectivityDelayMs={item.index * 180}
-			onToggleOnOff={() => handleToggleOnOff(item.tunnel.id)}
-			ondelete={() => requestDelete(item.tunnel.id)}
-			ondetail={(id) => openDetail(id)}
-		/>
-	{:else if item.kind === 'awg-system'}
-		<SystemTunnelCard
-			tunnel={item.tunnel}
-			view={effectiveAwgRenderMode === 'list-card' ? 'list' : effectiveAwgCardViewMode}
-			onMarkServer={markAsServer}
-			ondetail={(id) => openDetail(id)}
-			ontest={(id, name) => openAwgDiagnostics(id, name, 'system')}
-		/>
-	{:else if item.kind === 'awg-external'}
-		<ExternalTunnelCard
-			tunnel={item.tunnel}
-			view={effectiveAwgRenderMode === 'list-card' ? 'list' : effectiveAwgCardViewMode}
-			onadopt={(name) => handleAdoptClick(name)}
-		/>
-	{:else if item.kind === 'singbox'}
-		<SingboxTunnelCard
-			tunnel={item.tunnel}
-			layout={effectiveSingboxTunnelsRenderMode === 'list-card' ? 'list' : effectiveSingboxTunnelsEffectiveLayout}
-			renderMode={effectiveSingboxTunnelsRenderMode}
-			autoDelayCheckNonce={suppressAutoCheck ? 0 : singboxAutoDelayCheckNonce}
-			autoDelayCheckDelayMs={item.index * 180}
-			ondetail={(tag) => openSingboxDetail(tag)}
-		/>
-	{:else if item.kind === 'sub-active'}
-		<SubscriptionActiveCard
-			subscription={item.card.subscription}
-			activeMember={item.card.activeMember}
-			autoDelayCheckNonce={suppressAutoCheck ? 0 : singboxAutoDelayCheckNonce}
-			autoDelayCheckDelayMs={item.index * 180}
-			layout={effectiveSingboxSubscriptionsEffectiveLayout}
-			renderMode={effectiveSingboxSubscriptionsRenderMode}
-			ondetail={(tag) => openSingboxDetail(tag)}
-		/>
-	{:else if item.kind === 'sub-stopped'}
-		<SubscriptionCard
-			subscription={item.subscription}
-			liveActiveMember={liveActives[item.subscription.id] || null}
-			layout={effectiveSingboxSubscriptionsEffectiveLayout}
-			renderMode={effectiveSingboxSubscriptionsRenderMode}
-			ondelete={requestSubscriptionDelete}
-			ondetail={(tag) => openSingboxDetail(tag)}
-		/>
-	{/if}
-{/snippet}
-
-{#snippet dashboardItemFooter(item: TunnelDashboardFlatItem, dragIndex: number | null, dragDisabled: boolean = false)}
-	{@const itemTags = getItemTags($tunnelDashboardTags, item.key)}
-	<!-- Футер рендерится только когда в нём есть содержимое: грип ручного
-	     порядка и/или чипы тегов. Без тегов и вне тегового вида ряд с одиноким
-	     «+» под каждой карточкой не показывается; редактирование тегов живёт в
-	     группировке «Теги», в сплошном виде чипы readonly (клик = фильтр). -->
-	{#if dragIndex !== null || itemTags.length > 0 || dashboardGroupByTags}
-		<div class="dashboard-item-footer">
-			{#if dragIndex !== null}
-				<button
-					type="button"
-					class="dashboard-item-grip"
-					class:is-busy={flatDrag.busy}
-					disabled={dragDisabled}
-					title={dragDisabled
-						? 'Перетаскивание недоступно при поиске и фильтре'
-						: 'Перетащить для изменения порядка'}
-					aria-label="Перетащить «{item.name}»"
-					onpointerdown={dragDisabled || flatDrag.busy
-						? undefined
-						: (e) => handleGripPointerDown(dragIndex, e)}
-					onkeydown={dragDisabled ? undefined : (e) => handleGripKeydown(dragIndex, e)}
-				>
-					<GripVertical size={14} strokeWidth={2} aria-hidden="true" />
-				</button>
-			{/if}
-			{#if itemTags.length > 0 || dashboardGroupByTags}
-				<TunnelTagChips
-					tags={itemTags}
-					readonly={!dashboardGroupByTags}
-					onAdd={(raw) => tunnelDashboardTags.addTag(item.key, raw)}
-					onRemove={(tag) => tunnelDashboardTags.removeTag(item.key, tag)}
-					onSelect={(tag) => (dashboardTagFilter = tag)}
-					activeTag={dashboardTagFilter}
-				/>
-			{/if}
-		</div>
-	{/if}
 {/snippet}
 
 <svelte:head>
@@ -2026,135 +1976,7 @@
 		/>
 	{:else}
 		{#if dashboardOn}
-			{#if showSingboxSections}
-				<SingboxInstallBanner />
-			{/if}
-			<div class="dashboard-sticky">
-				<div class="tunnels-toolbar">
-					<div class="toolbar-actions">
-						<DashboardToolbar
-							searchQuery={dashboardSearchQuery}
-							onSearchChange={(value) => (dashboardSearchQuery = value)}
-							layout={$tunnelDashboardLayout}
-							onLayoutChange={(layout) => tunnelDashboardLayout.setLayout(layout)}
-							viewMode={$tunnelDashboardView}
-							onViewModeChange={tunnelDashboardView.setViewMode}
-							showViewToggle={showSingboxListOption}
-							showListOption={showSingboxListOption}
-							orderMode={$tunnelDashboardOrderMode}
-							onOrderModeChange={tunnelDashboardOrderMode.setMode}
-							showOrderControl={dashboardFlatLayout}
-							groupMode={$tunnelDashboardGroupMode}
-							onGroupModeChange={tunnelDashboardGroupMode.setMode}
-							showGroupControl={!dashboardFlatLayout}
-							activeTagFilter={dashboardTagFilter}
-							onClearTagFilter={() => (dashboardTagFilter = null)}
-							showSingboxCreate={showSingboxSections}
-							onCreateAwg={() => goto('/tunnels/new')}
-							onCreateSingboxSingle={() => openWizard('single')}
-							onCreateSingboxGroup={() => openWizard('inline')}
-							onCreateSingboxSubscription={() => openWizard('url')}
-							{createIcon}
-						>
-							{#snippet actions()}
-								<StoreStatusBadge store={tunnels} />
-								<Button variant="secondary" size="md" onclick={handleExportAll} disabled={exporting} iconBefore={exportIcon}>
-									Экспорт
-								</Button>
-							{/snippet}
-						</DashboardToolbar>
-					</div>
-				</div>
-				<DashboardSummary stats={dashboardSummaryStats} />
-			</div>
-			{#if dashboardFlatCardMode}
-				<div
-					bind:this={flatGridEl}
-					class={dashboardGridClass}
-					class:dashboard-grid--reordering={flatDrag.active}
-					style={dashboardDndEnabled ? flatDrag.cardsMotionStyle() : undefined}
-				>
-					{#each dashboardRenderItems as item, i (item.key)}
-						<div
-							class="dashboard-flat-item"
-							class:drag-source-exiting={flatDrag.isDragSource(i)}
-							class:drag-source-collapsed={flatDrag.sourceCollapsed(i)}
-							style={flatDrag.isDragSource(i) ? flatDrag.dropIndicatorStyle() : undefined}
-							bind:this={flatRowEls[i]}
-						>
-							{#if flatDrag.showsDropBefore(i)}
-								<div
-									class="drop-indicator"
-									class:expanded={flatDrag.dropBeforeExpanded(i)}
-									class:collapsing={flatDrag.dropBeforeCollapsing(i)}
-									style={flatDrag.dropIndicatorStyle()}
-								></div>
-							{/if}
-							{#if flatDrag.active}
-								<!-- Во время drag карточки (с графиками) заменяются
-								     компактными рядами фиксированной высоты: без двух
-								     полных релэйаутов страницы, и длинный список влезает
-								     на экран. Ключи те же — ключи снапшота. -->
-								<div class="dashboard-reorder-row">
-									<span class="dashboard-kind-badge">{DASHBOARD_KIND_LABELS[item.kind]}</span>
-									<span class="dashboard-reorder-name">{item.name}</span>
-								</div>
-							{:else}
-								{@render dashboardFlatCard(item)}
-								{@render dashboardItemFooter(
-									item,
-									$tunnelDashboardOrderMode === 'manual' ? i : null,
-									!dashboardDndEnabled,
-								)}
-							{/if}
-						</div>
-					{/each}
-					{#if flatDrag.showsDropAtEnd()}
-						<div
-							class="drop-indicator drop-indicator-end"
-							class:expanded={flatDrag.dropEndExpanded()}
-							class:collapsing={flatDrag.dropEndCollapsing()}
-							style={flatDrag.dropIndicatorStyle()}
-						></div>
-					{/if}
-				</div>
-			{:else if dashboardGroupByTags}
-				{#each dashboardTagGroups as group (group.tag ?? ' untagged')}
-					<TunnelSectionHeader
-						title={group.tag ?? 'Без тегов'}
-						count={group.items.length}
-						countLabel={pluralForm(group.items.length, TUNNEL_WORDS)}
-					/>
-					<div class={dashboardGridClass}>
-						{#each group.items as entry (entry.item.key)}
-							<div class="dashboard-flat-item">
-								{@render dashboardFlatCard(entry.item, !entry.autoCheck)}
-								{@render dashboardItemFooter(entry.item, null)}
-							</div>
-						{/each}
-					</div>
-				{/each}
-			{/if}
-			{#if dashboardFilterEmpty}
-				<EmptyState
-					title="Ничего не найдено"
-					description={dashboardTagFilter !== null
-						? `Нет туннелей с тегом «${dashboardTagFilter}»${dashboardSearchQuery.trim() !== '' ? ' по этому запросу' : ''}.`
-						: 'По запросу не нашлось ни одного туннеля.'}
-				>
-					{#snippet action()}
-						{#if dashboardTagFilter !== null}
-							<Button variant="secondary" size="md" onclick={() => (dashboardTagFilter = null)}>
-								Сбросить фильтр
-							</Button>
-						{:else}
-							<Button variant="secondary" size="md" onclick={() => (dashboardSearchQuery = '')}>
-								Очистить поиск
-							</Button>
-						{/if}
-					{/snippet}
-				</EmptyState>
-			{/if}
+			<DashboardFlatSection ctx={dashboardFlatCtx} />
 		{:else}
 			<Tabs
 				tabs={tunnelTabs}
@@ -2417,97 +2239,30 @@
 	/* Комбинированная сводка дашборда (issue #353): липкий блок «тулбар +
 	   сводка» под AppHeader — тот же паттерн, что sticky-header в
 	   TunnelEditHeader.svelte. */
-	.dashboard-sticky {
-		position: sticky;
-		top: 56px;
-		z-index: var(--z-sticky-secondary);
-		background: var(--color-bg-primary);
-		padding-bottom: 0.75rem;
-		border-bottom: 1px solid var(--color-border);
-		margin-bottom: 1rem;
-	}
 
-	.dashboard-sticky .tunnels-toolbar {
-		margin-bottom: 0.75rem;
-	}
 
 	/* На мобильном тулбар складывается в несколько рядов — прилипший блок
 	   съедал бы половину вьюпорта, поэтому ниже 760px он статичен. */
 	@media (max-width: 760px) {
-		.dashboard-sticky {
-			position: static;
-		}
 	}
 
 	/* Обёртка карточки в сплошном/теговом дашборде: карточка + футер
 	   (грип ручного порядка + чипы тегов). */
-	.dashboard-flat-item {
-		position: relative;
-		display: flex;
-		flex-direction: column;
-		gap: 0.375rem;
-		min-width: 0;
-	}
 
-	.dashboard-item-footer {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		min-width: 0;
-		margin-top: auto;
-	}
 
-	.dashboard-item-grip {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		flex: 0 0 auto;
-		background: transparent;
-		border: none;
-		padding: 0.125rem;
-		color: var(--color-text-muted);
-		opacity: 0.55;
-		cursor: grab;
-		touch-action: none;
-		border-radius: 4px;
-	}
 
-	.dashboard-item-grip:hover {
-		color: var(--color-text-primary);
-		opacity: 1;
-	}
 
-	.dashboard-item-grip:active {
-		cursor: grabbing;
-	}
 
-	.dashboard-item-grip.is-busy {
-		cursor: wait;
-		opacity: 0.3;
-		pointer-events: none;
-	}
 
 	/* Ручной порядок включён, но dnd заблокирован (поиск/фильтр/загрузка
 	   данных): грип виден, но неактивен — не исчезает молча. */
-	.dashboard-item-grip:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
 
 	/* ── D7: drag-reorder (общее pointer-ядро sb-router/reorderDrag).
 	   Движок вертикальный, поэтому на время активного drag сетка
 	   схлопывается в одну колонку — индексы вставки и индикатор
 	   становятся однозначными на любой плотности. ── */
-	.tunnel-grid.dashboard-grid--reordering {
-		--reorder-row-height: 40px;
-		display: flex;
-		flex-direction: column;
-		gap: var(--card-gap, 6px);
-		user-select: none;
-	}
 
-	/* Компактный ряд на время drag и ghost-токен: бейдж вида + имя. */
-	.dashboard-reorder-row,
+	/* Ghost-токен drag-переупорядочивания: бейдж вида + имя. */
 	.drag-ghost-token {
 		display: flex;
 		align-items: center;
@@ -2546,114 +2301,17 @@
 	/* Во время drag строки компактные — слот источника и раскрытый
 	   drop-скелетон ужимаются до высоты ряда, а не исходной карточки
 	   (--drop-height меряется на pointerdown по полной карточке). */
-	.dashboard-grid--reordering .dashboard-flat-item.drag-source-exiting:not(.drag-source-collapsed) {
-		height: var(--reorder-row-height, 40px);
-	}
 
-	.dashboard-grid--reordering .drop-indicator.expanded:not(.collapsing) {
-		height: var(--reorder-row-height, 40px);
-	}
 
-	.dashboard-flat-item.drag-source-exiting {
-		overflow: hidden;
-		height: var(--drop-height);
-		opacity: 1;
-		transition:
-			height var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			opacity var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			margin var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95));
-	}
 
-	.dashboard-flat-item.drag-source-exiting.drag-source-collapsed {
-		height: 0;
-		max-height: 0;
-		opacity: 0;
-		margin-bottom: calc(-1 * var(--card-gap, 6px));
-	}
 
-	.drop-indicator {
-		box-sizing: border-box;
-		overflow: hidden;
-		border: 1px solid transparent;
-		border-radius: 999px;
-		background: var(--color-accent);
-		box-shadow: 0 0 10px color-mix(in srgb, var(--color-accent) 45%, transparent);
-		opacity: 1;
-		pointer-events: none;
-		transition:
-			height var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			margin var(--drop-slot-motion-ms, 360ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			border-radius calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			background calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			box-shadow calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			border-color calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			opacity calc(var(--drop-slot-motion-ms, 360ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95));
-	}
 
-	.drop-indicator:not(.expanded):not(.collapsing) {
-		position: absolute;
-		top: -1px;
-		left: 0;
-		right: 0;
-		height: 2px;
-		margin: 0;
-		z-index: 2;
-	}
 
-	.drop-indicator.expanded:not(.collapsing) {
-		position: static;
-		top: auto;
-		height: var(--drop-height);
-		margin: 0 0 var(--card-gap, 6px);
-		border-radius: var(--radius-sm, 6px);
-		background: color-mix(in srgb, var(--color-accent) 6%, transparent);
-		border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
-		border-style: dashed;
-		box-shadow: none;
-	}
 
-	.drop-indicator.collapsing {
-		margin: 0 !important;
-		opacity: 0;
-		border-color: transparent;
-		background: transparent;
-		box-shadow: none;
-	}
 
-	.drop-indicator.collapsing.expanded {
-		position: static;
-		height: 0 !important;
-	}
 
-	.drop-indicator.collapsing:not(.expanded) {
-		position: absolute;
-		top: -1px;
-		left: 0;
-		right: 0;
-		height: 2px !important;
-		z-index: 2;
-		transition:
-			opacity var(--drop-line-collapse-ms, 240ms) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			box-shadow calc(var(--drop-line-collapse-ms, 240ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			background calc(var(--drop-line-collapse-ms, 240ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95)),
-			border-color calc(var(--drop-line-collapse-ms, 240ms) * 0.85) var(--slot-ease, cubic-bezier(0.45, 0.05, 0.55, 0.95));
-	}
 
-	.drop-indicator-end:not(.expanded):not(.collapsing) {
-		position: relative;
-		top: auto;
-		height: 2px;
-		margin: -1px 0 0;
-	}
 
-	.drop-indicator-end.collapsing:not(.expanded) {
-		position: relative;
-		top: auto;
-		left: auto;
-		right: auto;
-		height: 2px !important;
-		margin: -1px 0 0 !important;
-	}
 
 	.dashboard-drag-ghost {
 		position: fixed;
@@ -2669,304 +2327,53 @@
 	}
 
 	/* Toolbar (count + actions row above the tunnel grid) */
-	.tunnels-toolbar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 1rem;
-	}
 
-	.tunnel-count {
-		font-size: 0.8125rem;
-		color: var(--color-text-muted);
-	}
 
-	.count-group {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
 
-	.toolbar-actions {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
 
-	.toolbar-actions :global(.btn.size-md) {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		box-sizing: border-box;
-		height: 32px;
-		min-height: 32px;
-		max-height: 32px;
-		padding-block: 0;
-	}
 
-	.toolbar-actions :global(.btn.variant-primary:hover:not(:disabled):not(.is-disabled)) {
-		background: transparent;
-		color: var(--color-accent);
-		border-color: var(--color-accent);
-		filter: none;
-	}
 
 	/* Empty-state ghost terminal — page-specific */
-	.ghost-terminal {
-		margin: 3rem 0;
-		border: 2px dashed var(--color-border);
-		border-radius: var(--radius);
-		padding: 2rem 2rem 1.5rem;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 1.5rem;
-		transition: border-color var(--t-fast) ease, background var(--t-fast) ease;
-	}
 
-	.ghost-terminal.drag-over {
-		border-color: var(--color-accent);
-		border-style: solid;
-		background: var(--color-accent-tint);
-	}
 
-	.term-status {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.25rem;
-		font-family: var(--font-mono);
-	}
 
-	.term-prompt {
-		font-size: 0.8125rem;
-		color: var(--color-text-muted);
-	}
 
-	.term-info {
-		font-size: 0.75rem;
-		color: var(--color-text-muted);
-		opacity: 0.7;
-	}
 
-	.term-action-group {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 1.5rem;
-	}
 
-	.term-drop-hint {
-		display: flex;
-		align-items: center;
-		gap: 0.625rem;
-		color: var(--color-accent);
-		font-size: 1.0625rem;
-		font-weight: 500;
-	}
 
-	.term-drop-hint :global(svg) {
-		flex-shrink: 0;
-		opacity: 0.8;
-	}
 
-	.term-commands {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.125rem;
-		font-family: var(--font-mono);
-	}
 
-	.term-found {
-		font-size: 0.8125rem;
-		color: var(--color-accent);
-		margin-bottom: 0.375rem;
-	}
 
-	.term-cmd {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		background: none;
-		border: none;
-		color: var(--color-text-secondary);
-		font-family: inherit;
-		font-size: 0.875rem;
-		padding: 0.375rem 0.5rem;
-		border-radius: var(--radius-sm);
-		cursor: pointer;
-		transition: color var(--t-fast) ease, background var(--t-fast) ease;
-		text-decoration: none;
-	}
 
-	.term-cmd:hover {
-		color: var(--color-text-primary);
-		background: var(--color-bg-hover);
-	}
 
-	.term-cmd-primary {
-		color: var(--color-accent);
-	}
 
-	.term-cmd-primary:hover {
-		color: var(--color-accent-hover);
-	}
 
-	.term-arrow {
-		color: var(--color-text-muted);
-	}
 
 	/* Backend selector — chip-like toggles for nativewg/kernel */
-	.term-backend-selector {
-		display: flex;
-		gap: 8px;
-	}
 
-	.term-backend-btn {
-		font-family: var(--font-mono);
-		font-size: 0.8125rem;
-		padding: 0.375rem 1rem;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--color-text-muted);
-		cursor: pointer;
-		transition: border-color var(--t-fast) ease, color var(--t-fast) ease, background var(--t-fast) ease;
-	}
 
-	.term-backend-btn:hover:not(.disabled) {
-		border-color: var(--color-accent);
-		color: var(--color-text-secondary);
-	}
 
-	.term-backend-btn.selected {
-		border-color: var(--color-accent);
-		color: var(--color-accent);
-		background: var(--color-accent-tint);
-	}
 
-	.term-backend-btn.disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
 
-	.term-backend-hint {
-		margin: 8px 0 0;
-		font-family: var(--font-mono);
-		font-size: 0.75rem;
-		line-height: 1.4;
-		color: var(--color-text-muted);
-	}
 
 	/* Drag-over / importing overlays */
-	.drop-overlay {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.75rem;
-		padding: 2rem 0;
-		color: var(--color-accent);
-	}
 
-	.drop-text {
-		font-size: 1.0625rem;
-		font-weight: 500;
-	}
 
 	/* Empty-state kind picker — three clickable cards opening the wizard
 	   on the matching step 2. Mirrors the wizard's step-1 visual so the
 	   transition into the modal feels continuous. */
-	.empty-kinds {
-		display: grid;
-		grid-template-columns: 1fr;
-		gap: 0.7rem;
-		margin-top: 0.5rem;
-	}
 	@media (min-width: 600px) {
-		.empty-kinds { grid-template-columns: 1fr 1fr 1fr; }
-	}
-	.empty-kind-card {
-		display: flex;
-		flex-direction: column;
-		gap: 0.45rem;
-		padding: 1.1rem 1.2rem;
-		background: var(--color-bg-primary);
-		border: 1px solid var(--color-border);
-		border-radius: 8px;
-		text-align: left;
-		cursor: pointer;
-		font: inherit;
-		color: var(--color-text-primary);
-		transition: border-color 120ms, transform 120ms, background 120ms;
-	}
-	.empty-kind-card:hover {
-		border-color: var(--color-primary, #3b82f6);
-		background: rgba(59, 130, 246, 0.04);
-		transform: translateY(-1px);
-	}
-	.empty-kind-card:focus-visible {
-		outline: 2px solid var(--color-primary, #3b82f6);
-		outline-offset: 2px;
 	}
 	:global(.empty-kind-icon) { color: var(--color-primary, #3b82f6); }
-	.empty-kind-title { font-weight: 600; font-size: 0.95rem; }
-	.empty-kind-desc { color: var(--color-text-muted); font-size: 0.8rem; line-height: 1.4; }
 
 	/* "About AmneziaWG / Sing-box" info card — page-specific */
-	.info-card {
-		border-left: 3px solid var(--color-accent);
-		background: var(--color-bg-secondary);
-		border-radius: 0 var(--radius) var(--radius) 0;
-		padding: 1.25rem 1.5rem;
-		margin-top: 1.5rem;
-	}
 
-	.info-title {
-		font-size: 1rem;
-		font-weight: 600;
-		margin-bottom: 0.75rem;
-	}
 
-	.info-text {
-		font-size: 0.8125rem;
-		color: var(--color-text-secondary);
-		line-height: 1.6;
-		margin: 0;
-	}
 
-	.info-section-desc {
-		font-size: 0.85rem;
-		color: var(--color-text-muted);
-		margin: 0 0 0.75rem 0;
-	}
 
-	.info-versions {
-		display: flex;
-		flex-direction: column;
-		gap: 0.625rem;
-		margin: 0.75rem 0;
-	}
 
-	.info-version {
-		display: flex;
-		gap: 0.75rem;
-		align-items: baseline;
-	}
 
-	.info-version-desc {
-		font-size: 0.8125rem;
-		color: var(--color-text-secondary);
-		line-height: 1.5;
-	}
 
-	.info-kernel {
-		margin-top: 0.75rem;
-		padding-top: 0.75rem;
-		border-top: 1px solid var(--color-border);
-	}
 
 
 	/* "Kernel module unavailable" full-screen overlay — page-specific */
@@ -3048,68 +2455,8 @@
 		border-color: var(--color-accent);
 	}
 
-	.external-section {
-		margin-top: 2rem;
-		padding-top: 1.5rem;
-		border-top: 1px solid var(--border);
-	}
-	.singbox-sub-inactive-section {
-		margin-top: 0;
-		padding-top: 0;
-		border-top: none;
-	}
-	.section-title {
-		font-size: 1rem;
-		font-weight: 600;
-		color: var(--text-secondary);
-		margin-bottom: 1rem;
-	}
 
-	.subscription-empty {
-		padding: 3rem 1.5rem;
-		text-align: center;
-		border: 1px dashed var(--color-border);
-		border-radius: 6px;
-		margin-top: 0.5rem;
-	}
-	.subscription-empty-title {
-		color: var(--color-text-primary);
-		font-size: 1.1rem;
-		font-weight: 600;
-		margin-bottom: 0.4rem;
-	}
-	.subscription-empty-desc {
-		color: var(--color-text-muted);
-		font-size: 0.88rem;
-		margin-bottom: 1.2rem;
-	}
 
 	@media (max-width: 760px) {
-		.tunnels-toolbar {
-			flex-direction: column;
-			align-items: stretch;
-			gap: 0.75rem;
-		}
-
-		.toolbar-actions {
-			display: grid;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-			align-items: stretch;
-			gap: 0.5rem;
-			width: 100%;
-		}
-
-		.toolbar-actions :global(.toolbar-view-row) {
-			grid-column: 1 / -1;
-		}
-
-		.toolbar-actions > :global(.btn) {
-			width: 100%;
-			min-height: 32px;
-		}
-
-		.toolbar-actions > :global(.btn:only-of-type) {
-			grid-column: 1 / -1;
-		}
 	}
 </style>
