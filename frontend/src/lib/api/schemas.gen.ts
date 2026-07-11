@@ -1036,8 +1036,8 @@ const api_RoutingRefreshResponse: v.GenericSchema = v.looseObject({
 
 const api_RoutingTunnelDTO: v.GenericSchema = v.looseObject({
 	available: v.optional(v.nullable(v.boolean())),
-	iface: v.optional(v.nullable(v.string())),
 	id: v.optional(v.nullable(v.string())),
+	iface: v.optional(v.nullable(v.string())),
 	name: v.optional(v.nullable(v.string())),
 	status: v.optional(v.nullable(v.string())),
 	type: v.optional(v.nullable(v.string())),

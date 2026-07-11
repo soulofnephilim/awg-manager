@@ -2644,11 +2644,11 @@ definitions:
       available:
         example: true
         type: boolean
-      iface:
-        example: nwg0
-        type: string
       id:
         example: tun_abc123
+        type: string
+      iface:
+        example: nwg0
         type: string
       name:
         example: My VPN
@@ -2861,13 +2861,13 @@ definitions:
           type: string
         type: array
       confirmDeadline:
-        description: ConfirmDeadline is the RFC3339 revert moment; empty when no
-          change is pending.
+        description: ConfirmDeadline is the RFC3339 revert moment; empty when no change
+          is pending.
         example: "2026-07-11T12:00:00+03:00"
         type: string
       interfaces:
-        description: Interfaces are kernel interface names the server binds to;
-          empty = all (0.0.0.0).
+        description: Interfaces are kernel interface names the server binds to; empty
+          = all (0.0.0.0).
         example:
         - br0
         items:
@@ -4217,9 +4217,9 @@ definitions:
         type: boolean
       udpTimeout:
         description: |-
-          UDPTimeout sets the UDP session timeout for the tproxy-in inbound
-          (Go duration string, e.g. "3m0s", "10m0s"). Empty = use default (3m0s).
-          Increase to prevent long-quiet UDP applications (games, etc.) from
+          UDPTimeout sets the UDP session timeout for the tproxy-in / fakeip tun-in
+          inbound (Go duration string, e.g. "5m0s", "10m0s"). Empty = use default
+          (5m0s). Increase to prevent long-quiet UDP applications (games, etc.) from
           having their sessions silently dropped mid-game.
         example: 10m0s
         type: string
@@ -9534,9 +9534,8 @@ paths:
       - routing
   /server/listen:
     get:
-      description: Returns the configured port/interfaces, the ip:port addresses
-        with an active listener, and whether an applied change is still awaiting
-        confirmation.
+      description: Returns the configured port/interfaces, the ip:port addresses with
+        an active listener, and whether an applied change is still awaiting confirmation.
       produces:
       - application/json
       responses:
@@ -9561,8 +9560,8 @@ paths:
         the daemon: new listeners are bound first, old ones closed after (the server
         is never left without a listener). The change is NOT persisted yet — call
         /server/listen/confirm with the returned token before confirmDeadline, otherwise
-        listeners revert to the previous address. A 127.0.0.1 listener is always
-        kept (NDMS reverse proxy, health probes, rescue hatch).'
+        listeners revert to the previous address. A 127.0.0.1 listener is always kept
+        (NDMS reverse proxy, health probes, rescue hatch).'
       parameters:
       - description: New port and interface list (empty list = all interfaces)
         in: body
