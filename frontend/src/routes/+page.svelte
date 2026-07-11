@@ -47,6 +47,25 @@
 	import TunnelPageModals from '$lib/components/tunnels/TunnelPageModals.svelte';
 	import type { DashboardFlatContext } from '$lib/components/tunnels/dashboardFlatContext';
 	import type { TunnelPageModalsContext } from '$lib/components/tunnels/tunnelPageModalsContext';
+	import {
+		buildSingboxDelayMap,
+		computeAwgSummaryPeak,
+		computeAwgTrafficLeader,
+		computeSingboxTunnelListStats,
+		computeSubscriptionsTrafficStats,
+		externalStatusLabel,
+		externalStatusVariant,
+		isManagedTunnelOn,
+		managedRouteMeta,
+		sortFilterAwgList,
+		sortFilterExternalList,
+		sortFilterSingboxTunnels,
+		sortFilterSubscriptionsActiveCards,
+		sortFilterSubscriptionsListRows,
+		sortFilterSystemList,
+		systemStatusLabel,
+		systemStatusVariant,
+	} from '$lib/components/tunnels/tunnelPageSelectors';
 	import type { AwgTabContext } from '$lib/components/tunnels/awgTabContext';
 	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem } from '$lib/types';
 	import { formatBitRate, formatBytes, formatDuration, formatRelativeTime, secondsSince } from '$lib/utils/format';
@@ -103,7 +122,6 @@
 	} from '$lib/stores/tunnelTableSort';
 	import {
 		applyDirection,
-		ariaSort,
 		compareBool,
 		compareDelayLike,
 		compareNullableNumber,
@@ -119,9 +137,7 @@
 		if (layout === 'dense' || layout === 'cards') return 'dense';
 		return 'compact';
 	}
-	type ConnectivityCell = { connected: boolean; latency: number | null } | undefined;
 	type EndpointScope = 'managed' | 'system' | 'external';
-	type TunnelSortOption = { value: string; label: string };
 
 	const AWG_TUNNEL_VIEW_STORAGE_KEY = 'awg_tunnel_view_mode';
 	const SINGBOX_TUNNELS_LAYOUT_STORAGE_KEY = 'singbox_tunnels_layout_mode';
@@ -398,47 +414,7 @@
 
 	const singboxTunnelListStats = $derived.by(() => {
 		void trafficTick;
-		const list = singboxTunnelsList;
-		let running = 0;
-		let down = 0;
-		let up = 0;
-		let delaySum = 0;
-		let delayN = 0;
-		let leaderBytes = 0;
-		let leaderName = '—';
-		const trMap = $singboxTraffic;
-		const histMap = $singboxDelayHistory;
-		for (const t of list) {
-			if (t.running === true) running++;
-			const tr = trMap.get(t.tag);
-			if (tr) {
-				const tunnelDown = tr.download ?? 0;
-				const tunnelUp = tr.upload ?? 0;
-				const total = tunnelDown + tunnelUp;
-				down += tunnelDown;
-				up += tunnelUp;
-				if (total > leaderBytes) {
-					leaderBytes = total;
-					leaderName = t.tag;
-				}
-			}
-			const h = histMap.get(t.tag) ?? [];
-			const last = h.length > 0 ? h[h.length - 1] : 0;
-			if (typeof last === 'number' && last > 0) {
-				delaySum += last;
-				delayN++;
-			}
-		}
-		return {
-			count: list.length,
-			running,
-			stopped: list.length - running,
-			down,
-			up,
-			avgDelayMs: delayN > 0 ? Math.round(delaySum / delayN) : null,
-			leaderBytes,
-			leaderName,
-		};
+		return computeSingboxTunnelListStats(singboxTunnelsList, $singboxTraffic, $singboxDelayHistory);
 	});
 
 	let subscriptionsState = $derived($subscriptionsStore);
@@ -560,62 +536,14 @@
 
 	const singboxSubscriptionsTrafficStats = $derived.by(() => {
 		void trafficTick;
-		let down = 0;
-		let up = 0;
-		let delaySum = 0;
-		let delaySamples = 0;
-		let leaderBytes = 0;
-		let leaderName = '—';
-		const map = $singboxTraffic;
-		const delayMap = $singboxDelayHistory;
-
-		function ingestMember(tag: string, label: string, sampleDelay = false): void {
-			const tr = map.get(tag);
-			const memberDown = tr?.download ?? 0;
-			const memberUp = tr?.upload ?? 0;
-			const memberTotal = memberDown + memberUp;
-			down += memberDown;
-			up += memberUp;
-			if (memberTotal > leaderBytes) {
-				leaderBytes = memberTotal;
-				leaderName = label || tag;
-			}
-
-			if (sampleDelay) {
-				const delayHistory = delayMap.get(tag) ?? [];
-				const lastDelay = delayHistory.length > 0 ? delayHistory[delayHistory.length - 1] : 0;
-				if (typeof lastDelay === 'number' && lastDelay > 0) {
-					delaySum += lastDelay;
-					delaySamples += 1;
-				}
-			}
-		}
-
-		for (const card of subscriptionsActiveCards) {
-			ingestMember(
-				card.activeMember.tag,
-				card.subscription.label || card.activeMember.label || card.activeMember.tag,
-				true,
-			);
-		}
-		for (const sub of subscriptionsListRows) {
-			const tag = resolveSubscriptionMemberTag(sub, liveActives[sub.id] || null);
-			if (!tag) continue;
-			ingestMember(tag, sub.label || tag);
-		}
-		const totalTraffic = down + up;
-		return {
-			count: subscriptionsList.length,
-			activeCount: subscriptionsActiveCards.length,
-			inactiveCount: subscriptionsListRows.length,
-			down,
-			up,
-			avgDelayMs: delaySamples > 0 ? Math.round(delaySum / delaySamples) : null,
-			delaySamples,
-			leaderBytes,
-			leaderName,
-			leaderSharePct: totalTraffic > 0 ? Math.round((leaderBytes / totalTraffic) * 100) : 0,
-		};
+		return computeSubscriptionsTrafficStats(
+			subscriptionsList,
+			subscriptionsActiveCards,
+			subscriptionsListRows,
+			liveActives,
+			$singboxTraffic,
+			$singboxDelayHistory,
+		);
 	});
 
 	// Tabs
@@ -1069,62 +997,11 @@
 		),
 	);
 
-	function tunnelStatusBucket(status: string): 'running' | 'broken' | 'starting' | 'stopped' | 'disabled' | 'other' {
-		switch (status) {
-			case 'running':
-				return 'running';
-			case 'broken':
-				return 'broken';
-			case 'starting':
-			case 'needs_stop':
-			case 'stopping':
-				return 'starting';
-			case 'needs_start':
-			case 'stopped':
-			case 'not_created':
-				return 'stopped';
-			case 'disabled':
-				return 'disabled';
-			default:
-				return 'other';
-		}
-	}
-
-	function isManagedTunnelOn(tunnel: TunnelListItem): boolean {
-		return ['running', 'starting', 'broken'].includes(tunnel.status);
-	}
-
 	function showManagedPing(
 		tunnel: TunnelListItem,
 		connectivity: { connected: boolean; latency: number | null } | undefined,
 	): boolean {
 		return awgListShowsPingButton(tunnel, connectivity);
-	}
-
-	function managedRouteMeta(tunnel: TunnelListItem): string {
-		const iface = tunnel.resolvedIspInterface || tunnel.ispInterface || '';
-		const label = tunnel.resolvedIspInterfaceLabel || tunnel.ispInterfaceLabel || '';
-		if (label && iface) return label === iface ? label : `${label} (${iface})`;
-		if (label) return label;
-		if (iface) return iface;
-		return 'Маршрут не установлен';
-	}
-
-	function systemStatusVariant(tunnel: SystemTunnel): 'success' | 'muted' {
-		return tunnel.status === 'up' ? 'success' : 'muted';
-	}
-
-	function systemStatusLabel(tunnel: SystemTunnel): string {
-		if (tunnel.status !== 'up') return 'Выключен';
-		return tunnel.peer?.online ? 'Активен' : 'Без handshake';
-	}
-
-	function externalStatusVariant(tunnel: ExternalTunnel): 'success' | 'muted' {
-		return tunnel.lastHandshake ? 'success' : 'muted';
-	}
-
-	function externalStatusLabel(tunnel: ExternalTunnel): string {
-		return tunnel.lastHandshake ? 'Подключён' : 'Неактивен';
 	}
 
 	function latestRate(id: string): { rx: number; tx: number } {
@@ -1148,32 +1025,7 @@
 		externalList.filter((t) => !!t.lastHandshake).length,
 	);
 
-	let awgSummaryPeak = $derived.by(() => {
-		let rate = 0;
-		let name = '—';
-
-		for (const tunnel of awgList) {
-			if (!isManagedTunnelOn(tunnel)) continue;
-			const latest = latestRate(tunnel.id);
-			const combined = latest.rx + latest.tx;
-			if (combined > rate) {
-				rate = combined;
-				name = tunnel.name;
-			}
-		}
-
-		for (const tunnel of visibleSystemList) {
-			if (tunnel.status !== 'up') continue;
-			const latest = latestRate(tunnel.id);
-			const combined = latest.rx + latest.tx;
-			if (combined > rate) {
-				rate = combined;
-				name = tunnel.description || tunnel.interfaceName;
-			}
-		}
-
-		return { rate, name };
-	});
+	let awgSummaryPeak = $derived(computeAwgSummaryPeak(awgList, visibleSystemList, latestRate));
 
 	let awgSummaryRx = $derived(
 		awgList.reduce((sum, tunnel) => sum + (tunnel.rxBytes ?? 0), 0) +
@@ -1187,64 +1039,7 @@
 		externalList.reduce((sum, tunnel) => sum + tunnel.txBytes, 0),
 	);
 
-	let awgTrafficLeader = $derived.by(() => {
-		let bytes = 0;
-		let name = '—';
-
-		for (const tunnel of awgList) {
-			const total = (tunnel.rxBytes ?? 0) + (tunnel.txBytes ?? 0);
-			if (total > bytes) {
-				bytes = total;
-				name = tunnel.name;
-			}
-		}
-
-		for (const tunnel of visibleSystemList) {
-			const total = (tunnel.peer?.rxBytes ?? 0) + (tunnel.peer?.txBytes ?? 0);
-			if (total > bytes) {
-				bytes = total;
-				name = tunnel.description || tunnel.interfaceName;
-			}
-		}
-
-		for (const tunnel of externalList) {
-			const total = tunnel.rxBytes + tunnel.txBytes;
-			if (total > bytes) {
-				bytes = total;
-				name = tunnel.interfaceName;
-			}
-		}
-
-		return { bytes, name };
-	});
-
-	const awgSortOptions: TunnelSortOption[] = [
-		{ value: 'name', label: 'По имени' },
-		{ value: 'status', label: 'По статусу' },
-		{ value: 'endpoint', label: 'По endpoint' },
-		{ value: 'traffic', label: 'По трафику' },
-		{ value: 'handshake', label: 'По handshake' },
-	];
-
-	const singboxTunnelSortOptions: TunnelSortOption[] = [
-		{ value: 'delay', label: 'По delay' },
-		{ value: 'name', label: 'По имени' },
-		{ value: 'protocol', label: 'По протоколу' },
-		{ value: 'server', label: 'По серверу' },
-		{ value: 'running', label: 'По процессу' },
-		{ value: 'traffic', label: 'По трафику' },
-		{ value: 'ping', label: 'По ping' },
-	];
-
-	const subscriptionSortOptions: TunnelSortOption[] = [
-		{ value: 'delay', label: 'По delay' },
-		{ value: 'label', label: 'По имени' },
-		{ value: 'mode', label: 'По режиму' },
-		{ value: 'active', label: 'По активному серверу' },
-		{ value: 'traffic', label: 'По трафику' },
-		{ value: 'updated', label: 'По обновлению' },
-		{ value: 'ping', label: 'По ping' },
-	];
+	let awgTrafficLeader = $derived(computeAwgTrafficLeader(awgList, visibleSystemList, externalList));
 
 	function handleAwgSortChange(key: AwgTunnelSortKey): void {
 		awgTunnelTableSort.toggleSort(key);
@@ -1258,313 +1053,53 @@
 		singboxSubscriptionTableSort.toggleSort(key);
 	}
 
-	function matchQuery(values: Array<string | null | undefined>, query: string): boolean {
-		const q = query.trim().toLowerCase();
-		if (!q) return true;
-		return values.some((value) => String(value ?? '').toLowerCase().includes(q));
-	}
+	let sortedFilteredAwgList = $derived(
+		sortFilterAwgList(awgList, effectiveAwgSearchQuery, $awgTunnelTableSort.sortBy, $awgTunnelTableSort.sortAsc),
+	);
 
-	function awgStatusRank(tunnel: TunnelListItem): number {
-		switch (tunnelStatusBucket(tunnel.status)) {
-			case 'running':
-				return 0;
-			case 'starting':
-				return 1;
-			case 'broken':
-				return 2;
-			case 'stopped':
-				return 3;
-			case 'disabled':
-				return 4;
-			default:
-				return 5;
-		}
-	}
+	let sortedFilteredSystemList = $derived(
+		sortFilterSystemList(visibleSystemList, effectiveAwgSearchQuery, $awgTunnelTableSort.sortBy, $awgTunnelTableSort.sortAsc),
+	);
 
-	let sortedFilteredAwgList = $derived.by(() => {
-		const query = effectiveAwgSearchQuery.trim().toLowerCase();
-		const filtered = awgList.filter((tunnel) =>
-			matchQuery(
-				[
-					tunnel.name,
-					tunnel.interfaceName,
-					tunnel.id,
-					tunnel.ndmsName,
-					tunnel.address,
-					tunnel.endpoint,
-					tunnel.backend,
-					tunnel.awgVersion,
-				],
-				query,
-			),
-		);
-		const sortBy = $awgTunnelTableSort.sortBy;
-		if (!sortBy) return filtered;
-		const asc = $awgTunnelTableSort.sortAsc;
-		return [...filtered].sort((a, b) => {
-			switch (sortBy) {
-				case 'name':
-					return applyDirection(compareString(a.name, b.name), asc);
-				case 'status':
-					return applyDirection(compareNullableNumber(awgStatusRank(a), awgStatusRank(b), false), asc);
-				case 'endpoint':
-					return applyDirection(compareString(a.endpoint, b.endpoint), asc);
-				case 'traffic':
-					return applyDirection(
-						compareNullableNumber((a.rxBytes ?? 0) + (a.txBytes ?? 0), (b.rxBytes ?? 0) + (b.txBytes ?? 0), false),
-						asc,
-					);
-				case 'handshake':
-					return applyDirection(
-						compareNullableNumber(
-							a.lastHandshake ? new Date(a.lastHandshake).getTime() : null,
-							b.lastHandshake ? new Date(b.lastHandshake).getTime() : null,
-						),
-						asc,
-					);
-			}
-		});
-	});
+	let sortedFilteredExternalList = $derived(
+		sortFilterExternalList(externalList, effectiveAwgSearchQuery, $awgTunnelTableSort.sortBy, $awgTunnelTableSort.sortAsc),
+	);
 
-	let sortedFilteredSystemList = $derived.by(() => {
-		const query = effectiveAwgSearchQuery.trim().toLowerCase();
-		const filtered = visibleSystemList.filter((tunnel) =>
-			matchQuery(
-				[
-					tunnel.description,
-					tunnel.interfaceName,
-					tunnel.id,
-					tunnel.address,
-					tunnel.peer?.endpoint,
-					tunnel.peer?.via,
-				],
-				query,
-			),
-		);
-		const sortBy = $awgTunnelTableSort.sortBy;
-		if (!sortBy) return filtered;
-		const asc = $awgTunnelTableSort.sortAsc;
-		return [...filtered].sort((a, b) => {
-			switch (sortBy) {
-				case 'name':
-					return applyDirection(compareString(a.description || a.id, b.description || b.id), asc);
-				case 'status':
-					return applyDirection(compareBool(a.status === 'up', b.status === 'up'), asc);
-				case 'endpoint':
-					return applyDirection(compareString(a.peer?.endpoint, b.peer?.endpoint), asc);
-				case 'traffic':
-					return applyDirection(
-						compareNullableNumber(
-							(a.peer?.rxBytes ?? 0) + (a.peer?.txBytes ?? 0),
-							(b.peer?.rxBytes ?? 0) + (b.peer?.txBytes ?? 0),
-							false,
-						),
-						asc,
-					);
-				case 'handshake':
-					return applyDirection(
-						compareNullableNumber(
-							a.peer?.lastHandshake ? new Date(a.peer.lastHandshake).getTime() : null,
-							b.peer?.lastHandshake ? new Date(b.peer.lastHandshake).getTime() : null,
-						),
-						asc,
-					);
-			}
-		});
-	});
+	let singboxTunnelDelayValue = $derived(buildSingboxDelayMap(singboxTunnelsList, $singboxDelayHistory));
 
-	let sortedFilteredExternalList = $derived.by(() => {
-		const query = effectiveAwgSearchQuery.trim().toLowerCase();
-		const filtered = externalList.filter((tunnel) =>
-			matchQuery([tunnel.interfaceName, tunnel.endpoint, tunnel.publicKey, tunnel.isAWG ? 'awg' : 'wg'], query),
-		);
-		const sortBy = $awgTunnelTableSort.sortBy;
-		if (!sortBy) return filtered;
-		const asc = $awgTunnelTableSort.sortAsc;
-		return [...filtered].sort((a, b) => {
-			switch (sortBy) {
-				case 'name':
-					return applyDirection(compareString(a.interfaceName, b.interfaceName), asc);
-				case 'status':
-					return applyDirection(compareBool(!!a.lastHandshake, !!b.lastHandshake), asc);
-				case 'endpoint':
-					return applyDirection(compareString(a.endpoint, b.endpoint), asc);
-				case 'traffic':
-					return applyDirection(compareNullableNumber(a.rxBytes + a.txBytes, b.rxBytes + b.txBytes, false), asc);
-				case 'handshake':
-					return applyDirection(
-						compareNullableNumber(
-							a.lastHandshake ? new Date(a.lastHandshake).getTime() : null,
-							b.lastHandshake ? new Date(b.lastHandshake).getTime() : null,
-						),
-						asc,
-					);
-			}
-		});
-	});
+	let sortedFilteredSingboxTunnels = $derived(
+		sortFilterSingboxTunnels(
+			singboxTunnelsList,
+			effectiveSingboxTunnelsSearchQuery,
+			$singboxTunnelTableSort.sortBy,
+			$singboxTunnelTableSort.sortAsc,
+			singboxTunnelDelayValue,
+			$singboxTraffic,
+		),
+	);
 
-	let singboxTunnelDelayValue = $derived.by(() => {
-		const map = new Map<string, number | null>();
-		for (const tunnel of singboxTunnelsList) {
-			const history = $singboxDelayHistory.get(tunnel.tag) ?? [];
-			const latest = history.length > 0 ? history[history.length - 1] : null;
-			map.set(tunnel.tag, latest && latest > 0 ? latest : null);
-		}
-		return map;
-	});
+	let sortedFilteredSubscriptionsActiveCards = $derived(
+		sortFilterSubscriptionsActiveCards(
+			subscriptionsActiveCards,
+			effectiveSubscriptionsSearchQuery,
+			$singboxSubscriptionTableSort.sortBy,
+			$singboxSubscriptionTableSort.sortAsc,
+			$singboxTraffic,
+			$singboxDelayHistory,
+		),
+	);
 
-	let sortedFilteredSingboxTunnels = $derived.by(() => {
-		const query = effectiveSingboxTunnelsSearchQuery.trim().toLowerCase();
-		const filtered = singboxTunnelsList.filter((tunnel) =>
-			matchQuery(
-				[
-					tunnel.tag,
-					tunnel.protocol,
-					tunnel.server,
-					tunnel.proxyInterface,
-					tunnel.kernelInterface,
-					tunnel.transport,
-					tunnel.security,
-				],
-				query,
-			),
-		);
-		const sortBy = $singboxTunnelTableSort.sortBy;
-		if (!sortBy) return filtered;
-		const asc = $singboxTunnelTableSort.sortAsc;
-		return [...filtered].sort((a, b) => {
-			switch (sortBy) {
-				case 'delay':
-					return compareDelayLike(singboxTunnelDelayValue.get(a.tag), singboxTunnelDelayValue.get(b.tag), asc);
-				case 'ping':
-					return compareDelayLike(singboxTunnelDelayValue.get(a.tag), singboxTunnelDelayValue.get(b.tag), asc);
-				case 'name':
-					return applyDirection(compareString(a.tag, b.tag), asc);
-				case 'protocol':
-					return applyDirection(compareString(a.protocol, b.protocol), asc);
-				case 'server':
-					return applyDirection(compareString(`${a.server}:${a.port}`, `${b.server}:${b.port}`), asc);
-				case 'running':
-					return applyDirection(compareBool(a.running, b.running), asc);
-				case 'traffic':
-					return applyDirection(
-						compareNullableNumber(
-							($singboxTraffic.get(a.tag)?.download ?? 0) + ($singboxTraffic.get(a.tag)?.upload ?? 0),
-							($singboxTraffic.get(b.tag)?.download ?? 0) + ($singboxTraffic.get(b.tag)?.upload ?? 0),
-							false,
-						),
-						asc,
-					);
-			}
-		});
-	});
-
-	function subscriptionTrafficBytes(subscription: Subscription, activeTag: string | null): number {
-		if (!activeTag) return 0;
-		const traffic = $singboxTraffic.get(activeTag);
-		return (traffic?.download ?? 0) + (traffic?.upload ?? 0);
-	}
-
-	function subscriptionDelayValue(subscription: Subscription, activeTag: string | null): number | null {
-		if (!activeTag) return null;
-		const history = $singboxDelayHistory.get(activeTag) ?? [];
-		const latest = history.length > 0 ? history[history.length - 1] : null;
-		return latest && latest > 0 ? latest : null;
-	}
-
-	let sortedFilteredSubscriptionsActiveCards = $derived.by(() => {
-		const query = effectiveSubscriptionsSearchQuery.trim().toLowerCase();
-		const filtered = subscriptionsActiveCards.filter(({ subscription, activeMember }) =>
-			matchQuery(
-				[
-					subscription.label,
-					subscription.url,
-					subscription.inboundTag,
-					subscription.selectorTag,
-					activeMember.tag,
-					activeMember.label,
-					activeMember.server,
-					`Proxy${subscription.proxyIndex}`,
-					`t2s${subscription.proxyIndex}`,
-				],
-				query,
-			),
-		);
-		const sortBy = $singboxSubscriptionTableSort.sortBy;
-		if (!sortBy) return filtered;
-		const asc = $singboxSubscriptionTableSort.sortAsc;
-		return [...filtered].sort((a, b) => {
-			switch (sortBy) {
-				case 'delay':
-					return compareDelayLike(subscriptionDelayValue(a.subscription, a.activeMember.tag), subscriptionDelayValue(b.subscription, b.activeMember.tag), asc);
-				case 'ping':
-					return compareDelayLike(subscriptionDelayValue(a.subscription, a.activeMember.tag), subscriptionDelayValue(b.subscription, b.activeMember.tag), asc);
-				case 'label':
-					return applyDirection(compareString(a.subscription.label, b.subscription.label), asc);
-				case 'mode':
-					return applyDirection(compareString(a.subscription.mode, b.subscription.mode), asc);
-				case 'active':
-					return applyDirection(compareString(a.activeMember.label || a.activeMember.tag, b.activeMember.label || b.activeMember.tag), asc);
-				case 'traffic':
-					return applyDirection(compareNullableNumber(subscriptionTrafficBytes(a.subscription, a.activeMember.tag), subscriptionTrafficBytes(b.subscription, b.activeMember.tag), false), asc);
-				case 'updated':
-					return applyDirection(compareNullableNumber(
-						a.subscription.lastFetched ? new Date(a.subscription.lastFetched).getTime() : null,
-						b.subscription.lastFetched ? new Date(b.subscription.lastFetched).getTime() : null,
-					), asc);
-			}
-		});
-	});
-
-	let sortedFilteredSubscriptionsListRows = $derived.by(() => {
-		const query = effectiveSubscriptionsSearchQuery.trim().toLowerCase();
-		const filtered = subscriptionsListRows.filter((subscription) => {
-			const activeTag = liveActives[subscription.id] || null;
-			const member = subscription.members?.find((m) => m.tag === activeTag) ?? null;
-			return matchQuery(
-				[
-					subscription.label,
-					subscription.url,
-					subscription.inboundTag,
-					subscription.selectorTag,
-					member?.tag,
-					member?.label,
-					member?.server,
-					`Proxy${subscription.proxyIndex}`,
-					`t2s${subscription.proxyIndex}`,
-				],
-				query,
-			);
-		});
-		const sortBy = $singboxSubscriptionTableSort.sortBy;
-		if (!sortBy) return filtered;
-		const asc = $singboxSubscriptionTableSort.sortAsc;
-		return [...filtered].sort((a, b) => {
-			const activeA = liveActives[a.id] || resolveSubscriptionMemberTag(a, null);
-			const activeB = liveActives[b.id] || resolveSubscriptionMemberTag(b, null);
-			const memberA = a.members?.find((m) => m.tag === activeA) ?? null;
-			const memberB = b.members?.find((m) => m.tag === activeB) ?? null;
-			switch (sortBy) {
-				case 'delay':
-					return compareDelayLike(subscriptionDelayValue(a, activeA), subscriptionDelayValue(b, activeB), asc);
-				case 'ping':
-					return compareDelayLike(subscriptionDelayValue(a, activeA), subscriptionDelayValue(b, activeB), asc);
-				case 'label':
-					return applyDirection(compareString(a.label, b.label), asc);
-				case 'mode':
-					return applyDirection(compareString(a.mode, b.mode), asc);
-				case 'active':
-					return applyDirection(compareString(memberA?.label || memberA?.tag, memberB?.label || memberB?.tag), asc);
-				case 'traffic':
-					return applyDirection(compareNullableNumber(subscriptionTrafficBytes(a, activeA), subscriptionTrafficBytes(b, activeB), false), asc);
-				case 'updated':
-					return applyDirection(compareNullableNumber(
-						a.lastFetched ? new Date(a.lastFetched).getTime() : null,
-						b.lastFetched ? new Date(b.lastFetched).getTime() : null,
-					), asc);
-			}
-		});
-	});
+	let sortedFilteredSubscriptionsListRows = $derived(
+		sortFilterSubscriptionsListRows(
+			subscriptionsListRows,
+			effectiveSubscriptionsSearchQuery,
+			$singboxSubscriptionTableSort.sortBy,
+			$singboxSubscriptionTableSort.sortAsc,
+			liveActives,
+			$singboxTraffic,
+			$singboxDelayHistory,
+		),
+	);
 
 	let awgSourceRowCount = $derived(awgList.length + visibleSystemList.length + externalList.length);
 	let singboxTunnelsSourceRowCount = $derived(singboxTunnelsList.length);
