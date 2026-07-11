@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { AccessPolicyInterface, PolicyGlobalInterface } from '$lib/types';
+	import { errorMessage } from '$lib/utils/errorMessage';
 	import { ConfirmModal, Badge, Button } from '$lib/components/ui';
 	import { Power, ChevronUp, ChevronDown, Check, Ban } from 'lucide-svelte';
 	import { api } from '$lib/api/client';
@@ -79,8 +80,8 @@
 		try {
 			await api.setPolicyInterfaceUp(name, !currentlyUp);
 			onupdate();
-		} catch (e: any) {
-			notifications.error(`Ошибка: ${e.message}`);
+		} catch (e) {
+			notifications.error(`Ошибка: ${errorMessage(e)}`);
 		} finally {
 			toggling = '';
 		}

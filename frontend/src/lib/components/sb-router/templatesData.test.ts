@@ -15,8 +15,8 @@ const presetYoutube: SingboxRouterPreset = {
   id: 'youtube', name: 'YouTube', category: 'media',
   ruleSets: [], rules: [],
 };
-const rsTelegram: SingboxRouterRuleSet = { tag: 'telegram', type: 'remote' } as SingboxRouterRuleSet;
-const rsGeoipRu: SingboxRouterRuleSet = { tag: 'geoip:ru', type: 'inline' } as SingboxRouterRuleSet;
+const rsTelegram: SingboxRouterRuleSet = { tag: 'telegram', type: 'remote' };
+const rsGeoipRu: SingboxRouterRuleSet = { tag: 'geoip:ru', type: 'inline' };
 
 describe('templatesData.buildTemplateList', () => {
   it('without rulesets returns only services group', () => {

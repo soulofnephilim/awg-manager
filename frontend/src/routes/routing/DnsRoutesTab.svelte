@@ -1,5 +1,6 @@
 <script lang="ts">
     import { api } from '$lib/api/client';
+    import { errorMessage } from '$lib/utils/errorMessage';
     import { Globe, LayoutGrid, Upload } from 'lucide-svelte';
     import type { DnsRoute, RoutingTunnel, CatalogPreset } from '$lib/types';
     import { ConfirmModal, StoreStatusBadge, Button, Dropdown, type DropdownOption } from '$lib/components/ui';
@@ -108,8 +109,8 @@
             } else {
                 notifications.success('DNS-маршрут создан');
             }
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка создания');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка создания'));
         } finally {
             dnsSaving = false;
         }
@@ -137,8 +138,8 @@
             } else {
                 notifications.success('DNS-маршрут обновлён');
             }
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка сохранения');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка сохранения'));
         } finally {
             dnsSaving = false;
         }
@@ -149,8 +150,8 @@
         try {
             const fresh = await api.setDnsRouteEnabled(id, enabled);
             dnsRoutesStore.applyMutationResponse(fresh);
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка'));
         } finally {
             dnsToggling = null;
         }
@@ -164,8 +165,8 @@
             const fresh = await api.deleteDnsRoute(id);
             dnsRoutesStore.applyMutationResponse(fresh);
             notifications.success('DNS-маршрут удалён');
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка удаления');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка удаления'));
         }
     }
 
@@ -541,8 +542,8 @@
             try {
                 await api.updateDnsRoute(route.id, { ...route, iconUrl: newUrl ?? undefined });
                 notifications.success(newUrl ? 'Иконка изменена' : 'Иконка сброшена');
-            } catch (e: any) {
-                notifications.error(e?.message || 'Не удалось обновить иконку');
+            } catch (e) {
+                notifications.error(errorMessage(e, 'Не удалось обновить иконку'));
             }
         }}
     />

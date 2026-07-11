@@ -38,7 +38,7 @@ export function highlightAmneziaConfContent(raw: string): string {
 	const lines = raw.split('\n');
 	const parts: string[] = [];
 	for (let i = 0; i < lines.length; i++) {
-		parts.push(highlightLine(lines[i]!));
+		parts.push(highlightLine(lines[i]));
 		if (i < lines.length - 1) parts.push('\n');
 	}
 	return parts.join('');

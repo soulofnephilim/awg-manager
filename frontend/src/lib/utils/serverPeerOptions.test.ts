@@ -7,7 +7,7 @@ import {
 import type { ServersSnapshot } from '$lib/stores/servers';
 
 function snap(over: Partial<ServersSnapshot> = {}): ServersSnapshot {
-  return { servers: [], managed: [], managedStats: {}, ...over } as ServersSnapshot;
+  return { servers: [], managed: [], managedStats: {}, ...over };
 }
 
 describe('serverPeerOptions value codec', () => {

@@ -30,7 +30,7 @@ export async function resolveTunnelOutbound(
   existingOutbounds: SingboxRouterOutbound[],
 ): Promise<string> {
   if (tunnelTags.length === 0) throw new ValidationError('Выберите туннель');
-  if (tunnelTags.length === 1) return tunnelTags[0]!;
+  if (tunnelTags.length === 1) return tunnelTags[0];
 
   const existing = findMatchingComposite(existingOutbounds, tunnelTags);
   if (existing) return existing.tag;
@@ -117,7 +117,7 @@ export async function submitWizard(args: SubmitWizardArgs): Promise<SubmitResult
         rule.outbound = outbound;
         rule.action = 'route';
       }
-      await api.singboxRouterAddRule(rule as SingboxRouterRule);
+      await api.singboxRouterAddRule(rule);
       combined.successes.push('custom');
     } catch (e) {
       combined.failures.push({ id: 'custom', error: e instanceof Error ? e.message : String(e) });
@@ -181,7 +181,7 @@ export async function submitWizardEdit(args: SubmitWizardEditArgs): Promise<void
     if (args.selectedTemplates.length !== 1) {
       throw new ValidationError('Выберите один шаблон');
     }
-    const tag = ruleSetTagFromTemplateId(args.selectedTemplates[0]!, args.groups, args.presets);
+    const tag = ruleSetTagFromTemplateId(args.selectedTemplates[0], args.groups, args.presets);
     if (!tag) throw new ValidationError('Шаблон не найден');
     await api.singboxRouterUpdateRule(args.ruleIndex, buildRoutedRule(outbound, [tag]));
     return;
