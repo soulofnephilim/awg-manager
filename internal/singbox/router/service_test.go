@@ -546,6 +546,75 @@ func TestUpdateSettings_SelectiveBypassRejectedWhenFinalNotDirect(t *testing.T) 
 	}
 }
 
+// #486: селективный перехват, включённый в tproxy, вне tproxy СПИТ и не
+// должен блокировать несвязанные изменения настроек в fakeip-режиме —
+// в частности переключение TCP/IP-стека.
+func TestUpdateSettings_FakeIPStackChangeAllowedWithDormantSelective(t *testing.T) {
+	svc, _ := newOrchedTestService(t)
+
+	// Наследие tproxy: selectiveBypass уже включён в персисте.
+	all, err := svc.deps.Settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	all.SingboxRouter.SelectiveBypass = true
+	all.SingboxRouter.RoutingMode = "fakeip-tun"
+	if err := svc.deps.Settings.Save(all); err != nil {
+		t.Fatal(err)
+	}
+
+	// Репро issue: фронт мержит патч стека с текущими настройками и шлёт
+	// полный объект, включая унаследованный selectiveBypass=true.
+	err = svc.UpdateSettings(context.Background(), storage.SingboxRouterSettings{
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		RoutingMode:     "fakeip-tun",
+		SelectiveBypass: true,
+		FakeIPStack:     "system",
+	})
+	if err != nil {
+		t.Fatalf("stack switch must not be blocked by dormant selectiveBypass: %v", err)
+	}
+
+	saved, err := svc.deps.Settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.SingboxRouter.FakeIPStack != "system" {
+		t.Errorf("fakeipStack not persisted: %q", saved.SingboxRouter.FakeIPStack)
+	}
+	if !saved.SingboxRouter.SelectiveBypass {
+		t.Error("dormant selectiveBypass must survive the settings update (не сбрасывается молча)")
+	}
+}
+
+// #486 (обратная сторона): ВКЛЮЧИТЬ селективный перехват, находясь вне
+// tproxy, по-прежнему нельзя — dormant-послабление касается только уже
+// включённого флага.
+func TestUpdateSettings_SelectiveEnableRejectedOutsideTproxy(t *testing.T) {
+	svc, _ := newOrchedTestService(t)
+
+	err := svc.UpdateSettings(context.Background(), storage.SingboxRouterSettings{
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		RoutingMode:     "fakeip-tun",
+		SelectiveBypass: true,
+	})
+	if err == nil {
+		t.Fatal("expected enabling selectiveBypass outside tproxy to be rejected")
+	}
+	if !strings.Contains(err.Error(), "tproxy") {
+		t.Errorf("error should mention tproxy, got %q", err.Error())
+	}
+	saved, err := svc.deps.Settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.SingboxRouter.SelectiveBypass {
+		t.Error("selectiveBypass must not be persisted when enable is rejected")
+	}
+}
+
 func TestSetRouteFinal_DisablesSelectiveBypass(t *testing.T) {
 	singbox := newTestSingbox(t)
 	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
