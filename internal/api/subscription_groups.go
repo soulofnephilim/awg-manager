@@ -221,6 +221,7 @@ func (h *SubscriptionHandler) CreateGroup(w http.ResponseWriter, r *http.Request
 		h.respondGroupServiceError(w, err)
 		return
 	}
+	h.log.Info("subscription-group-create", g.Label, "Subscription group created: "+g.Label)
 	response.Success(w, h.toSubscriptionGroupDTO(*g))
 }
 
@@ -276,6 +277,7 @@ func (h *SubscriptionHandler) UpdateGroup(w http.ResponseWriter, r *http.Request
 		h.respondGroupServiceError(w, err)
 		return
 	}
+	h.log.Info("subscription-group-update", g.Label, "Subscription group updated: "+g.Label)
 	response.Success(w, h.toSubscriptionGroupDTO(*g))
 }
 
@@ -306,10 +308,15 @@ func (h *SubscriptionHandler) DeleteGroup(w http.ResponseWriter, r *http.Request
 		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
 		return
 	}
+	label := req.ID
+	if g, err := h.svc.GetGroup(req.ID); err == nil && g.Label != "" {
+		label = g.Label
+	}
 	if err := h.svc.DeleteGroup(r.Context(), req.ID); err != nil {
 		h.respondGroupServiceError(w, err)
 		return
 	}
+	h.log.Info("subscription-group-delete", req.ID, "Subscription group deleted: "+label)
 	response.Success(w, struct {
 		OK bool `json:"ok"`
 	}{true})

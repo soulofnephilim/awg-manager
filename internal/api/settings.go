@@ -441,6 +441,33 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			h.log.Info("memory-saving", "", "Memory saving enabled")
 		}
 	}
+	if oldSettings.ConnectivityCheckURL != merged.ConnectivityCheckURL {
+		h.log.Info("connectivity-check", "", fmt.Sprintf("Connectivity check URL changed: %s -> %s", oldSettings.ConnectivityCheckURL, merged.ConnectivityCheckURL))
+	}
+	if oldSettings.Download != merged.Download {
+		h.log.Info("download-route", "", fmt.Sprintf("Download route changed: %s -> %s", formatDownloadRoute(oldSettings.Download), formatDownloadRoute(merged.Download)))
+	}
+	if oldSettings.UsageLevel != merged.UsageLevel {
+		h.log.Info("usage-level", "", fmt.Sprintf("Usage level changed: %s -> %s", oldSettings.UsageLevel, merged.UsageLevel))
+	}
+	if oldSettings.DNSRoute != merged.DNSRoute {
+		h.log.Info("dns-route-schedule", "", fmt.Sprintf("DNS route auto-refresh schedule changed: %s -> %s",
+			formatRefreshSchedule(oldSettings.DNSRoute.AutoRefreshEnabled, oldSettings.DNSRoute.RefreshMode, oldSettings.DNSRoute.RefreshIntervalHours, oldSettings.DNSRoute.RefreshDailyTime),
+			formatRefreshSchedule(merged.DNSRoute.AutoRefreshEnabled, merged.DNSRoute.RefreshMode, merged.DNSRoute.RefreshIntervalHours, merged.DNSRoute.RefreshDailyTime)))
+	}
+	if oldSettings.GeoFile != merged.GeoFile {
+		h.log.Info("geo-file-schedule", "", fmt.Sprintf("Geo file auto-refresh schedule changed: %s -> %s",
+			formatRefreshSchedule(oldSettings.GeoFile.AutoRefreshEnabled, oldSettings.GeoFile.RefreshMode, oldSettings.GeoFile.RefreshIntervalHours, oldSettings.GeoFile.RefreshDailyTime),
+			formatRefreshSchedule(merged.GeoFile.AutoRefreshEnabled, merged.GeoFile.RefreshMode, merged.GeoFile.RefreshIntervalHours, merged.GeoFile.RefreshDailyTime)))
+	}
+	if oldSettings.Logging.MaxAge != merged.Logging.MaxAge {
+		h.log.Info("logging", "", fmt.Sprintf("Log max age changed: %dh -> %dh", oldSettings.Logging.MaxAge, merged.Logging.MaxAge))
+	}
+	if oldSettings.Logging.AppMaxEntries != merged.Logging.AppMaxEntries || oldSettings.Logging.SingboxMaxEntries != merged.Logging.SingboxMaxEntries {
+		h.log.Info("logging", "", fmt.Sprintf("Log max entries changed: app %d -> %d, singbox %d -> %d",
+			oldSettings.Logging.AppMaxEntries, merged.Logging.AppMaxEntries,
+			oldSettings.Logging.SingboxMaxEntries, merged.Logging.SingboxMaxEntries))
+	}
 
 	if h.pingCheckSnapshot != nil && (toggleEnabled || toggleDisabled) {
 		h.pingCheckSnapshot()
@@ -506,6 +533,27 @@ func generateUUIDv4() (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// formatDownloadRoute renders a download route for the settings diff log,
+// e.g. "direct" or "vless-de (outbound)".
+func formatDownloadRoute(d storage.DownloadSettings) string {
+	if d.RouteKind == "" || d.RouteKind == d.RouteTag {
+		return d.RouteTag
+	}
+	return d.RouteTag + " (" + d.RouteKind + ")"
+}
+
+// formatRefreshSchedule renders an auto-refresh schedule (dnsRoute/geoFile)
+// for the settings diff log, e.g. "off", "every 24h" or "daily at 03:00".
+func formatRefreshSchedule(enabled bool, mode string, intervalHours int, dailyTime string) string {
+	if !enabled {
+		return "off"
+	}
+	if mode == "daily" {
+		return "daily at " + dailyTime
+	}
+	return fmt.Sprintf("every %dh", intervalHours)
 }
 
 func normalizePingCheckTarget(target string) string {

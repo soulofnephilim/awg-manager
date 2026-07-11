@@ -224,6 +224,7 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateServerRequest
 	}
 
 	s.log.Info("managed server updated", "interface", server.InterfaceName, "address", req.Address, "port", req.ListenPort)
+	s.appLog.Info("update", server.InterfaceName, fmt.Sprintf("Managed server updated on %s", server.InterfaceName))
 	return nil
 }
 
@@ -707,5 +708,10 @@ func (s *Service) SetLANSegments(ctx context.Context, id string, segments []stri
 		return fmt.Errorf("save to storage: %w", err)
 	}
 	s.log.Info("managed server LAN segments changed", "interface", server.InterfaceName, "segments", segments)
+	segs := strings.Join(segments, ", ")
+	if segs == "" {
+		segs = "none"
+	}
+	s.appLog.Info("lan-segments", server.InterfaceName, "LAN segments changed: "+segs)
 	return nil
 }

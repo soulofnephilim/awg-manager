@@ -175,6 +175,7 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		h.respondServiceError(w, err)
 		return
 	}
+	h.log.Info("subscription-create", sub.Label, "Subscription created: "+sub.Label)
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))
 }
 
@@ -268,6 +269,7 @@ func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		h.respondServiceError(w, err)
 		return
 	}
+	h.log.Info("subscription-update", sub.Label, "Subscription updated: "+sub.Label)
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))
 }
 
@@ -289,7 +291,11 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	label := id
 	if sub, err := h.svc.Get(id); err == nil {
+		if sub.Label != "" {
+			label = sub.Label
+		}
 		tags := make([]string, 0, 1+len(sub.MemberTags))
 		if sub.SelectorTag != "" {
 			tags = append(tags, sub.SelectorTag)
@@ -308,6 +314,7 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("subscription-delete", id, "Subscription deleted: "+label)
 	response.Success(w, struct {
 		OK bool `json:"ok"`
 	}{true})
