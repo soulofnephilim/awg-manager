@@ -593,8 +593,10 @@ const api_LANSegmentsListResponse: v.GenericSchema = v.looseObject({
 const api_LogEntryDTO: v.GenericSchema = v.looseObject({
 	action: v.optional(v.nullable(v.string())),
 	group: v.optional(v.nullable(v.string())),
+	lastSeen: v.optional(v.nullable(v.string())),
 	level: v.optional(v.nullable(v.string())),
 	message: v.optional(v.nullable(v.string())),
+	repeats: v.optional(v.nullable(v.number())),
 	sanitized: v.optional(v.nullable(v.boolean())),
 	subgroup: v.optional(v.nullable(v.string())),
 	target: v.optional(v.nullable(v.string())),

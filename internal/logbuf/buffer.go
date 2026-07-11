@@ -140,6 +140,29 @@ func (b *Buffer[T]) FilterPage(pred func(T) bool, limit, offset int) ([]T, int) 
 	return page, total
 }
 
+// UpdateRecent scans entries newest-first, at most scanLimit of them
+// (0 = no cap), and applies update in place to the first entry matching
+// match. Returns a copy of the updated entry. Entry order and timestamps
+// are untouched — the caller's update decides what changes.
+func (b *Buffer[T]) UpdateRecent(scanLimit int, match func(T) bool, update func(*T)) (T, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	scanned := 0
+	for i := len(b.entries) - 1; i >= 0; i-- {
+		if scanLimit > 0 && scanned >= scanLimit {
+			break
+		}
+		scanned++
+		if match(b.entries[i]) {
+			update(&b.entries[i])
+			return b.entries[i], true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
 // Clear drops all entries.
 func (b *Buffer[T]) Clear() {
 	b.mu.Lock()

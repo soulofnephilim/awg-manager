@@ -32,14 +32,30 @@ function createLogStore(bucket: LogBucket) {
     loaded: { subscribe: loaded.subscribe },
     lastSeenTs: { subscribe: lastSeenTs.subscribe },
     stats: { subscribe: stats.subscribe },
-    /** SSE-driven head append (newest at front). */
+    /** SSE-driven head append (newest at front). Повтор (repeats > 0)
+     * обновляет существующую строку по составному ключу вместо новой. */
     append(entry: LogEntryEvent) {
       const logEntry: LogEntry = {
         ...entry,
         subgroup: entry.subgroup ?? '',
       };
-      const ts = new Date(entry.timestamp).getTime();
+      const ts = new Date(entry.lastSeen ?? entry.timestamp).getTime();
       lastSeenTs.update((cur) => (ts > cur ? ts : cur));
+      if ((entry.repeats ?? 0) > 0) {
+        const key = keyOf(logEntry);
+        let found = false;
+        update((entries) => {
+          const idx = entries.findIndex((e) => keyOf(e) === key);
+          if (idx === -1) return entries;
+          found = true;
+          const next = entries.slice();
+          next[idx] = { ...next[idx], repeats: entry.repeats, lastSeen: entry.lastSeen };
+          return next;
+        });
+        // Первое появление могло не попасть в клиентский буфер (страница
+        // открыта позже) — тогда повтор вставляется как обычная строка.
+        if (found) return;
+      }
       update((entries) => {
         const updated = [logEntry, ...entries];
         if (updated.length > MAX_ENTRIES) updated.length = MAX_ENTRIES;
@@ -47,14 +63,23 @@ function createLogStore(bucket: LogBucket) {
       });
       logsTotal.update((n) => n + 1);
     },
-    /** Catch-up merge after SSE reconnect — keeps entries newest-first, dedups by composite key. */
+    /** Catch-up merge after SSE reconnect — keeps entries newest-first, dedups by composite key.
+     * Дубликат с бОльшим repeats освежает счётчик существующей строки. */
     appendMany(arr: LogEntry[]) {
       update((entries) => {
-        const seen = new Set(entries.map(keyOf));
+        const byKey = new Map(entries.map((e, i) => [keyOf(e), i]));
         const newOnes: LogEntry[] = [];
+        let refreshed: LogEntry[] | null = null;
         for (const e of arr) {
-          if (!seen.has(keyOf(e))) newOnes.push(e);
+          const idx = byKey.get(keyOf(e));
+          if (idx === undefined) {
+            newOnes.push(e);
+          } else if ((e.repeats ?? 0) > ((refreshed ?? entries)[idx].repeats ?? 0)) {
+            refreshed = refreshed ?? entries.slice();
+            refreshed[idx] = { ...refreshed[idx], repeats: e.repeats, lastSeen: e.lastSeen };
+          }
         }
+        if (refreshed) entries = refreshed;
         if (newOnes.length === 0) return entries;
         const newestTs = newOnes.reduce((m, e) => Math.max(m, new Date(e.timestamp).getTime()), 0);
         if (newestTs > 0) lastSeenTs.update((cur) => (newestTs > cur ? newestTs : cur));

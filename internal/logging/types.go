@@ -131,12 +131,18 @@ var KnownSubgroups = map[string][]string{
 }
 
 // LogEntry represents a single log entry.
+//
+// Идентичные повторы схлопываются в одну запись (см. LogBuffer.Coalesce):
+// Timestamp — первое появление, Repeats — сколько повторов свёрнуто
+// (0 = запись уникальна), LastSeen — время последнего повтора.
 type LogEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	Level     string    `json:"level"`
-	Group     string    `json:"group"`
-	Subgroup  string    `json:"subgroup,omitempty"`
-	Action    string    `json:"action"`
-	Target    string    `json:"target"`
-	Message   string    `json:"message"`
+	Timestamp time.Time  `json:"timestamp"`
+	Level     string     `json:"level"`
+	Group     string     `json:"group"`
+	Subgroup  string     `json:"subgroup,omitempty"`
+	Action    string     `json:"action"`
+	Target    string     `json:"target"`
+	Message   string     `json:"message"`
+	Repeats   int        `json:"repeats,omitempty"`
+	LastSeen  *time.Time `json:"lastSeen,omitempty"`
 }

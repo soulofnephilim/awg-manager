@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -165,7 +166,7 @@ func TestService_GetLogsPagination(t *testing.T) {
 	defer svc.Stop()
 
 	for i := 0; i < 10; i++ {
-		svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "create", "t", "msg")
+		svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "create", "t", fmt.Sprintf("msg %d", i))
 	}
 
 	// First page
@@ -362,8 +363,8 @@ func TestService_StatsReportsBucketState(t *testing.T) {
 	svc := NewService(settings)
 	defer svc.Stop()
 
-	svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "x", "t", "msg")
-	svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "x", "t", "msg")
+	svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "x", "t", "msg 1")
+	svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "x", "t", "msg 2")
 
 	stats := svc.Stats(BucketApp)
 	if stats.Bucket != BucketApp {
@@ -395,7 +396,7 @@ func TestService_ApplySettingsRetargetsCaps(t *testing.T) {
 	defer svc.Stop()
 
 	for i := 0; i < 50; i++ {
-		svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "x", "t", "msg")
+		svc.AppLog(LevelInfo, GroupTunnel, SubLifecycle, "x", "t", fmt.Sprintf("msg %d", i))
 	}
 
 	// Shrink to 10.

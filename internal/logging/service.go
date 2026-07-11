@@ -6,6 +6,12 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 )
 
+// repeatCoalesceWindow — окно схлопывания идентичных повторов: пока между
+// одинаковыми записями проходит меньше этого времени, они копятся в одной
+// строке журнала (LastSeen продлевает окно, так что непрерывный шум с любым
+// периодом короче окна остаётся одной записью).
+const repeatCoalesceWindow = 5 * time.Minute
+
 // SettingsGetter provides logging configuration.
 type SettingsGetter interface {
 	IsLoggingEnabled() bool
@@ -105,9 +111,16 @@ func (s *Service) AppLog(level Level, group, subgroup, action, target, message s
 		Target:    target,
 		Message:   message,
 	}
-	target_buf.Add(entry)
+	// Идентичный повтор в окне сворачивается в существующую запись (×N)
+	// вместо новой строки — источник рекуррентного шума (периодические
+	// проверки, зацикленные Warn) не может забить журнал.
+	if updated, ok := target_buf.Coalesce(entry, repeatCoalesceWindow); ok {
+		entry = updated
+	} else {
+		target_buf.Add(entry)
+	}
 	if s.bus != nil {
-		s.bus.Publish("log:entry", events.LogEntryEvent{
+		ev := events.LogEntryEvent{
 			Timestamp: entry.Timestamp.Format(time.RFC3339),
 			Level:     entry.Level,
 			Group:     entry.Group,
@@ -116,7 +129,12 @@ func (s *Service) AppLog(level Level, group, subgroup, action, target, message s
 			Target:    entry.Target,
 			Message:   entry.Message,
 			Bucket:    string(bucket),
-		})
+			Repeats:   entry.Repeats,
+		}
+		if entry.LastSeen != nil {
+			ev.LastSeen = entry.LastSeen.Format(time.RFC3339)
+		}
+		s.bus.Publish("log:entry", ev)
 	}
 }
 

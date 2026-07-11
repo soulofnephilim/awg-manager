@@ -75,6 +75,41 @@ func (lb *LogBuffer) GetPaginatedMulti(groups, subgroups []string, level string,
 	return lb.inner.FilterPage(matcherMulti(groups, subgroups, level, since), limit, offset)
 }
 
+// coalesceScanLimit ограничивает поиск дубликата последними записями —
+// при debug-флуде окно может содержать сотни записей, сканировать весь
+// буфер на каждую запись незачем.
+const coalesceScanLimit = 300
+
+// Coalesce сворачивает идентичный повтор в недавнюю существующую запись:
+// совпадают level/group/subgroup/action/target/message и последнее появление
+// (LastSeen, иначе Timestamp) не старше window от entry.Timestamp. У найденной
+// записи Repeats++ и LastSeen обновляется; Timestamp (первое появление) и
+// позиция в буфере не меняются. Возвращает обновлённую запись.
+func (lb *LogBuffer) Coalesce(entry LogEntry, window time.Duration) (LogEntry, bool) {
+	now := entry.Timestamp
+	if now.IsZero() {
+		now = time.Now()
+	}
+	cutoff := now.Add(-window)
+	return lb.inner.UpdateRecent(coalesceScanLimit,
+		func(e LogEntry) bool {
+			if e.Level != entry.Level || e.Group != entry.Group || e.Subgroup != entry.Subgroup ||
+				e.Action != entry.Action || e.Target != entry.Target || e.Message != entry.Message {
+				return false
+			}
+			last := e.Timestamp
+			if e.LastSeen != nil {
+				last = *e.LastSeen
+			}
+			return last.After(cutoff)
+		},
+		func(e *LogEntry) {
+			e.Repeats++
+			t := now
+			e.LastSeen = &t
+		})
+}
+
 // Clear removes all entries.
 func (lb *LogBuffer) Clear() { lb.inner.Clear() }
 

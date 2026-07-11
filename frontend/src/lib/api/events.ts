@@ -19,6 +19,9 @@ export interface LogEntryEvent {
 	target: string;
 	message: string;
 	bucket: 'app' | 'singbox';
+	/** Повтор, свёрнутый в существующую запись: счётчик и время последнего. */
+	repeats?: number;
+	lastSeen?: string;
 }
 
 export interface SystemBootingEvent {
