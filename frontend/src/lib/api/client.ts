@@ -13,6 +13,8 @@ import type {
 	LogsResponse,
 	WANInterface,
 	RouterInterface,
+	ServerListenState,
+	ServerListenChangeResult,
 	WANStatus,
 	ExternalTunnel,
 	SystemTunnel,
@@ -616,6 +618,26 @@ class ApiClient {
 
 	async getAllInterfaces(): Promise<RouterInterface[]> {
 		return this.request('/system/all-interfaces');
+	}
+
+	// ── HTTP-listen (живая смена порта/интерфейсов веб-интерфейса) ──
+
+	async serverListenState(): Promise<ServerListenState> {
+		return this.request('/server/listen');
+	}
+
+	async serverListenChange(port: number, interfaces: string[]): Promise<ServerListenChangeResult> {
+		return this.request('/server/listen/change', {
+			method: 'POST',
+			body: JSON.stringify({ port, interfaces }),
+		});
+	}
+
+	async serverListenConfirm(token: string): Promise<void> {
+		await this.request('/server/listen/confirm', {
+			method: 'POST',
+			body: JSON.stringify({ token }),
+		});
 	}
 
 	async getWANStatus(): Promise<WANStatus> {

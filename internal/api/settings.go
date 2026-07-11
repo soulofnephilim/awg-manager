@@ -22,8 +22,13 @@ import (
 
 // ServerSettingsDTO mirrors frontend ServerSettings.
 type ServerSettingsDTO struct {
-	Port      int    `json:"port" example:"8080"`
+	Port int `json:"port" example:"8080"`
+	// Interface is the legacy single bind interface (superseded by
+	// interfaces; kept for downgrade compatibility).
 	Interface string `json:"interface" example:""`
+	// Interfaces are kernel interface names the HTTP server binds to;
+	// empty = all (0.0.0.0). Changed live via /server/listen/change.
+	Interfaces []string `json:"interfaces,omitempty" example:"br0"`
 }
 
 // PingCheckDefaultsDTO mirrors frontend PingCheckDefaults.

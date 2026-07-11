@@ -1098,8 +1098,33 @@ const api_SelectiveStatusData: v.GenericSchema = v.looseObject({
 	xtSetAvailable: v.optional(v.nullable(v.boolean())),
 });
 
+const api_ServerListenChangeData: v.GenericSchema = v.looseObject({
+	boundAddrs: v.optional(v.nullable(v.array(v.string()))),
+	confirmDeadline: v.optional(v.nullable(v.string())),
+	confirmToken: v.optional(v.nullable(v.string())),
+});
+
+const api_ServerListenChangeResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_ServerListenChangeData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_ServerListenStateData: v.GenericSchema = v.looseObject({
+	boundAddrs: v.optional(v.nullable(v.array(v.string()))),
+	confirmDeadline: v.optional(v.nullable(v.string())),
+	interfaces: v.optional(v.nullable(v.array(v.string()))),
+	pendingConfirm: v.optional(v.nullable(v.boolean())),
+	port: v.optional(v.nullable(v.number())),
+});
+
+const api_ServerListenStateResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_ServerListenStateData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
 const api_ServerSettingsDTO: v.GenericSchema = v.looseObject({
 	interface: v.optional(v.nullable(v.string())),
+	interfaces: v.optional(v.nullable(v.array(v.string()))),
 	port: v.optional(v.nullable(v.number())),
 });
 
@@ -2238,6 +2263,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /routing/resolve": v.lazy(() => api_ResolveResponse),
 	"GET /routing/static-routes": v.lazy(() => api_StaticRoutesListResponse),
 	"GET /routing/tunnels": v.lazy(() => api_RoutingTunnelsResponse),
+	"GET /server/listen": v.lazy(() => api_ServerListenStateResponse),
 	"GET /servers/{name}/peers/{pubkey}/conf": v.lazy(() => api_PeerConfResponse),
 	"GET /servers/all": v.lazy(() => api_ServersAllResponse),
 	"GET /servers/marked": v.lazy(() => api_APIEnvelope),
@@ -2376,6 +2402,8 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /proxy/instances/apply": v.lazy(() => api_APIEnvelope),
 	"POST /proxy/runtime/select": v.lazy(() => api_ProxyRuntimeResponse),
 	"POST /routing/refresh": v.lazy(() => api_RoutingRefreshResponse),
+	"POST /server/listen/change": v.lazy(() => api_ServerListenChangeResponse),
+	"POST /server/listen/confirm": v.lazy(() => api_OkResponse),
 	"POST /servers/{name}/endpoint": v.lazy(() => api_ServersAllResponse),
 	"POST /servers/{name}/nat": v.lazy(() => api_ServersAllResponse),
 	"POST /servers/{name}/peers": v.lazy(() => api_ServersAllResponse),
