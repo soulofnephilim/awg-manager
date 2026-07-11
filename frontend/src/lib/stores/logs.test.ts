@@ -79,7 +79,7 @@ describe('logs store: схлопнутые повторы', () => {
 				target: 'awg10',
 				message: 'Connectivity check failed: timeout',
 				repeats: 2,
-			} as LogEntry,
+			},
 		]);
 		const entries = get(appLogEntries);
 		expect(entries).toHaveLength(1);
