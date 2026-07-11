@@ -41,7 +41,9 @@ func NewSubscriptionHandler(svc *subscription.Service, presence SingboxPresenceP
 	return &SubscriptionHandler{
 		svc:      svc,
 		presence: presence,
-		log:      logging.NewScopedLogger(lg, logging.GroupSingbox, logging.SubSBRuntime),
+		// Действия пользователя над подписками — в главный app-журнал
+		// (routing/subscription), а не в изолированный singbox-бакет.
+		log: logging.NewScopedLogger(lg, logging.GroupRouting, logging.SubSubscription),
 	}
 }
 
@@ -74,8 +76,23 @@ func (h *SubscriptionHandler) ndmsProxyEnabled() bool {
 // box check rejected the merged config) → 422 VALIDATION_FAILED so the
 // frontend can surface a "your subscription has invalid outbound(s)"
 // banner instead of a generic 500. Other errors fall through to 500.
-func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, err error) {
+func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, action string, err error) {
+	// Ошибки клиента (4xx: валидация, фильтры, not-found) — Debug: ответ
+	// пользователь уже видит в UI, а Warn всегда видим и содержит
+	// свободный ввод (не сворачивается коалесцером). Warn — только для
+	// внутренних сбоев (default → 500).
 	var filterErr *subscription.FilterError
+	isInternal := !errors.As(err, &filterErr) &&
+		!errors.Is(err, subscription.ErrValidation) &&
+		!errors.Is(err, subscription.ErrExcludeOnInline) &&
+		!errors.Is(err, subscription.ErrAllMembersExcluded) &&
+		!errors.Is(err, subscription.ErrAllMembersFiltered) &&
+		!errors.Is(err, subscription.ErrMemberNotFound)
+	if isInternal {
+		h.log.Warn(action, "", err.Error())
+	} else {
+		h.log.Debug(action, "", err.Error())
+	}
 	switch {
 	case errors.As(err, &filterErr):
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
@@ -171,10 +188,10 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, err := h.svc.Create(r.Context(), in)
 	if err != nil {
-		h.log.Warn("subscription-create", req.Label, "failed: "+err.Error())
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-create", err)
 		return
 	}
+	h.log.Info("subscription-create", sub.Label, "Subscription created: "+sub.Label)
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))
 }
 
@@ -265,9 +282,10 @@ func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, err := h.svc.Update(id, patch)
 	if err != nil {
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-update", err)
 		return
 	}
+	h.log.Info("subscription-update", sub.Label, "Subscription updated: "+sub.Label)
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))
 }
 
@@ -289,7 +307,11 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	label := id
 	if sub, err := h.svc.Get(id); err == nil {
+		if sub.Label != "" {
+			label = sub.Label
+		}
 		tags := make([]string, 0, 1+len(sub.MemberTags))
 		if sub.SelectorTag != "" {
 			tags = append(tags, sub.SelectorTag)
@@ -308,6 +330,7 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("subscription-delete", id, "Subscription deleted: "+label)
 	response.Success(w, struct {
 		OK bool `json:"ok"`
 	}{true})
@@ -334,7 +357,7 @@ func (h *SubscriptionHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("subscription-refresh", id, "requested via API")
 	res, err := h.svc.Refresh(r.Context(), id)
 	if err != nil {
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-refresh", err)
 		return
 	}
 	response.Success(w, res)

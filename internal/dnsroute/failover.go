@@ -7,9 +7,9 @@ import (
 )
 
 // Logger is the minimal logger interface used by FailoverManager.
-// (Will be filled in by Task 2 — for now just a type stub.)
 type Logger interface {
 	Warnf(format string, args ...interface{})
+	Infof(format string, args ...interface{})
 }
 
 // AffectedList describes a DNS route list affected by a tunnel state change.
@@ -142,8 +142,32 @@ func (fm *FailoverManager) MarkFailed(tunnelID string) error {
 	}
 	fm.mu.Unlock()
 
+	// Журналим только реальный переход (не dirty-retry от чужих событий)
+	// и только когда у туннеля есть DNS-листы — иначе «переключение»
+	// не происходило и строка вводит в заблуждение.
+	if fm.log != nil && !alreadyFailed {
+		if n := fm.affectedCount(tunnelID, "switched"); n != 0 {
+			if err != nil {
+				fm.log.Warnf("failover: DNS lists switch off failed tunnel %s did not apply: %v", tunnelID, err)
+			} else if n > 0 {
+				fm.log.Warnf("failover: tunnel %s failed, %d DNS list(s) switched to backup", tunnelID, n)
+			} else {
+				fm.log.Warnf("failover: tunnel %s failed, DNS lists switched to backup", tunnelID)
+			}
+		}
+	}
 	fm.publishFailoverEvents(tunnelID, "switched", err)
 	return err
+}
+
+// affectedCount возвращает число DNS-листов, затронутых сменой состояния
+// туннеля; -1 когда lookup не подключён (журналим без числа? нет —
+// считаем «неизвестно» как «есть», чтобы не потерять событие).
+func (fm *FailoverManager) affectedCount(tunnelID, action string) int {
+	if fm.lookupAffected == nil {
+		return -1
+	}
+	return len(fm.lookupAffected(tunnelID, action))
 }
 
 // MarkRecovered removes a tunnel from the failed set and triggers reconcile.
@@ -182,6 +206,15 @@ func (fm *FailoverManager) MarkRecovered(tunnelID string) error {
 	}
 	fm.mu.Unlock()
 
+	if fm.log != nil && wasFailed {
+		if n := fm.affectedCount(tunnelID, "restored"); n != 0 {
+			if err != nil {
+				fm.log.Warnf("failover: DNS lists restore to recovered tunnel %s did not apply: %v", tunnelID, err)
+			} else {
+				fm.log.Infof("failover: tunnel %s recovered, DNS lists restored", tunnelID)
+			}
+		}
+	}
 	fm.publishFailoverEvents(tunnelID, "restored", err)
 	return err
 }

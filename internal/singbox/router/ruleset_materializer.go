@@ -337,14 +337,18 @@ func (m ruleSetMaterializer) gcArtifacts(referenced map[string]struct{}) {
 	if m.configDir == "" {
 		return
 	}
-	m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "inline"), referenced)
-	m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "dat"), referenced)
+	removed := m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "inline"), referenced)
+	removed += m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "dat"), referenced)
+	// Пофайловые строки — debug; сводка уборки видна на info.
+	if removed > 0 && m.log != nil {
+		m.log.Info("gc", "", fmt.Sprintf("removed %d orphaned rule-set artifact(s)", removed))
+	}
 }
 
-func (m ruleSetMaterializer) gcArtifactDir(dir string, referenced map[string]struct{}) {
+func (m ruleSetMaterializer) gcArtifactDir(dir string, referenced map[string]struct{}) (removed int) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return // dir absent — nothing to sweep
+		return 0 // dir absent — nothing to sweep
 	}
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() {
@@ -365,10 +369,12 @@ func (m ruleSetMaterializer) gcArtifactDir(dir string, referenced map[string]str
 			}
 			continue
 		}
+		removed++
 		if m.log != nil {
 			m.log.Debug("gc", base, "removed orphaned rule-set artifact "+path)
 		}
 	}
+	return removed
 }
 
 // ruleSetArtifactBase maps an artifact filename to the base name compared

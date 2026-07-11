@@ -60,6 +60,7 @@ func (h *SingboxRouterHandler) AddOutbound(w http.ResponseWriter, r *http.Reques
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("outbound-add", o.Tag, "composite outbound added: "+o.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -93,6 +94,7 @@ func (h *SingboxRouterHandler) UpdateOutbound(w http.ResponseWriter, r *http.Req
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("outbound-update", body.Tag, "composite outbound updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -134,6 +136,7 @@ func (h *SingboxRouterHandler) DeleteOutbound(w http.ResponseWriter, r *http.Req
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("outbound-delete", body.Tag, "composite outbound deleted: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -190,6 +193,7 @@ func (h *SingboxRouterHandler) ApplyPreset(w http.ResponseWriter, r *http.Reques
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("preset-apply", body.ID, "preset applied: "+body.ID+" (outbound: "+body.Outbound+")")
 	response.Success(w, map[string]bool{"ok": true})
 }
 

@@ -238,7 +238,11 @@ func (h *AuthHandler) finishFailedLogin(w http.ResponseWriter, login, clientIP s
 // actually checked (see finishFailedLogin) for the throttle and applies the
 // constant anti-brute-force delay before the handler returns its status.
 func (h *AuthHandler) registerFailure(clientIP string) {
-	h.throttle.Fail(clientIP)
+	if h.throttle.Fail(clientIP) {
+		// Момент срабатывания анти-брутфорса — основной сигнал атаки
+		// подбором; отдельные неудачные попытки уже логируются выше.
+		h.log.Warn("login-throttle", clientIP, "login blocked after repeated failures (anti-bruteforce)")
+	}
 	if h.failureDelay > 0 {
 		time.Sleep(h.failureDelay)
 	}

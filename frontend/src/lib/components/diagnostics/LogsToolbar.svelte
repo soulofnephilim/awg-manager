@@ -48,6 +48,7 @@
     'client-route': 'Per-client routes',
     'singbox-router': 'Sing-box router',
     selective: 'Селективный ipset',
+    subscription: 'Подписки',
     deviceproxy: 'Device proxy',
     hrneo: 'HrNeo',
     catalog: 'Каталог',
@@ -69,6 +70,11 @@
     profiling: 'Profiling HTTP',
     rci: 'RCI',
     ndms: 'NDMS',
+    storage: 'Хранилище',
+    monitoring: 'Мониторинг',
+    orchestrator: 'Оркестратор',
+    kmod: 'Модуль ядра',
+    http: 'HTTP-сервер',
   };
 
   export interface BufferBadge {

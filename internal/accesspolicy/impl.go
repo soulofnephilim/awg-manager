@@ -289,7 +289,7 @@ func (s *ServiceImpl) SetDescription(ctx context.Context, name, description stri
 		return err
 	}
 
-	s.appLog.Full("set-description", name, fmt.Sprintf("Policy %s description updated", name))
+	s.appLog.Info("set-description", name, fmt.Sprintf("Policy %s description updated", name))
 	return nil
 }
 
@@ -311,7 +311,7 @@ func (s *ServiceImpl) SetStandalone(ctx context.Context, name string, enabled bo
 	if enabled {
 		state = "enabled"
 	}
-	s.appLog.Full("set-standalone", name, fmt.Sprintf("Policy %s standalone %s", name, state))
+	s.appLog.Info("set-standalone", name, fmt.Sprintf("Policy %s standalone %s", name, state))
 	return nil
 }
 
@@ -491,7 +491,7 @@ func (s *ServiceImpl) SetInterfaceUp(ctx context.Context, ndmsName string, up bo
 				return lerr
 			}
 			s.refreshInterfaceAfterLifecycle(ndmsName)
-			s.appLog.Full("set-interface", ndmsName, fmt.Sprintf("Managed tunnel %s set %s via lifecycle", id, action))
+			s.appLog.Info("set-interface", ndmsName, fmt.Sprintf("Managed tunnel %s set %s via lifecycle", id, action))
 			return nil
 		}
 	}
@@ -506,7 +506,7 @@ func (s *ServiceImpl) SetInterfaceUp(ctx context.Context, ndmsName string, up bo
 		s.appLog.Warn("set-interface", ndmsName, fmt.Sprintf("Failed to set %s: %v", action, err))
 		return err
 	}
-	s.appLog.Full("set-interface", ndmsName, fmt.Sprintf("Interface %s set %s", ndmsName, action))
+	s.appLog.Info("set-interface", ndmsName, fmt.Sprintf("Interface %s set %s", ndmsName, action))
 	return nil
 }
 

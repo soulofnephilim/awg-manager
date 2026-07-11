@@ -97,6 +97,7 @@ func (h *SingboxRouterHandler) Enable(w http.ResponseWriter, r *http.Request) {
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("enable", "", "Sing-box router enabled")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -120,6 +121,7 @@ func (h *SingboxRouterHandler) Disable(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("disable", "", "Sing-box router disabled")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -169,6 +171,7 @@ func (h *SingboxRouterHandler) SwitchMode(w http.ResponseWriter, r *http.Request
 	// Keep the documented OkResponse shape ({"ok":true}); 200 here means
 	// "transition accepted and started", progress/terminal state arrives via
 	// the singbox-router:transition SSE events.
+	h.log.Info("mode-switch", mode, "mode switch requested: "+mode)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -225,6 +228,7 @@ func (h *SingboxRouterHandler) PutSettings(w http.ResponseWriter, r *http.Reques
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("settings", "", "Sing-box router settings updated")
 	response.Success(w, map[string]bool{"ok": true})
 }
 

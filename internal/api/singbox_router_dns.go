@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
@@ -165,6 +166,7 @@ func (h *SingboxRouterHandler) AddDNSServer(w http.ResponseWriter, r *http.Reque
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-server-add", s.Tag, "DNS server added: "+s.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -198,6 +200,7 @@ func (h *SingboxRouterHandler) UpdateDNSServer(w http.ResponseWriter, r *http.Re
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-server-update", body.Tag, "DNS server updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -229,6 +232,7 @@ func (h *SingboxRouterHandler) DeleteDNSServer(w http.ResponseWriter, r *http.Re
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-server-delete", body.Tag, "DNS server deleted: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -259,6 +263,8 @@ func (h *SingboxRouterHandler) MoveDNSServer(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-server-move", strconv.Itoa(body.From),
+		"DNS server moved from index "+strconv.Itoa(body.From)+" to "+strconv.Itoa(body.To))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -316,6 +322,7 @@ func (h *SingboxRouterHandler) AddDNSRule(w http.ResponseWriter, r *http.Request
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-rule-add", rule.Server, "DNS rule added (server: "+rule.Server+")")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -349,6 +356,7 @@ func (h *SingboxRouterHandler) UpdateDNSRule(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-rule-update", strconv.Itoa(body.Index), "DNS rule updated at index "+strconv.Itoa(body.Index))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -379,6 +387,7 @@ func (h *SingboxRouterHandler) DeleteDNSRule(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-rule-delete", strconv.Itoa(body.Index), "DNS rule deleted at index "+strconv.Itoa(body.Index))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -409,6 +418,8 @@ func (h *SingboxRouterHandler) MoveDNSRule(w http.ResponseWriter, r *http.Reques
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-rule-move", strconv.Itoa(body.From),
+		"DNS rule moved from index "+strconv.Itoa(body.From)+" to "+strconv.Itoa(body.To))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -465,5 +476,6 @@ func (h *SingboxRouterHandler) PutDNSGlobals(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("dns-globals", body.Final, "DNS globals updated (final: "+body.Final+", strategy: "+body.Strategy+")")
 	response.Success(w, map[string]bool{"ok": true})
 }

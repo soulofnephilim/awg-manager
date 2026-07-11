@@ -132,9 +132,15 @@ func (s *ServiceImpl) triggerSelectiveRebuild(_ context.Context) {
 		return
 	}
 	go func() {
+		// Пересборка на MIPS может занимать минуты и меняет поведение
+		// bypass — старт и завершение видны в журнале, детали и счётчики
+		// живут в selective-панели (SSE-статус билдера).
+		s.appLog.Info("selective-rebuild", "", "ipset rebuild started")
 		if err := s.deps.SelectiveBuilder.Rebuild(context.Background()); err != nil {
 			s.appLog.Warn("selective-rebuild", "", fmt.Sprintf("ipset rebuild failed: %v", err))
+			return
 		}
+		s.appLog.Info("selective-rebuild", "", "ipset rebuild complete")
 	}()
 }
 

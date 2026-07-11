@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/response"
@@ -60,6 +61,7 @@ func (h *SingboxRouterHandler) AddRule(w http.ResponseWriter, r *http.Request) {
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("rule-add", rule.Outbound, "routing rule added (outbound: "+rule.Outbound+")")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -93,6 +95,8 @@ func (h *SingboxRouterHandler) UpdateRule(w http.ResponseWriter, r *http.Request
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("rule-update", strconv.Itoa(body.Index),
+		"routing rule updated at index "+strconv.Itoa(body.Index)+" (outbound: "+body.Rule.Outbound+")")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -125,6 +129,7 @@ func (h *SingboxRouterHandler) DeleteRule(w http.ResponseWriter, r *http.Request
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("rule-delete", strconv.Itoa(body.Index), "routing rule deleted at index "+strconv.Itoa(body.Index))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -158,6 +163,8 @@ func (h *SingboxRouterHandler) MoveRule(w http.ResponseWriter, r *http.Request) 
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("rule-move", strconv.Itoa(body.From),
+		"routing rule moved from index "+strconv.Itoa(body.From)+" to "+strconv.Itoa(body.To))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -212,6 +219,7 @@ func (h *SingboxRouterHandler) AddRuleSet(w http.ResponseWriter, r *http.Request
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("ruleset-add", rs.Tag, "ruleset added: "+rs.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -250,6 +258,7 @@ func (h *SingboxRouterHandler) UpdateRuleSet(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("ruleset-update", body.Tag, "ruleset updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -284,6 +293,7 @@ func (h *SingboxRouterHandler) DeleteRuleSet(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("ruleset-delete", body.Tag, "ruleset deleted: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -390,5 +400,6 @@ func (h *SingboxRouterHandler) SetRouteFinal(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "route-final", err)
 		return
 	}
+	h.log.Info("route-final", req.Final, "route.final set to "+req.Final)
 	response.Success(w, map[string]bool{"ok": true})
 }

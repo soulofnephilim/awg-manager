@@ -74,7 +74,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 func TestSelectiveRebuild_Returns202AndRunsInBackground(t *testing.T) {
 	b := &blockingRebuildTriggerer{started: make(chan struct{}, 1), release: make(chan struct{})}
-	h := NewSelectiveHandler(nil, "", b, &stubSelectiveStatus{})
+	h := NewSelectiveHandler(nil, "", b, &stubSelectiveStatus{}, nil)
 
 	rr := postRebuild(t, h)
 	if rr.Code != http.StatusAccepted {
@@ -116,7 +116,7 @@ func TestSelectiveRebuild_409WhenHeavyOpGateHeld(t *testing.T) {
 	defer heavyop.Default.Unlock()
 
 	b := &blockingRebuildTriggerer{started: make(chan struct{}, 1), release: make(chan struct{})}
-	h := NewSelectiveHandler(nil, "", b, &stubSelectiveStatus{})
+	h := NewSelectiveHandler(nil, "", b, &stubSelectiveStatus{}, nil)
 
 	rr := postRebuild(t, h)
 	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "OPERATION_IN_PROGRESS") {
@@ -132,7 +132,7 @@ func TestSelectiveRebuild_409WhenHeavyOpGateHeld(t *testing.T) {
 
 func TestSelectiveRebuild_202WhenAutoRebuildInFlight(t *testing.T) {
 	b := &blockingRebuildTriggerer{started: make(chan struct{}, 1), release: make(chan struct{})}
-	h := NewSelectiveHandler(nil, "", b, &stubSelectiveStatus{rebuilding: true})
+	h := NewSelectiveHandler(nil, "", b, &stubSelectiveStatus{rebuilding: true}, nil)
 
 	rr := postRebuild(t, h)
 	if rr.Code != http.StatusAccepted || !strings.Contains(rr.Body.String(), `"rebuilding":true`) {
@@ -147,7 +147,7 @@ func TestSelectiveRebuild_202WhenAutoRebuildInFlight(t *testing.T) {
 }
 
 func TestSelectiveRebuild_MethodAndConfigGuards(t *testing.T) {
-	h := NewSelectiveHandler(nil, "", nil, &stubSelectiveStatus{})
+	h := NewSelectiveHandler(nil, "", nil, &stubSelectiveStatus{}, nil)
 
 	rr := httptest.NewRecorder()
 	h.Rebuild(rr, httptest.NewRequest(http.MethodGet, "/singbox/router/selective/rebuild", nil))
@@ -174,7 +174,7 @@ func postCancelRebuild(t *testing.T, h *SelectiveHandler) *httptest.ResponseReco
 // поддержки CancelRun (сторонняя заглушка) → cancelled:false без паники.
 func TestSelectiveCancelRebuild(t *testing.T) {
 	st := &stubCancellableStatus{active: true}
-	h := NewSelectiveHandler(nil, "", nil, st)
+	h := NewSelectiveHandler(nil, "", nil, st, nil)
 
 	rr := postCancelRebuild(t, h)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"cancelled":true`) {
@@ -197,7 +197,7 @@ func TestSelectiveCancelRebuild(t *testing.T) {
 	}
 
 	// Статус-провайдер без SelectiveRebuildCanceller — честный no-op.
-	hPlain := NewSelectiveHandler(nil, "", nil, &stubSelectiveStatus{rebuilding: true})
+	hPlain := NewSelectiveHandler(nil, "", nil, &stubSelectiveStatus{rebuilding: true}, nil)
 	rr = postCancelRebuild(t, hPlain)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"cancelled":false`) {
 		t.Fatalf("non-canceller status: code=%d body=%s", rr.Code, rr.Body.String())
@@ -206,7 +206,7 @@ func TestSelectiveCancelRebuild(t *testing.T) {
 
 func TestSelectiveGetStatus_ReportsRebuilding(t *testing.T) {
 	st := &stubSelectiveStatus{}
-	h := NewSelectiveHandler(nil, "", nil, st)
+	h := NewSelectiveHandler(nil, "", nil, st, nil)
 
 	rr := httptest.NewRecorder()
 	h.GetStatus(rr, httptest.NewRequest(http.MethodGet, "/singbox/router/selective/status", nil))

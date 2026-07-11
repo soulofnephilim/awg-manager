@@ -12,6 +12,10 @@ export interface LogEntry {
 	message: string;
 	/** true when target/message were sanitized by backend before delivery. */
 	sanitized?: boolean;
+	/** Схлопнутые повторы: сколько идентичных записей свёрнуто в эту (0/нет = уникальна). */
+	repeats?: number;
+	/** Время последнего повтора (timestamp — первое появление). */
+	lastSeen?: string;
 }
 
 export interface LogsResponse {

@@ -30,7 +30,7 @@ func newEditorHandler(t *testing.T) (*SingboxConfigEditorHandler, *orchestrator.
 	if err := o.Bootstrap(); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return NewSingboxConfigEditorHandler(o), o, dir
+	return NewSingboxConfigEditorHandler(o, nil), o, dir
 }
 
 func decodeEnvelope(t *testing.T, body []byte, data any) {

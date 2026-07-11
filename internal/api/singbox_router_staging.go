@@ -94,13 +94,16 @@ func (h *SingboxRouterHandler) PostStagingApply(w http.ResponseWriter, r *http.R
 		return
 	}
 	if err != nil {
+		h.log.Warn("staging-apply", "", "apply rejected by sing-box check: "+err.Error())
 		writeJSONStatus(w, http.StatusUnprocessableEntity, RouterStagingValidationError{SbCheck: stripAnsiFromErr(err)})
 		return
 	}
 	if !res.Ok() {
+		h.log.Warn("staging-apply", "", "apply rejected: config validation failed")
 		writeJSONStatus(w, http.StatusUnprocessableEntity, RouterStagingValidationError{Validation: validationDTOFrom(res)})
 		return
 	}
+	h.log.Info("staging-apply", "", "staging draft applied")
 	response.Success(w, OkData{Ok: true})
 }
 
@@ -124,5 +127,6 @@ func (h *SingboxRouterHandler) PostStagingDiscard(w http.ResponseWriter, r *http
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("staging-discard", "", "staging draft discarded")
 	response.Success(w, OkData{Ok: true})
 }

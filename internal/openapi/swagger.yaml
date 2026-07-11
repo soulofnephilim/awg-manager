@@ -1602,12 +1602,21 @@ definitions:
       group:
         example: singbox
         type: string
+      lastSeen:
+        example: "2024-01-15T10:35:00Z"
+        type: string
       level:
         example: info
         type: string
       message:
         example: 'lookup succeed for node.example.org: 203.0.113.77'
         type: string
+      repeats:
+        description: |-
+          Схлопнутые повторы: Repeats — сколько идентичных записей свёрнуто в
+          эту (0 = уникальна), LastSeen — время последнего повтора.
+        example: 4
+        type: integer
       sanitized:
         example: false
         type: boolean

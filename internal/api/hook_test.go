@@ -202,10 +202,11 @@ type fakeWANSetUp struct {
 	Up   bool
 }
 
-func (f *fakeWANModel) SetUp(name string, up bool) {
+func (f *fakeWANModel) SetUp(name string, up bool) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, fakeWANSetUp{Name: name, Up: up})
+	return true
 }
 
 func (f *fakeWANModel) Calls() []fakeWANSetUp {

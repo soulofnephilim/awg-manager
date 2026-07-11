@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 )
@@ -20,11 +21,20 @@ import (
 // не пишет в user-слот — единственный владелец содержимого здесь.
 type SingboxConfigEditorHandler struct {
 	orch *orchestrator.Orchestrator
+	log  *logging.ScopedLogger
 }
 
 // NewSingboxConfigEditorHandler constructs the handler.
-func NewSingboxConfigEditorHandler(orch *orchestrator.Orchestrator) *SingboxConfigEditorHandler {
-	return &SingboxConfigEditorHandler{orch: orch}
+// appLogger may be nil — the scoped logger is nil-safe.
+func NewSingboxConfigEditorHandler(orch *orchestrator.Orchestrator, appLogger logging.AppLogger) *SingboxConfigEditorHandler {
+	return &SingboxConfigEditorHandler{
+		orch: orch,
+		// Действия пользователя над конфигом — в главный app-журнал
+		// (routing/singbox-router, как и остальной CRUD конфигурации);
+		// singbox-бакет — для вывода самого процесса, там строки быстро
+		// вытесняются форвардером.
+		log: logging.NewScopedLogger(appLogger, logging.GroupRouting, logging.SubSingboxRouter),
+	}
 }
 
 // ConfigSlotInfo describes one config.d slot for the slots browser.
@@ -278,9 +288,11 @@ func (h *SingboxConfigEditorHandler) PutUserConfig(w http.ResponseWriter, r *htt
 		return
 	}
 	if err := h.orch.SaveDraft(orchestrator.SlotUser, raw); err != nil {
+		h.log.Warn("user-config-save", "90-user.json", "save draft failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("user-config-save", "90-user.json", "user config draft saved")
 	response.Success(w, OkData{Ok: true})
 }
 
@@ -324,6 +336,8 @@ func (h *SingboxConfigEditorHandler) CheckUserConfig(w http.ResponseWriter, r *h
 	}
 	res, err := h.orch.CheckMerged(orchestrator.SlotUser, raw)
 	if err != nil {
+		// Dry-run проверка, не применение — отдельная метка.
+		h.log.Warn("user-config-check", "90-user.json", "merged check failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -370,17 +384,21 @@ func (h *SingboxConfigEditorHandler) ApplyUserConfig(w http.ResponseWriter, r *h
 		return
 	}
 	if err != nil {
+		h.log.Warn("user-config-apply", "90-user.json", "apply rejected by sing-box check: "+err.Error())
 		writeJSONStatus(w, http.StatusUnprocessableEntity, RouterStagingValidationError{SbCheck: stripAnsiFromErr(err)})
 		return
 	}
 	if !res.Ok() {
+		h.log.Warn("user-config-apply", "90-user.json", "apply rejected: config validation failed")
 		writeJSONStatus(w, http.StatusUnprocessableEntity, RouterStagingValidationError{Validation: validationDTOFrom(res)})
 		return
 	}
 	if err := h.orch.SetEnabled(orchestrator.SlotUser, true); err != nil {
+		h.log.Warn("user-config-apply", "90-user.json", "enable slot failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("user-config-apply", "90-user.json", "user config draft applied")
 	out := UserConfigApplyResponse{Ok: true}
 	_, out.Warnings = splitUserValidationDTO(res)
 	response.Success(w, out)
@@ -403,9 +421,11 @@ func (h *SingboxConfigEditorHandler) DiscardUserConfig(w http.ResponseWriter, r 
 		return
 	}
 	if err := h.orch.DiscardDraft(orchestrator.SlotUser); err != nil {
+		h.log.Warn("user-config-discard", "90-user.json", "discard draft failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.log.Info("user-config-discard", "90-user.json", "user config draft discarded")
 	response.Success(w, OkData{Ok: true})
 }
 
@@ -434,8 +454,14 @@ func (h *SingboxConfigEditorHandler) EnableUserConfig(w http.ResponseWriter, r *
 		return
 	}
 	if err := h.orch.SetEnabled(orchestrator.SlotUser, req.Enabled); err != nil {
+		h.log.Warn("user-config-enable", "90-user.json", "toggle slot failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
+	state := "disabled"
+	if req.Enabled {
+		state = "enabled"
+	}
+	h.log.Info("user-config-enable", "90-user.json", "user config slot "+state)
 	response.Success(w, OkData{Ok: true})
 }

@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"sync"
 	"time"
 )
@@ -29,6 +30,10 @@ type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	stopCh   chan struct{}
+	// log — журнал приложения (system/auth); nil-safe. Истечение сессии —
+	// причина внезапного «разлогинило», без строки в журнале она выглядит
+	// как сбой.
+	log *logging.ScopedLogger
 	// ttl returns the configured session lifetime. Read LIVE on every
 	// expiry check, so a shortened TTL takes effect immediately for
 	// already-issued sessions (the server-side check is authoritative;
@@ -96,6 +101,9 @@ func (s *SessionStore) Get(token string) *Session {
 	// Check if expired (TTL read live — settings changes apply immediately)
 	if time.Since(session.LastSeen) > s.TTL() {
 		delete(s.sessions, token)
+		if s.log != nil {
+			s.log.Info("session-expired", session.Login, "session expired (inactive longer than TTL)")
+		}
 		return nil
 	}
 
@@ -141,8 +149,18 @@ func (s *SessionStore) cleanup() {
 	for token, session := range s.sessions {
 		if now.Sub(session.LastSeen) > ttl {
 			delete(s.sessions, token)
+			if s.log != nil {
+				s.log.Info("session-expired", session.Login, "session expired (inactive longer than TTL)")
+			}
 		}
 	}
+}
+
+// SetLogger подключает журнал приложения (после создания logging.Service).
+func (s *SessionStore) SetLogger(log *logging.ScopedLogger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = log
 }
 
 // generateToken creates a cryptographically secure random token.
