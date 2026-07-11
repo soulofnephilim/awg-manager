@@ -358,6 +358,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	// Save settings BEFORE starting monitoring (so service reads new values)
 	if err := h.store.Save(&merged); err != nil {
+		h.log.Warn("settings", "", "save failed: "+err.Error())
 		response.Error(w, err.Error(), "SETTINGS_SAVE_ERROR")
 		return
 	}

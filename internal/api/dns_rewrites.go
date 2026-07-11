@@ -114,10 +114,12 @@ func (h *DNSRewritesHandler) Add(w http.ResponseWriter, r *http.Request) {
 	}
 	var rw dnsrewrite.DNSRewrite
 	if err := decodeBody(r, &rw); err != nil {
+		h.log.Warn("dns-rewrite-add", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}
 	if err := h.svc.Add(rw); err != nil {
+		h.log.Warn("dns-rewrite-add", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}
@@ -148,10 +150,12 @@ func (h *DNSRewritesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		Rewrite dnsrewrite.DNSRewrite `json:"rewrite"`
 	}
 	if err := decodeBody(r, &req); err != nil {
+		h.log.Warn("dns-rewrite-update", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}
 	if err := h.svc.Update(req.Index, req.Rewrite); err != nil {
+		h.log.Warn("dns-rewrite-update", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}
@@ -181,10 +185,12 @@ func (h *DNSRewritesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		Index int `json:"index"`
 	}
 	if err := decodeBody(r, &req); err != nil {
+		h.log.Warn("dns-rewrite-delete", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}
 	if err := h.svc.Delete(req.Index); err != nil {
+		h.log.Warn("dns-rewrite-delete", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}
@@ -215,10 +221,12 @@ func (h *DNSRewritesHandler) Move(w http.ResponseWriter, r *http.Request) {
 		To   int `json:"to"`
 	}
 	if err := decodeBody(r, &req); err != nil {
+		h.log.Warn("dns-rewrite-move", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}
 	if err := h.svc.Move(req.From, req.To); err != nil {
+		h.log.Warn("dns-rewrite-move", "", err.Error())
 		response.BadRequest(w, err.Error())
 		return
 	}

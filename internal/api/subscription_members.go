@@ -227,7 +227,7 @@ func (h *SubscriptionHandler) RejectedToInfo(w http.ResponseWriter, r *http.Requ
 		case errors.Is(err, subscription.ErrInfoItemsFull):
 			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INFO_ITEMS_FULL")
 		default:
-			h.respondServiceError(w, err)
+			h.respondServiceError(w, "subscription-rejected-to-info", err)
 		}
 		return
 	}
@@ -259,7 +259,7 @@ func (h *SubscriptionHandler) InfoRemove(w http.ResponseWriter, r *http.Request)
 		case errors.Is(err, subscription.ErrInfoItemNotFound):
 			response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "INFO_ITEM_NOT_FOUND")
 		default:
-			h.respondServiceError(w, err)
+			h.respondServiceError(w, "subscription-info-remove", err)
 		}
 		return
 	}
@@ -306,7 +306,7 @@ func (h *SubscriptionHandler) AddMember(w http.ResponseWriter, r *http.Request) 
 		case errors.Is(err, subscription.ErrMemberDuplicate):
 			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "MEMBER_DUPLICATE")
 		default:
-			h.respondServiceError(w, err)
+			h.respondServiceError(w, "subscription-add-member", err)
 		}
 		return
 	}
@@ -354,7 +354,7 @@ func (h *SubscriptionHandler) RemoveMember(w http.ResponseWriter, r *http.Reques
 		case errors.Is(err, subscription.ErrMemberNotFound):
 			response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "MEMBER_NOT_FOUND")
 		default:
-			h.respondServiceError(w, err)
+			h.respondServiceError(w, "subscription-remove-member", err)
 		}
 		return
 	}
@@ -401,7 +401,7 @@ func (h *SubscriptionHandler) ExcludeMembers(w http.ResponseWriter, r *http.Requ
 	}
 	sub, err := h.svc.ExcludeMembers(r.Context(), id, req.MemberTags)
 	if err != nil {
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-exclude-members", err)
 		return
 	}
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))
@@ -440,7 +440,7 @@ func (h *SubscriptionHandler) RestoreMembers(w http.ResponseWriter, r *http.Requ
 	}
 	sub, err := h.svc.RestoreMembers(r.Context(), id, req.MemberTags)
 	if err != nil {
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-restore-members", err)
 		return
 	}
 	response.Success(w, toSubscriptionDTO(*sub, h.ndmsProxyEnabled()))

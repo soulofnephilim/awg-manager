@@ -74,7 +74,8 @@ func (h *SubscriptionHandler) ndmsProxyEnabled() bool {
 // box check rejected the merged config) → 422 VALIDATION_FAILED so the
 // frontend can surface a "your subscription has invalid outbound(s)"
 // banner instead of a generic 500. Other errors fall through to 500.
-func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, err error) {
+func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, action string, err error) {
+	h.log.Warn(action, "", err.Error())
 	var filterErr *subscription.FilterError
 	switch {
 	case errors.As(err, &filterErr):
@@ -172,7 +173,7 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	sub, err := h.svc.Create(r.Context(), in)
 	if err != nil {
 		h.log.Warn("subscription-create", req.Label, "failed: "+err.Error())
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-create", err)
 		return
 	}
 	h.log.Info("subscription-create", sub.Label, "Subscription created: "+sub.Label)
@@ -266,7 +267,7 @@ func (h *SubscriptionHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, err := h.svc.Update(id, patch)
 	if err != nil {
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-update", err)
 		return
 	}
 	h.log.Info("subscription-update", sub.Label, "Subscription updated: "+sub.Label)
@@ -341,7 +342,7 @@ func (h *SubscriptionHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("subscription-refresh", id, "requested via API")
 	res, err := h.svc.Refresh(r.Context(), id)
 	if err != nil {
-		h.respondServiceError(w, err)
+		h.respondServiceError(w, "subscription-refresh", err)
 		return
 	}
 	response.Success(w, res)

@@ -321,6 +321,7 @@ func (h *SelectiveHandler) InstallDeps(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), installTimeout)
 	defer cancel()
 	if err := selective.InstallIPSet(ctx, nil); err != nil { // progress delivered via SSE by the builder
+		h.log.Warn("install-deps", "ipset", "installation failed: "+err.Error())
 		response.InternalError(w, "ipset installation failed: "+err.Error())
 		return
 	}
@@ -361,6 +362,7 @@ func (h *SelectiveHandler) InstallConntrack(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), installTimeout)
 	defer cancel()
 	if err := selective.InstallConntrackTools(ctx, nil); err != nil {
+		h.log.Warn("install-conntrack", "conntrack-tools", "installation failed: "+err.Error())
 		response.InternalError(w, "conntrack installation failed: "+err.Error())
 		return
 	}

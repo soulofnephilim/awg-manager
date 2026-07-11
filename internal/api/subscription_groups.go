@@ -137,8 +137,10 @@ func (h *SubscriptionHandler) toSubscriptionGroupDTO(g subscription.AggregateGro
 	}
 }
 
-// respondGroupServiceError маппит ошибки Group-CRUD на HTTP-статусы.
-func (h *SubscriptionHandler) respondGroupServiceError(w http.ResponseWriter, err error) {
+// respondGroupServiceError маппит ошибки Group-CRUD на HTTP-статусы
+// и журналит сбой мутации.
+func (h *SubscriptionHandler) respondGroupServiceError(w http.ResponseWriter, action string, err error) {
+	h.log.Warn(action, "", err.Error())
 	var filterErr *subscription.FilterError
 	switch {
 	case errors.As(err, &filterErr):
@@ -218,7 +220,7 @@ func (h *SubscriptionHandler) CreateGroup(w http.ResponseWriter, r *http.Request
 	})
 	if err != nil {
 		h.log.Warn("subscription-group-create", req.Label, "failed: "+err.Error())
-		h.respondGroupServiceError(w, err)
+		h.respondGroupServiceError(w, "subscription-group-create", err)
 		return
 	}
 	h.log.Info("subscription-group-create", g.Label, "Subscription group created: "+g.Label)
@@ -274,7 +276,7 @@ func (h *SubscriptionHandler) UpdateGroup(w http.ResponseWriter, r *http.Request
 	}
 	g, err := h.svc.UpdateGroup(r.Context(), id, patch)
 	if err != nil {
-		h.respondGroupServiceError(w, err)
+		h.respondGroupServiceError(w, "subscription-group-update", err)
 		return
 	}
 	h.log.Info("subscription-group-update", g.Label, "Subscription group updated: "+g.Label)
@@ -313,7 +315,7 @@ func (h *SubscriptionHandler) DeleteGroup(w http.ResponseWriter, r *http.Request
 		label = g.Label
 	}
 	if err := h.svc.DeleteGroup(r.Context(), req.ID); err != nil {
-		h.respondGroupServiceError(w, err)
+		h.respondGroupServiceError(w, "subscription-group-delete", err)
 		return
 	}
 	h.log.Info("subscription-group-delete", req.ID, "Subscription group deleted: "+label)

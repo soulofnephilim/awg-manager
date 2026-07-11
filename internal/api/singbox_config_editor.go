@@ -284,6 +284,7 @@ func (h *SingboxConfigEditorHandler) PutUserConfig(w http.ResponseWriter, r *htt
 		return
 	}
 	if err := h.orch.SaveDraft(orchestrator.SlotUser, raw); err != nil {
+		h.log.Warn("user-config-save", "90-user.json", "save draft failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -331,6 +332,7 @@ func (h *SingboxConfigEditorHandler) CheckUserConfig(w http.ResponseWriter, r *h
 	}
 	res, err := h.orch.CheckMerged(orchestrator.SlotUser, raw)
 	if err != nil {
+		h.log.Warn("user-config-apply", "90-user.json", "merged check failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -385,6 +387,7 @@ func (h *SingboxConfigEditorHandler) ApplyUserConfig(w http.ResponseWriter, r *h
 		return
 	}
 	if err := h.orch.SetEnabled(orchestrator.SlotUser, true); err != nil {
+		h.log.Warn("user-config-apply", "90-user.json", "enable slot failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -411,6 +414,7 @@ func (h *SingboxConfigEditorHandler) DiscardUserConfig(w http.ResponseWriter, r 
 		return
 	}
 	if err := h.orch.DiscardDraft(orchestrator.SlotUser); err != nil {
+		h.log.Warn("user-config-discard", "90-user.json", "discard draft failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -443,6 +447,7 @@ func (h *SingboxConfigEditorHandler) EnableUserConfig(w http.ResponseWriter, r *
 		return
 	}
 	if err := h.orch.SetEnabled(orchestrator.SlotUser, req.Enabled); err != nil {
+		h.log.Warn("user-config-enable", "90-user.json", "toggle slot failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
