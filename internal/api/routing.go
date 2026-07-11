@@ -61,7 +61,7 @@ func (h *RoutingHandler) SetEventBus(bus *events.Bus) { h.bus = bus }
 //	@Tags			routing
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Success		200	{array}	object
+//	@Success		200	{object}	RoutingTunnelsResponse
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/routing/tunnels [get]

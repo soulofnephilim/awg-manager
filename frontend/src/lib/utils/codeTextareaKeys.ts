@@ -84,7 +84,7 @@ function outdentSelection(ctx: CodeTextareaKeyContext): void {
 	let deltaStart = 0;
 	let deltaEnd = 0;
 	for (let i = ranges.length - 1; i >= 0; i--) {
-		const r = ranges[i]!;
+		const r = ranges[i];
 		const line = value.slice(r.from, r.to);
 		const { line: next, removed } = stripOneIndentLevel(line);
 		if (removed === 0) continue;

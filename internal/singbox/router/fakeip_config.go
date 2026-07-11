@@ -1,13 +1,10 @@
 package router
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"reflect"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
@@ -174,25 +171,7 @@ func (s *ServiceImpl) persistFakeIPConfig(ctx context.Context, cfg *RouterConfig
 		// Orch-nil: test-only, nothing to persist.
 		return nil
 	}
-	materialized, err := s.ruleSetMaterializer().materializeConfig(cfg)
-	if err != nil {
-		return err
-	}
-	if err := validateNoCompositeCycles(materialized.Outbounds); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(materialized, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal fakeip config: %w", err)
-	}
-	activePath := filepath.Join(s.deps.Orch.ConfigDir(), "21-fakeip.json")
-	if existing, err := os.ReadFile(activePath); err == nil && bytes.Equal(existing, data) {
-		return nil
-	}
-	if err := s.deps.Orch.Save(orchestrator.SlotFakeIP, data); err != nil {
-		return err
-	}
-	return nil
+	return s.persistSlotDirect(orchestrator.SlotFakeIP, cfg, true)
 }
 
 // captureFakeIPRealServerEdit persists a user edit of the "real" DNS server's

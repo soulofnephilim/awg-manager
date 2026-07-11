@@ -183,7 +183,7 @@ describe('parseInlineRuleList', () => {
 	it('deduplicates values within each group', () => {
 		const input = ['openai.com', 'openai.com', 'port:443,443'].join('\n');
 		const { rules } = parseInlineRuleList(input);
-		const g = rules.find((r) => (r as Record<string, unknown>).domain_suffix);
+		const g = rules.find((r) => (r).domain_suffix);
 		expect((g!['domain_suffix'] as string[])).toEqual(['openai.com']);
 	});
 
@@ -380,7 +380,7 @@ describe('analyzeInlineRuleListLossy', () => {
 	});
 
 	it('flags unsupported JSON keys', () => {
-		const r = analyzeInlineRuleListLossy([{ domain: ['z.com'], inverted: [true] } as Record<string, unknown>]);
+		const r = analyzeInlineRuleListLossy([{ domain: ['z.com'], inverted: [true] }]);
 		expect(r.lossy).toBe(true);
 		expect(r.issues.some((i) => i.includes('inverted'))).toBe(true);
 	});

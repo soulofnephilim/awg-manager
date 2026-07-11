@@ -38,7 +38,12 @@
 	let copyingLink = $state(false);
 	let linkCopied = $state(false);
 	let error = $state<string | null>(null);
-	let outbound = $state<Record<string, any> | null>(null);
+	// The outbound is an arbitrary sing-box JSON object whose shape depends on the
+	// protocol; the editor reads/writes fields by path, so it is modelled as a
+	// dynamic record rather than a fixed interface.
+	type JsonRecord = Record<string, unknown>;
+
+	let outbound = $state<JsonRecord | null>(null);
 	let protocol = $state<string>('');
 	let editableTag = $state('');
 	let initialOutboundFingerprint = $state('');
@@ -58,8 +63,8 @@
 	onMount(async () => {
 		try {
 			const r = await api.singboxGetTunnel(tag);
-			outbound = r.outbound as Record<string, any>;
-			protocol = outbound?.type ?? '';
+			outbound = r.outbound as JsonRecord;
+			protocol = typeof outbound.type === 'string' ? outbound.type : '';
 			editableTag = r.tag;
 			initialOutboundFingerprint = outboundFingerprint(outbound);
 		} catch (e) {
@@ -99,24 +104,42 @@
 		}
 	}
 
-	function setField(path: string[], value: any): void {
+	function setField(path: string[], value: unknown): void {
 		if (!outbound) return;
-		let obj: any = outbound;
+		let obj: JsonRecord = outbound;
 		for (let i = 0; i < path.length - 1; i++) {
-			if (obj[path[i]] == null) obj[path[i]] = {};
-			obj = obj[path[i]];
+			const next = obj[path[i]];
+			if (next != null && typeof next === 'object') {
+				obj = next as JsonRecord;
+			} else {
+				const created: JsonRecord = {};
+				obj[path[i]] = created;
+				obj = created;
+			}
 		}
 		obj[path[path.length - 1]] = value;
 		outbound = { ...outbound };
 	}
 
-	function getField(path: string[]): any {
-		let obj: any = outbound;
+	function getField(path: string[]): unknown {
+		let obj: unknown = outbound;
 		for (const p of path) {
-			if (obj == null) return undefined;
-			obj = obj[p];
+			if (obj == null || typeof obj !== 'object') return undefined;
+			obj = (obj as JsonRecord)[p];
 		}
 		return obj;
+	}
+
+	/** Field value coerced to a string for text inputs (empty when absent). */
+	function getFieldString(path: string[]): string {
+		const v = getField(path);
+		if (v == null) return '';
+		return typeof v === 'string' ? v : String(v);
+	}
+
+	/** Field value coerced to a boolean for checkbox inputs. */
+	function getFieldBool(path: string[]): boolean {
+		return getField(path) === true;
 	}
 
 	function serverPortsText(value: unknown): string {
@@ -131,7 +154,7 @@
 		return parts.length > 0 ? parts : undefined;
 	}
 
-	function outboundFingerprint(value: Record<string, any> | null): string {
+	function outboundFingerprint(value: JsonRecord | null): string {
 		if (!value) return '';
 		const { tag: _tag, ...rest } = value;
 		return JSON.stringify(rest);
@@ -224,7 +247,7 @@
 					<input
 						id="server"
 						class="input"
-						value={outbound.server ?? ''}
+						value={getFieldString(['server'])}
 						oninput={(e) => setField(['server'], (e.target as HTMLInputElement).value)}
 					/>
 				</div>
@@ -235,7 +258,7 @@
 						id="server_port"
 						class="input"
 						type="number"
-						value={outbound.server_port ?? 0}
+						value={getFieldString(['server_port'])}
 						oninput={(e) => setField(['server_port'], parseInt((e.target as HTMLInputElement).value, 10))}
 					/>
 				</div>
@@ -250,7 +273,7 @@
 						<input
 							id="uuid"
 							class="input"
-							value={outbound.uuid ?? ''}
+							value={getFieldString(['uuid'])}
 							oninput={(e) => setField(['uuid'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -260,7 +283,7 @@
 						<input
 							id="flow"
 							class="input"
-							value={outbound.flow ?? ''}
+							value={getFieldString(['flow'])}
 							oninput={(e) => setField(['flow'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -275,7 +298,7 @@
 							<input
 								id="reality_pubkey"
 								class="input"
-								value={getField(['tls', 'reality', 'public_key']) ?? ''}
+								value={getFieldString(['tls', 'reality', 'public_key'])}
 								oninput={(e) => setField(['tls', 'reality', 'public_key'], (e.target as HTMLInputElement).value)}
 							/>
 						</div>
@@ -285,7 +308,7 @@
 							<input
 								id="reality_short_id"
 								class="input"
-								value={getField(['tls', 'reality', 'short_id']) ?? ''}
+								value={getFieldString(['tls', 'reality', 'short_id'])}
 								oninput={(e) => setField(['tls', 'reality', 'short_id'], (e.target as HTMLInputElement).value)}
 							/>
 						</div>
@@ -300,7 +323,7 @@
 						<input
 							id="sni"
 							class="input"
-							value={getField(['tls', 'server_name']) ?? ''}
+							value={getFieldString(['tls', 'server_name'])}
 							oninput={(e) => setField(['tls', 'server_name'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -309,7 +332,7 @@
 						<Dropdown
 							id="fingerprint"
 							label="Fingerprint"
-							value={getField(['tls', 'utls', 'fingerprint']) ?? ''}
+							value={getFieldString(['tls', 'utls', 'fingerprint'])}
 							options={[
 								{ value: '', label: '—' },
 								{ value: 'chrome', label: 'chrome' },
@@ -323,7 +346,7 @@
 					</div>
 				</section>
 
-				{#if outbound.transport?.type === 'grpc'}
+				{#if getField(['transport', 'type']) === 'grpc'}
 					<section class="card tunnel-section">
 						<SettingsSectionLabel label="Transport (gRPC)" icon={Waypoints} tone="teal" header />
 
@@ -332,34 +355,34 @@
 							<input
 								id="grpc_service"
 								class="input"
-								value={getField(['transport', 'service_name']) ?? ''}
+								value={getFieldString(['transport', 'service_name'])}
 								oninput={(e) => setField(['transport', 'service_name'], (e.target as HTMLInputElement).value)}
 							/>
 						</div>
 					</section>
 				{/if}
 
-				{#if outbound.transport?.type === 'ws'}
+				{#if getField(['transport', 'type']) === 'ws'}
 					<section class="card tunnel-section">
 						<SettingsSectionLabel label="Transport (WebSocket)" icon={Radio} tone="orange" header />
 						<p class="section-hint">Параметры импортированы из ссылки и редактированию не подлежат.</p>
 
 						<div class="form-group">
 							<label class="label" for="ws_path">Path</label>
-							<input id="ws_path" class="input" value={getField(['transport', 'path']) ?? '/'} readonly />
+							<input id="ws_path" class="input" value={getFieldString(['transport', 'path']) || '/'} readonly />
 						</div>
 
 						{#if getField(['transport', 'headers', 'Host'])}
 							<div class="form-group">
 								<label class="label" for="ws_host">Host header</label>
-								<input id="ws_host" class="input" value={getField(['transport', 'headers', 'Host'])} readonly />
+								<input id="ws_host" class="input" value={getFieldString(['transport', 'headers', 'Host'])} readonly />
 							</div>
 						{/if}
 
 						{#if getField(['transport', 'early_data_header_name'])}
 							<div class="form-group">
 								<label class="label" for="ws_ed">Early Data Header</label>
-								<input id="ws_ed" class="input" value={getField(['transport', 'early_data_header_name'])} readonly />
+								<input id="ws_ed" class="input" value={getFieldString(['transport', 'early_data_header_name'])} readonly />
 							</div>
 						{/if}
 					</section>
@@ -375,7 +398,7 @@
 							id="trojan_password"
 							class="input"
 							type="password"
-							value={outbound.password ?? ''}
+							value={getFieldString(['password'])}
 							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -389,7 +412,7 @@
 						<input
 							id="trojan_sni"
 							class="input"
-							value={getField(['tls', 'server_name']) ?? ''}
+							value={getFieldString(['tls', 'server_name'])}
 							oninput={(e) => setField(['tls', 'server_name'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -398,7 +421,7 @@
 						<Dropdown
 							id="trojan_fingerprint"
 							label="Fingerprint"
-							value={getField(['tls', 'utls', 'fingerprint']) ?? ''}
+							value={getFieldString(['tls', 'utls', 'fingerprint'])}
 							options={[
 								{ value: '', label: '—' },
 								{ value: 'chrome', label: 'chrome' },
@@ -414,14 +437,14 @@
 					<label class="checkbox-label">
 						<input
 							type="checkbox"
-							checked={getField(['tls', 'insecure']) ?? false}
+							checked={getFieldBool(['tls', 'insecure'])}
 							onchange={(e) => setField(['tls', 'insecure'], (e.target as HTMLInputElement).checked)}
 						/>
 						<span>Insecure (пропустить проверку сертификата)</span>
 					</label>
 				</section>
 
-				{#if outbound.transport?.type === 'grpc'}
+				{#if getField(['transport', 'type']) === 'grpc'}
 					<section class="card tunnel-section">
 						<SettingsSectionLabel label="Transport (gRPC)" icon={Waypoints} tone="teal" header />
 
@@ -430,27 +453,27 @@
 							<input
 								id="trojan_grpc_service"
 								class="input"
-								value={getField(['transport', 'service_name']) ?? ''}
+								value={getFieldString(['transport', 'service_name'])}
 								oninput={(e) => setField(['transport', 'service_name'], (e.target as HTMLInputElement).value)}
 							/>
 						</div>
 					</section>
 				{/if}
 
-				{#if outbound.transport?.type === 'ws'}
+				{#if getField(['transport', 'type']) === 'ws'}
 					<section class="card tunnel-section">
 						<SettingsSectionLabel label="Transport (WebSocket)" icon={Radio} tone="orange" header />
 						<p class="section-hint">Параметры импортированы из ссылки и редактированию не подлежат.</p>
 
 						<div class="form-group">
 							<label class="label" for="trojan_ws_path">Path</label>
-							<input id="trojan_ws_path" class="input" value={getField(['transport', 'path']) ?? '/'} readonly />
+							<input id="trojan_ws_path" class="input" value={getFieldString(['transport', 'path']) || '/'} readonly />
 						</div>
 
 						{#if getField(['transport', 'headers', 'Host'])}
 							<div class="form-group">
 								<label class="label" for="trojan_ws_host">Host header</label>
-								<input id="trojan_ws_host" class="input" value={getField(['transport', 'headers', 'Host'])} readonly />
+								<input id="trojan_ws_host" class="input" value={getFieldString(['transport', 'headers', 'Host'])} readonly />
 							</div>
 						{/if}
 					</section>
@@ -465,7 +488,7 @@
 						<input
 							id="ss_method"
 							class="input"
-							value={outbound.method ?? ''}
+							value={getFieldString(['method'])}
 							oninput={(e) => setField(['method'], (e.target as HTMLInputElement).value)}
 							placeholder="aes-256-gcm"
 						/>
@@ -477,7 +500,7 @@
 							id="ss_password"
 							class="input"
 							type="password"
-							value={outbound.password ?? ''}
+							value={getFieldString(['password'])}
 							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -487,7 +510,7 @@
 						<input
 							id="ss_plugin"
 							class="input"
-							value={outbound.plugin ?? ''}
+							value={getFieldString(['plugin'])}
 							oninput={(e) => setField(['plugin'], (e.target as HTMLInputElement).value)}
 							placeholder="obfs-local, v2ray-plugin…"
 						/>
@@ -499,7 +522,7 @@
 							id="ss_plugin_opts"
 							class="input textarea"
 							rows="2"
-							value={outbound.plugin_opts ?? ''}
+							value={getFieldString(['plugin_opts'])}
 							oninput={(e) => setField(['plugin_opts'], (e.target as HTMLTextAreaElement).value)}
 							placeholder="obfs=http;obfs-host=example.com"
 						></textarea>
@@ -516,7 +539,7 @@
 							id="password"
 							class="input"
 							type="password"
-							value={outbound.password ?? ''}
+							value={getFieldString(['password'])}
 							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -530,7 +553,7 @@
 						<input
 							id="hy2_sni"
 							class="input"
-							value={getField(['tls', 'server_name']) ?? ''}
+							value={getFieldString(['tls', 'server_name'])}
 							oninput={(e) => setField(['tls', 'server_name'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -538,7 +561,7 @@
 					<label class="checkbox-label">
 						<input
 							type="checkbox"
-							checked={getField(['tls', 'insecure']) ?? false}
+							checked={getFieldBool(['tls', 'insecure'])}
 							onchange={(e) => setField(['tls', 'insecure'], (e.target as HTMLInputElement).checked)}
 						/>
 						<span>Insecure (пропустить проверку сертификата)</span>
@@ -554,7 +577,7 @@
 						<input
 							id="username"
 							class="input"
-							value={outbound.username ?? ''}
+							value={getFieldString(['username'])}
 							oninput={(e) => setField(['username'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -565,7 +588,7 @@
 							id="naive_password"
 							class="input"
 							type="password"
-							value={outbound.password ?? ''}
+							value={getFieldString(['password'])}
 							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -579,7 +602,7 @@
 						<input
 							id="mieru_username"
 							class="input"
-							value={outbound.username ?? ''}
+							value={getFieldString(['username'])}
 							oninput={(e) => setField(['username'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -590,7 +613,7 @@
 							id="mieru_password"
 							class="input"
 							type="password"
-							value={outbound.password ?? ''}
+							value={getFieldString(['password'])}
 							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -599,7 +622,7 @@
 						<Dropdown
 							id="mieru_transport"
 							label="Transport"
-							value={outbound.transport ?? 'TCP'}
+							value={getFieldString(['transport']) || 'TCP'}
 							options={[
 								{ value: 'TCP', label: 'TCP' },
 								{ value: 'UDP', label: 'UDP' },
@@ -615,7 +638,7 @@
 							id="mieru_server_ports"
 							class="input textarea"
 							rows="3"
-							value={serverPortsText(outbound.server_ports)}
+							value={serverPortsText(getField(['server_ports']))}
 							oninput={(e) => setField(['server_ports'], parseServerPorts((e.target as HTMLTextAreaElement).value))}
 						></textarea>
 					</div>
@@ -625,7 +648,7 @@
 						<input
 							id="mieru_multiplexing"
 							class="input"
-							value={outbound.multiplexing ?? ''}
+							value={getFieldString(['multiplexing'])}
 							oninput={(e) => setField(['multiplexing'], (e.target as HTMLInputElement).value)}
 						/>
 					</div>
@@ -636,7 +659,7 @@
 							id="mieru_traffic_pattern"
 							class="input textarea"
 							rows="3"
-							value={outbound.traffic_pattern ?? ''}
+							value={getFieldString(['traffic_pattern'])}
 							oninput={(e) => setField(['traffic_pattern'], (e.target as HTMLTextAreaElement).value)}
 						></textarea>
 					</div>

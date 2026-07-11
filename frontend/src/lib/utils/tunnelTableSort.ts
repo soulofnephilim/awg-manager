@@ -44,7 +44,7 @@ export function compareNullableNumber(
 	if (aNull && bNull) return 0;
 	if (aNull) return nullsLast ? 1 : -1;
 	if (bNull) return nullsLast ? -1 : 1;
-	return (a as number) - (b as number);
+	return a - b;
 }
 
 export function compareBool(a: boolean | null | undefined, b: boolean | null | undefined): number {

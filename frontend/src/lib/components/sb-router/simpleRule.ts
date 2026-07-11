@@ -81,7 +81,7 @@ export function classifyRuleSimplicity(
     return { simple: false };
   }
 
-  const tag = tags[0]!;
+  const tag = tags[0];
   const rs = resolveRuleSetByTag(tag, ruleSets);
   if (!rs) return { simple: false };
 

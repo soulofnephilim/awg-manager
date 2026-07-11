@@ -26,7 +26,7 @@ export function datInfo(rs: SingboxRouterRuleSet): RuleSetDatInfo | null {
 
 export function resolveRuleSetDisplayType(rs: SingboxRouterRuleSet): RuleSetDisplayType {
 	if (datInfo(rs)) return 'dat';
-	return (rs.type ?? 'remote') as Exclude<RuleSetDisplayType, 'dat'>;
+	return (rs.type ?? 'remote');
 }
 
 export function ruleSetDisplayLabel(type: RuleSetDisplayType): string {

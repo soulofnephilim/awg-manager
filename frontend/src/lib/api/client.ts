@@ -112,6 +112,7 @@ import type {
 } from '$lib/types';
 import { sanitizeDnsServerForApi } from '$lib/utils/dnsServerDetour';
 import { isMockDevMode as envIsMockDevMode } from '$lib/env';
+import { validateApiResponse } from './validate';
 
 export type TrafficPeriod = '5m' | '10m' | '30m' | '1h' | '3h' | '6h' | '12h' | '24h';
 
@@ -255,6 +256,10 @@ class ApiClient {
 			throw err;
 		}
 
+		// Runtime-проверка конверта по схеме из swagger: каст `as T` ниже
+		// подкреплён фактической валидацией, а не доверием.
+		validateApiResponse(options.method ?? 'GET', endpoint, data);
+
 		return data.data as T;
 	}
 
@@ -348,6 +353,11 @@ class ApiClient {
 		}
 		const data = (await res.json()) as ApiResponse<T>;
 		if (data.error) throw new Error(data.message || 'Ошибка удаления');
+		validateApiResponse(
+			options.method ?? 'POST',
+			url.startsWith(this.baseUrl) ? url.slice(this.baseUrl.length) : url,
+			data,
+		);
 		return data.data as T;
 	}
 
@@ -1866,13 +1876,13 @@ class ApiClient {
 		const url = `${this.baseUrl}/singbox/tunnels/test/speed/stream?tag=${encodeURIComponent(tag)}&server=${encodeURIComponent(server)}&port=${port}${ifaceParam}`;
 		const es = new EventSource(url);
 		es.addEventListener('phase', (e) => {
-			try { onPhase(JSON.parse((e as MessageEvent).data).phase); } catch { /* ignore */ }
+			try { onPhase(JSON.parse((e).data).phase); } catch { /* ignore */ }
 		});
 		es.addEventListener('interval', (e) => {
-			try { onInterval(JSON.parse((e as MessageEvent).data)); } catch { /* ignore */ }
+			try { onInterval(JSON.parse((e).data)); } catch { /* ignore */ }
 		});
 		es.addEventListener('result', (e) => {
-			try { onResult(JSON.parse((e as MessageEvent).data)); } catch { /* ignore */ }
+			try { onResult(JSON.parse((e).data)); } catch { /* ignore */ }
 		});
 		es.addEventListener('done', () => { onDone(); es.close(); });
 		es.addEventListener('error', (e) => {
@@ -2280,13 +2290,13 @@ class ApiClient {
 		const es = new EventSource(`${this.baseUrl}/singbox/router/inspect/stream?${qs.toString()}`);
 		es.addEventListener('progress', (e) => {
 			try {
-				const payload = JSON.parse((e as MessageEvent).data);
+				const payload = JSON.parse((e).data);
 				if (payload?.progress) handlers.onProgress(payload.progress as SingboxRouterInspectProgress);
 			} catch {}
 		});
 		es.addEventListener('result', (e) => {
 			try {
-				const payload = JSON.parse((e as MessageEvent).data);
+				const payload = JSON.parse((e).data);
 				if (payload?.result) handlers.onResult(payload.result as SingboxRouterInspectResult);
 			} catch (err) {
 				handlers.onError(err instanceof Error ? err.message : 'Invalid stream result');
@@ -2295,7 +2305,7 @@ class ApiClient {
 		});
 		es.addEventListener('inspect-error', (e) => {
 			try {
-				const payload = JSON.parse((e as MessageEvent).data);
+				const payload = JSON.parse((e).data);
 				handlers.onInspectError(String(payload?.error ?? 'Inspect failed'));
 			} catch {
 				handlers.onInspectError('Inspect failed');

@@ -130,12 +130,6 @@ type SingboxController interface {
 	// (stderr FATAL line or exit tail). Empty after a clean start.
 	// Surfaced via Status.LastError so the UI explains «СБОЙ».
 	LastError() string
-	// AutoRestartIfCrashed restarts a dead sing-box through the shared
-	// crash-loop backoff (issue #456). Respects the sticky manual-stop
-	// intent (all-false return). ONLY for automatic reconcile paths —
-	// user actions go through the ungated Control API. Callers still do
-	// their own mode-aware readiness wait after restarted=true.
-	AutoRestartIfCrashed(ctx context.Context) (restarted, suppressed bool, err error)
 	// CrashStats returns crash observability for Status (issue #456):
 	// crashes within the recent window, the reason of the newest one,
 	// and until when auto-restart is suppressed (zero = not suppressed).
@@ -401,6 +395,12 @@ type ServiceImpl struct {
 	// After Install succeeds the flag is set to true until Disable resets it.
 	netfilterStateKnown bool
 
+	// blackholeActive tracks whether the fail-closed DROP chain is currently
+	// engaged (installed by reconcileInstalled while sing-box is dead and the
+	// PREROUTING interception jumps were wiped). It is removed the moment the
+	// engine recovers. Guarded by s.mu, like the other current* install state.
+	blackholeActive bool
+
 	// selective tracking
 	currentSelectiveBypass bool // last-applied value of SelectiveBypass
 
@@ -598,22 +598,38 @@ func (s *ServiceImpl) persistConfigDirect(ctx context.Context, cfg *RouterConfig
 		// Test-only legacy fallback: reuse the in-place writer.
 		return s.persistConfig(ctx, cfg)
 	}
+	return s.persistSlotDirect(orchestrator.SlotRouter, cfg, false)
+}
+
+// persistSlotDirect materializes cfg and, when the serialized bytes differ from
+// what is already on disk, writes them to the slot's active file via the
+// orchestrator (scheduling a debounced reload). The active path is resolved
+// from the orchestrator so it stays in sync with the slot's registered
+// filename instead of a hardcoded literal. checkCycles runs the composite-cycle
+// guard before writing. Orch must be non-nil; the caller must have arranged for
+// the slot to be enabled. Shared by persistConfigDirect and persistFakeIPConfig.
+func (s *ServiceImpl) persistSlotDirect(slot orchestrator.Slot, cfg *RouterConfig, checkCycles bool) error {
 	materialized, err := s.ruleSetMaterializer().materializeConfig(cfg)
 	if err != nil {
 		return err
 	}
+	if checkCycles {
+		if err := validateNoCompositeCycles(materialized.Outbounds); err != nil {
+			return err
+		}
+	}
 	data, err := json.MarshalIndent(materialized, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal router config: %w", err)
+		return fmt.Errorf("marshal %s config: %w", slot, err)
 	}
-	activePath := filepath.Join(s.deps.Orch.ConfigDir(), "20-router.json")
+	activePath, err := s.deps.Orch.ActivePath(slot)
+	if err != nil {
+		return err
+	}
 	if existing, err := os.ReadFile(activePath); err == nil && bytes.Equal(existing, data) {
 		return nil
 	}
-	if err := s.deps.Orch.Save(orchestrator.SlotRouter, data); err != nil {
-		return err
-	}
-	return nil
+	return s.deps.Orch.Save(slot, data)
 }
 
 // notifyRoutingSlotsChanged invokes the OnRoutingSlotsChanged hook (see
@@ -1724,6 +1740,9 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	s.currentSelectiveBypass = false
 	s.currentQoSClasses = nil
 	s.netfilterStateKnown = false
+	// Uninstall already tore down the fail-closed blackhole (if any); clear the
+	// tracking flag so a later reconcile doesn't try to remove it again.
+	s.blackholeActive = false
 
 	if s.deps.Orch != nil {
 		// Move 20-router.json under disabled/ — sing-box's non-recursive
@@ -1823,39 +1842,27 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	if err != nil {
 		return err
 	}
-	// Мёртвый sing-box при живых iptables (issue #456): цепочки и
-	// PREROUTING-джампы целы, но процесс упал (OOM и т.п.) — перехваченный
-	// трафик уходит в никуда, а этот reconcile раньше лечил только iptables.
-	// Зеркалим fakeip-ветку (fakeip_reconcile.go): перезапуск через общий
-	// backoff-гейт — ручной Stop и анти-crash-loop пауза уважаются внутри
-	// AutoRestartIfCrashed (подавление логируется там один раз на смену
-	// состояния, не каждый 30s-тик).
-	// engineDown: движок не работает и восстановить его на этом тике не
-	// вышло (рестарт подавлен backoff'ом / ручным Stop, либо сам старт
-	// упал). Ниже это гасит восстановление PREROUTING-джампов (FIX-B):
-	// лечить перехват в мёртвый порт нельзя.
-	engineDown := false
+	// Единственный рестарт-авторитет sing-box — watchdog (Operator.Reconcile,
+	// свой независимый 30s-тик). Router-reconcile больше НЕ рестартит движок
+	// сам: раньше это был второй независимый авторитет (#456), и вся
+	// токен-машинерия backoff'а существовала только чтобы примирить гонку двух
+	// рестартёров. Здесь лишь фиксируем факт смерти движка: engineDown ниже
+	// (а) включит fail-closed blackhole вместо перехвата в мёртвый порт,
+	// (б) погасит heal PREROUTING-джампов. Движок поднимет watchdog своим тиком;
+	// следующий reconcile-тик при живом движке восстановит перехват и снимет
+	// blackhole. Fail-closed держится blackhole'ом всё время, пока движок мёртв.
+	//
+	// «Готов» = process + оба inbound-сокета ПРИВЯЗАНЫ (singboxReady, hard-gate
+	// #221), а не просто IsRunning. Процесс может быть жив, но inbound не
+	// привязался (порт занят, отклонённый hot-reload) — тогда установка iptables
+	// REDIRECT/TPROXY в непривязанный сокет заблэкхолила бы весь policy-трафик,
+	// включая DNS:53. Поэтому up-but-unbound трактуем как engineDown: ставим
+	// fail-closed blackhole и НЕ ставим реальный перехват, пока сокеты не встанут.
+	engineReady := true
 	if s.deps.Singbox != nil {
-		if running, _ := s.deps.Singbox.IsRunning(); !running {
-			restarted, _, rerr := s.deps.Singbox.AutoRestartIfCrashed(ctx)
-			switch {
-			case rerr != nil:
-				s.appLog.Warn("reconcile", "", "restart dead sing-box: "+rerr.Error())
-			case restarted:
-				// Дожидаемся inbound-сокетов, чтобы дальнейшие шаги (re-Install
-				// iptables) не направили трафик на порты, которые ещё не слушаются.
-				// Мягкий дедлайн: на таймауте продолжаем, как QoS-heal ниже.
-				if alive, _ := s.deps.Singbox.IsRunning(); alive {
-					if e := s.waitForSingbox(ctx, bootWaitWithFloor()); e != nil {
-						s.appLog.Warn("reconcile", "", "sing-box not ready after restart: "+e.Error())
-					}
-				}
-			}
-			if alive, _ := s.deps.Singbox.IsRunning(); !alive {
-				engineDown = true
-			}
-		}
+		engineReady = s.singboxReady(ctx, false)
 	}
+	engineDown := !engineReady
 	if sr.SelectiveBypass {
 		if err := s.validateSelectiveBypassAgainstApplied(sr); err != nil {
 			if errors.Is(err, errSelectiveIncompatible) {
@@ -1979,17 +1986,63 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// during an NDMS reload must not trigger a needless rebuild.
 	_, jumps, probeErr := s.deps.IPTables.Probe(ctx)
 	jumpsMissing := probeErr == nil && !jumps
-	if jumpsMissing && engineDown {
-		// Не восстанавливаем перехват в мёртвый порт (FIX-B): движок не
-		// работает (рестарт подавлен или не удался), и вернуть PREROUTING-
-		// джампы значило бы направить трафик политик (включая hijacked
-		// DNS:53) в никуда на всю паузу backoff'а. Существующие правила НЕ
-		// трогаем — fail-closed остаётся, VPN не должен fail-open'иться;
-		// просто не долечиваем отсутствующие jump'ы на этом тике.
-		s.appLog.Warn("reconcile", "", "PREROUTING jumps missing, но движок не работает — пропускаем восстановление перехвата на этот тик")
+	// wantBlackhole: движок мёртв И PREROUTING-джампы снесены (NDMS перестроил
+	// firewall). Раньше здесь перехват просто не восстанавливался в мёртвый порт
+	// (FIX-B), НО при снесённых джампах это означало fail-OPEN: policy-трафик
+	// уходил в обычный роутинг Keenetic → в WAN мимо proxy/AWG. Теперь ставим
+	// явный fail-closed blackhole — DROP policy-трафика (с теми же RETURN-
+	// исключениями LAN/router/WAN, что и у перехвата), чтобы гарантированно НЕ
+	// течь в WAN, пока движок не вернётся. Снимается ниже, когда движок оживёт.
+	wantBlackhole := jumpsMissing && engineDown
+	if wantBlackhole {
+		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
+		bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
+		// Selective guard references the AWGM-SELECTIVE ipset; ensure it exists so
+		// iptables-restore of the blackhole doesn't fail with "Set ... doesn't
+		// exist" (same pre-create the real Install path does below).
+		if sr.SelectiveBypass {
+			if e := ensureSelectiveSetExists(ctx); e != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("pre-create ipset for blackhole: %v", e))
+			}
+		}
+		// Mirror the real interception spec's exclusions (bypass ports + selective
+		// guard) so the blackhole drops EXACTLY what would have been proxied — not
+		// the user's non-selective traffic and not their bypass ports.
+		blackholeSpec := RestoreInputSpec{
+			PolicyMark:     mark,
+			MatchAll:       !policyMode,
+			WANIPs:         wanIPs,
+			BypassCIDRs:    bypassSubnets,
+			BypassUDPPorts: bypassUDP,
+			BypassTCPPorts: bypassTCP,
+			SelectiveIPSet: sr.SelectiveBypass,
+		}
+		s.mu.Lock()
+		err := s.deps.IPTables.InstallBlackhole(ctx, blackholeSpec)
+		if err == nil {
+			s.blackholeActive = true
+		}
+		s.mu.Unlock()
+		if err != nil {
+			s.appLog.Warn("reconcile", "", "не удалось поставить fail-closed blackhole: "+err.Error())
+		} else {
+			s.appLog.Warn("reconcile", "", "движок не работает, PREROUTING jumps снесены — включён fail-closed blackhole (policy-трафик дропается, не течёт в WAN)")
+		}
+		// Реальный перехват в мёртвый порт всё равно не восстанавливаем.
 		jumpsMissing = false
 	}
 	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged || qosChanged
+
+	// Движок не готов интерсептить (мёртв или inbound-сокеты не привязаны) —
+	// НЕ ставим iptables ни по какому триггеру (#221): REDIRECT/TPROXY в
+	// непривязанный сокет заблэкхолил бы весь policy-трафик, включая DNS:53.
+	// Fail-closed уже держит blackhole (при снесённых джампах) или перехват в
+	// мёртвый порт (при целых). Установку откладываем до готовности — следующий
+	// reconcile-тик поставит iptables, когда сокеты встанут.
+	if needsInstall && engineDown {
+		s.appLog.Warn("reconcile", "", "движок не готов (inbound-сокеты не привязаны) — откладываем установку iptables до готовности")
+		needsInstall = false
+	}
 
 	if needsInstall {
 		if forceInitialSync {
@@ -2059,6 +2112,26 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 			if _, err := s.stripLegacySelectiveRulesFromRouter(ctx); err != nil {
 				s.appLog.Warn("selective", "", fmt.Sprintf("strip legacy selective rules: %v", err))
 			}
+		}
+	}
+
+	// Снимаем fail-closed blackhole ТОЛЬКО когда движок жив И probe успешен —
+	// тогда реальный перехват гарантированно на месте (steady state с целыми
+	// jumps, либо только что переустановлен выше; при ошибке Install был ранний
+	// return). Делаем ПОСЛЕ реального Install, чтобы не было окна утечки между
+	// снятием blackhole и восстановлением перехвата. Критично: на probe-ОШИБКЕ
+	// (jumpsMissing→false из-за !nil err) или мёртвом движке blackhole СОХРАНЯЕМ,
+	// иначе транзиентная -S ошибка во время NDMS-reload снесла бы DROP при живой
+	// утечке и удалила бы rules-файл, обездвижив и netfilter.d-хук. Идемпотентно.
+	if !engineDown && probeErr == nil {
+		s.mu.Lock()
+		if s.blackholeActive {
+			s.deps.IPTables.RemoveBlackhole(ctx)
+			s.blackholeActive = false
+			s.mu.Unlock()
+			s.appLog.Info("reconcile", "", "движок восстановлен — fail-closed blackhole снят")
+		} else {
+			s.mu.Unlock()
 		}
 	}
 

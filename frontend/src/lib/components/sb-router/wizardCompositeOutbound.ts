@@ -78,7 +78,7 @@ export function previewTunnelOutboundResolution(
 ): TunnelOutboundPreview | null {
   if (tunnelTags.length === 0) return null;
   if (tunnelTags.length === 1) {
-    return { outboundTag: tunnelTags[0]!, willCreate: false, tunnelCount: 1 };
+    return { outboundTag: tunnelTags[0], willCreate: false, tunnelCount: 1 };
   }
   const existing = findMatchingComposite(outbounds, tunnelTags);
   if (existing) {

@@ -33,7 +33,7 @@ function baseProps(over: Partial<Props> = {}): Props {
 }
 
 function rowLines(container: HTMLElement): HTMLElement[] {
-	return Array.from(container.querySelectorAll('.member-list-line')) as HTMLElement[];
+	return Array.from(container.querySelectorAll('.member-list-line'));
 }
 
 describe('SubscriptionMemberList', () => {
@@ -67,7 +67,7 @@ describe('SubscriptionMemberList', () => {
 		const { container } = render(SubscriptionMemberList, {
 			props: baseProps({ isUrlSub: true, isInline: false, selectMode: false, onexclude, onremove }),
 		});
-		const exBtns = Array.from(container.querySelectorAll('.ex-btn')) as HTMLButtonElement[];
+		const exBtns = Array.from(container.querySelectorAll('.ex-btn'));
 		expect(exBtns).toHaveLength(2);
 		// no remove buttons for a URL sub
 		expect(container.querySelectorAll('.member-remove-btn')).toHaveLength(0);
@@ -84,7 +84,7 @@ describe('SubscriptionMemberList', () => {
 		const { container } = render(SubscriptionMemberList, {
 			props: baseProps({ isInline: true, isUrlSub: false, selectMode: false, onexclude, onremove }),
 		});
-		const rmBtns = Array.from(container.querySelectorAll('.member-remove-btn')) as HTMLButtonElement[];
+		const rmBtns = Array.from(container.querySelectorAll('.member-remove-btn'));
 		expect(rmBtns).toHaveLength(2);
 		// no exclude buttons for an inline sub
 		expect(container.querySelectorAll('.ex-btn')).toHaveLength(0);

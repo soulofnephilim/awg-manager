@@ -1374,6 +1374,25 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.GeoTagDTO:
+    properties:
+      count:
+        example: 1250
+        type: integer
+      name:
+        example: google
+        type: string
+    type: object
+  api.GeoTagsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.GeoTagDTO'
+        type: array
+      success:
+        example: true
+        type: boolean
+    type: object
   api.HealthData:
     properties:
       instanceId:
@@ -2616,6 +2635,37 @@ definitions:
     properties:
       data:
         $ref: '#/definitions/api.RoutingRefreshData'
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.RoutingTunnelDTO:
+    properties:
+      available:
+        example: true
+        type: boolean
+      iface:
+        example: nwg0
+        type: string
+      id:
+        example: tun_abc123
+        type: string
+      name:
+        example: My VPN
+        type: string
+      status:
+        example: connected
+        type: string
+      type:
+        example: managed
+        type: string
+    type: object
+  api.RoutingTunnelsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.RoutingTunnelDTO'
+        type: array
       success:
         example: true
         type: boolean
@@ -7603,9 +7653,7 @@ paths:
         "200":
           description: OK
           schema:
-            items:
-              type: string
-            type: array
+            $ref: '#/definitions/api.GeoTagsResponse'
       security:
       - CookieAuth: []
       summary: HydraRoute geo tags
@@ -9362,9 +9410,7 @@ paths:
         "200":
           description: OK
           schema:
-            items:
-              type: object
-            type: array
+            $ref: '#/definitions/api.RoutingTunnelsResponse'
         "400":
           description: Bad Request
           schema:
@@ -9594,9 +9640,7 @@ paths:
         "200":
           description: OK
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/api.PeerConfResponse'
         "404":
           description: Not Found
           schema:
@@ -14864,10 +14908,10 @@ paths:
   /terminal/ws:
     get:
       produces:
-      - application/json
+      - text/plain
       responses:
-        "200":
-          description: WebSocket upgrade
+        "101":
+          description: Switching Protocols (WebSocket upgrade)
           schema:
             type: string
         "400":

@@ -35,6 +35,15 @@ const (
 	RoutingTable  = 100
 	ChainName     = "AWGM-TPROXY"
 	RedirectChain = "AWGM-REDIRECT"
+	// BlackholeChain is the fail-closed DROP chain (mangle). It is engaged
+	// ONLY while sing-box is dead AND the PREROUTING interception jumps were
+	// wiped (e.g. an NDMS firewall reload): without it, policy-marked traffic
+	// would fall through to the normal Keenetic routing table and LEAK to WAN
+	// unencrypted, even though the user expects it to go through proxy/AWG.
+	// The chain carries the SAME LAN/router/WAN RETURN exclusions as the
+	// interception chains, then a terminal DROP, and is removed the moment the
+	// engine recovers. Traffic is dropped, never leaked.
+	BlackholeChain = "AWGM-BLACKHOLE"
 	// DNSRescueTag identifies our short-circuit REDIRECT rules in nat
 	// PREROUTING that bypass NDMS's _NDM_DNS_FLT_REDIR catch-all
 	// (which would unconditionally REDIRECT DNS to :53, where
@@ -74,8 +83,9 @@ const (
 // Mutable in tests via t.Cleanup so they can redirect into a tmp dir.
 // Production code reads these at call time.
 var (
-	netfilterHookPath  = "/opt/etc/ndm/netfilter.d/50-awgm-tproxy.sh"
-	netfilterRulesPath = "/opt/etc/awg-manager/singbox/router-netfilter.rules"
+	netfilterHookPath      = "/opt/etc/ndm/netfilter.d/50-awgm-tproxy.sh"
+	netfilterRulesPath     = "/opt/etc/awg-manager/singbox/router-netfilter.rules"
+	netfilterBlackholePath = "/opt/etc/awg-manager/singbox/router-blackhole.rules"
 )
 
 // selectiveSetName is the ipset name used for selective bypass — aliased
@@ -430,6 +440,52 @@ func emitPreroutingJump(b *strings.Builder, chain string, spec RestoreInputSpec)
 	}
 }
 
+// buildBlackholeRestoreInput renders the mangle-only *AWGM-BLACKHOLE* blob:
+// the SAME LAN/router/WAN RETURN exclusions as the interception chain, then a
+// terminal DROP, entered from PREROUTING by the identical policy selector
+// (emitPreroutingJump). So the set it drops is exactly the set that would have
+// entered AWGM-TPROXY — nothing local is caught, and no policy traffic escapes.
+// mangle (not nat) so every packet of a flow is matched while the tunnel is
+// down, not only the first packet of a new conntrack.
+func buildBlackholeRestoreInput(spec RestoreInputSpec) string {
+	var b strings.Builder
+	b.WriteString("*mangle\n")
+	fmt.Fprintf(&b, ":%s - [0:0]\n", BlackholeChain)
+	// User bypass first — an explicitly excluded subnet must never be dropped.
+	emitUserBypassReturns(&b, BlackholeChain, spec.BypassCIDRs)
+	// User bypass ports (BOTH protocols): traffic the user deliberately keeps off
+	// the proxy (STUN/VoIP/WireGuard/games) must go direct, not be dropped. The
+	// blackhole matches every protocol (connmark on the jump, no -p filter), so it
+	// must honour the TCP ports too — even though real TCP interception lives in
+	// the nat chain, the fail-closed DROP here is the one place TCP policy traffic
+	// is dropped while the engine is down.
+	for _, pr := range spec.BypassUDPPorts {
+		fmt.Fprintf(&b, "-A %s -p udp --dport %s -j RETURN\n", BlackholeChain, pr.String())
+	}
+	for _, pr := range spec.BypassTCPPorts {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport %s -j RETURN\n", BlackholeChain, pr.String())
+	}
+	// Selective mode: only destinations in AWGM-SELECTIVE are proxied; everything
+	// else is SUPPOSED to go direct to WAN. Mirror the interception guard so the
+	// blackhole drops ONLY the selective subset — without it a dead engine would
+	// blackhole the user's entire (mostly non-selective) traffic, taking policy
+	// devices fully offline, which is worse than the fail-open it replaces.
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n", BlackholeChain, selectiveSetName)
+	}
+	// LAN/loopback/CGNAT/multicast + router-owned WAN IPs: reused verbatim from
+	// the interception chain so the exclusion set cannot drift and the blackhole
+	// can never over-block router-local, LAN-to-LAN, or management traffic.
+	emitBypassReturns(&b, BlackholeChain, spec.WANIPs)
+	// Everything else that belongs to the policy: drop it (fail-closed).
+	fmt.Fprintf(&b, "-A %s -j DROP\n", BlackholeChain)
+	// Same PREROUTING selector as the real interception jump (connmark policy
+	// filter, or MatchAll), so exactly the policy traffic is diverted here.
+	emitPreroutingJump(&b, BlackholeChain, spec)
+	b.WriteString("COMMIT\n")
+	return b.String()
+}
+
 func buildRestoreInput(spec RestoreInputSpec) string {
 	var b strings.Builder
 
@@ -639,13 +695,15 @@ type runOutFn func(ctx context.Context, args ...string) (string, error)
 type persistFn func(input string) error
 
 type IPTables struct {
-	restoreNoflush restoreNoflushFn
-	runIPTables    runFn
-	runIPTablesOut runOutFn
-	runIP          runFn
-	persistRules   persistFn
-	persistHook    func() error
-	cleanupHook    func()
+	restoreNoflush   restoreNoflushFn
+	runIPTables      runFn
+	runIPTablesOut   runOutFn
+	runIP            runFn
+	persistRules     persistFn
+	persistHook      func() error
+	cleanupHook      func()
+	persistBlackhole persistFn
+	cleanupBlackhole func()
 }
 
 func NewIPTables() *IPTables {
@@ -657,10 +715,44 @@ func NewIPTables() *IPTables {
 			result, err := sysexec.Run(ctx, "ip", args...)
 			return sysexec.FormatError(result, err)
 		},
-		persistRules: writeNetfilterRulesFile,
-		persistHook:  writeNetfilterHook,
-		cleanupHook:  removeNetfilterRulesFile,
+		persistRules:     writeNetfilterRulesFile,
+		persistHook:      writeNetfilterHook,
+		cleanupHook:      removeNetfilterRulesFile,
+		persistBlackhole: writeNetfilterBlackholeRulesFile,
+		cleanupBlackhole: removeNetfilterBlackholeRulesFile,
 	}
+}
+
+// InstallBlackhole engages the fail-closed DROP chain: scrub any stale jump,
+// persist the blackhole rules (so the netfilter.d hook can re-assert it after
+// an NDMS reload while the engine is still dead), then restore it via
+// iptables-restore --noflush. It reuses the same hook it.persistHook already
+// wrote — only the blackhole rules file is blackhole-specific. No fwmark/ip
+// rule: the blackhole only drops, it never delivers to a table. Idempotent.
+func (it *IPTables) InstallBlackhole(ctx context.Context, spec RestoreInputSpec) error {
+	it.removeSourceHooksFromTable(ctx, "mangle", BlackholeChain)
+	input := buildBlackholeRestoreInput(spec)
+	if it.persistBlackhole != nil {
+		if err := it.persistBlackhole(input); err != nil {
+			return fmt.Errorf("write blackhole rules: %w", err)
+		}
+	}
+	if err := it.restoreNoflush(ctx, input); err != nil {
+		return fmt.Errorf("iptables-restore blackhole: %w", err)
+	}
+	return nil
+}
+
+// RemoveBlackhole tears down the fail-closed DROP chain: delete the rules file
+// (so the hook stops re-asserting it), scrub the PREROUTING jump, then flush +
+// delete the chain. Idempotent — safe to call when no blackhole is present.
+func (it *IPTables) RemoveBlackhole(ctx context.Context) {
+	if it.cleanupBlackhole != nil {
+		it.cleanupBlackhole()
+	}
+	it.removeSourceHooksFromTable(ctx, "mangle", BlackholeChain)
+	_ = it.runIPTables(ctx, "-t", "mangle", "-F", BlackholeChain)
+	_ = it.runIPTables(ctx, "-t", "mangle", "-X", BlackholeChain)
 }
 
 // drainFwmarkRules deletes every `ip rule` for our fwmark/table, looping until
@@ -735,6 +827,17 @@ func writeNetfilterRulesFile(input string) error {
 	return storage.AtomicWritePerm(netfilterRulesPath, []byte(input), 0644)
 }
 
+func writeNetfilterBlackholeRulesFile(input string) error {
+	return storage.AtomicWritePerm(netfilterBlackholePath, []byte(input), 0644)
+}
+
+// removeNetfilterBlackholeRulesFile deletes the persisted blackhole rules so
+// the netfilter.d hook stops re-asserting the fail-closed DROP on the next NDMS
+// reload. Called when the engine recovers (blackhole removed). Idempotent.
+func removeNetfilterBlackholeRulesFile() {
+	_ = os.Remove(netfilterBlackholePath)
+}
+
 func writeNetfilterHook() error {
 	return storage.AtomicWritePerm(netfilterHookPath, []byte(netfilterHookScript()), 0755)
 }
@@ -743,69 +846,89 @@ func writeNetfilterHook() error {
 // substituted. Pure (no I/O) so a test can validate the generated shell with
 // `sh -n`.
 //
-// Scrub block before restore: when NDMS reloads only one table (e.g. nat) but
-// leaves mangle intact, restoring --noflush would append a SECOND PREROUTING
-// jump on top of the surviving one. The `-[jg]` regex covers both legacy `-j`
-// and current `-g` syntax so the upgrade path doesn't leave duplicates around.
+// Two mutually-exclusive paths, chosen by whether sing-box is alive:
+//
+//   - ALIVE: real interception governs. Scrub any lingering fail-closed
+//     blackhole, then restore the AWGM chains if NDMS wiped their PREROUTING
+//     jumps. Scrub-before-restore: when NDMS reloads only one table (e.g. nat)
+//     but leaves mangle intact, restoring --noflush would append a SECOND
+//     jump on top of the surviving one. The `-[jg]` regex covers both legacy
+//     `-j` and current `-g` syntax so upgrades don't leave duplicates.
+//   - DEAD: fail-closed. Re-assert the blackhole DROP (if its rules file exists
+//     and the jump was wiped) so policy traffic can NEVER reach WAN while the
+//     engine is down — the old hook simply exited here, leaving a leak window
+//     until the next reconcile tick.
 func netfilterHookScript() string {
 	return fmt.Sprintf(`#!/bin/sh
 [ "$type" = "ip6tables" ] && exit 0
 case "$table" in mangle|nat) ;; *) exit 0 ;; esac
-[ -f %[1]q ] || exit 0
-pidof sing-box >/dev/null 2>&1 || exit 0
-# Best-effort kernel module preload. Absent .ko or built-in modules are
-# silently skipped — iptables-restore will surface the final verdict anyway.
+# Best-effort kernel module preload (both paths need these). Absent .ko or
+# built-in modules are silently skipped — iptables-restore surfaces the verdict.
 KREL="$(uname -r)"
 for mod in xt_TPROXY xt_comment xt_mark xt_connmark xt_conntrack xt_pkttype xt_dscp; do
   grep -q "^${mod} " /proc/modules 2>/dev/null && continue
   [ -f "/lib/modules/${KREL}/${mod}.ko" ] && insmod "/lib/modules/${KREL}/${mod}.ko" 2>/dev/null || true
 done
-# A chain is "ok" only if it EXISTS and PREROUTING actually jumps into it.
-# NDMS rebuilds PREROUTING and wipes our AWGM PREROUTING jumps while leaving
-# the custom chains intact; gating on chain existence alone would skip the
-# restore in exactly that case, leaving interception silently dead.
-mangle_ok=0; nat_ok=0
-/opt/sbin/iptables -w -t mangle -nL %[2]s >/dev/null 2>&1 \
-  && /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[2]s($| )' \
-  && mangle_ok=1
-/opt/sbin/iptables -w -t nat -nL %[6]s >/dev/null 2>&1 \
-  && /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[6]s($| )' \
-  && nat_ok=1
-if [ "$mangle_ok" -eq 0 ] || [ "$nat_ok" -eq 0 ]; then
+if pidof sing-box >/dev/null 2>&1; then
+  # sing-box ALIVE — real interception governs. Drop any lingering fail-closed
+  # blackhole first so a stale DROP never sits in front of the interception jump.
   /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
-    | grep -E -- '-[jg] %[2]s($| )' \
+    | grep -E -- '-[jg] %[11]s($| )' \
     | sed 's/-A PREROUTING/-D PREROUTING/' \
     | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
-  /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
-    | grep -E -- '-[jg] %[6]s($| )' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
-  # Scrub DNS-RESCUE direct PREROUTING rules in nat (identified by
-  # comment tag, not by jump target — these are -j REDIRECT rules,
-  # not chain jumps). Same drop-and-restore approach as above, just
-  # matched via the iptables-save comment serialisation.
-  /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
-    | grep -E -- '--comment "?%[7]s' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
-  # Legacy DNS-NOPOLICY MARK rules in mangle (dead code from earlier
-  # AWGM builds). Always scrub so upgrades don't leave dangling rules
-  # accumulating across NDMS reloads.
-  /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
-    | grep -E -- '--comment "?%[8]s' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
-  # Ingress-scope MARK/CONNMARK rules in mangle (comment-tagged).
-  /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
-    | grep -E -- '--comment "?%[9]s' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
-  /opt/sbin/iptables-restore --noflush < %[1]q
-  /opt/sbin/ip rule add fwmark 0x%[3]x table %[4]d priority %[5]d 2>/dev/null || true
-  /opt/sbin/ip route add local 0.0.0.0/0 dev lo table %[4]d 2>/dev/null || true
-  logger -t awgm-tproxy "netfilter.d: restored AWGM chains after NDMS reload"
+  /opt/sbin/iptables -w -t mangle -F %[11]s 2>/dev/null
+  /opt/sbin/iptables -w -t mangle -X %[11]s 2>/dev/null
+  [ -f %[1]q ] || exit 0
+  # A chain is "ok" only if it EXISTS and PREROUTING actually jumps into it.
+  # NDMS rebuilds PREROUTING and wipes our AWGM jumps while leaving the custom
+  # chains intact; gating on chain existence alone would skip the restore.
+  mangle_ok=0; nat_ok=0
+  /opt/sbin/iptables -w -t mangle -nL %[2]s >/dev/null 2>&1 \
+    && /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[2]s($| )' \
+    && mangle_ok=1
+  /opt/sbin/iptables -w -t nat -nL %[6]s >/dev/null 2>&1 \
+    && /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[6]s($| )' \
+    && nat_ok=1
+  if [ "$mangle_ok" -eq 0 ] || [ "$nat_ok" -eq 0 ]; then
+    /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
+      | grep -E -- '-[jg] %[2]s($| )' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
+    /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
+      | grep -E -- '-[jg] %[6]s($| )' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
+    # Scrub DNS-RESCUE direct PREROUTING rules in nat (comment-tagged -j REDIRECT).
+    /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
+      | grep -E -- '--comment "?%[7]s' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
+    # Legacy DNS-NOPOLICY MARK rules in mangle (dead code from earlier builds).
+    /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
+      | grep -E -- '--comment "?%[8]s' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
+    # Ingress-scope MARK/CONNMARK rules in mangle (comment-tagged).
+    /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
+      | grep -E -- '--comment "?%[9]s' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
+    /opt/sbin/iptables-restore --noflush < %[1]q
+    /opt/sbin/ip rule add fwmark 0x%[3]x table %[4]d priority %[5]d 2>/dev/null || true
+    /opt/sbin/ip route add local 0.0.0.0/0 dev lo table %[4]d 2>/dev/null || true
+    logger -t awgm-tproxy "netfilter.d: restored AWGM chains after NDMS reload"
+  fi
+else
+  # sing-box DEAD — fail-closed. Re-assert the blackhole DROP if its rules file
+  # exists and the PREROUTING jump was wiped, so policy traffic cannot leak to
+  # WAN while the engine is down.
+  [ -f %[10]q ] || exit 0
+  if ! /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[11]s($| )'; then
+    /opt/sbin/iptables-restore --noflush < %[10]q
+    logger -t awgm-tproxy "netfilter.d: re-asserted fail-closed blackhole (sing-box down)"
+  fi
 fi
-`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain, DNSRescueTag, DNSNoPolicyTag, IngressTag)
+`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain, DNSRescueTag, DNSNoPolicyTag, IngressTag, netfilterBlackholePath, BlackholeChain)
 }
 
 // removeNetfilterRulesFile deletes the persisted rules file so the
@@ -830,6 +953,10 @@ func (it *IPTables) Uninstall(ctx context.Context) error {
 	if it.cleanupHook != nil {
 		it.cleanupHook()
 	}
+	// Also tear down the fail-closed blackhole if one lingers (engine died,
+	// blackhole engaged, then the user disabled the router): delete its rules
+	// file, scrub the jump, drop the chain.
+	it.RemoveBlackhole(ctx)
 	it.removeSourceHooks(ctx)
 	_ = it.runIPTables(ctx, "-t", "mangle", "-F", ChainName)
 	_ = it.runIPTables(ctx, "-t", "mangle", "-X", ChainName)

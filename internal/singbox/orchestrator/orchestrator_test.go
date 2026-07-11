@@ -549,6 +549,44 @@ func TestBootstrap_SweepsStaleApplyCheckDirs(t *testing.T) {
 	}
 }
 
+func TestBootstrap_SweepsStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, disabledSubdir), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, "pending"), 0755)
+	// Leftover AtomicWrite temp files from a crash between write and rename,
+	// one in each dir slot writes can land in.
+	staleTmps := []string{
+		filepath.Join(dir, "20-router.json.tmp.1234.5678"),
+		filepath.Join(dir, disabledSubdir, "40-subscriptions.json.tmp.1.2"),
+		filepath.Join(dir, "pending", "90-user.json.tmp.9.9"),
+	}
+	for _, p := range staleTmps {
+		if err := os.WriteFile(p, []byte(`{}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A real slot file must survive the sweep.
+	keep := filepath.Join(dir, "20-router.json")
+	if err := os.WriteFile(keep, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	o := New(dir, nil)
+	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
+	if err := o.Bootstrap(); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	for _, p := range staleTmps {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale temp file not swept: %s (%v)", p, err)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("real slot file wrongly removed: %v", err)
+	}
+}
+
 func TestBootstrap_LeavesPendingFileIntact(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "pending"), 0755)

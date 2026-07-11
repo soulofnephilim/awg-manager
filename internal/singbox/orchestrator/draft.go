@@ -264,7 +264,6 @@ func (o *Orchestrator) ApplyDraft(slot Slot) (ValidationResult, error) {
 	if err := os.Rename(pendingPath, o.activePath(meta)); err != nil {
 		return ValidationResult{}, fmt.Errorf("ApplyDraft rename: %w", err)
 	}
-	o.dirty = true
 	o.scheduleReload()
 	return res, nil // res.Ok() == true; может содержать advisory-предупреждения
 }
@@ -445,7 +444,6 @@ func (o *Orchestrator) SaveAndValidate(slot Slot, jsonBytes []byte) (ValidationR
 	if err := writeAtomic(o.activePath(meta), jsonBytes); err != nil {
 		return ValidationResult{}, fmt.Errorf("SaveAndValidate write active: %w", err)
 	}
-	o.dirty = true
 	o.scheduleReload()
 	return res, nil // res.Ok() == true; может содержать advisory-предупреждения
 }

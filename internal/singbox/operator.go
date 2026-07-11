@@ -2700,9 +2700,10 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 	return nil
 }
 
-// AutoRestartIfCrashed is the shared entry point for AUTOMATIC recovery
-// of a dead sing-box (router tproxy/fakeip reconcile loops; the watchdog
-// path uses the waitClash variant via Reconcile). It respects the sticky
+// autoRestartIfCrashed is the shared entry point for AUTOMATIC recovery of a
+// dead sing-box. The ONLY production caller is the watchdog via Reconcile
+// (waitClash=true) — the router reconcile loops no longer restart the engine
+// themselves (watchdog is the single restart authority). It respects the sticky
 // manual-stop intent and the crash-loop backoff:
 //
 //	restarted=true  — the process was dead and has been started;
@@ -2712,16 +2713,7 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 //	err != nil      — the start itself failed.
 //
 // Manual Control("start"/"restart") stays ungated and resets the backoff.
-// Satisfies part of router.SingboxController.
-func (o *Operator) AutoRestartIfCrashed(ctx context.Context) (restarted, suppressed bool, err error) {
-	// Router callers do their own mode-aware readiness wait
-	// (waitForSingbox: tun carrier / inbound sockets), so this variant
-	// spawns without gating on the Clash API — same semantics the fakeip
-	// drift-heal had with plain Start().
-	return o.autoRestartIfCrashed(ctx, false)
-}
-
-// autoRestartIfCrashed implements AutoRestartIfCrashed. waitClash=true
+// waitClash=true
 // (Operator.Reconcile / watchdog) preserves the legacy startAndWait
 // behaviour — block until the Clash API answers, stop the half-started
 // process on timeout. waitClash=false spawns via Start (validate +

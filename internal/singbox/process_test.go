@@ -276,6 +276,11 @@ func TestProcess_ReloadSIGHUPsWhenNoTun(t *testing.T) {
 	var sawSIGHUP bool
 	var spawnCount atomic.Int32
 	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	// The pidfile borrows the test's own pid to keep the process "alive" for
+	// the SIGHUP path; its cmdline is the test binary, not /bin/sleep, so the
+	// real identity check would (correctly) see a mismatch. Model "alive AND
+	// ours" via the seam — identity is not what this test exercises.
+	p.matchBinaryFn = func(int) bool { return true }
 	p.signalFn = func(pid int, sig syscall.Signal) error {
 		if sig == syscall.SIGHUP {
 			sawSIGHUP = true
@@ -296,6 +301,33 @@ func TestProcess_ReloadSIGHUPsWhenNoTun(t *testing.T) {
 	if got := spawnCount.Load(); got != 0 {
 		t.Errorf("Reload spawned %d times, want 0 (SIGHUP, process still alive)", got)
 	}
+}
+
+// Reload respawns when the pidfile's process is alive but NOT ours (pid
+// recycled to a foreign process). A bare kill(0) would wrongly keep the stale
+// pid on the SIGHUP path; the identity check forces a fresh start.
+func TestProcess_ReloadRespawnsWhenPidNotOurs(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	self := os.Getpid() // alive → isAlive passes; the seam reports not-ours
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(self)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var spawnCount atomic.Int32
+	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	p.matchBinaryFn = func(int) bool { return false } // foreign/recycled pid
+	p.signalFn = func(pid int, sig syscall.Signal) error { return nil }
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		spawnCount.Add(1)
+		return exec.Command("/bin/sleep", "2"), nil
+	}
+	if err := p.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := spawnCount.Load(); got != 1 {
+		t.Errorf("Reload spawned %d times, want 1 (identity mismatch → fresh start)", got)
+	}
+	_ = p.Stop()
 }
 
 // FIX-C (#456): у каждого запуска СВОЯ генерация deliberate-флага.

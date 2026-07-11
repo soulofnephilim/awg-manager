@@ -17,7 +17,7 @@ const ADBLOCK_RE = /^\|\|.+(\^)?$/;
 function highlightRuleSymbols(text: string): string {
 	let out = '';
 	for (let i = 0; i < text.length; i++) {
-		const ch = text[i]!;
+		const ch = text[i];
 		if (ch === ',' || ch === '^') {
 			out += `<span class="hl-rule-wild">${escapeHtml(ch)}</span>`;
 		} else if (ch === '|' && text[i + 1] === '|') {
@@ -48,9 +48,9 @@ function highlightAdblockRule(v: string): string {
 
 function splitInlineComment(line: string): { main: string; tail: string } {
 	const hash = line.match(/^(.*?)(\s+#\s.*)$/);
-	if (hash) return { main: hash[1]!, tail: hash[2]! };
+	if (hash) return { main: hash[1], tail: hash[2] };
 	const semi = line.match(/^(.*?)(\s+;\s.*)$/);
-	if (semi) return { main: semi[1]!, tail: semi[2]! };
+	if (semi) return { main: semi[1], tail: semi[2] };
 	return { main: line, tail: '' };
 }
 
@@ -87,7 +87,7 @@ function highlightInlineRuleMain(line: string): string {
 
 	const colonMatch = RULE_PREFIX.exec(trimmed);
 	if (colonMatch) {
-		const prefix = colonMatch[1]!;
+		const prefix = colonMatch[1];
 		const prefixLen = colonMatch[0].length;
 		const lead = line.slice(0, line.length - trimmed.length);
 		const rest = trimmed.slice(prefixLen);
@@ -132,7 +132,7 @@ export function highlightInlineRuleListContent(raw: string): string {
 	const lines = raw.split('\n');
 	const parts: string[] = [];
 	for (let i = 0; i < lines.length; i++) {
-		parts.push(highlightInlineRuleLine(lines[i]!));
+		parts.push(highlightInlineRuleLine(lines[i]));
 		if (i < lines.length - 1) parts.push('\n');
 	}
 	return parts.join('');

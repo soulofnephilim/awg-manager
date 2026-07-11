@@ -58,7 +58,6 @@ func (o *Orchestrator) Reload() error {
 		return nil // collapse re-entrancy
 	}
 	o.reloading = true
-	o.dirty = false
 	// Defense-in-depth: strip dangling selector/urltest members and defaults
 	// (a tag whose outbound was deleted from another slot) BEFORE validating.
 	// sing-box check does not catch these — like composite cycles, a missing
