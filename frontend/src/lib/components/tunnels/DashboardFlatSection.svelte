@@ -3,7 +3,7 @@
 	// (класс 2): снипеты карточек всех видов + тулбар/сетка/группировка по
 	// тегам. Состояние страницы приходит live-контекстом (ctx); ghost-слой
 	// drag-переупорядочивания остался в странице (fixed-позиционирование).
-	import { TunnelCard, ExternalTunnelCard, SystemTunnelCard, AdoptTunnelDialog } from '$lib/components/tunnels';
+	import { TunnelCard, ExternalTunnelCard, SystemTunnelCard } from '$lib/components/tunnels';
 	import DashboardToolbar from '$lib/components/tunnels/DashboardToolbar.svelte';
 	import { Button, StoreStatusBadge } from '$lib/components/ui';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';

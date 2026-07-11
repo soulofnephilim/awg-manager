@@ -9,10 +9,7 @@
 	import {
 		TunnelCard,
 		ExternalTunnelCard,
-		AdoptTunnelDialog,
 		SystemTunnelCard,
-		TunnelReferencedModal,
-		ConnectivitySettingsModal,
 		TunnelListTrafficCell,
 		TunnelPingButton,
 		TunnelTitleRow,
@@ -21,14 +18,10 @@
 		DefaultRouteBadge,
 	} from '$lib/components/tunnels';
 	import { TunnelListActions } from '$lib/components/ui';
-	import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsModal.svelte';
 	import { PageContainer, PageHeader, LoadingSpinner, EmptyState, WelcomeBanner } from '$lib/components/layout';
 	import {
-		Modal,
 		StoreStatusBadge,
-		TrafficChartModal,
 		TrafficSparkline,
-		Button,
 		Badge,
 		Tabs,
 		Toggle,
@@ -45,14 +38,15 @@
 	import { isSectionVisible, isTunnelDashboardAvailable } from '$lib/types/usageLevel';
 	import { subscriptionsStore } from '$lib/stores/subscriptions';
 	import SubscriptionCard from '$lib/components/subscriptions/SubscriptionCard.svelte';
-	import AddTunnelWizard from '$lib/components/subscriptions/AddTunnelWizard.svelte';
 	import SubscriptionActiveCard from '$lib/components/subscriptions/SubscriptionActiveCard.svelte';
 	import SubscriptionGroupsSection from '$lib/components/subscriptions/SubscriptionGroupsSection.svelte';
 	import SubscriptionsTabSection from '$lib/components/subscriptions/SubscriptionsTabSection.svelte';
 	import SingboxTunnelsTabSection from '$lib/components/singbox/SingboxTunnelsTabSection.svelte';
 	import AwgTunnelsTabSection from '$lib/components/tunnels/AwgTunnelsTabSection.svelte';
 	import DashboardFlatSection from '$lib/components/tunnels/DashboardFlatSection.svelte';
+	import TunnelPageModals from '$lib/components/tunnels/TunnelPageModals.svelte';
 	import type { DashboardFlatContext } from '$lib/components/tunnels/dashboardFlatContext';
+	import type { TunnelPageModalsContext } from '$lib/components/tunnels/tunnelPageModalsContext';
 	import type { AwgTabContext } from '$lib/components/tunnels/awgTabContext';
 	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem } from '$lib/types';
 	import { formatBitRate, formatBytes, formatDuration, formatRelativeTime, secondsSince } from '$lib/utils/format';
@@ -77,7 +71,7 @@
 		type TunnelRenderMode,
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode as getIsMockDevMode } from '$lib/env';
-	import { Download, Eye, EyeOff, GripVertical, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert } from 'lucide-svelte';
+	import { Eye, EyeOff, GripVertical, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert } from 'lucide-svelte';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 	import { formatRunningSub, pluralForm, SUBSCRIPTION_WORDS, TUNNEL_WORDS } from '$lib/utils/pluralize';
 	import DashboardToolbar from '$lib/components/tunnels/DashboardToolbar.svelte';
@@ -1952,6 +1946,43 @@
 		set flatGridEl(v) { flatGridEl = v; },
 		handleAdopt, handleAdoptClick, handleExportAll, handleGripKeydown, handleGripPointerDown, handleToggleOnOff, markAsServer, openAwgDiagnostics, openDetail, openSingboxDetail, openWizard, requestDelete, requestSubscriptionDelete,
 	};
+
+	// Live-контекст модалок страницы (см. tunnelPageModalsContext.ts).
+	const pageModalsCtx: TunnelPageModalsContext = {
+		get awgList() { return awgList; },
+		get systemList() { return systemList; },
+		get singboxTunnelsList() { return singboxTunnelsList; },
+		get subscriptionsActiveCards() { return subscriptionsActiveCards; },
+		get subscriptionsListRows() { return subscriptionsListRows; },
+		get liveActives() { return liveActives; },
+		get pendingSubscriptionLabel() { return pendingSubscriptionLabel; },
+		get adoptDialogOpen() { return adoptDialogOpen; },
+		set adoptDialogOpen(v) { adoptDialogOpen = v; },
+		get adoptError() { return adoptError; },
+		set adoptError(v) { adoptError = v; },
+		get adoptLoading() { return adoptLoading; },
+		set adoptLoading(v) { adoptLoading = v; },
+		get adoptingInterface() { return adoptingInterface; },
+		get deleteConfirmId() { return deleteConfirmId; },
+		set deleteConfirmId(v) { deleteConfirmId = v; },
+		get referencedDetails() { return referencedDetails; },
+		set referencedDetails(v) { referencedDetails = v; },
+		get referencedTunnelName() { return referencedTunnelName; },
+		set referencedTunnelName(v) { referencedTunnelName = v; },
+		get createModalOpen() { return createModalOpen; },
+		set createModalOpen(v) { createModalOpen = v; },
+		get wizardPreselect() { return wizardPreselect; },
+		get pendingSubscriptionDelete() { return pendingSubscriptionDelete; },
+		set pendingSubscriptionDelete(v) { pendingSubscriptionDelete = v; },
+		get deletingSubscription() { return deletingSubscription; },
+		get detailId() { return detailId; },
+		get singboxDetailTag() { return singboxDetailTag; },
+		get awgDiagnosticsTarget() { return awgDiagnosticsTarget; },
+		get connectivitySettingsTunnel() { return connectivitySettingsTunnel; },
+		get connectivitySettingsOpen() { return connectivitySettingsOpen; },
+		set connectivitySettingsOpen(v) { connectivitySettingsOpen = v; },
+		handleAdopt, handleDelete, confirmSubscriptionDelete, closeDetail, closeSingboxDetail, closeAwgDiagnostics, closeConnectivitySettings,
+	};
 </script>
 
 {#snippet createIcon()}
@@ -2082,136 +2113,7 @@
 	</div>
 {/if}
 
-<AdoptTunnelDialog
-	interfaceName={adoptingInterface}
-	bind:open={adoptDialogOpen}
-	bind:error={adoptError}
-	bind:loading={adoptLoading}
-	onclose={() => adoptDialogOpen = false}
-	onadopt={handleAdopt}
-/>
-
-{#if deleteConfirmId}
-	{@const tunnelName = awgList.find(t => t.id === deleteConfirmId)?.name ?? deleteConfirmId}
-	<Modal
-		open={true}
-		title="Удалить туннель"
-		size="sm"
-		onclose={() => deleteConfirmId = null}
-	>
-		<p class="confirm-text">Удалить туннель <strong>{tunnelName}</strong>?</p>
-		{#snippet actions()}
-			<Button variant="secondary" size="md" onclick={() => deleteConfirmId = null}>Отмена</Button>
-			<Button variant="danger" size="md" onclick={() => handleDelete(deleteConfirmId!)}>Удалить</Button>
-		{/snippet}
-	</Modal>
-{/if}
-
-<TunnelReferencedModal
-	open={referencedDetails !== null}
-	details={referencedDetails}
-	tunnelName={referencedTunnelName}
-	onclose={() => { referencedDetails = null; referencedTunnelName = ''; }}
-/>
-
-<AddTunnelWizard bind:open={createModalOpen} preselect={wizardPreselect} />
-
-<Modal
-	open={pendingSubscriptionDelete !== null}
-	title="Удалить подписку?"
-	size="md"
-	onclose={() => {
-		if (deletingSubscription) return;
-		pendingSubscriptionDelete = null;
-	}}
->
-	<p>
-		Подписка <strong>{pendingSubscriptionLabel}</strong> будет удалена
-		вместе с её sing-box outbound'ами и NDMS Proxy-интерфейсом.
-	</p>
-	{#snippet actions()}
-		<Button
-			variant="ghost"
-			disabled={deletingSubscription}
-			onclick={() => (pendingSubscriptionDelete = null)}
-		>
-			Отмена
-		</Button>
-		<Button
-			variant="danger"
-			disabled={deletingSubscription}
-			loading={deletingSubscription}
-			onclick={confirmSubscriptionDelete}
-		>
-			{deletingSubscription ? 'Удаляем...' : 'Удалить'}
-		</Button>
-	{/snippet}
-</Modal>
-
-{#if detailId}
-	{@const managed = awgList.find((x) => x.id === detailId)}
-	{@const sys = systemList.find((x) => x.id === detailId)}
-	{#if managed || sys}
-		<TrafficChartModal
-			open={true}
-			tunnelId={detailId}
-			tunnelName={managed?.name ?? sys?.description ?? detailId}
-			ifaceName={managed?.interfaceName ?? sys?.interfaceName ?? ''}
-			onclose={closeDetail}
-		/>
-	{/if}
-{/if}
-
-{#if singboxDetailTag}
-	{@const sb = singboxTunnelsList.find((x) => x.tag === singboxDetailTag)}
-	{@const subActiveCard = subscriptionsActiveCards.find((c) => c.activeMember.tag === singboxDetailTag)}
-	{@const subListRow = subscriptionsListRows.find(
-		(s) => resolveSubscriptionMemberTag(s, liveActives[s.id] || null) === singboxDetailTag,
-	)}
-	{@const detailName =
-		subActiveCard?.subscription.label
-		?? subListRow?.label
-		?? sb?.tag
-		?? singboxDetailTag}
-	{@const detailIface =
-		subActiveCard
-			? (subActiveCard.subscription.proxyIndex >= 0 ? `Proxy${subActiveCard.subscription.proxyIndex}` : '')
-			: (subListRow
-				? (subListRow.proxyIndex >= 0 ? `Proxy${subListRow.proxyIndex}` : '')
-				: (sb?.proxyInterface ?? ''))}
-	<TrafficChartModal
-		open={true}
-		tunnelId={singboxDetailTag}
-		tunnelName={detailName}
-		ifaceName={detailIface}
-		onclose={closeSingboxDetail}
-	/>
-{/if}
-
-{#if awgDiagnosticsTarget}
-	<TunnelDiagnosticsModal
-		open={true}
-		kind={awgDiagnosticsTarget.kind}
-		targetId={awgDiagnosticsTarget.id}
-		displayName={awgDiagnosticsTarget.name}
-		subjectLabel="туннель"
-		onclose={closeAwgDiagnostics}
-	/>
-{/if}
-
-{#if connectivitySettingsTunnel}
-	<ConnectivitySettingsModal
-		bind:open={connectivitySettingsOpen}
-		tunnelId={connectivitySettingsTunnel.id}
-		tunnelAddress={connectivitySettingsTunnel.address}
-		onclose={closeConnectivitySettings}
-		onSaved={closeConnectivitySettings}
-	/>
-{/if}
-
-{#snippet exportIcon()}
-	<Download size={14} strokeWidth={2} aria-hidden="true" />
-{/snippet}
+<TunnelPageModals ctx={pageModalsCtx} />
 
 {#if showUnsupportedBlock}
 	<div class="unsupported-overlay">
