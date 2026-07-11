@@ -2611,6 +2611,18 @@ func normalizeFakeIPSettings(sr *storage.SingboxRouterSettings) error {
 	if sr.FakeIPMTU < fakeIPMTUMin || sr.FakeIPMTU > fakeIPMTUMax {
 		return fmt.Errorf("fakeipMtu %d out of range [%d, %d]", sr.FakeIPMTU, fakeIPMTUMin, fakeIPMTUMax)
 	}
+	if sr.FakeIPRealServer == "" {
+		sr.FakeIPRealServer = def.RealServer
+	}
+	// Real upstream must be a plain IP: the fakeip topology resolves every
+	// domain through the "real" server itself, so a domain upstream could
+	// never bootstrap. Zoned addresses (fe80::1%eth0) make no sense for a
+	// DNS upstream either.
+	if addr, err := netip.ParseAddr(sr.FakeIPRealServer); err != nil {
+		return fmt.Errorf("fakeipRealServer: invalid IP address %q: %w", sr.FakeIPRealServer, err)
+	} else if addr.Zone() != "" {
+		return fmt.Errorf("fakeipRealServer: zoned address %q is not allowed", sr.FakeIPRealServer)
+	}
 	return nil
 }
 

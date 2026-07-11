@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 )
@@ -61,18 +63,40 @@ func guardFakeIPLocked(before, after *RouterConfig) error {
 		}
 	}
 
+	// 6. real DNS server edited beyond its upstream address. The engine overlay
+	// rewrites the whole entry ({tag, type:udp, server}) on every persist, so a
+	// change to any other field (type, port, detour, ...) would return success
+	// and then silently vanish (issue #487) — reject it instead. The upstream
+	// address (Server) edit itself is allowed: fakeipWithConfig captures it
+	// into settings (FakeIPRealServer) before the overlay runs, so it sticks.
+	if b := findDNSServerByTag(before, "real"); b != nil {
+		if a := findDNSServerByTag(after, "real"); a != nil {
+			bc, ac := *b, *a
+			ac.Server = bc.Server
+			if !reflect.DeepEqual(bc, ac) {
+				return fmt.Errorf("%w: dns server \"real\" is engine-locked (managed by fakeip-tun); only its upstream address (server) can be changed", ErrFakeIPLockedField)
+			}
+		}
+	}
+
 	return nil
 }
 
 // hasDNSServerByTag reports whether cfg has at least one DNSServer with the
 // given Tag.
 func hasDNSServerByTag(cfg *RouterConfig, tag string) bool {
-	for _, sv := range cfg.DNS.Servers {
-		if sv.Tag == tag {
-			return true
+	return findDNSServerByTag(cfg, tag) != nil
+}
+
+// findDNSServerByTag returns a pointer to the first DNSServer with the given
+// Tag, or nil when absent.
+func findDNSServerByTag(cfg *RouterConfig, tag string) *DNSServer {
+	for i := range cfg.DNS.Servers {
+		if cfg.DNS.Servers[i].Tag == tag {
+			return &cfg.DNS.Servers[i]
 		}
 	}
-	return false
+	return nil
 }
 
 // hasDNSServerByType reports whether cfg has at least one DNSServer with the
@@ -171,6 +195,40 @@ func (s *ServiceImpl) persistFakeIPConfig(ctx context.Context, cfg *RouterConfig
 	return nil
 }
 
+// captureFakeIPRealServerEdit persists a user edit of the "real" DNS server's
+// upstream address into settings.SingboxRouter.FakeIPRealServer BEFORE the
+// overlay runs, so ensureFakeIPOverlayFromState re-asserts the user's new
+// upstream instead of clobbering it back to the previous one (issue #487: the
+// update API returned success but the edit silently vanished from the config
+// and the UI). The upstream must be a plain IP — the fakeip topology resolves
+// every domain through "real" itself, so a domain upstream could never
+// bootstrap.
+func (s *ServiceImpl) captureFakeIPRealServerEdit(before, after *RouterConfig) error {
+	b := findDNSServerByTag(before, "real")
+	a := findDNSServerByTag(after, "real")
+	if b == nil || a == nil || a.Server == b.Server {
+		return nil
+	}
+	addr, err := netip.ParseAddr(a.Server)
+	if err != nil || addr.Zone() != "" {
+		return fmt.Errorf("%w: got %q", ErrFakeIPRealServerInvalid, a.Server)
+	}
+	settings, err := s.deps.Settings.Load()
+	if err != nil {
+		return fmt.Errorf("fakeip real server: load settings: %w", err)
+	}
+	norm := addr.String()
+	if settings.SingboxRouter.FakeIPRealServer == norm {
+		return nil
+	}
+	settings.SingboxRouter.FakeIPRealServer = norm
+	if err := s.deps.Settings.Save(settings); err != nil {
+		return fmt.Errorf("fakeip real server: save settings: %w", err)
+	}
+	s.appLog.Info("fakeip-dns", "real", "upstream resolver changed to "+norm)
+	return nil
+}
+
 // ensureFakeIPOverlayFromState loads settings and re-asserts all engine-locked
 // bits into cfg via ensureFakeIPOverlay. Called on every persist so the overlay
 // always wins over a user edit that touched a locked field.
@@ -230,6 +288,9 @@ func (s *ServiceImpl) fakeipWithConfig(ctx context.Context, event string, fn fun
 		return err
 	}
 	if err := guardFakeIPLocked(before, cfg); err != nil {
+		return err
+	}
+	if err := s.captureFakeIPRealServerEdit(before, cfg); err != nil {
 		return err
 	}
 	if err := s.ensureFakeIPOverlayFromState(cfg); err != nil {

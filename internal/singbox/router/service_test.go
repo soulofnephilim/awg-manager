@@ -1472,6 +1472,9 @@ func TestNormalizeSingboxRouterSettings_DefaultsFakeIPFields(t *testing.T) {
 	if out.FakeIPMTU != def.MTU {
 		t.Errorf("FakeIPMTU = %d, want %d", out.FakeIPMTU, def.MTU)
 	}
+	if out.FakeIPRealServer != def.RealServer {
+		t.Errorf("FakeIPRealServer = %q, want %q", out.FakeIPRealServer, def.RealServer)
+	}
 }
 
 func TestNormalizeSingboxRouterSettings_PreservesFakeIPFields(t *testing.T) {
@@ -1520,6 +1523,11 @@ func TestValidateSingboxRouterSettings_FakeIPFields(t *testing.T) {
 		{"mtu too big", func(s *storage.SingboxRouterSettings) { s.FakeIPMTU = 99999 }, true},
 		{"mtu min ok", func(s *storage.SingboxRouterSettings) { s.FakeIPMTU = 576 }, false},
 		{"mtu max ok", func(s *storage.SingboxRouterSettings) { s.FakeIPMTU = 9000 }, false},
+		{"real server v4 ok", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "9.9.9.9" }, false},
+		{"real server v6 ok", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "2606:4700:4700::1111" }, false},
+		{"real server domain", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "dns.google" }, true},
+		{"real server zoned", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "fe80::1%eth0" }, true},
+		{"real server garbage", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "not an ip" }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

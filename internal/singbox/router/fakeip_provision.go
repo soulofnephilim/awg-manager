@@ -52,7 +52,8 @@ type FakeIPTunParams struct {
 	MTU        int    // tun MTU (default 1500)
 	// RealServer is the true upstream resolver the fakeip config's "real" DNS
 	// server forwards to (proxy-endpoint hostnames + non-fakeip queries).
-	// Default "1.1.1.1" — v1 fixed upstream; made configurable in a later slice.
+	// Default "1.1.1.1"; user-overridable via settings.FakeIPRealServer
+	// (resolveFakeIPParams).
 	RealServer string
 	// CachePath is the sing-box experimental.cache_file path (store_fakeip).
 	// Not a spec-default — wired by cmd/awg-manager from singbox.DefaultCacheDBPath
@@ -70,16 +71,17 @@ func DefaultFakeIPTunParams() FakeIPTunParams {
 		TunAddr4:   "172.18.0.1/30",
 		TunAddr6:   "fdfe:dcba:9876::1/126",
 		MTU:        1500,
-		RealServer: "1.1.1.1", // v1 default upstream; configurable later
+		RealServer: "1.1.1.1", // default upstream; user-overridable via FakeIPRealServer
 		// CachePath left empty — wired by main.go from singbox.DefaultCacheDBPath.
 	}
 }
 
-// resolveFakeIPParams overlays the user-editable engine settings (pool4/6, MTU)
-// from sr onto the wired static params base, returning the effective
-// FakeIPTunParams. Single source of truth shared by enableFakeIPTun and the
-// fakeip config overlay so the live tun/cache/pool can never diverge from what
-// the user is editing. Mirrors the merge formerly inlined in enableFakeIPTun.
+// resolveFakeIPParams overlays the user-editable engine settings (pool4/6,
+// MTU, real upstream) from sr onto the wired static params base, returning
+// the effective FakeIPTunParams. Single source of truth shared by
+// enableFakeIPTun and the fakeip config overlay so the live tun/cache/pool
+// can never diverge from what the user is editing. Mirrors the merge formerly
+// inlined in enableFakeIPTun.
 func resolveFakeIPParams(base FakeIPTunParams, sr storage.SingboxRouterSettings) FakeIPTunParams {
 	p := base
 	if sr.FakeIPPool4 != "" {
@@ -91,6 +93,9 @@ func resolveFakeIPParams(base FakeIPTunParams, sr storage.SingboxRouterSettings)
 	}
 	if sr.FakeIPMTU != 0 {
 		p.MTU = sr.FakeIPMTU
+	}
+	if sr.FakeIPRealServer != "" {
+		p.RealServer = sr.FakeIPRealServer
 	}
 	return p
 }
