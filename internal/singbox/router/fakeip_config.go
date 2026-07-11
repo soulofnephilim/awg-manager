@@ -203,6 +203,12 @@ func (s *ServiceImpl) persistFakeIPConfig(ctx context.Context, cfg *RouterConfig
 // and the UI). The upstream must be a plain IP — the fakeip topology resolves
 // every domain through "real" itself, so a domain upstream could never
 // bootstrap.
+//
+// NB: settings are saved BEFORE persistFakeIPConfig runs (the overlay needs
+// the new value). If the subsequent persist fails, the captured upstream
+// stays in settings and takes effect on the next successful persist/enable —
+// a deliberate trade-off: rolling settings back on persist failure would add
+// its own desync window for no practical gain.
 func (s *ServiceImpl) captureFakeIPRealServerEdit(before, after *RouterConfig) error {
 	b := findDNSServerByTag(before, "real")
 	a := findDNSServerByTag(after, "real")
