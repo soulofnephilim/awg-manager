@@ -15,12 +15,16 @@ export const SUBGROUP_FAMILY: Record<string, SubgroupFamily> = {
   'client-route': 'routing',
   'singbox-router': 'routing',
   'hrneo': 'routing',
+  'subscription': 'routing',
+  'selective': 'routing',
   // lifecycle
   'lifecycle': 'lifecycle',
   'ops': 'lifecycle',
   'state': 'lifecycle',
   'boot': 'lifecycle',
   'cleanup': 'lifecycle',
+  'orchestrator': 'lifecycle',
+  'kmod': 'lifecycle',
   // network
   'connectivity': 'network',
   'pingcheck': 'network',
@@ -28,6 +32,7 @@ export const SUBGROUP_FAMILY: Record<string, SubgroupFamily> = {
   'wan': 'network',
   'connections': 'network',
   'traffic': 'network',
+  'monitoring': 'network',
   // policy
   'access-policy': 'policy',
   'firewall': 'policy',
@@ -35,6 +40,8 @@ export const SUBGROUP_FAMILY: Record<string, SubgroupFamily> = {
   // system
   'rci': 'system',
   'ndms': 'system',
+  'storage': 'system',
+  'http': 'system',
   'settings': 'system',
   'auth': 'system',
   'update': 'system',

@@ -29,7 +29,11 @@ type SingboxConfigEditorHandler struct {
 func NewSingboxConfigEditorHandler(orch *orchestrator.Orchestrator, appLogger logging.AppLogger) *SingboxConfigEditorHandler {
 	return &SingboxConfigEditorHandler{
 		orch: orch,
-		log:  logging.NewScopedLogger(appLogger, logging.GroupSingbox, logging.SubSBRuntime),
+		// Действия пользователя над конфигом — в главный app-журнал
+		// (routing/singbox-router, как и остальной CRUD конфигурации);
+		// singbox-бакет — для вывода самого процесса, там строки быстро
+		// вытесняются форвардером.
+		log: logging.NewScopedLogger(appLogger, logging.GroupRouting, logging.SubSingboxRouter),
 	}
 }
 
@@ -332,7 +336,8 @@ func (h *SingboxConfigEditorHandler) CheckUserConfig(w http.ResponseWriter, r *h
 	}
 	res, err := h.orch.CheckMerged(orchestrator.SlotUser, raw)
 	if err != nil {
-		h.log.Warn("user-config-apply", "90-user.json", "merged check failed: "+err.Error())
+		// Dry-run проверка, не применение — отдельная метка.
+		h.log.Warn("user-config-check", "90-user.json", "merged check failed: "+err.Error())
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -379,10 +384,12 @@ func (h *SingboxConfigEditorHandler) ApplyUserConfig(w http.ResponseWriter, r *h
 		return
 	}
 	if err != nil {
+		h.log.Warn("user-config-apply", "90-user.json", "apply rejected by sing-box check: "+err.Error())
 		writeJSONStatus(w, http.StatusUnprocessableEntity, RouterStagingValidationError{SbCheck: stripAnsiFromErr(err)})
 		return
 	}
 	if !res.Ok() {
+		h.log.Warn("user-config-apply", "90-user.json", "apply rejected: config validation failed")
 		writeJSONStatus(w, http.StatusUnprocessableEntity, RouterStagingValidationError{Validation: validationDTOFrom(res)})
 		return
 	}

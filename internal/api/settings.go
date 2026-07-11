@@ -451,15 +451,16 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if oldSettings.UsageLevel != merged.UsageLevel {
 		h.log.Info("usage-level", "", fmt.Sprintf("Usage level changed: %s -> %s", oldSettings.UsageLevel, merged.UsageLevel))
 	}
-	if oldSettings.DNSRoute != merged.DNSRoute {
-		h.log.Info("dns-route-schedule", "", fmt.Sprintf("DNS route auto-refresh schedule changed: %s -> %s",
-			formatRefreshSchedule(oldSettings.DNSRoute.AutoRefreshEnabled, oldSettings.DNSRoute.RefreshMode, oldSettings.DNSRoute.RefreshIntervalHours, oldSettings.DNSRoute.RefreshDailyTime),
-			formatRefreshSchedule(merged.DNSRoute.AutoRefreshEnabled, merged.DNSRoute.RefreshMode, merged.DNSRoute.RefreshIntervalHours, merged.DNSRoute.RefreshDailyTime)))
+	// Сравниваем отрендеренные расписания, а не структуры: правка поля,
+	// не влияющего на действующее расписание (интервал при выключенном
+	// авто-обновлении), не должна давать строку «off -> off».
+	if from, to := formatRefreshSchedule(oldSettings.DNSRoute.AutoRefreshEnabled, oldSettings.DNSRoute.RefreshMode, oldSettings.DNSRoute.RefreshIntervalHours, oldSettings.DNSRoute.RefreshDailyTime),
+		formatRefreshSchedule(merged.DNSRoute.AutoRefreshEnabled, merged.DNSRoute.RefreshMode, merged.DNSRoute.RefreshIntervalHours, merged.DNSRoute.RefreshDailyTime); from != to {
+		h.log.Info("dns-route-schedule", "", fmt.Sprintf("DNS route auto-refresh schedule changed: %s -> %s", from, to))
 	}
-	if oldSettings.GeoFile != merged.GeoFile {
-		h.log.Info("geo-file-schedule", "", fmt.Sprintf("Geo file auto-refresh schedule changed: %s -> %s",
-			formatRefreshSchedule(oldSettings.GeoFile.AutoRefreshEnabled, oldSettings.GeoFile.RefreshMode, oldSettings.GeoFile.RefreshIntervalHours, oldSettings.GeoFile.RefreshDailyTime),
-			formatRefreshSchedule(merged.GeoFile.AutoRefreshEnabled, merged.GeoFile.RefreshMode, merged.GeoFile.RefreshIntervalHours, merged.GeoFile.RefreshDailyTime)))
+	if from, to := formatRefreshSchedule(oldSettings.GeoFile.AutoRefreshEnabled, oldSettings.GeoFile.RefreshMode, oldSettings.GeoFile.RefreshIntervalHours, oldSettings.GeoFile.RefreshDailyTime),
+		formatRefreshSchedule(merged.GeoFile.AutoRefreshEnabled, merged.GeoFile.RefreshMode, merged.GeoFile.RefreshIntervalHours, merged.GeoFile.RefreshDailyTime); from != to {
+		h.log.Info("geo-file-schedule", "", fmt.Sprintf("Geo file auto-refresh schedule changed: %s -> %s", from, to))
 	}
 	if oldSettings.Logging.MaxAge != merged.Logging.MaxAge {
 		h.log.Info("logging", "", fmt.Sprintf("Log max age changed: %dh -> %dh", oldSettings.Logging.MaxAge, merged.Logging.MaxAge))

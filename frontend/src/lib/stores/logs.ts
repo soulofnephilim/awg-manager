@@ -5,6 +5,10 @@ import type { LogEntryEvent } from '$lib/api/events';
 export type LogBucket = 'app' | 'singbox';
 
 const MAX_ENTRIES = 5000;
+// Кап скана при upsert повтора — зеркало backend coalesceScanLimit:
+// повторы почти всегда матчатся в свежих строках, полный проход по 5000
+// строк на каждое SSE-событие — лишняя работа на UI-потоке.
+const REPEAT_SCAN_LIMIT = 300;
 
 function keyOf(e: LogEntry): string {
   return `${e.timestamp}|${e.level}|${e.group}|${e.subgroup}|${e.action}|${e.target}|${e.message}`;
@@ -45,16 +49,30 @@ function createLogStore(bucket: LogBucket) {
         const key = keyOf(logEntry);
         let found = false;
         update((entries) => {
-          const idx = entries.findIndex((e) => keyOf(e) === key);
-          if (idx === -1) return entries;
-          found = true;
-          const next = entries.slice();
-          next[idx] = { ...next[idx], repeats: entry.repeats, lastSeen: entry.lastSeen };
-          return next;
+          const limit = Math.min(entries.length, REPEAT_SCAN_LIMIT);
+          for (let i = 0; i < limit; i++) {
+            if (keyOf(entries[i]) !== key) continue;
+            found = true;
+            const next = entries.slice();
+            next[i] = { ...next[i], repeats: entry.repeats, lastSeen: entry.lastSeen };
+            return next;
+          }
+          return entries;
         });
-        // Первое появление могло не попасть в клиентский буфер (страница
-        // открыта позже) — тогда повтор вставляется как обычная строка.
         if (found) return;
+        // Первое появление не попало в клиентский буфер (страница открыта
+        // позже): вставляем строку по её timestamp (первое появление может
+        // быть давним — в голове списка она ломала бы порядок), total не
+        // трогаем — на сервере повтор не создал новой записи.
+        update((entries) => {
+          const ts2 = new Date(logEntry.timestamp).getTime();
+          const pos = entries.findIndex((e) => new Date(e.timestamp).getTime() <= ts2);
+          const at = pos === -1 ? entries.length : pos;
+          const updated = [...entries.slice(0, at), logEntry, ...entries.slice(at)];
+          if (updated.length > MAX_ENTRIES) updated.length = MAX_ENTRIES;
+          return updated;
+        });
+        return;
       }
       update((entries) => {
         const updated = [logEntry, ...entries];

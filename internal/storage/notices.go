@@ -14,23 +14,43 @@ type Notice struct {
 	Message string
 }
 
+// maxPendingNotices ограничивает довайринговый буфер: при систематическом
+// сбое (например, карантин не срабатывает на read-only ФС и Load повторяется
+// каждый тик) буфер не должен расти безгранично.
+const maxPendingNotices = 64
+
 var (
 	noticesMu      sync.Mutex
 	pendingNotices []Notice
+	noticeSink     func(Notice)
 )
 
 func recordNotice(action, target, message string) {
+	n := Notice{Action: action, Target: target, Message: message}
 	noticesMu.Lock()
-	defer noticesMu.Unlock()
-	pendingNotices = append(pendingNotices, Notice{Action: action, Target: target, Message: message})
+	sink := noticeSink
+	if sink == nil {
+		if len(pendingNotices) < maxPendingNotices {
+			pendingNotices = append(pendingNotices, n)
+		}
+		noticesMu.Unlock()
+		return
+	}
+	noticesMu.Unlock()
+	sink(n)
 }
 
-// DrainNotices возвращает накопленные события восстановления и очищает
-// буфер. Вызывается один раз после создания logging.Service.
-func DrainNotices() []Notice {
+// SetNoticeSink подключает живой приёмник (журнал приложения) и выгружает
+// в него всё накопленное до подключения. Большинство хранилищ грузятся
+// лениво ПОСЛЕ создания logging.Service — без живого sink их события
+// восстановления терялись бы навсегда.
+func SetNoticeSink(sink func(Notice)) {
 	noticesMu.Lock()
-	defer noticesMu.Unlock()
-	out := pendingNotices
+	noticeSink = sink
+	buffered := pendingNotices
 	pendingNotices = nil
-	return out
+	noticesMu.Unlock()
+	for _, n := range buffered {
+		sink(n)
+	}
 }

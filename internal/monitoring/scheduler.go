@@ -258,6 +258,12 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 
 	cells := make([]Cell, 0, len(targets)*len(tunnels))
 	var cellsMu sync.Mutex
+	// Наблюдаемые в этом проходе туннели: серии переходов живут только у
+	// них — туннель с disabled/handshake-методом или без self-цели
+	// забывается (после включения проверки первый отказ снова даст Warn,
+	// а не «повтор»; та же семантика, что у connectivity-трекера).
+	probed := make(map[string]bool, len(tunnels))
+	var probedMu sync.Mutex
 
 	sem := make(chan struct{}, s.workerLimit)
 	var wg sync.WaitGroup
@@ -285,6 +291,9 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 				latency, ok := s.runProbeCell(ctx, t, tn, self)
 				now := time.Now()
 
+				probedMu.Lock()
+				probed[tn.ID] = true
+				probedMu.Unlock()
 				s.logProbeTransition(tn, t, ok)
 
 				sample := Sample{TS: now, OK: ok}
@@ -331,9 +340,7 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 		keepIDs[t.ID] = true
 	}
 	s.history.PruneTunnels(keepIDs)
-	// Удалённый/остановленный туннель не должен продолжать серию после
-	// пересоздания — его следующий отказ снова даст Warn, а не «повтор».
-	s.transitions.Retain(keepIDs)
+	s.transitions.Retain(probed)
 
 	if s.deps.Bus != nil {
 		s.deps.Bus.Publish("monitoring:matrix-update", snap)

@@ -58,23 +58,22 @@ func (s *Service) CheckConnectivity(ctx context.Context, tunnelID string) (*Conn
 // Warn пишется на переходе в отказ, Info на восстановлении с длиной серии,
 // повторы того же исхода видны только на debug.
 func (s *Service) logConnectivityOutcome(method, tunnelID string, res *ConnectivityResult) {
-	action := method + "-check"
-	if method == "http" {
-		action = "http-check"
-	}
+	// Единая метка: method приходит из хранимого конфига и не whitelisted —
+	// производная метка вида "<произвольное>-check" дробила бы фильтрацию.
+	const action = "connectivity-check"
 	latency := ""
 	if res.Latency != nil {
 		latency = fmt.Sprintf(", latency=%dms", *res.Latency)
 	}
 	switch obs := s.connTracker.Observe(tunnelID, res.Connected); obs.Kind {
 	case logging.TransitionNowFailing:
-		s.appLog.Warn(action, tunnelID, fmt.Sprintf("Connectivity check failed: %s", res.Reason))
+		s.appLog.Warn(action, tunnelID, fmt.Sprintf("Connectivity check (%s) failed: %s", method, res.Reason))
 	case logging.TransitionStillFailing:
-		s.appLog.Debug(action, tunnelID, fmt.Sprintf("Connectivity check still failing (%d in a row): %s", obs.Failures, res.Reason))
+		s.appLog.Debug(action, tunnelID, fmt.Sprintf("Connectivity check (%s) still failing (%d in a row): %s", method, obs.Failures, res.Reason))
 	case logging.TransitionRecovered:
 		s.appLog.Info(action, tunnelID, fmt.Sprintf("Connectivity restored after %d failed checks%s", obs.Failures, latency))
 	default: // FirstOK / StillOK
-		s.appLog.Debug(action, tunnelID, fmt.Sprintf("Connectivity check ok%s", latency))
+		s.appLog.Debug(action, tunnelID, fmt.Sprintf("Connectivity check (%s) ok%s", method, latency))
 	}
 }
 

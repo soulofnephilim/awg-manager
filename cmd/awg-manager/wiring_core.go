@@ -53,11 +53,13 @@ func (a *app) setupCore() {
 
 	// Logging service (created early — injected into tunnel service, pingcheck, dnsroute, operator, state, firewall, nwg)
 	a.loggingService = logging.NewService(a.settingsStore)
-	// События восстановления хранилищ (карантин битых файлов, откат к .bak)
-	// произошли до появления журнала — выгружаем отложенный буфер.
-	for _, n := range storage.DrainNotices() {
+	// События восстановления хранилищ (карантин битых файлов, откат к .bak):
+	// живой sink — большинство хранилищ грузятся лениво позже этой точки,
+	// разовый дрейн терял бы их события. Заодно выгружается накопленное
+	// до связывания (настройки грузятся раньше журнала).
+	storage.SetNoticeSink(func(n storage.Notice) {
 		a.loggingService.AppLog(logging.LevelWarn, logging.GroupSystem, logging.SubStorage, n.Action, n.Target, n.Message)
-	}
+	})
 	a.deferOnExit(a.loggingService.Stop)
 
 	// bootLog: UI-visible scoped logger for all bootstrap diagnostics. Replaces

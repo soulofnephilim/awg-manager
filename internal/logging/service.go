@@ -114,11 +114,7 @@ func (s *Service) AppLog(level Level, group, subgroup, action, target, message s
 	// Идентичный повтор в окне сворачивается в существующую запись (×N)
 	// вместо новой строки — источник рекуррентного шума (периодические
 	// проверки, зацикленные Warn) не может забить журнал.
-	if updated, ok := target_buf.Coalesce(entry, repeatCoalesceWindow); ok {
-		entry = updated
-	} else {
-		target_buf.Add(entry)
-	}
+	entry, _ = target_buf.CoalesceOrAdd(entry, repeatCoalesceWindow)
 	if s.bus != nil {
 		// Формат должен побайтно совпадать с REST-DTO (api.logEntryDTO):
 		// клиент сопоставляет SSE-повторы с загруженными строками по

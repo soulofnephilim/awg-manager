@@ -26,7 +26,7 @@ func TestCoalesce_FoldsIdenticalRepeat(t *testing.T) {
 	base := time.Now()
 	lb.Add(testEntry("fail", base))
 
-	updated, ok := lb.Coalesce(testEntry("fail", base.Add(30*time.Second)), 5*time.Minute)
+	updated, ok := lb.CoalesceOrAdd(testEntry("fail", base.Add(30*time.Second)), 5*time.Minute)
 	if !ok {
 		t.Fatal("expected repeat to coalesce")
 	}
@@ -55,7 +55,7 @@ func TestCoalesce_LastSeenExtendsWindow(t *testing.T) {
 	// в окно от LastSeen предыдущего, хотя от Timestamp уже далеко.
 	for i := 1; i <= 3; i++ {
 		ts := base.Add(time.Duration(i) * 4 * time.Minute)
-		updated, ok := lb.Coalesce(testEntry("fail", ts), 5*time.Minute)
+		updated, ok := lb.CoalesceOrAdd(testEntry("fail", ts), 5*time.Minute)
 		if !ok {
 			t.Fatalf("repeat %d must coalesce (window extends via LastSeen)", i)
 		}
@@ -75,8 +75,11 @@ func TestCoalesce_ExpiredWindowStartsFresh(t *testing.T) {
 	base := time.Now()
 	lb.Add(testEntry("fail", base))
 
-	if _, ok := lb.Coalesce(testEntry("fail", base.Add(6*time.Minute)), 5*time.Minute); ok {
+	if _, ok := lb.CoalesceOrAdd(testEntry("fail", base.Add(6*time.Minute)), 5*time.Minute); ok {
 		t.Fatal("repeat outside window must NOT coalesce")
+	}
+	if lb.Len() != 2 {
+		t.Fatalf("expired repeat must be added as a fresh entry: Len = %d, want 2", lb.Len())
 	}
 }
 
@@ -89,17 +92,20 @@ func TestCoalesce_DifferentFieldsDoNotFold(t *testing.T) {
 
 	other := testEntry("fail", base.Add(time.Second))
 	other.Target = "awg11"
-	if _, ok := lb.Coalesce(other, 5*time.Minute); ok {
+	if _, ok := lb.CoalesceOrAdd(other, 5*time.Minute); ok {
 		t.Fatal("different target must not coalesce")
 	}
 	other = testEntry("different message", base.Add(time.Second))
-	if _, ok := lb.Coalesce(other, 5*time.Minute); ok {
+	if _, ok := lb.CoalesceOrAdd(other, 5*time.Minute); ok {
 		t.Fatal("different message must not coalesce")
 	}
 	other = testEntry("fail", base.Add(time.Second))
 	other.Level = "error"
-	if _, ok := lb.Coalesce(other, 5*time.Minute); ok {
+	if _, ok := lb.CoalesceOrAdd(other, 5*time.Minute); ok {
 		t.Fatal("different level must not coalesce")
+	}
+	if lb.Len() != 4 {
+		t.Fatalf("non-matching entries must be added: Len = %d, want 4", lb.Len())
 	}
 }
 
@@ -112,7 +118,7 @@ func TestCoalesce_InterleavedEntriesStillFold(t *testing.T) {
 	lb.Add(testEntry("fail B", base.Add(time.Second)))
 
 	// Повтор A находит свою запись сквозь более новую B.
-	updated, ok := lb.Coalesce(testEntry("fail A", base.Add(2*time.Second)), 5*time.Minute)
+	updated, ok := lb.CoalesceOrAdd(testEntry("fail A", base.Add(2*time.Second)), 5*time.Minute)
 	if !ok || updated.Message != "fail A" || updated.Repeats != 1 {
 		t.Fatalf("interleaved repeat must coalesce into its own entry: ok=%v entry=%+v", ok, updated)
 	}

@@ -140,8 +140,17 @@ func (h *SubscriptionHandler) toSubscriptionGroupDTO(g subscription.AggregateGro
 // respondGroupServiceError маппит ошибки Group-CRUD на HTTP-статусы
 // и журналит сбой мутации.
 func (h *SubscriptionHandler) respondGroupServiceError(w http.ResponseWriter, action string, err error) {
-	h.log.Warn(action, "", err.Error())
+	// См. respondServiceError: клиентские 4xx — Debug, внутренние — Warn.
 	var filterErr *subscription.FilterError
+	isInternal := !errors.As(err, &filterErr) &&
+		!errors.Is(err, subscription.ErrGroupSubscriptionNotFound) &&
+		!errors.Is(err, subscription.ErrValidation) &&
+		!errors.Is(err, subscription.ErrGroupNotFound)
+	if isInternal {
+		h.log.Warn(action, "", err.Error())
+	} else {
+		h.log.Debug(action, "", err.Error())
+	}
 	switch {
 	case errors.As(err, &filterErr):
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
@@ -219,7 +228,6 @@ func (h *SubscriptionHandler) CreateGroup(w http.ResponseWriter, r *http.Request
 		Enabled:            req.Enabled,
 	})
 	if err != nil {
-		h.log.Warn("subscription-group-create", req.Label, "failed: "+err.Error())
 		h.respondGroupServiceError(w, "subscription-group-create", err)
 		return
 	}

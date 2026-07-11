@@ -140,11 +140,13 @@ func (b *Buffer[T]) FilterPage(pred func(T) bool, limit, offset int) ([]T, int) 
 	return page, total
 }
 
-// UpdateRecent scans entries newest-first, at most scanLimit of them
+// UpsertRecent scans entries newest-first, at most scanLimit of them
 // (0 = no cap), and applies update in place to the first entry matching
-// match. Returns a copy of the updated entry. Entry order and timestamps
-// are untouched — the caller's update decides what changes.
-func (b *Buffer[T]) UpdateRecent(scanLimit int, match func(T) bool, update func(*T)) (T, bool) {
+// match; when nothing matches, appends entry (respecting MaxEntries) —
+// scan and append happen under ONE lock, so two goroutines upserting the
+// same key concurrently cannot both append. Returns the stored entry and
+// whether an existing one was updated.
+func (b *Buffer[T]) UpsertRecent(scanLimit int, match func(T) bool, update func(*T), entry T) (T, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -159,8 +161,14 @@ func (b *Buffer[T]) UpdateRecent(scanLimit int, match func(T) bool, update func(
 			return b.entries[i], true
 		}
 	}
-	var zero T
-	return zero, false
+	if b.setTimestamp != nil && b.timestampOf(entry).IsZero() {
+		b.setTimestamp(&entry, time.Now())
+	}
+	if len(b.entries) >= b.maxEntries {
+		b.entries = b.entries[len(b.entries)-b.maxEntries+1:]
+	}
+	b.entries = append(b.entries, entry)
+	return entry, false
 }
 
 // Clear drops all entries.

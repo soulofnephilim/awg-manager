@@ -41,7 +41,9 @@ func NewSubscriptionHandler(svc *subscription.Service, presence SingboxPresenceP
 	return &SubscriptionHandler{
 		svc:      svc,
 		presence: presence,
-		log:      logging.NewScopedLogger(lg, logging.GroupSingbox, logging.SubSBRuntime),
+		// Действия пользователя над подписками — в главный app-журнал
+		// (routing/subscription), а не в изолированный singbox-бакет.
+		log: logging.NewScopedLogger(lg, logging.GroupRouting, logging.SubSubscription),
 	}
 }
 
@@ -75,8 +77,22 @@ func (h *SubscriptionHandler) ndmsProxyEnabled() bool {
 // frontend can surface a "your subscription has invalid outbound(s)"
 // banner instead of a generic 500. Other errors fall through to 500.
 func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, action string, err error) {
-	h.log.Warn(action, "", err.Error())
+	// Ошибки клиента (4xx: валидация, фильтры, not-found) — Debug: ответ
+	// пользователь уже видит в UI, а Warn всегда видим и содержит
+	// свободный ввод (не сворачивается коалесцером). Warn — только для
+	// внутренних сбоев (default → 500).
 	var filterErr *subscription.FilterError
+	isInternal := !errors.As(err, &filterErr) &&
+		!errors.Is(err, subscription.ErrValidation) &&
+		!errors.Is(err, subscription.ErrExcludeOnInline) &&
+		!errors.Is(err, subscription.ErrAllMembersExcluded) &&
+		!errors.Is(err, subscription.ErrAllMembersFiltered) &&
+		!errors.Is(err, subscription.ErrMemberNotFound)
+	if isInternal {
+		h.log.Warn(action, "", err.Error())
+	} else {
+		h.log.Debug(action, "", err.Error())
+	}
 	switch {
 	case errors.As(err, &filterErr):
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
@@ -172,7 +188,6 @@ func (h *SubscriptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, err := h.svc.Create(r.Context(), in)
 	if err != nil {
-		h.log.Warn("subscription-create", req.Label, "failed: "+err.Error())
 		h.respondServiceError(w, "subscription-create", err)
 		return
 	}

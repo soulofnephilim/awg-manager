@@ -612,7 +612,10 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 	// подробная строка выше живёт в sing-box бакете, а пользователь смотрит
 	// главный журнал. Без изменений не дублируем — иначе плановые тики
 	// снова превращаются в шум.
-	if s.appLog != nil && (res.Added > 0 || res.Updated > 0 || res.Orphaned > 0) {
+	// Updated = len(diff.Existing) — все члены, пережившие fetch: он >0 на
+	// каждом успешном обновлении непустой подписки. Реальные изменения —
+	// только Added/Orphaned; иначе плановые тики снова спамят журнал.
+	if s.appLog != nil && (res.Added > 0 || res.Orphaned > 0) {
 		label := sub.Label
 		if label == "" {
 			label = id

@@ -30,9 +30,12 @@ func NewLogBuffer(bucket Bucket) *LogBuffer {
 	return &LogBuffer{
 		bucket: bucket,
 		inner: logbuf.New(logbuf.Options[LogEntry]{
-			MaxAge:       defaultMaxAge,
-			MaxEntries:   defaultMaxEntriesFor(bucket),
-			TimestampOf:  func(e LogEntry) time.Time { return e.Timestamp },
+			MaxAge:     defaultMaxAge,
+			MaxEntries: defaultMaxEntriesFor(bucket),
+			// Эффективное время записи — последний повтор: активно
+			// повторяющаяся схлопнутая запись не должна выселяться TTL-очисткой
+			// по давнему первому появлению.
+			TimestampOf:  effectiveTime,
 			SetTimestamp: func(e *LogEntry, t time.Time) { e.Timestamp = t },
 		}),
 	}
@@ -80,34 +83,41 @@ func (lb *LogBuffer) GetPaginatedMulti(groups, subgroups []string, level string,
 // буфер на каждую запись незачем.
 const coalesceScanLimit = 300
 
-// Coalesce сворачивает идентичный повтор в недавнюю существующую запись:
-// совпадают level/group/subgroup/action/target/message и последнее появление
-// (LastSeen, иначе Timestamp) не старше window от entry.Timestamp. У найденной
-// записи Repeats++ и LastSeen обновляется; Timestamp (первое появление) и
-// позиция в буфере не меняются. Возвращает обновлённую запись.
-func (lb *LogBuffer) Coalesce(entry LogEntry, window time.Duration) (LogEntry, bool) {
+// effectiveTime — время последней активности записи: LastSeen для
+// схлопнутых повторов, иначе Timestamp (первое появление).
+func effectiveTime(e LogEntry) time.Time {
+	if e.LastSeen != nil {
+		return *e.LastSeen
+	}
+	return e.Timestamp
+}
+
+// CoalesceOrAdd сворачивает идентичный повтор в недавнюю существующую
+// запись (совпадают level/group/subgroup/action/target/message, последнее
+// появление не старше window), иначе добавляет новую — атомарно, под одним
+// локом буфера: параллельные одинаковые записи не могут задвоиться. У
+// свёрнутой записи Repeats++ и LastSeen; Timestamp и позиция не меняются.
+// Возвращает сохранённую запись и признак сворачивания.
+func (lb *LogBuffer) CoalesceOrAdd(entry LogEntry, window time.Duration) (LogEntry, bool) {
 	now := entry.Timestamp
 	if now.IsZero() {
 		now = time.Now()
 	}
 	cutoff := now.Add(-window)
-	return lb.inner.UpdateRecent(coalesceScanLimit,
+	return lb.inner.UpsertRecent(coalesceScanLimit,
 		func(e LogEntry) bool {
 			if e.Level != entry.Level || e.Group != entry.Group || e.Subgroup != entry.Subgroup ||
 				e.Action != entry.Action || e.Target != entry.Target || e.Message != entry.Message {
 				return false
 			}
-			last := e.Timestamp
-			if e.LastSeen != nil {
-				last = *e.LastSeen
-			}
-			return last.After(cutoff)
+			return effectiveTime(e).After(cutoff)
 		},
 		func(e *LogEntry) {
 			e.Repeats++
 			t := now
 			e.LastSeen = &t
-		})
+		},
+		entry)
 }
 
 // Clear removes all entries.
@@ -140,7 +150,9 @@ func (lb *LogBuffer) Oldest() time.Time {
 // `since` disables the timestamp cutoff.
 func matcher(group, subgroup, level string, since time.Time) func(LogEntry) bool {
 	return func(e LogEntry) bool {
-		if !since.IsZero() && !e.Timestamp.After(since) {
+		// Отсечка по последней активности: схлопнутая запись, повторившаяся
+		// после since, попадает в catch-up и освежает счётчик у клиента.
+		if !since.IsZero() && !effectiveTime(e).After(since) {
 			return false
 		}
 		if group != "" && e.Group != group {
@@ -172,7 +184,7 @@ func matcherMulti(groups, subgroups []string, level string, since time.Time) fun
 	}
 
 	return func(e LogEntry) bool {
-		if !since.IsZero() && !e.Timestamp.After(since) {
+		if !since.IsZero() && !effectiveTime(e).After(since) {
 			return false
 		}
 		if len(groupSet) > 0 {

@@ -89,7 +89,10 @@ func (m *Model) SetUp(name string, up bool) (changed bool) {
 		// Apply hook state after repopulate (NDMS snapshot may lag behind hook)
 		m.mu.Lock()
 		if iface, ok := m.interfaces[name]; ok {
-			changed = iface.Up != up
+			// Интерфейс был неизвестен модели до этого hook'а — его первое
+			// появление само по себе переход, даже если свежий NDMS-снапшот
+			// уже отражает up-состояние.
+			changed = true
 			iface.Up = up
 		}
 		m.mu.Unlock()
