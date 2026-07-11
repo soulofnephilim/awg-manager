@@ -40,6 +40,9 @@ func (s *Service) CheckConnectivity(ctx context.Context, tunnelID string) (*Conn
 		result, err = s.checkHandshake(tunnelID)
 	case "disabled":
 		s.appLog.Debug("connectivity-check", tunnelID, "Check disabled, returning OK")
+		// Выключенная проверка не наблюдается трекером — сбрасываем серию,
+		// чтобы после включения первый отказ снова дал Warn, а не «повтор».
+		s.connTracker.Forget(tunnelID)
 		return &ConnectivityResult{Connected: true, Reason: "check disabled"}, nil
 	default:
 		result, err = s.checkHTTP(ctx, tunnelID)

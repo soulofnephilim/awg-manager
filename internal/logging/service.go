@@ -120,8 +120,11 @@ func (s *Service) AppLog(level Level, group, subgroup, action, target, message s
 		target_buf.Add(entry)
 	}
 	if s.bus != nil {
+		// Формат должен побайтно совпадать с REST-DTO (api.logEntryDTO):
+		// клиент сопоставляет SSE-повторы с загруженными строками по
+		// составному ключу, включающему timestamp как строку.
 		ev := events.LogEntryEvent{
-			Timestamp: entry.Timestamp.Format(time.RFC3339),
+			Timestamp: entry.Timestamp.UTC().Format(time.RFC3339Nano),
 			Level:     entry.Level,
 			Group:     entry.Group,
 			Subgroup:  entry.Subgroup,
@@ -132,7 +135,7 @@ func (s *Service) AppLog(level Level, group, subgroup, action, target, message s
 			Repeats:   entry.Repeats,
 		}
 		if entry.LastSeen != nil {
-			ev.LastSeen = entry.LastSeen.Format(time.RFC3339)
+			ev.LastSeen = entry.LastSeen.UTC().Format(time.RFC3339Nano)
 		}
 		s.bus.Publish("log:entry", ev)
 	}

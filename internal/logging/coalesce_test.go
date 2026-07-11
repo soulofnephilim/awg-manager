@@ -3,6 +3,8 @@ package logging
 import (
 	"testing"
 	"time"
+
+	"github.com/hoaxisr/awg-manager/internal/events"
 )
 
 func testEntry(msg string, ts time.Time) LogEntry {
@@ -143,5 +145,43 @@ func TestServiceAppLog_CoalescesRepeats(t *testing.T) {
 	_, total = s.GetLogs(BucketApp, "", "", "", time.Time{}, 10, 0)
 	if total != 2 {
 		t.Fatalf("total = %d, want 2", total)
+	}
+}
+
+// SSE-событие и REST-DTO должны выдавать побайтно одинаковую строку
+// timestamp — клиент сопоставляет повторы с загруженными строками по
+// составному ключу (см. frontend logs store keyOf).
+func TestServiceAppLog_SSETimestampMatchesRESTFormat(t *testing.T) {
+	s := NewService(&mockSettings{enabled: true, maxAge: 2, logLevel: "info", appMaxEntries: 100, sbMaxEntries: 100})
+	defer s.Stop()
+	bus := events.NewBus()
+	s.SetEventBus(bus)
+	_, ch, unsub := bus.Subscribe()
+	defer unsub()
+
+	s.AppLog(LevelWarn, GroupTunnel, SubConnectivity, "http-check", "awg10", "fail")
+	s.AppLog(LevelWarn, GroupTunnel, SubConnectivity, "http-check", "awg10", "fail") // повтор
+
+	entries, _ := s.GetLogs(BucketApp, "", "", "", time.Time{}, 1, 0)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	wantTS := entries[0].Timestamp.UTC().Format(time.RFC3339Nano)
+	wantLastSeen := entries[0].LastSeen.UTC().Format(time.RFC3339Nano)
+
+	var got []events.LogEntryEvent
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-ch:
+			got = append(got, ev.Data.(events.LogEntryEvent))
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for log:entry event")
+		}
+	}
+	if got[0].Timestamp != wantTS || got[1].Timestamp != wantTS {
+		t.Fatalf("SSE timestamps %q/%q != REST format %q", got[0].Timestamp, got[1].Timestamp, wantTS)
+	}
+	if got[1].Repeats != 1 || got[1].LastSeen != wantLastSeen {
+		t.Fatalf("repeat event: repeats=%d lastSeen=%q, want 1/%q", got[1].Repeats, got[1].LastSeen, wantLastSeen)
 	}
 }
