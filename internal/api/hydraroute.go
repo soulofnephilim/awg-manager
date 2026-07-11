@@ -545,7 +545,7 @@ func (h *HydraRouteHandler) UpdateGeoFile(w http.ResponseWriter, r *http.Request
 //	@Produce		json
 //	@Security		CookieAuth
 //	@Param			path	query	string	true	"Geo file path"
-//	@Success		200	{array}	string
+//	@Success		200	{object}	GeoTagsResponse
 //	@Router			/hydraroute/geo-tags [get]
 func (h *HydraRouteHandler) GetGeoTags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
