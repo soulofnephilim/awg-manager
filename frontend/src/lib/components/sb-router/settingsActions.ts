@@ -12,6 +12,10 @@ export const BYPASS_PRESETS: readonly BypassPresetMeta[] = [
   { id: 'l2tp', label: 'L2TP / IPsec VPN', desc: 'UDP 500, 1701, 4500' },
   { id: 'ntp', label: 'NTP (синхронизация времени)', desc: 'UDP 123' },
   { id: 'netbios-smb', label: 'NetBIOS / SMB', desc: 'UDP 137/138, TCP 139/445' },
+  // Не порты, а destination-IP: статическая A-запись KeenDNS/CrazeDNS-доменов
+  // (my.keenetic.net / my.netcraze.net и 4-го уровня) указывает на этот IP,
+  // который роутер обслуживает локально — перехват ломает доступ (#490).
+  { id: 'keendns', label: 'KeenDNS / CrazeDNS', desc: 'IP 78.47.125.180' },
 ];
 
 export async function mergeAndSaveSettings(

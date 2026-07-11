@@ -195,3 +195,60 @@ func TestResolveBypassSubnets(t *testing.T) {
 		})
 	}
 }
+
+// ── resolveBypassCIDRs (issue #490: IP-пресеты, keendns) ─────────────────
+
+func TestResolveBypassCIDRs_Empty(t *testing.T) {
+	got, err := resolveBypassCIDRs(nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty, got %v", got)
+	}
+}
+
+func TestResolveBypassCIDRs_KeenDNSPreset(t *testing.T) {
+	got, err := resolveBypassCIDRs([]string{"keendns"}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "78.47.125.180/32" {
+		t.Fatalf("keendns preset CIDRs = %v, want [78.47.125.180/32]", got)
+	}
+}
+
+func TestResolveBypassCIDRs_PortPresetsContributeNoCIDRs(t *testing.T) {
+	got, err := resolveBypassCIDRs([]string{"l2tp", "ntp", "netbios-smb"}, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("port presets must not contribute CIDRs, got %v", got)
+	}
+}
+
+func TestResolveBypassCIDRs_DedupAgainstExtra(t *testing.T) {
+	// Пользователь мог продублировать IP пресета вручную (так все и чинили
+	// #490 до пресета) — дубль схлопывается, порядок стабильный.
+	got, err := resolveBypassCIDRs([]string{"keendns"}, "78.47.125.180, 10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"78.47.125.180/32", "10.0.0.0/8"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolveBypassCIDRs_UnknownPreset(t *testing.T) {
+	if _, err := resolveBypassCIDRs([]string{"nonexistent"}, ""); err == nil {
+		t.Fatal("expected error for unknown preset")
+	}
+}
+
+func TestResolveBypassCIDRs_ExtraError(t *testing.T) {
+	if _, err := resolveBypassCIDRs([]string{"keendns"}, "not-an-ip"); err == nil {
+		t.Fatal("expected error for malformed extra subnets")
+	}
+}

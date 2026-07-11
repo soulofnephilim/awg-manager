@@ -1243,7 +1243,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	}
 
 	bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
-	bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
+	bypassSubnets, _ := resolveBypassCIDRs(sr.BypassPresets, sr.BypassExtraSubnets)
 
 	// Pre-create the AWGM-SELECTIVE ipset (empty) before iptables-restore
 	// when selective bypass is enabled. iptables-restore fails immediately
@@ -1996,7 +1996,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	wantBlackhole := jumpsMissing && engineDown
 	if wantBlackhole {
 		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
-		bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
+		bypassSubnets, _ := resolveBypassCIDRs(sr.BypassPresets, sr.BypassExtraSubnets)
 		// Selective guard references the AWGM-SELECTIVE ipset; ensure it exists so
 		// iptables-restore of the blackhole doesn't fail with "Set ... doesn't
 		// exist" (same pre-create the real Install path does below).
@@ -2071,7 +2071,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 		}
 
 		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
-		bypassSubnets, _ := resolveBypassSubnets(sr.BypassExtraSubnets)
+		bypassSubnets, _ := resolveBypassCIDRs(sr.BypassPresets, sr.BypassExtraSubnets)
 		s.mu.Lock()
 		if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
 			PolicyMark:        mark,

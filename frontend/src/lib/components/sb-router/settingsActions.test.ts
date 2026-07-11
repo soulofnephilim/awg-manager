@@ -35,10 +35,10 @@ describe('settingsActions', () => {
     mockCurrent(baseSettings);
   });
 
-  it('BYPASS_PRESETS has 3 entries with correct ids', () => {
-    expect(BYPASS_PRESETS).toHaveLength(3);
+  it('BYPASS_PRESETS has 4 entries with correct ids', () => {
+    expect(BYPASS_PRESETS).toHaveLength(4);
     const ids = BYPASS_PRESETS.map((p) => p.id).sort();
-    expect(ids).toEqual(['l2tp', 'netbios-smb', 'ntp']);
+    expect(ids).toEqual(['keendns', 'l2tp', 'netbios-smb', 'ntp']);
     for (const p of BYPASS_PRESETS) {
       expect(p.label).toBeTruthy();
       expect(p.desc).toBeTruthy();

@@ -4031,7 +4031,8 @@ definitions:
       bypassPresets:
         description: |-
           BypassPresets lists active named port-bypass presets.
-          Valid values: "l2tp", "ntp", "netbios-smb".
+          Valid values: "l2tp", "ntp", "netbios-smb" (port-based), "keendns"
+          (destination-IP 78.47.125.180, KeenDNS/CrazeDNS).
         example:
         - l2tp
         items:

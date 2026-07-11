@@ -28,16 +28,27 @@ func portRangeKey(pr PortRange) string {
 	return fmt.Sprintf("%d-%d", pr.From, pr.To)
 }
 
-type portSet struct {
+type bypassPreset struct {
 	UDP []int
 	TCP []int
+	// CIDRs — destination-IP исключения пресета (канонические IPv4 CIDR).
+	// Вливаются в spec.BypassCIDRs наравне с bypassExtraSubnets, т.е. весь
+	// трафик к этим адресам идёт мимо sing-box (включая DNS/53).
+	CIDRs []string
 }
 
-// knownPresets maps preset name → UDP and TCP ports to exclude from TPROXY/REDIRECT.
-var knownPresets = map[string]portSet{
+// knownPresets maps preset name → UDP/TCP ports and destination CIDRs to
+// exclude from TPROXY/REDIRECT.
+var knownPresets = map[string]bypassPreset{
 	"l2tp":        {UDP: []int{500, 4500, 1701}},
 	"ntp":         {UDP: []int{123}},
 	"netbios-smb": {UDP: []int{137, 138}, TCP: []int{139, 445}},
+	// KeenDNS/CrazeDNS (issue #490): статическая A-запись доменов
+	// my.keenetic.net / my.netcraze.net и доменов 4-го уровня указывает на
+	// анонсируемый Keenetic'ом IP 78.47.125.180, который роутер при локальном
+	// доступе обслуживает сам. TPROXY-перехват уводит эти соединения в
+	// туннель → ERR_CONNECTION_REFUSED; исключение возвращает их роутеру.
+	"keendns": {CIDRs: []string{"78.47.125.180/32"}},
 }
 
 // resolveBypassPorts collects the final UDP and TCP port/range lists from
@@ -63,6 +74,39 @@ func resolveBypassPorts(presets []string, extra string) (udp, tcp []PortRange, e
 	udp = append(udp, eu...)
 	tcp = append(tcp, et...)
 	return udp, tcp, nil
+}
+
+// resolveBypassCIDRs собирает итоговый список destination-CIDR исключений:
+// CIDR-часть именованных пресетов + пользовательский extra-список
+// (resolveBypassSubnets). Дедуп со стабильным порядком — пользователь мог
+// продублировать IP пресета вручную, а дубли в iptables-правилах не нужны.
+func resolveBypassCIDRs(presets []string, extra string) ([]string, error) {
+	var out []string
+	seen := make(map[string]struct{})
+	add := func(c string) {
+		if _, ok := seen[c]; ok {
+			return
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	for _, name := range presets {
+		ps, ok := knownPresets[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown bypass preset %q", name)
+		}
+		for _, c := range ps.CIDRs {
+			add(c)
+		}
+	}
+	subnets, err := resolveBypassSubnets(extra)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range subnets {
+		add(c)
+	}
+	return out, nil
 }
 
 // resolveBypassSubnets парсит список IPv4 IP/CIDR (через запятую/пробел) в
