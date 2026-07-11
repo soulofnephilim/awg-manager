@@ -69,12 +69,16 @@ func (m *Model) SetRepopulateFn(fn func()) {
 // Called by hook handler on ipv4 state change.
 // If the interface is unknown and the model has been populated, triggers
 // a full re-populate from NDMS to discover newly configured WANs.
-func (m *Model) SetUp(name string, up bool) {
+// SetUp обновляет up-состояние интерфейса и сообщает, изменилось ли оно
+// фактически (NDMS может повторять hook-события с тем же уровнем —
+// вызывающий код логирует только реальные переходы).
+func (m *Model) SetUp(name string, up bool) (changed bool) {
 	m.mu.Lock()
 	if iface, ok := m.interfaces[name]; ok {
+		changed = iface.Up != up
 		iface.Up = up
 		m.mu.Unlock()
-		return
+		return changed
 	}
 	populated := m.populated
 	m.mu.Unlock()
@@ -85,10 +89,12 @@ func (m *Model) SetUp(name string, up bool) {
 		// Apply hook state after repopulate (NDMS snapshot may lag behind hook)
 		m.mu.Lock()
 		if iface, ok := m.interfaces[name]; ok {
+			changed = iface.Up != up
 			iface.Up = up
 		}
 		m.mu.Unlock()
 	}
+	return changed
 }
 
 // IsUp returns true if the named interface is up.

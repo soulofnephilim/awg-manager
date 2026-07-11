@@ -23,7 +23,7 @@ type HookDispatcher interface {
 // HookWANModel is the narrow surface HookHandler needs from the WAN
 // model. Kept local so api/hook.go doesn't depend on *wan.Model.
 type HookWANModel interface {
-	SetUp(kernelName string, up bool)
+	SetUp(kernelName string, up bool) (changed bool)
 }
 
 // TunnelHookInvalidator is invoked on ifcreated / ifdestroyed hooks so
@@ -234,9 +234,11 @@ func (h *HookHandler) handleWANLayerEvent(e events.Event) {
 
 	// Sync WAN model update — must happen before the orch decides
 	// whether any WAN is up. SetUp handles hot-plug via repopulateFn.
-	h.wanModel.SetUp(kernelName, up)
+	changed := h.wanModel.SetUp(kernelName, up)
 
-	if h.wanLog != nil {
+	// Логируем только реальные переходы: NDMS повторяет hook-события с
+	// неизменным уровнем, и без этого фильтра каждый повтор писал бы строку.
+	if h.wanLog != nil && changed {
 		if up {
 			h.wanLog.Info("wan-state", kernelName, "WAN interface up")
 		} else {
