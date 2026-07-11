@@ -16,26 +16,11 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { ariaSort } from '$lib/utils/tunnelTableSort';
 	import type { SingboxLayoutMode, TunnelRenderMode } from '$lib/constants/singboxLayout';
-	import type { Subscription, SubscriptionMember } from '$lib/types';
+	import type { Subscription } from '$lib/types';
+	import type { SubscriptionActiveCardVM, SubscriptionsTrafficStats } from './subscriptionVMs';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 
-	export interface SubscriptionActiveCardVM {
-		subscription: Subscription;
-		activeMember: SubscriptionMember;
-	}
 
-	export interface SubscriptionsTrafficStats {
-		count: number;
-		activeCount: number;
-		inactiveCount: number;
-		down: number;
-		up: number;
-		avgDelayMs: number | null;
-		delaySamples: number;
-		leaderBytes: number;
-		leaderName: string;
-		leaderSharePct: number;
-	}
 
 	interface Props {
 		loading: boolean;
