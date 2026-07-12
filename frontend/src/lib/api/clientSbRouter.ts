@@ -3,6 +3,7 @@ import type {
 	RouterPolicy,
 	RouterStagingStatusResponse,
 	SelectiveStatus,
+	SingboxGeositesData,
 	SingboxProxiesListResponse,
 	SingboxProxiesSelectRequest,
 	SingboxProxiesTestRequest,
@@ -145,6 +146,12 @@ export class SbRouterClient extends SingboxClient {
 
 	async singboxRouterListProxies(): Promise<SingboxProxiesListResponse> {
 		return this.request<SingboxProxiesListResponse>('/singbox/router/proxies/list');
+	}
+
+	async singboxRouterListGeosites(refresh = false): Promise<SingboxGeositesData> {
+		return this.request<SingboxGeositesData>(
+			`/singbox/router/geosites/list${refresh ? '?refresh=1' : ''}`,
+		);
 	}
 
 	async singboxRouterSelectProxy(req: SingboxProxiesSelectRequest): Promise<void> {

@@ -3401,6 +3401,23 @@ definitions:
         example: ipv4_only
         type: string
     type: object
+  api.SingboxGeositesData:
+    properties:
+      baseUrl:
+        description: BaseURL + "geosite-" + name + ".srs" — готовый URL для rule-set.
+        example: https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/
+        type: string
+      fetchedAt:
+        example: "2026-07-12T10:00:00Z"
+        type: string
+      names:
+        description: |-
+          Names — имена наборов без префикса geosite- и суффикса .srs
+          (например "youtube", "category-ads-all", "xiaomi@cn").
+        items:
+          type: string
+        type: array
+    type: object
   api.SingboxInboundEntry:
     properties:
       idle:
@@ -12248,6 +12265,36 @@ paths:
       security:
       - CookieAuth: []
       summary: Enable singbox-router
+      tags:
+      - singbox-router
+  /singbox/router/geosites/list:
+    get:
+      description: Full list of geosite rule-set names from the SagerNet/sing-geosite
+        rule-set branch, cached for 24h. Pass refresh=1 to force a re-fetch.
+      parameters:
+      - description: 1 = force refresh
+        in: query
+        name: refresh
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.SingboxGeositesData'
+              type: object
+        "502":
+          description: listing fetch failed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List SagerNet sing-geosite catalog
       tags:
       - singbox-router
   /singbox/router/ingress-eligible-interfaces:

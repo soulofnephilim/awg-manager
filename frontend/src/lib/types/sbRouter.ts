@@ -323,6 +323,15 @@ export interface SingboxProxiesListResponse {
 	groups: SingboxProxyGroup[];
 }
 
+/** GET /singbox/router/geosites/list — каталог SagerNet sing-geosite. */
+export interface SingboxGeositesData {
+	/** Имена без префикса geosite- и суффикса .srs. */
+	names: string[];
+	/** baseUrl + "geosite-" + name + ".srs" — готовый URL rule-set'а. */
+	baseUrl: string;
+	fetchedAt: string;
+}
+
 export interface SingboxProxiesSelectRequest {
 	group: string;
 	member: string;

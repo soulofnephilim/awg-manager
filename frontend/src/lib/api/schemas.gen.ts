@@ -1266,6 +1266,12 @@ const api_SingboxDomainResolverDTO: v.GenericSchema = v.looseObject({
 	strategy: v.optional(v.nullable(v.string())),
 });
 
+const api_SingboxGeositesData: v.GenericSchema = v.looseObject({
+	baseUrl: v.optional(v.nullable(v.string())),
+	fetchedAt: v.optional(v.nullable(v.string())),
+	names: v.optional(v.nullable(v.array(v.string()))),
+});
+
 const api_SingboxInboundEntry: v.GenericSchema = v.looseObject({
 	idle: v.optional(v.nullable(v.boolean())),
 	idleReason: v.optional(v.nullable(v.string())),
@@ -2297,6 +2303,9 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /singbox/router/dns/rewrites/list": v.lazy(() => api_SingboxDNSRewritesListResponse),
 	"GET /singbox/router/dns/rules/list": v.lazy(() => api_SingboxDNSRulesListResponse),
 	"GET /singbox/router/dns/servers/list": v.lazy(() => api_SingboxDNSServersListResponse),
+	"GET /singbox/router/geosites/list": v.intersect([v.lazy(() => api_OkResponse), v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SingboxGeositesData))),
+})]),
 	"GET /singbox/router/ingress-eligible-interfaces": v.lazy(() => api_SingboxRouterWANInterfacesListResponse),
 	"GET /singbox/router/outbounds/list": v.lazy(() => api_SingboxRouterOutboundsListResponse),
 	"GET /singbox/router/policies": v.lazy(() => api_SingboxRouterPoliciesListResponse),
