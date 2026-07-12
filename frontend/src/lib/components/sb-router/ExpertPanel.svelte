@@ -1016,6 +1016,10 @@
   .rs-head-actions {
     display: flex;
     align-items: center;
+    /* Три кнопки не влезают в шапку панели на узких телефонах — перенос
+       вместо молчаливого обрезания overflow:hidden родителя. */
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 8px;
   }
   .panel-cap {

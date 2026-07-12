@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  addGeositeRuleSets,
   applyCatalogPresetsAsRuleSets,
   fullyAddedPresetNames,
 } from './rulesetCatalogActions';
@@ -121,5 +122,47 @@ describe('applyCatalogPresetsAsRuleSets', () => {
 
     expect(result.failures).toEqual([{ tag: 'geosite-netflix', error: 'boom' }]);
     expect(result.added).toEqual(['geosite-youtube']);
+  });
+});
+
+describe('addGeositeRuleSets', () => {
+  beforeEach(() => {
+    vi.mocked(api.singboxRouterAddRuleSet).mockReset();
+    vi.mocked(api.singboxRouterAddRuleSet).mockResolvedValue(undefined);
+  });
+
+  const BASE = 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/';
+
+  it('строит тег geosite-<имя> и URL <baseUrl>geosite-<имя>.srs', async () => {
+    const result = await addGeositeRuleSets(['xiaomi@cn'], BASE, []);
+
+    expect(api.singboxRouterAddRuleSet).toHaveBeenCalledWith({
+      tag: 'geosite-xiaomi@cn',
+      type: 'remote',
+      format: 'binary',
+      url: `${BASE}geosite-xiaomi@cn.srs`,
+      update_interval: '24h',
+    });
+    expect(result.added).toEqual(['geosite-xiaomi@cn']);
+  });
+
+  it('пропускает уже существующие теги без вызова API', async () => {
+    const existing: SingboxRouterRuleSet[] = [{ tag: 'geosite-youtube', type: 'remote' }];
+    const result = await addGeositeRuleSets(['youtube', 'netflix'], BASE, existing);
+
+    expect(api.singboxRouterAddRuleSet).toHaveBeenCalledTimes(1);
+    expect(result.skipped).toEqual(['geosite-youtube']);
+    expect(result.added).toEqual(['geosite-netflix']);
+  });
+
+  it('собирает сбои, не прерывая пакет', async () => {
+    vi.mocked(api.singboxRouterAddRuleSet)
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(undefined);
+
+    const result = await addGeositeRuleSets(['a', 'b'], BASE, []);
+
+    expect(result.failures).toEqual([{ tag: 'geosite-a', error: 'boom' }]);
+    expect(result.added).toEqual(['geosite-b']);
   });
 });

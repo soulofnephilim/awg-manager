@@ -3417,6 +3417,11 @@ definitions:
         items:
           type: string
         type: array
+      stale:
+        description: |-
+          Stale — список отдан из кэша, потому что обновление не удалось
+          (GitHub недоступен). Фронт показывает предупреждение при refresh=1.
+        type: boolean
     type: object
   api.SingboxInboundEntry:
     properties:

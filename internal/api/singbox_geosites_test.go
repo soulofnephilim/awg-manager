@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func geositeTreeJSON(paths ...string) string {
+func geositeTreeJSON(truncated bool, paths ...string) string {
 	type entry struct {
 		Path string `json:"path"`
 	}
@@ -17,7 +17,7 @@ func geositeTreeJSON(paths ...string) string {
 	for _, p := range paths {
 		entries = append(entries, entry{Path: p})
 	}
-	b, _ := json.Marshal(map[string]any{"truncated": false, "tree": entries})
+	b, _ := json.Marshal(map[string]any{"truncated": truncated, "tree": entries})
 	return string(b)
 }
 
@@ -32,6 +32,14 @@ func newGeositesTestHandler(t *testing.T, upstream http.HandlerFunc) (*SingboxGe
 	h := NewSingboxGeositesHandler(nil)
 	h.treeURL = srv.URL
 	return h, &calls
+}
+
+// rewindGeositeAttempt отматывает дебаунс/кулдаун, чтобы тест мог сразу
+// провоцировать следующий фетч.
+func rewindGeositeAttempt(h *SingboxGeositesHandler, back time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastAttempt = h.lastAttempt.Add(-back)
 }
 
 func geositesList(t *testing.T, h *SingboxGeositesHandler, url string) (*httptest.ResponseRecorder, SingboxGeositesData) {
@@ -54,7 +62,7 @@ func geositesList(t *testing.T, h *SingboxGeositesHandler, url string) (*httptes
 // посторонние файлы отбрасываются, порядок — сортированный.
 func TestGeositesList_ParsesAndSorts(t *testing.T) {
 	h, calls := newGeositesTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(geositeTreeJSON(
+		_, _ = w.Write([]byte(geositeTreeJSON(false,
 			"geosite-youtube.srs",
 			"geosite-category-ads-all.srs",
 			"README.md",
@@ -80,70 +88,103 @@ func TestGeositesList_ParsesAndSorts(t *testing.T) {
 	if data.BaseURL == "" || data.FetchedAt == "" {
 		t.Errorf("baseUrl/fetchedAt must be set, got %+v", data)
 	}
+	if data.Stale {
+		t.Error("fresh fetch must not be stale")
+	}
 	if calls.Load() != 1 {
 		t.Errorf("expected 1 upstream call, got %d", calls.Load())
 	}
 
 	// Повторный запрос — из кэша, без нового обращения к GitHub.
-	rec2, _ := geositesList(t, h, "/api/singbox/router/geosites/list")
-	if rec2.Code != http.StatusOK {
+	if rec2, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec2.Code != http.StatusOK {
 		t.Fatalf("cached status %d", rec2.Code)
 	}
 	if calls.Load() != 1 {
 		t.Errorf("cached call must not hit upstream, got %d calls", calls.Load())
 	}
 
-	// refresh=1 форсирует перезапрос.
-	rec3, _ := geositesList(t, h, "/api/singbox/router/geosites/list?refresh=1")
-	if rec3.Code != http.StatusOK {
-		t.Fatalf("refresh status %d", rec3.Code)
+	// refresh=1 сразу после удачного фетча гасится дебаунсом…
+	if rec3, _ := geositesList(t, h, "/api/singbox/router/geosites/list?refresh=1"); rec3.Code != http.StatusOK {
+		t.Fatalf("debounced refresh status %d", rec3.Code)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("debounced refresh must not hit upstream, got %d calls", calls.Load())
+	}
+
+	// …а после паузы — форсирует перезапрос.
+	rewindGeositeAttempt(h, geositeAttemptDebounce+time.Second)
+	if rec4, _ := geositesList(t, h, "/api/singbox/router/geosites/list?refresh=1"); rec4.Code != http.StatusOK {
+		t.Fatalf("refresh status %d", rec4.Code)
 	}
 	if calls.Load() != 2 {
 		t.Errorf("refresh must hit upstream, got %d calls", calls.Load())
 	}
 }
 
-// Сбой апстрима без кэша — 502; с кэшем — отдаётся протухший список.
+// Сбой апстрима без кэша — 502; с кэшем — протухший список со stale=true.
+// Кулдаун после неудачи не пускает следующий запрос к апстриму.
 func TestGeositesList_UpstreamFailure(t *testing.T) {
 	fail := true
-	h, _ := newGeositesTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+	h, calls := newGeositesTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		if fail {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
 			return
 		}
-		_, _ = w.Write([]byte(geositeTreeJSON("geosite-google.srs")))
+		_, _ = w.Write([]byte(geositeTreeJSON(false, "geosite-google.srs")))
 	})
 
 	rec, _ := geositesList(t, h, "/api/singbox/router/geosites/list")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("no-cache failure: status %d, want 502", rec.Code)
 	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", calls.Load())
+	}
 
-	// Наполняем кэш, затем ломаем апстрим и форсируем refresh — кэш выживает.
+	// Кулдаун: немедленный повтор не жжёт rate-limit, ошибка отдаётся из кэша.
+	if rec2, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec2.Code != http.StatusBadGateway {
+		t.Fatalf("cooldown failure: status %d, want 502", rec2.Code)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("cooldown must not hit upstream, got %d calls", calls.Load())
+	}
+
+	// Наполняем кэш (после паузы), затем ломаем апстрим и форсируем refresh —
+	// кэш выживает и помечается stale.
 	fail = false
-	if rec2, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec2.Code != http.StatusOK {
-		t.Fatalf("prime cache: status %d", rec2.Code)
+	rewindGeositeAttempt(h, geositeFailCooldown+time.Second)
+	if rec3, data := geositesList(t, h, "/api/singbox/router/geosites/list"); rec3.Code != http.StatusOK || data.Stale {
+		t.Fatalf("prime cache: status %d stale %v", rec3.Code, data.Stale)
 	}
 	fail = true
-	rec3, data := geositesList(t, h, "/api/singbox/router/geosites/list?refresh=1")
-	if rec3.Code != http.StatusOK {
-		t.Fatalf("stale-cache fallback: status %d, want 200", rec3.Code)
+	rewindGeositeAttempt(h, geositeAttemptDebounce+time.Second)
+	rec4, data := geositesList(t, h, "/api/singbox/router/geosites/list?refresh=1")
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("stale-cache fallback: status %d, want 200", rec4.Code)
 	}
 	if len(data.Names) != 1 || data.Names[0] != "google" {
 		t.Errorf("stale names = %v", data.Names)
 	}
+	if !data.Stale {
+		t.Error("failed refresh must mark the payload stale")
+	}
 }
 
-// Пустой листинг (например, HTML от перехватывающего прокси распарсился в
-// ноль записей) — ошибка, а не пустой кэш.
-func TestGeositesList_EmptyListingIsError(t *testing.T) {
+// Пустой листинг и truncated-листинг — ошибка, а не пустой/частичный кэш.
+func TestGeositesList_BadListingsAreErrors(t *testing.T) {
+	payload := geositeTreeJSON(false, "README.md")
 	h, _ := newGeositesTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(geositeTreeJSON("README.md")))
+		_, _ = w.Write([]byte(payload))
 	})
-	rec, _ := geositesList(t, h, "/api/singbox/router/geosites/list")
-	if rec.Code != http.StatusBadGateway {
+	if rec, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec.Code != http.StatusBadGateway {
 		t.Fatalf("empty listing: status %d, want 502", rec.Code)
+	}
+
+	payload = geositeTreeJSON(true, "geosite-google.srs")
+	rewindGeositeAttempt(h, geositeFailCooldown+time.Second)
+	if rec, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec.Code != http.StatusBadGateway {
+		t.Fatalf("truncated listing: status %d, want 502", rec.Code)
 	}
 }
 
@@ -159,13 +200,14 @@ func TestGeositesList_MethodNotAllowed(t *testing.T) {
 // TTL: протухший кэш обновляется без refresh=1.
 func TestGeositesList_TTLExpiry(t *testing.T) {
 	h, calls := newGeositesTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(geositeTreeJSON("geosite-google.srs")))
+		_, _ = w.Write([]byte(geositeTreeJSON(false, "geosite-google.srs")))
 	})
 	if rec, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec.Code != http.StatusOK {
 		t.Fatal("prime")
 	}
 	h.mu.Lock()
 	h.fetchedAt = time.Now().Add(-geositeCacheTTL - time.Minute)
+	h.lastAttempt = time.Now().Add(-geositeCacheTTL - time.Minute)
 	h.mu.Unlock()
 	if rec, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec.Code != http.StatusOK {
 		t.Fatal("post-ttl")
@@ -173,4 +215,66 @@ func TestGeositesList_TTLExpiry(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Errorf("expired cache must re-fetch, got %d calls", calls.Load())
 	}
+}
+
+// Warm-cache чтение не блокируется чужим долгим фетчем: пока refresh висит
+// в апстриме, обычный запрос немедленно получает stale-копию.
+func TestGeositesList_StaleWhileRevalidate(t *testing.T) {
+	release := make(chan struct{})
+	slow := false
+	h, _ := newGeositesTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		if slow {
+			<-release
+		}
+		_, _ = w.Write([]byte(geositeTreeJSON(false, "geosite-google.srs")))
+	})
+	if rec, _ := geositesList(t, h, "/api/singbox/router/geosites/list"); rec.Code != http.StatusOK {
+		t.Fatal("prime")
+	}
+
+	slow = true
+	// Протухший кэш: обычный запрос не пройдёт по fresh-пути и упрётся в
+	// inflight-развилку — ровно её и проверяем.
+	h.mu.Lock()
+	h.fetchedAt = time.Now().Add(-geositeCacheTTL - time.Minute)
+	h.mu.Unlock()
+	rewindGeositeAttempt(h, geositeAttemptDebounce+time.Second)
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		_, _ = geositesList(t, h, "/api/singbox/router/geosites/list?refresh=1")
+	}()
+
+	// Дожидаемся, пока refresh займёт inflight-слот.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.mu.Lock()
+		busy := h.inflight != nil
+		h.mu.Unlock()
+		if busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("refresh never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	done := make(chan SingboxGeositesData, 1)
+	go func() {
+		_, data := geositesList(t, h, "/api/singbox/router/geosites/list")
+		done <- data
+	}()
+	select {
+	case data := <-done:
+		if len(data.Names) != 1 || !data.Stale {
+			t.Errorf("expected stale cached copy, got %+v", data)
+		}
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("warm-cache read blocked behind the in-flight fetch")
+	}
+	close(release)
+	<-refreshDone
 }

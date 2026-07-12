@@ -1270,6 +1270,7 @@ const api_SingboxGeositesData: v.GenericSchema = v.looseObject({
 	baseUrl: v.optional(v.nullable(v.string())),
 	fetchedAt: v.optional(v.nullable(v.string())),
 	names: v.optional(v.nullable(v.array(v.string()))),
+	stale: v.optional(v.nullable(v.boolean())),
 });
 
 const api_SingboxInboundEntry: v.GenericSchema = v.looseObject({

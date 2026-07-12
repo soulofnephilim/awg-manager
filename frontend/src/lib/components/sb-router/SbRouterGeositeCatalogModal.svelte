@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
 	import { api } from '$lib/api/client';
+	import { notifications } from '$lib/stores/notifications';
 	import { Badge, Button, Modal } from '$lib/components/ui';
 	import { RefreshCw } from 'lucide-svelte';
 	import type { SingboxGeositesData } from '$lib/types';
@@ -44,9 +45,20 @@
 		loading = true;
 		loadError = '';
 		try {
-			catalog = await api.singboxRouterListGeosites(refresh);
+			const fresh = await api.singboxRouterListGeosites(refresh);
+			catalog = fresh;
+			if (refresh && fresh.stale) {
+				// Бэкенд не смог обновиться и отдал сохранённую копию.
+				notifications.warning('GitHub недоступен — показан сохранённый список');
+			}
 		} catch (e) {
-			loadError = e instanceof Error ? e.message : String(e);
+			const msg = e instanceof Error ? e.message : String(e);
+			if (catalog) {
+				// Неудачное обновление не должно прятать уже загруженный список.
+				notifications.error(`Не удалось обновить список: ${msg}`);
+			} else {
+				loadError = msg;
+			}
 		} finally {
 			loading = false;
 		}
@@ -58,10 +70,20 @@
 
 	$effect(() => {
 		if (!open) {
-			// Выбор и поиск не переживают закрытие; загруженный список — да.
+			// Выбор, поиск и ошибка не переживают закрытие (повторное открытие
+			// снова пробует загрузку); загруженный список — да.
 			selected = new Set();
 			query = '';
+			loadError = '';
 		}
+	});
+
+	$effect(() => {
+		// Успешно добавленные (частичный сбой оставляет модалку открытой)
+		// выбывают из выбора: иначе счётчик врёт, а повторный confirm
+		// рапортует «уже есть в конфиге» про только что добавленные.
+		const remaining = [...selected].filter((n) => !existingTagSet.has(`geosite-${n}`));
+		if (remaining.length !== selected.size) selected = new Set(remaining);
 	});
 
 	function isAdded(name: string): boolean {
@@ -113,7 +135,7 @@
 		{:else if filtered.length === 0}
 			<div class="state">Ничего не найдено по «{query}».</div>
 		{:else}
-			<div class="list" role="listbox" aria-multiselectable="true">
+			<div class="list">
 				{#each rendered as name (name)}
 					{@const added = isAdded(name)}
 					<button
@@ -121,8 +143,7 @@
 						class="row"
 						class:selected={selected.has(name)}
 						class:added
-						role="option"
-						aria-selected={selected.has(name)}
+						aria-pressed={selected.has(name)}
 						disabled={added}
 						onclick={() => toggle(name)}
 					>

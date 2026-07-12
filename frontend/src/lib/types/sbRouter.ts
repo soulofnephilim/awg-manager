@@ -330,6 +330,8 @@ export interface SingboxGeositesData {
 	/** baseUrl + "geosite-" + name + ".srs" — готовый URL rule-set'а. */
 	baseUrl: string;
 	fetchedAt: string;
+	/** Обновление не удалось — отдана сохранённая копия. */
+	stale?: boolean;
 }
 
 export interface SingboxProxiesSelectRequest {
