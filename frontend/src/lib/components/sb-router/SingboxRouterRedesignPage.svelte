@@ -69,10 +69,12 @@
   }
 
   onMount(() => {
-    // Не восстанавливаем визард (?add=1) и sub=connections после ухода на другие вкладки routing.
+    // Не восстанавливаем визард (?add=1) и sub=connections после ухода на другие
+    // вкладки routing. sub=logs — намеренное исключение: лог-вью должен переживать
+    // F5 и открываться по прямой ссылке.
     resetSingboxOverlayState();
     const sub = $page.url.searchParams.get('sub');
-    if (!sub) {
+    if (!sub || sub === 'logs') {
       void singboxRouterStore.loadAll();
       return;
     }
@@ -134,9 +136,17 @@
     void goto(`${url.pathname}${url.search}`, { keepFocus: true, noScroll: true });
   }
 
-  function openLogsSub() {
+  // Toggle, как у чипа соединений: повторный клик закрывает вид, а не наслаивает
+  // одинаковые записи в истории. tab=singbox фиксируем явно — window.location мог
+  // ещё не получить его от асинхронного goto тулбара вкладок.
+  function toggleLogsSub() {
     const url = new URL(window.location.href);
-    url.searchParams.set('sub', 'logs');
+    if (activeSingboxSub === 'logs') {
+      url.searchParams.delete('sub');
+    } else {
+      url.searchParams.set('tab', 'singbox');
+      url.searchParams.set('sub', 'logs');
+    }
     void goto(`${url.pathname}${url.search}`, { keepFocus: true, noScroll: true });
   }
 </script>
@@ -145,7 +155,8 @@
   onOpenInspector={() => (inspectorOpen = true)}
   onOpenJson={() => (jsonOpen = true)}
   onOpenConfigEditor={$sbMode === 'expert' ? () => (configEditorOpen = true) : undefined}
-  onOpenLogs={openLogsSub}
+  onOpenLogs={toggleLogsSub}
+  logsActive={activeSingboxSub === 'logs'}
 >
   <StagingBanner />
   {#if inSubView}

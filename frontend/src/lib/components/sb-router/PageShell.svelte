@@ -22,13 +22,15 @@
     onOpenJson?: () => void;
     /** Открыть редактор конфигурации config.d (эксперт; рендерится только если задан). */
     onOpenConfigEditor?: () => void;
-    /** Открыть логи sing-box (кнопка в шапке рендерится только если задан). */
+    /** Открыть/закрыть логи sing-box (кнопка в шапке рендерится только если задан). */
     onOpenLogs?: () => void;
+    /** Лог-вью сейчас открыт — кнопка «Логи» подсвечивается как активная. */
+    logsActive?: boolean;
     /** Дочерний контент страницы. */
     children: Snippet;
   }
 
-  let { subtitle, onOpenInspector, onOpenJson, onOpenConfigEditor, onOpenLogs, children }: Props = $props();
+  let { subtitle, onOpenInspector, onOpenJson, onOpenConfigEditor, onOpenLogs, logsActive = false, children }: Props = $props();
   let currentMode = $derived($mode);
 
   onMount(() => {
@@ -101,9 +103,11 @@
           <button
             type="button"
             class="icon-btn"
+            class:icon-btn-active={logsActive}
             onclick={onOpenLogs}
-            aria-label="Логи sing-box"
-            title="Логи sing-box"
+            aria-pressed={logsActive}
+            aria-label={logsActive ? 'Закрыть логи sing-box' : 'Логи sing-box'}
+            title={logsActive ? 'Закрыть логи sing-box' : 'Логи sing-box'}
           >
             <span class="action-icon"><ScrollText size={16} /></span>
             <span class="action-text">Логи</span>
@@ -224,6 +228,11 @@
   .icon-btn:hover {
     color: var(--color-text-primary, var(--text-primary));
     background: var(--color-bg-hover, var(--bg-tertiary));
+  }
+  .icon-btn-active,
+  .icon-btn-active:hover {
+    color: var(--color-text-primary, var(--text-primary));
+    border-color: var(--accent);
   }
 
   .header-actions {
