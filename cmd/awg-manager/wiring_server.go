@@ -334,6 +334,10 @@ func (a *app) setupRouter() {
 		selectiveGeo.GeoSite = geoCfg.GeoSiteFiles
 		selectiveGeo.GeoIP = geoCfg.GeoIPFiles
 	}
+	// Health-check бинаря ipset пишет вердикты в журнал (битый Entware-бинарь
+	// вида «libc.so: cannot open shared object file» иначе виден только как
+	// молчаливые exit 127 на каждой команде). До подключения логгер nil-safe.
+	selective.SetHealthLogger(logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSelective))
 	selectiveBuilder := selective.NewBuilder(selective.BuilderConfig{
 		ConfigDir:       a.singboxOp.ConfigDir(),
 		DNSSource:       a.ndmsQueries.DNSProxyStatus,

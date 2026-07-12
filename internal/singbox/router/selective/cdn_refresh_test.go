@@ -146,8 +146,14 @@ func fakeIPSetBinary(t *testing.T) (logPath string) {
 		t.Fatal(err)
 	}
 	orig := ipsetBinaryPaths
-	t.Cleanup(func() { ipsetBinaryPaths = orig })
+	t.Cleanup(func() {
+		ipsetBinaryPaths = orig
+		resetIPSetHealthForTest()
+	})
 	ipsetBinaryPaths = []string{bin}
+	// Сбросить кэш health-check'а — иначе IPSetBinary вернёт путь,
+	// провалидированный предыдущим тестом с другими candidate paths.
+	resetIPSetHealthForTest()
 	return logPath
 }
 

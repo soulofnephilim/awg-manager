@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
 )
@@ -24,18 +27,103 @@ var ipsetBinaryPaths = []string{
 	"/sbin/ipset",
 }
 
-// IPSetBinary returns the path to the installed ipset binary, or ""
-// when not found. Scans candidate paths in preference order.
-func IPSetBinary() string {
-	for _, p := range ipsetBinaryPaths {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
+// healthLog — журнал приложения (routing/selective) для вердиктов health-check
+// бинаря ipset. nil-safe: до/без подключения через SetHealthLogger вердикты
+// просто не журналируются.
+var healthLog *logging.ScopedLogger
+
+// SetHealthLogger подключает журнал для health-check ipset. Вызывается один
+// раз из wiring до старта фоновых потребителей (CDN-loop, HTTP-сервер).
+func SetHealthLogger(l *logging.ScopedLogger) { healthLog = l }
+
+// ipsetProbeTimeout ограничивает пробу `ipset version`: сломанный бинарь
+// (exit 127) падает мгновенно, здоровый отвечает миллисекунды — таймаут
+// нужен только против зависшего носителя /opt.
+const ipsetProbeTimeout = 5 * time.Second
+
+const (
+	// ipsetHealthyTTL — как долго доверять найденному рабочему бинарю,
+	// прежде чем перепроверить (opkg upgrade может сломать его на лету).
+	ipsetHealthyTTL = 5 * time.Minute
+	// ipsetBrokenTTL — как долго кэшировать вердикт «рабочего бинаря нет»:
+	// короче, чтобы ручная починка (переустановка пакета по SSH) подхватилась
+	// без рестарта демона.
+	ipsetBrokenTTL = 30 * time.Second
+)
+
+// probeIPSetBinary запускает `<path> version` и возвращает ошибку, если
+// бинарь не исполняется (битая установка Entware: «error while loading
+// shared libraries: libc.so» даёт exit 127 при живом файле — голый os.Stat
+// такое пропускает, а все реальные команды потом молча падают).
+// Подменяется в тестах.
+var probeIPSetBinary = func(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), ipsetProbeTimeout)
+	defer cancel()
+	res, err := sysexec.RunWithOptions(ctx, path, []string{"version"}, sysexec.Options{Timeout: ipsetProbeTimeout})
+	if err != nil {
+		return sysexec.FormatError(res, err)
 	}
-	return ""
+	return nil
 }
 
-// IsIPSetAvailable reports whether the ipset binary is present on the router.
+// ipsetHealth кэширует результат поиска рабочего бинаря ipset. Пробы идут
+// под мьютексом — конкурентные вызовы (status-поллинг + пересборка) ждут
+// один общий вердикт, а не форкают ipset наперегонки.
+var ipsetHealth = struct {
+	mu      sync.Mutex
+	path    string    // проверенный рабочий путь ("" — нет)
+	checked time.Time // момент вердикта (zero — кэш пуст)
+	// lastErr хранит последний зажурналенный сбой по каждому кандидату:
+	// повторный идентичный вердикт не спамит Warn, смена ошибки и
+	// восстановление — журналируются.
+	lastErr map[string]string
+}{lastErr: map[string]string{}}
+
+// IPSetBinary returns the path to a WORKING ipset binary, or "" when no
+// candidate both exists and executes. Существующий, но неисполнимый бинарь
+// (битый Entware-пакет) пропускается с Warn в журнал — иначе он затеняет
+// рабочий системный и валит каждую команду exit-кодом 127.
+func IPSetBinary() string {
+	now := time.Now()
+	ipsetHealth.mu.Lock()
+	defer ipsetHealth.mu.Unlock()
+
+	ttl := ipsetBrokenTTL
+	if ipsetHealth.path != "" {
+		ttl = ipsetHealthyTTL
+	}
+	if !ipsetHealth.checked.IsZero() && now.Sub(ipsetHealth.checked) < ttl {
+		return ipsetHealth.path
+	}
+
+	chosen := ""
+	for _, p := range ipsetBinaryPaths {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if err := probeIPSetBinary(p); err != nil {
+			msg := err.Error()
+			if ipsetHealth.lastErr[p] != msg {
+				ipsetHealth.lastErr[p] = msg
+				healthLog.Warn("ipset-health", p,
+					fmt.Sprintf("ipset binary is present but not runnable (%s) — candidate skipped; reinstall it: opkg install --force-reinstall ipset", msg))
+			}
+			continue
+		}
+		if ipsetHealth.lastErr[p] != "" {
+			delete(ipsetHealth.lastErr, p)
+			healthLog.Info("ipset-health", p, "ipset binary is runnable again")
+		}
+		chosen = p
+		break
+	}
+	ipsetHealth.path = chosen
+	ipsetHealth.checked = now
+	return chosen
+}
+
+// IsIPSetAvailable reports whether a working ipset binary is present on the
+// router (existence AND executability — see IPSetBinary).
 func IsIPSetAvailable() bool {
 	return IPSetBinary() != ""
 }
@@ -174,9 +262,16 @@ func opkgInstall(ctx context.Context, opkg, pkg string, progressFn func(line str
 	return nil
 }
 
-// resetIPSetCache is kept for API compatibility with tests but is now a no-op
-// since IsXtSetAvailable no longer caches.
-func resetIPSetCache() {}
+// resetIPSetCache сбрасывает кэш health-check'а — вызывается после установки
+// пакета, чтобы следующий IPSetBinary перепробовал кандидатов немедленно, а
+// не по TTL. lastErr сознательно не чистится: восстановление после
+// переустановки журналируется как переход («runnable again»).
+func resetIPSetCache() {
+	ipsetHealth.mu.Lock()
+	defer ipsetHealth.mu.Unlock()
+	ipsetHealth.path = ""
+	ipsetHealth.checked = time.Time{}
+}
 
 // findOpkg returns the absolute path to opkg, or an error if not found.
 func findOpkg() (string, error) {
