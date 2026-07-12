@@ -57,18 +57,26 @@ func inlineTagFromSRSTag(tag string) (string, bool) {
 
 // inspectRuleSetsWithInlineAliases возвращает rule_set'ы конфига,
 // дополненные алиасами: каждый материализованный inline-набор (managed
-// local "X-srs" со скомпилированным .srs на диске) дублируется под
-// базовым тегом "X". DNS-инспектор ходит по восстановленным правилам
-// (как их видит пользователь в UI), где ссылки указывают на "X" — без
-// алиаса поиск по карте наборов давал «не определён в rule_set[]»
-// (#506). Алиас указывает на скомпилированный файл, поэтому матчинг
-// полноценный — inline-содержимое инспектор проверять не умеет.
+// local "X-srs") дублируется под базовым тегом "X". Инспектор ходит по
+// восстановленным правилам (как их видит пользователь в UI), где ссылки
+// указывают на "X" — без алиаса поиск по карте наборов давал «не
+// определён в rule_set[]» (#506). Алиас указывает на скомпилированный
+// .srs, поэтому матчинг полноценный, пока файл существует на диске
+// (иначе инспектор честно деградирует к «не удалось проверить») —
+// inline-содержимое сам инспектор проверять не умеет.
+//
 // Алиасы добавляются в конец: при построении карты «последний
 // побеждает», и alias перекрывает возможную сырую inline-запись с тем
-// же тегом.
+// же тегом. Настоящий НЕ-inline набор с тегом "X" (remote/local в
+// legacy/ручных конфигах) алиас не затеняет — иначе инспектор молча
+// матчил бы не тот файл.
 func (m ruleSetMaterializer) inspectRuleSetsWithInlineAliases(cfg *RouterConfig) []RuleSet {
 	if cfg == nil {
 		return nil
+	}
+	rawType := make(map[string]string, len(cfg.Route.RuleSet))
+	for _, rs := range cfg.Route.RuleSet {
+		rawType[rs.Tag] = rs.Type
 	}
 	out := make([]RuleSet, 0, len(cfg.Route.RuleSet)+4)
 	out = append(out, cfg.Route.RuleSet...)
@@ -78,6 +86,9 @@ func (m ruleSetMaterializer) inspectRuleSetsWithInlineAliases(cfg *RouterConfig)
 		}
 		base, ok := inlineTagFromSRSTag(rs.Tag)
 		if !ok {
+			continue
+		}
+		if t, exists := rawType[base]; exists && t != "inline" {
 			continue
 		}
 		alias := rs
@@ -203,7 +214,7 @@ func (m ruleSetMaterializer) rewritePersistedSRSRefsToInline(src, dst *RouterCon
 // in route/DNS rules so the UI always shows the inline tag (defense in depth).
 func (m ruleSetMaterializer) rewriteSRSSuffixRuleSetRefs(cfg *RouterConfig) {
 	for i := range cfg.Route.Rules {
-		cfg.Route.Rules[i].RuleSet = rewriteRuleSetTagsStripSRSSuffix(cfg.Route.Rules[i].RuleSet)
+		rewriteRuleRefsDeep(&cfg.Route.Rules[i], rewriteRuleSetTagsStripSRSSuffix)
 	}
 	for i := range cfg.DNS.Rules {
 		cfg.DNS.Rules[i].RuleSet = rewriteRuleSetTagsStripSRSSuffix(cfg.DNS.Rules[i].RuleSet)
@@ -243,10 +254,23 @@ func (m ruleSetMaterializer) rewriteRuleSetRefs(cfg *RouterConfig, from, to stri
 		return
 	}
 	for i := range cfg.Route.Rules {
-		cfg.Route.Rules[i].RuleSet = rewriteRuleSetSlice(cfg.Route.Rules[i].RuleSet, from, to)
+		rewriteRuleRefsDeep(&cfg.Route.Rules[i], func(tags []string) []string {
+			return rewriteRuleSetSlice(tags, from, to)
+		})
 	}
 	for i := range cfg.DNS.Rules {
 		cfg.DNS.Rules[i].RuleSet = rewriteRuleSetSlice(cfg.DNS.Rules[i].RuleSet, from, to)
+	}
+}
+
+// rewriteRuleRefsDeep применяет fn к rule_set-ссылкам правила и всех его
+// вложенных logical-подправил: ссылка на inline-набор внутри
+// type:"logical" без рекурсии избегала переписывания при материализации
+// и указывала на несуществующий после неё тег.
+func rewriteRuleRefsDeep(rule *Rule, fn func([]string) []string) {
+	rule.RuleSet = fn(rule.RuleSet)
+	for i := range rule.Rules {
+		rewriteRuleRefsDeep(&rule.Rules[i], fn)
 	}
 }
 

@@ -382,3 +382,82 @@ func TestInspectRuleSetsWithInlineAliases(t *testing.T) {
 		t.Error("nil config must yield nil")
 	}
 }
+
+// Guard: алиас не затеняет настоящий НЕ-inline набор с тем же базовым
+// тегом (legacy/ручной конфиг с remote "geo-x" рядом с managed
+// "geo-x-srs") — иначе инспектор молча матчил бы не тот файл.
+func TestInspectRuleSetsWithInlineAliases_DoesNotShadowGenuineSet(t *testing.T) {
+	dir := t.TempDir()
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+	m := ruleSetMaterializer{configDir: dir, binary: "/opt/bin/sing-box"}
+	local, err := m.materializeRuleSet(RuleSet{
+		Tag:   "geo-x",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{"x.example"}}},
+	})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	genuine := RuleSet{Tag: "geo-x", Type: "remote", URL: "https://example.com/x.srs"}
+	cfg := NewEmptyConfig()
+	cfg.Route.RuleSet = []RuleSet{genuine, local}
+
+	got := m.inspectRuleSetsWithInlineAliases(cfg)
+	if len(got) != 2 {
+		t.Fatalf("alias must be skipped for a shadowed genuine set, got %d entries: %+v", len(got), got)
+	}
+	byTag := map[string]RuleSet{}
+	for _, rs := range got {
+		byTag[rs.Tag] = rs
+	}
+	if byTag["geo-x"].Type != "remote" {
+		t.Errorf("genuine remote set must stay resolvable, got %+v", byTag["geo-x"])
+	}
+}
+
+// Вложенные logical-подправила: ссылки на inline-наборы переписываются
+// при материализации (иначе персистится ссылка на несуществующий тег)
+// и восстанавливаются обратно.
+func TestMaterializeConfig_RewritesNestedRuleRefs(t *testing.T) {
+	dir := t.TempDir()
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+	m := ruleSetMaterializer{configDir: dir, binary: "/opt/bin/sing-box"}
+
+	cfg := NewEmptyConfig()
+	cfg.Route.RuleSet = []RuleSet{{
+		Tag:   "geo-telegram",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{"t.me"}}},
+	}}
+	cfg.Route.Rules = []Rule{{
+		Type: "logical",
+		Mode: "or",
+		Rules: []Rule{
+			{RuleSet: []string{"geo-telegram"}},
+			{Protocol: "dns"},
+		},
+		Action:   "route",
+		Outbound: "vpn",
+	}}
+
+	persisted, err := m.materializeConfig(cfg)
+	if err != nil {
+		t.Fatalf("materializeConfig: %v", err)
+	}
+	nested := persisted.Route.Rules[0].Rules[0].RuleSet
+	if len(nested) != 1 || nested[0] != "geo-telegram-srs" {
+		t.Fatalf("nested ref must be rewritten to the materialized tag, got %v", nested)
+	}
+
+	restored := m.restoreConfig(persisted)
+	nested = restored.Route.Rules[0].Rules[0].RuleSet
+	if len(nested) != 1 || nested[0] != "geo-telegram" {
+		t.Fatalf("restored nested ref must be the inline tag, got %v", nested)
+	}
+}
