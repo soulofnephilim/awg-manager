@@ -4,7 +4,7 @@
 
 <script lang="ts">
   import { onMount } from "svelte";
-  import { FileJson, FilePen, Search, Settings } from "lucide-svelte";
+  import { FileJson, FilePen, ScrollText, Search, Settings } from "lucide-svelte";
   import { mode, setMode, type RouterMode } from "./modeStore";
   import { bindLiveConnectionsStore } from "./liveConnectionsStore";
   import { openDrawer } from "./drawerStore";
@@ -22,11 +22,13 @@
     onOpenJson?: () => void;
     /** Открыть редактор конфигурации config.d (эксперт; рендерится только если задан). */
     onOpenConfigEditor?: () => void;
+    /** Открыть логи sing-box (кнопка в шапке рендерится только если задан). */
+    onOpenLogs?: () => void;
     /** Дочерний контент страницы. */
     children: Snippet;
   }
 
-  let { subtitle, onOpenInspector, onOpenJson, onOpenConfigEditor, children }: Props = $props();
+  let { subtitle, onOpenInspector, onOpenJson, onOpenConfigEditor, onOpenLogs, children }: Props = $props();
   let currentMode = $derived($mode);
 
   onMount(() => {
@@ -93,6 +95,18 @@
           >
             <span class="action-icon"><FilePen size={16} /></span>
             <span class="action-text">Редактор</span>
+          </button>
+        {/if}
+        {#if onOpenLogs}
+          <button
+            type="button"
+            class="icon-btn"
+            onclick={onOpenLogs}
+            aria-label="Логи sing-box"
+            title="Логи sing-box"
+          >
+            <span class="action-icon"><ScrollText size={16} /></span>
+            <span class="action-text">Логи</span>
           </button>
         {/if}
       </div>

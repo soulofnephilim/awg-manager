@@ -258,7 +258,7 @@
 				блок: при остановленном движке / clash-down — заглушка.
 			-->
 			{#if engineState === 'live'}
-				<LogsTerminal lockBucket="singbox" />
+				<LogsTerminal lockBucket="singbox" storagePrefix="awgm.fakeip" />
 			{:else if engineState === 'clash-down'}
 				<section class="chip-stub">
 					<h2 class="chip-stub-title">{activeChip.label}</h2>

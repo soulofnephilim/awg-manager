@@ -22,11 +22,22 @@
   // lockBucket: фиксирует журнал на один bucket (напр. FakeIP-чип «Журнал» —
   // только 'singbox') и прячет переключатель app/singbox в тулбаре. Не задан —
   // прежнее поведение (переключаемый, как на странице Диагностики).
-  let { lockBucket }: { lockBucket?: LogBucket } = $props();
+  // storagePrefix: пространство localStorage-ключей инстанса. Терминалы на
+  // разных страницах (Диагностика, FakeIP, TProxy) обязаны хранить фильтры
+  // раздельно, иначе они перетекают между страницами через общие ключи.
+  let { lockBucket, storagePrefix = 'awgm.diagnostics' }: {
+    lockBucket?: LogBucket;
+    storagePrefix?: string;
+  } = $props();
 
-  const STORAGE_KEY = 'awgm.diagnostics.logsFilter';
-  const BUCKET_KEY = 'awgm.diagnostics.logsBucket';
-  const FULL_TIMESTAMP_KEY = 'awgm.diagnostics.logsFullTimestamp';
+  // Пропы фиксированы на всё время жизни инстанса — захват начальных значений
+  // намеренный.
+  // svelte-ignore state_referenced_locally
+  const STORAGE_KEY = `${storagePrefix}.logsFilter`;
+  // svelte-ignore state_referenced_locally
+  const BUCKET_KEY = `${storagePrefix}.logsBucket`;
+  // svelte-ignore state_referenced_locally
+  const FULL_TIMESTAMP_KEY = `${storagePrefix}.logsFullTimestamp`;
   const PAGE_SIZE = 200;
   type LogsQueryParams = {
     bucket: 'app' | 'singbox';
@@ -107,9 +118,22 @@
     localStorage.setItem(FULL_TIMESTAMP_KEY, v ? '1' : '0');
   }
 
-  let filter = $state<LogsFilter>(loadFilter());
+  // Сохранённый фильтр всегда согласован с сохранённым bucket'ом (setBucket
+  // сбрасывает группы). Если журнал зафиксирован на другом bucket'е —
+  // групповые фильтры чужие (наборы групп не пересекаются), сбрасываем их.
+  function initialFilter(): LogsFilter {
+    const f = loadFilter();
+    if (!lockBucket || loadBucket() === lockBucket) return f;
+    saveBucket(lockBucket);
+    const next = { ...f, groups: [], subgroups: [] };
+    saveFilter(next);
+    return next;
+  }
+
   // lockBucket — фиксированный проп (не меняется в рантайме): захват начального
   // значения — намеренный.
+  // svelte-ignore state_referenced_locally
+  let filter = $state<LogsFilter>(initialFilter());
   // svelte-ignore state_referenced_locally
   let bucket = $state<LogBucket>(lockBucket ?? loadBucket());
   let showFullTimestamp = $state(loadFullTimestamp());
