@@ -76,6 +76,7 @@ const SLUGS_FROM_SIMPLE_ICONS = [
 	'reddit',
 	'roblox',
 	'samsung',
+	'xiaomi',
 	'bittorrent',
 	'signal',
 	'spotify',
