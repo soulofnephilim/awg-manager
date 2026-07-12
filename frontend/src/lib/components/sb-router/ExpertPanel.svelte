@@ -724,6 +724,8 @@
           outbounds={$storeOutbounds}
           subscriptions={$subscriptionsStore.data ?? []}
           usage={outboundUsageContext}
+          proxyGroups={$singboxProxies.data ?? []}
+          outboundOptions={$storeOptions}
           onEdit={(tag) => (outboundEditTag = tag)}
           onDelete={handleDeleteOutbound}
         />
