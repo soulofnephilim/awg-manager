@@ -266,18 +266,22 @@
 	}
 
 	function openConf(peer: ManagedPeer) {
+		// Клиент, созданный через AWG Manager, имеет сохранённые ключи —
+		// показываем готовый .conf (и для перенесённых серверов тоже).
+		const raw = managedPeerMap.get(peer.publicKey);
+		if (raw?.confAvailable) {
+			confPubkey = peer.publicKey;
+			confPeerName = peer.description || 'peer';
+			confModalOpen = true;
+			return;
+		}
 		if (isMarked) {
+			// Ключей нет (клиент создан в веб-интерфейсе Keenetic) — генератор
+			// собирает .conf по вручную введённому приватному ключу.
 			void openConfGenerator(peer.publicKey);
 			return;
 		}
-		const raw = managedPeerMap.get(peer.publicKey);
-		if (!raw?.confAvailable) {
-			notifications.warning('Конфиг недоступен — клиент создан вне AWG Manager или через KeenDNS');
-			return;
-		}
-		confPubkey = peer.publicKey;
-		confPeerName = peer.description || 'peer';
-		confModalOpen = true;
+		notifications.warning('Конфиг недоступен — клиент создан вне AWG Manager или через KeenDNS');
 	}
 
 	async function openConfGenerator(publicKey: string) {
@@ -306,7 +310,9 @@
 	);
 
 	$effect(() => {
-		if (!isBuiltIn) {
+		// WAN IP нужен подсказке endpoint-настройки — она видна и встроенному,
+		// и перенесённому системному серверу.
+		if (!isBuiltIn && !isMarked) {
 			builtinWanIP = '';
 			loadingBuiltinWanIP = false;
 			builtinWanIPLoadedFor = '';
@@ -386,7 +392,9 @@
 		<Stat value={`UDP :${server.listenPort}`} label="Listen" />
 	</StatStrip>
 
-	{#if isBuiltIn}
+	<!-- Панель настроек доступна и перенесённым системным серверам: бэкенд
+	     (NAT/политика/endpoint/пиры) принимает их наравне со встроенным. -->
+	{#if isBuiltIn || isMarked}
 		<ServerSettingsPanel persistKey="awgm:servers:settingsCollapsed">
 			<div class="setting-row setting-row-toggle">
 				<div class="setting-copy">
@@ -461,7 +469,7 @@
 					showSearch={(server.peers ?? []).length > 0}
 					hideSortOnDesktop
 				/>
-				{#if isBuiltIn}
+				{#if isBuiltIn || isMarked}
 					<Button variant="secondary" size="sm" onclick={() => (addPeerOpen = true)} iconBefore={addPeerIcon}>
 						Добавить клиента
 					</Button>
@@ -476,8 +484,8 @@
 				peers={sortedPeers}
 				{getPeerStats}
 				showPeerDownload={isBuiltIn || isMarked}
-				showPeerActions={isBuiltIn}
-				showPeerToggle={isBuiltIn}
+				showPeerActions={isBuiltIn || isMarked}
+				showPeerToggle={isBuiltIn || isMarked}
 				onTogglePeer={handleTogglePeer}
 				{isPeerToggling}
 				onOpenConf={openConf}
