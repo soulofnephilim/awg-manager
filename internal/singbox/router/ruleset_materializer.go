@@ -55,6 +55,38 @@ func inlineTagFromSRSTag(tag string) (string, bool) {
 	return base, true
 }
 
+// inspectRuleSetsWithInlineAliases возвращает rule_set'ы конфига,
+// дополненные алиасами: каждый материализованный inline-набор (managed
+// local "X-srs" со скомпилированным .srs на диске) дублируется под
+// базовым тегом "X". DNS-инспектор ходит по восстановленным правилам
+// (как их видит пользователь в UI), где ссылки указывают на "X" — без
+// алиаса поиск по карте наборов давал «не определён в rule_set[]»
+// (#506). Алиас указывает на скомпилированный файл, поэтому матчинг
+// полноценный — inline-содержимое инспектор проверять не умеет.
+// Алиасы добавляются в конец: при построении карты «последний
+// побеждает», и alias перекрывает возможную сырую inline-запись с тем
+// же тегом.
+func (m ruleSetMaterializer) inspectRuleSetsWithInlineAliases(cfg *RouterConfig) []RuleSet {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]RuleSet, 0, len(cfg.Route.RuleSet)+4)
+	out = append(out, cfg.Route.RuleSet...)
+	for _, rs := range cfg.Route.RuleSet {
+		if !m.isManagedLocalRuleSet(rs) {
+			continue
+		}
+		base, ok := inlineTagFromSRSTag(rs.Tag)
+		if !ok {
+			continue
+		}
+		alias := rs
+		alias.Tag = base
+		out = append(out, alias)
+	}
+	return out
+}
+
 func ruleSetTagsWithCompanion(tag string) []string {
 	if _, ok := inlineTagFromSRSTag(tag); ok {
 		return []string{tag}

@@ -328,3 +328,57 @@ func TestMapTagSlice(t *testing.T) {
 		t.Error("rewriteTagSlice from==to must be a no-op returning original")
 	}
 }
+
+// #506: DNS-инспектор ходит по восстановленным правилам (ссылки на
+// inline-теги без -srs) — карта наборов должна содержать алиасы
+// материализованных inline'ов под базовым тегом, указывающие на
+// скомпилированный .srs.
+func TestInspectRuleSetsWithInlineAliases(t *testing.T) {
+	dir := t.TempDir()
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+	m := ruleSetMaterializer{configDir: dir, binary: "/opt/bin/sing-box"}
+
+	local, err := m.materializeRuleSet(RuleSet{
+		Tag:   "geo-telegram",
+		Type:  "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{"t.me"}}},
+	})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	remote := RuleSet{Tag: "geosite-google", Type: "remote", URL: "https://example.com/g.srs"}
+	cfg := NewEmptyConfig()
+	cfg.Route.RuleSet = []RuleSet{remote, local}
+
+	got := m.inspectRuleSetsWithInlineAliases(cfg)
+	if len(got) != 3 {
+		t.Fatalf("expected original 2 + 1 alias, got %d: %+v", len(got), got)
+	}
+	alias := got[2]
+	if alias.Tag != "geo-telegram" {
+		t.Errorf("alias tag = %q, want geo-telegram", alias.Tag)
+	}
+	if alias.Type != "local" || alias.Path != local.Path {
+		t.Errorf("alias must point at the compiled srs, got %+v", alias)
+	}
+
+	// Карта «последний побеждает»: алиас перекрывает сырую inline-запись
+	// с тем же тегом и остаётся матчабельным local-набором.
+	byTag := map[string]RuleSet{}
+	for _, rs := range got {
+		byTag[rs.Tag] = rs
+	}
+	if byTag["geo-telegram"].Type != "local" {
+		t.Errorf("map entry for base tag must be the local alias, got %+v", byTag["geo-telegram"])
+	}
+	if byTag["geosite-google"].Type != "remote" {
+		t.Errorf("remote entry must be untouched, got %+v", byTag["geosite-google"])
+	}
+
+	if m.inspectRuleSetsWithInlineAliases(nil) != nil {
+		t.Error("nil config must yield nil")
+	}
+}

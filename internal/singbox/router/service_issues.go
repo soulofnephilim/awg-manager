@@ -285,7 +285,13 @@ func (s *ServiceImpl) InspectDNS(ctx context.Context, input InspectDNSInput) (In
 	if err != nil {
 		return InspectDNSResult{}, err
 	}
-	dnsRules := s.ruleSetMaterializer().restoreConfig(cfg).DNS.Rules
+	m := s.ruleSetMaterializer()
+	// DNS-правила — в восстановленном виде (ссылки на inline-теги без
+	// -srs, как их видит пользователь в UI); карта наборов поэтому
+	// дополняется алиасами материализованных inline'ов, иначе поиск
+	// по восстановленному тегу давал «не определён в rule_set[]» (#506).
+	dnsRules := m.restoreConfig(cfg).DNS.Rules
+	ruleSets := m.inspectRuleSetsWithInlineAliases(cfg)
 	binary := ""
 	if s.deps.Singbox != nil {
 		binary = s.deps.Singbox.Binary()
@@ -293,7 +299,7 @@ func (s *ServiceImpl) InspectDNS(ctx context.Context, input InspectDNSInput) (In
 	s.inspectCacheOnce.Do(func() {
 		s.inspectCache = newRuleSetCache("")
 	})
-	return InspectDNS(input, dnsRules, cfg.DNS.Servers, cfg.Route.RuleSet, cfg.DNS.Final, binary, s.inspectCache), nil
+	return InspectDNS(input, dnsRules, cfg.DNS.Servers, ruleSets, cfg.DNS.Final, binary, s.inspectCache), nil
 }
 
 func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-chan InspectStreamEvent, error) {
