@@ -303,8 +303,12 @@ func (h *SelectiveHandler) InstallDeps(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
+	// Свежий вердикт вместо кэша: бинарь мог сломаться или исчезнуть минуту
+	// назад, и «уже установлено» по пятиминутному кэшу оставляло бы
+	// пользователя без починки через UI.
+	selective.RecheckIPSet()
 	if selective.IsIPSetAvailable() {
-		// Already installed — just return current status.
+		// Already installed and runnable — just return current status.
 		h.GetStatus(w, r)
 		return
 	}
