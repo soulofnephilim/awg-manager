@@ -49,29 +49,61 @@ export async function applyCatalogPresetsAsRuleSets(
       emptyPresets.push(preset.id);
       continue;
     }
-    for (const ref of refs) {
-      if (existingTags.has(ref.tag)) {
-        skipped.push(ref.tag);
-        continue;
-      }
-      try {
-        await addFn({
-          tag: ref.tag,
-          type: 'remote',
-          format: 'binary',
-          url: ref.url,
-          update_interval: '24h',
-        });
-        existingTags.add(ref.tag);
-        added.push(ref.tag);
-      } catch (e) {
-        failures.push({
-          tag: ref.tag,
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-    }
+    await addRemoteRuleSetRefs(refs, existingTags, addFn, { added, skipped, failures });
   }
 
   return { added, skipped, failures, emptyPresets };
+}
+
+/** Add remote rule-sets from SagerNet geosite catalog names (no routing rules).
+ *  Тег строится как `geosite-<name>`, URL — `<baseUrl>geosite-<name>.srs`. */
+export async function addGeositeRuleSets(
+  names: string[],
+  baseUrl: string,
+  existingRuleSets: SingboxRouterRuleSet[],
+  addRuleSetFn?: AddRuleSetFn,
+): Promise<ApplyRuleSetsFromCatalogResult> {
+  const addFn: AddRuleSetFn = addRuleSetFn ?? ((rs) => api.singboxRouterAddRuleSet(rs));
+  const existingTags = new Set(existingRuleSets.map((rs) => rs.tag));
+  const added: string[] = [];
+  const skipped: string[] = [];
+  const failures: Array<{ tag: string; error: string }> = [];
+
+  const refs = names.map((name) => ({
+    tag: `geosite-${name}`,
+    url: `${baseUrl}geosite-${name}.srs`,
+  }));
+  await addRemoteRuleSetRefs(refs, existingTags, addFn, { added, skipped, failures });
+
+  return { added, skipped, failures, emptyPresets: [] };
+}
+
+async function addRemoteRuleSetRefs(
+  refs: Array<{ tag: string; url: string }>,
+  existingTags: Set<string>,
+  addFn: AddRuleSetFn,
+  out: { added: string[]; skipped: string[]; failures: Array<{ tag: string; error: string }> },
+): Promise<void> {
+  for (const ref of refs) {
+    if (existingTags.has(ref.tag)) {
+      out.skipped.push(ref.tag);
+      continue;
+    }
+    try {
+      await addFn({
+        tag: ref.tag,
+        type: 'remote',
+        format: 'binary',
+        url: ref.url,
+        update_interval: '24h',
+      });
+      existingTags.add(ref.tag);
+      out.added.push(ref.tag);
+    } catch (e) {
+      out.failures.push({
+        tag: ref.tag,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
 }

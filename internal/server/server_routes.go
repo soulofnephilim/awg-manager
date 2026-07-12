@@ -742,6 +742,10 @@ func (s *Server) registerSingboxRoutes(mux *http.ServeMux, h *routeHandlers) {
 		mux.HandleFunc("/api/singbox/router/rulesets/delete", h.guarded(rh.DeleteRuleSet))
 		mux.HandleFunc("/api/singbox/router/rulesets/dat-url", h.guarded(rh.DatRuleSetURL))
 		mux.HandleFunc("/api/singbox/router/rulesets/dat-srs", rh.DatRuleSetSRS)
+		// Каталог SagerNet geosite — дополнение к каталогу пресетов:
+		// хендлер создаётся здесь один раз, кэш живёт в нём.
+		geositesHandler := api.NewSingboxGeositesHandler(s.downloadSvc)
+		mux.HandleFunc("/api/singbox/router/geosites/list", h.guarded(geositesHandler.List))
 		mux.HandleFunc("/api/singbox/router/outbounds/list", h.guarded(rh.ListOutbounds))
 		mux.HandleFunc("/api/singbox/router/outbounds/add", h.guarded(rh.AddOutbound))
 		mux.HandleFunc("/api/singbox/router/outbounds/update", h.guarded(rh.UpdateOutbound))
