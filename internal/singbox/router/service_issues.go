@@ -263,6 +263,12 @@ func (s *ServiceImpl) Inspect(ctx context.Context, input InspectInput) (InspectR
 	if final == "" {
 		final = "direct"
 	}
+	// Как и в InspectDNS: правила — в восстановленном виде (теги без -srs,
+	// как в UI и в остальных блоках трейса), карта наборов — с алиасами
+	// материализованных inline'ов. Алиасы считаются до restoreConfig.
+	m := s.ruleSetMaterializer()
+	ruleSets := m.inspectRuleSetsWithInlineAliases(cfg)
+	rules := m.restoreConfig(cfg).Route.Rules
 	binary := ""
 	if s.deps.Singbox != nil {
 		binary = s.deps.Singbox.Binary()
@@ -270,7 +276,7 @@ func (s *ServiceImpl) Inspect(ctx context.Context, input InspectInput) (InspectR
 	s.inspectCacheOnce.Do(func() {
 		s.inspectCache = newRuleSetCache("")
 	})
-	return Inspect(input, cfg.Route.Rules, cfg.Route.RuleSet, final, binary, s.inspectCache), nil
+	return Inspect(input, rules, ruleSets, final, binary, s.inspectCache), nil
 }
 
 // InspectDNS simulates which DNS rule would match the given domain and how
@@ -285,7 +291,16 @@ func (s *ServiceImpl) InspectDNS(ctx context.Context, input InspectDNSInput) (In
 	if err != nil {
 		return InspectDNSResult{}, err
 	}
-	dnsRules := s.ruleSetMaterializer().restoreConfig(cfg).DNS.Rules
+	m := s.ruleSetMaterializer()
+	// DNS-правила — в восстановленном виде (ссылки на inline-теги без
+	// -srs, как их видит пользователь в UI); карта наборов поэтому
+	// дополняется алиасами материализованных inline'ов, иначе поиск
+	// по восстановленному тегу давал «не определён в rule_set[]» (#506).
+	// Алиасы считаются ДО restoreConfig: восстановление переписывает
+	// ссылки правил через общие backing-массивы (out := *cfg), и «сырого»
+	// вида ссылок после него уже нет.
+	ruleSets := m.inspectRuleSetsWithInlineAliases(cfg)
+	dnsRules := m.restoreConfig(cfg).DNS.Rules
 	binary := ""
 	if s.deps.Singbox != nil {
 		binary = s.deps.Singbox.Binary()
@@ -293,7 +308,7 @@ func (s *ServiceImpl) InspectDNS(ctx context.Context, input InspectDNSInput) (In
 	s.inspectCacheOnce.Do(func() {
 		s.inspectCache = newRuleSetCache("")
 	})
-	return InspectDNS(input, dnsRules, cfg.DNS.Servers, cfg.Route.RuleSet, cfg.DNS.Final, binary, s.inspectCache), nil
+	return InspectDNS(input, dnsRules, cfg.DNS.Servers, ruleSets, cfg.DNS.Final, binary, s.inspectCache), nil
 }
 
 func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-chan InspectStreamEvent, error) {
@@ -327,10 +342,15 @@ func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-
 		if s.deps.Orch != nil {
 			usingDraft = s.deps.Orch.DraftInfo(slot).HasDraft
 		}
+		// Восстановленные правила + алиасы — как в Inspect/InspectDNS,
+		// чтобы теги в прогрессе/условиях совпадали с UI (без -srs).
+		m := s.ruleSetMaterializer()
+		ruleSets := m.inspectRuleSetsWithInlineAliases(cfg)
+		rules := m.restoreConfig(cfg).Route.Rules
 		if !emitEvent(InspectStreamEvent{Type: "progress", Progress: &InspectProgress{
 			Phase:        "config_loaded",
-			Message:      fmt.Sprintf("Конфигурация загружена: %d правил, %d rule_set, final: %s", len(cfg.Route.Rules), len(cfg.Route.RuleSet), final),
-			RuleTotal:    intPtr(len(cfg.Route.Rules)),
+			Message:      fmt.Sprintf("Конфигурация загружена: %d правил, %d rule_set, final: %s", len(rules), len(cfg.Route.RuleSet), final),
+			RuleTotal:    intPtr(len(rules)),
 			RuleSetTotal: intPtr(len(cfg.Route.RuleSet)),
 			Final:        final,
 			UsingDraft:   usingDraft,
@@ -344,7 +364,7 @@ func (s *ServiceImpl) InspectStream(ctx context.Context, input InspectInput) (<-
 		s.inspectCacheOnce.Do(func() {
 			s.inspectCache = newRuleSetCache("")
 		})
-		res := InspectWithProgress(input, cfg.Route.Rules, cfg.Route.RuleSet, final, binary, s.inspectCache, func(p InspectProgress) {
+		res := InspectWithProgress(input, rules, ruleSets, final, binary, s.inspectCache, func(p InspectProgress) {
 			select {
 			case <-ctx.Done():
 				return
