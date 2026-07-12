@@ -33,8 +33,13 @@ var ipsetBinaryPaths = []string{
 var healthLog *logging.ScopedLogger
 
 // SetHealthLogger подключает журнал для health-check ipset. Вызывается один
-// раз из wiring до старта фоновых потребителей (CDN-loop, HTTP-сервер).
-func SetHealthLogger(l *logging.ScopedLogger) { healthLog = l }
+// раз из wiring; пишется под тем же мьютексом, под которым IPSetBinary
+// журналирует вердикты, — безопасно и при уже работающих фоновых вызовах.
+func SetHealthLogger(l *logging.ScopedLogger) {
+	ipsetHealth.mu.Lock()
+	defer ipsetHealth.mu.Unlock()
+	healthLog = l
+}
 
 // ipsetProbeTimeout ограничивает пробу `ipset version`: сломанный бинарь
 // (exit 127) падает мгновенно, здоровый отвечает миллисекунды — таймаут
