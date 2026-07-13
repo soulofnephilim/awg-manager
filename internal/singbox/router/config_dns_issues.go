@@ -3,83 +3,88 @@ package router
 import (
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 )
 
 // dnsUpstreamTypes — типы DNS-серверов с сетевым upstream-адресом (поле
-// server). local/fakeip/hosts адреса не имеют, dial-проверки к ним не
-// применимы.
+// server). local/fakeip адреса не имеют, dial-проверки к ним не применимы.
+// tcp в validDNSTypes нашей модели нет, но в сыром 20-router.json он
+// представим — учитываем, чтобы не «зеленить» такой конфиг молча.
 var dnsUpstreamTypes = map[string]bool{
 	"udp":   true,
+	"tcp":   true,
 	"tls":   true,
 	"https": true,
 	"quic":  true,
 	"h3":    true,
 }
 
-// dnsServerAddrIsDomain: server задан доменным именем (не IP-литерал).
+// dnsServerAddrIsDomain: server задан доменным именем. IP-литералы (включая
+// IPv6 в скобках), IP:port и URL-подобные значения доменом не считаются:
+// «1.1.1.1:853» — это ошибка формата поля (порт живёт в server_port), а не
+// домен, и совет «укажите IP-адрес» для неё звучал бы издевательски.
 func dnsServerAddrIsDomain(server string) bool {
 	addr := strings.TrimSpace(server)
 	if addr == "" {
 		return false
 	}
-	addr = strings.TrimPrefix(addr, "[")
-	addr = strings.TrimSuffix(addr, "]")
-	_, err := netip.ParseAddr(addr)
-	return err != nil
+	if strings.Contains(addr, "/") {
+		return false
+	}
+	if _, err := netip.ParseAddrPort(addr); err == nil {
+		return false
+	}
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	if _, err := netip.ParseAddr(trimmed); err == nil {
+		return false
+	}
+	return true
 }
 
-// computeDNSDialIssues — предупреждения о dial-ловушках DNS-серверов, которые
-// проходят жёсткую валидацию, но ломаются в рантайме sing-box ≥1.14:
+// computeDNSDialIssues — предупреждения о dial-ловушках DNS-серверов,
+// которые проходят жёсткую валидацию, но молча ломают поведение в рантайме.
 //
-//   - server задан доменом без domain_resolver (и без
-//     route.default_domain_resolver) — с 1.14 sing-box требует резолвер для
-//     доменных адресов; исключение по документации — конфиг с единственным
-//     DNS-сервером;
-//   - domain_strategy — dial-поле удалено в 1.14 (deprecated с 1.12);
-//   - detour вместе с другими dial-полями — «If enabled, all other fields
-//     will be ignored»: domain_resolver при detour молча не применяется;
-//   - domain_resolver / default_domain_resolver ссылается на несуществующий
-//     DNS-сервер;
-//   - цикл резолверов: доменный сервер, чья цепочка domain_resolver
-//     возвращается в него самого, — dead lock резолвинга.
+// Скоуп проверок сознательно узкий. НЕ проверяется здесь:
+//   - домен в server без domain_resolver — merged config.d всегда несёт
+//     route.default_domain_resolver из 00-base.json (self-heal), sing-box
+//     валидирует именно merged-конфиг, предупреждение было бы вечным ложным
+//     срабатыванием на поддерживаемый флоу приложения;
+//   - ссылки domain_resolver на несуществующие серверы — резолвятся
+//     КРОСС-слотово (90-user, 00-base), slot-local проверка давала бы ложные
+//     «несуществующий»; реально битые ссылки отлавливает оркестратор при
+//     reload-валидации.
+//
+// Что проверяется:
+//   - detour вместе с domain_resolver — по документации dial-полей «If
+//     enabled, all other fields will be ignored»: резолвер молча не
+//     применяется;
+//   - цикл резолверов внутри слота (доменный сервер, чья цепочка
+//     domain_resolver возвращается в себя) — deadlock резолвинга, который
+//     reload-валидация не ловит; каждый цикл репортится один раз;
+//   - дубликаты тегов DNS-серверов — sing-box отвергает такой конфиг на
+//     старте, а мимо UI-операций он мог доехать только руками в JSON.
 func computeDNSDialIssues(cfg *RouterConfig) []Issue {
 	var issues []Issue
 
-	serverTags := make(map[string]struct{}, len(cfg.DNS.Servers))
+	seenTags := make(map[string]bool, len(cfg.DNS.Servers))
 	for _, s := range cfg.DNS.Servers {
-		serverTags[s.Tag] = struct{}{}
-	}
-
-	defaultResolver := ""
-	if cfg.Route.DefaultDomainResolver != nil {
-		defaultResolver = strings.TrimSpace(cfg.Route.DefaultDomainResolver.Server)
-	}
-	if defaultResolver != "" {
-		if _, ok := serverTags[defaultResolver]; !ok {
+		if seenTags[s.Tag] {
 			issues = append(issues, Issue{
 				Severity: "warning",
-				Kind:     "dns-domain-resolver",
-				Tag:      defaultResolver,
-				Message:  fmt.Sprintf("route.default_domain_resolver ссылается на несуществующий DNS-сервер %q", defaultResolver),
-			})
-		}
-	}
-
-	for _, s := range cfg.DNS.Servers {
-		if s.Strategy != "" {
-			issues = append(issues, Issue{
-				Severity: "warning",
-				Kind:     "dns-deprecated-field",
+				Kind:     "dns-duplicate-tag",
 				Tag:      s.Tag,
-				Message:  fmt.Sprintf("DNS-сервер %q использует domain_strategy — поле удалено в sing-box 1.14; задайте strategy внутри domain_resolver", s.Tag),
+				Message:  fmt.Sprintf("дублирующийся тег DNS-сервера %q — sing-box отвергнет конфиг при старте", s.Tag),
 			})
+			continue
 		}
+		seenTags[s.Tag] = true
+	}
 
+	for _, s := range cfg.DNS.Servers {
 		if !dnsUpstreamTypes[s.Type] {
 			continue
 		}
-
 		if s.Detour != "" && s.DomainResolver != nil {
 			issues = append(issues, Issue{
 				Severity: "warning",
@@ -88,75 +93,73 @@ func computeDNSDialIssues(cfg *RouterConfig) []Issue {
 				Message:  fmt.Sprintf("DNS-сервер %q: при заданном detour остальные dial-поля игнорируются — domain_resolver не будет применён", s.Tag),
 			})
 		}
+	}
 
-		if !dnsServerAddrIsDomain(s.Server) {
+	defaultResolver := ""
+	if cfg.Route.DefaultDomainResolver != nil {
+		defaultResolver = strings.TrimSpace(cfg.Route.DefaultDomainResolver.Server)
+	}
+
+	reportedCycles := make(map[string]bool)
+	for _, s := range cfg.DNS.Servers {
+		if !dnsUpstreamTypes[s.Type] || s.Detour != "" || !dnsServerAddrIsDomain(s.Server) {
 			continue
 		}
-
-		resolver := ""
-		if s.DomainResolver != nil {
-			resolver = strings.TrimSpace(s.DomainResolver.Server)
+		loop := dnsResolverCycle(cfg, s.Tag, defaultResolver)
+		// Репортим цикл только его участникам (loop[0] == s.Tag): сервер,
+		// чья цепочка лишь ВЕДЁТ в чужой цикл, — жертва, а не причина; сам
+		// цикл будет найден при обходе его участников.
+		if len(loop) == 0 || loop[0] != s.Tag {
+			continue
 		}
-
-		if resolver != "" {
-			if _, ok := serverTags[resolver]; !ok {
-				issues = append(issues, Issue{
-					Severity: "warning",
-					Kind:     "dns-domain-resolver",
-					Tag:      s.Tag,
-					Message:  fmt.Sprintf("DNS-сервер %q: domain_resolver ссылается на несуществующий DNS-сервер %q", s.Tag, resolver),
-				})
-			}
-		} else if s.Detour == "" && defaultResolver == "" && len(cfg.DNS.Servers) > 1 {
-			issues = append(issues, Issue{
-				Severity: "warning",
-				Kind:     "dns-domain-resolver",
-				Tag:      s.Tag,
-				Message:  fmt.Sprintf("DNS-сервер %q задан доменом %q без domain_resolver — sing-box 1.14 требует резолвер (укажите IP-адрес, domain_resolver или route.default_domain_resolver)", s.Tag, s.Server),
-			})
+		members := append([]string(nil), loop[:len(loop)-1]...)
+		sort.Strings(members)
+		key := strings.Join(members, "\x00")
+		if reportedCycles[key] {
+			continue
 		}
-
-		if cycle := dnsResolverCycle(cfg, s.Tag, defaultResolver); cycle != "" {
-			issues = append(issues, Issue{
-				Severity: "warning",
-				Kind:     "dns-domain-resolver",
-				Tag:      s.Tag,
-				Message:  fmt.Sprintf("DNS-сервер %q: цикл domain_resolver (%s) — резолвинг доменного адреса зациклен", s.Tag, cycle),
-			})
-		}
+		reportedCycles[key] = true
+		issues = append(issues, Issue{
+			Severity: "warning",
+			Kind:     "dns-domain-resolver",
+			Tag:      s.Tag,
+			Message:  fmt.Sprintf("цикл domain_resolver (%s) — резолвинг доменного адреса зациклен", strings.Join(loop, " → ")),
+		})
 	}
 
 	return issues
 }
 
 // dnsResolverCycle идёт по цепочке «доменный сервер → его резолвер» начиная
-// со start и возвращает строку цикла («a → b → a»), если цепочка возвращается
-// в уже пройденный тег. Серверы с IP-адресом обрывают цепочку — им резолвер
-// не нужен. Пустая строка — цикла нет.
-func dnsResolverCycle(cfg *RouterConfig, start, defaultResolver string) string {
+// со start и возвращает участок цикла ([b c b] для цепочки a→b→c→b), если
+// цепочка возвращается в уже пройденный тег. Обрывают цепочку: сервер с
+// IP-адресом (резолвер не нужен), сервер с detour (dial-поля, включая
+// резолвер, игнорируются — адрес уезжает на удалённое разрешение), тег
+// чужого слота (byTag его не знает — кросс-слотовые ссылки валидирует
+// оркестратор). nil — цикла нет.
+func dnsResolverCycle(cfg *RouterConfig, start, defaultResolver string) []string {
 	byTag := make(map[string]*DNSServer, len(cfg.DNS.Servers))
 	for i := range cfg.DNS.Servers {
 		byTag[cfg.DNS.Servers[i].Tag] = &cfg.DNS.Servers[i]
 	}
 
 	visited := []string{start}
-	seen := map[string]bool{start: true}
+	index := map[string]int{start: 0}
 	cur := byTag[start]
-	for cur != nil && dnsUpstreamTypes[cur.Type] && dnsServerAddrIsDomain(cur.Server) {
+	for cur != nil && dnsUpstreamTypes[cur.Type] && cur.Detour == "" && dnsServerAddrIsDomain(cur.Server) {
 		next := defaultResolver
-		// При detour dial-поля игнорируются — резолвер этого узла не участвует.
-		if cur.Detour == "" && cur.DomainResolver != nil && strings.TrimSpace(cur.DomainResolver.Server) != "" {
+		if cur.DomainResolver != nil && strings.TrimSpace(cur.DomainResolver.Server) != "" {
 			next = strings.TrimSpace(cur.DomainResolver.Server)
 		}
 		if next == "" {
-			return ""
+			return nil
 		}
-		if seen[next] {
-			return strings.Join(append(visited, next), " → ")
+		if at, ok := index[next]; ok {
+			return append(visited[at:], next)
 		}
+		index[next] = len(visited)
 		visited = append(visited, next)
-		seen[next] = true
 		cur = byTag[next]
 	}
-	return ""
+	return nil
 }

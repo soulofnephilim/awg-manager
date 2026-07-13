@@ -23,133 +23,185 @@ func requireIssueContaining(t *testing.T, msgs []string, substr string) {
 	t.Fatalf("no issue containing %q, got %v", substr, msgs)
 }
 
-// Доменный адрес без domain_resolver в конфиге с несколькими серверами —
-// предупреждение; IP-адрес и единственный сервер — нет.
-func TestDNSDialIssues_DomainWithoutResolver(t *testing.T) {
+// Домен без резолвера НЕ флагается: merged config.d всегда несёт
+// route.default_domain_resolver из 00-base.json, sing-box валидирует
+// merged-конфиг — предупреждение было бы вечным ложным срабатыванием.
+func TestDNSDialIssues_DomainWithoutResolverIsNotFlagged(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.DNS.Servers = []DNSServer{
 		{Tag: "dot", Type: "tls", Server: "common.dot.dns.yandex.net"},
 		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
 	}
-	msgs := dialIssueMessages(cfg)
-	requireIssueContaining(t, msgs, `"dot" задан доменом`)
-	for _, m := range msgs {
-		if strings.Contains(m, `"direct"`) {
-			t.Fatalf("IP-addressed server must not be flagged: %v", msgs)
-		}
-	}
-
-	// Единственный сервер — по документации резолвер опционален.
-	cfg.DNS.Servers = cfg.DNS.Servers[:1]
 	if msgs := dialIssueMessages(cfg); len(msgs) != 0 {
-		t.Fatalf("single-server config must not warn, got %v", msgs)
+		t.Fatalf("no warnings expected, got %v", msgs)
 	}
 }
 
-// domain_resolver или route.default_domain_resolver снимают предупреждение.
-func TestDNSDialIssues_ResolverSatisfies(t *testing.T) {
+// Ссылки резолверов на неизвестные слоту теги НЕ флагаются: они резолвятся
+// кросс-слотово (90-user, 00-base) и валидируются оркестратором при reload.
+func TestDNSDialIssues_CrossSlotResolverRefsAreNotFlagged(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.DNS.Servers = []DNSServer{
-		{Tag: "dot", Type: "tls", Server: "dns.example.com", DomainResolver: &DomainResolver{Server: "direct"}},
-		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
+		{Tag: "dot", Type: "tls", Server: "dns.example.com", DomainResolver: &DomainResolver{Server: "dns-bootstrap"}},
 	}
+	cfg.Route.DefaultDomainResolver = &DomainResolver{Server: "dns-bootstrap"}
 	if msgs := dialIssueMessages(cfg); len(msgs) != 0 {
-		t.Fatalf("domain_resolver set — no warnings expected, got %v", msgs)
-	}
-
-	cfg.DNS.Servers[0].DomainResolver = nil
-	cfg.Route.DefaultDomainResolver = &DomainResolver{Server: "direct"}
-	if msgs := dialIssueMessages(cfg); len(msgs) != 0 {
-		t.Fatalf("default_domain_resolver set — no warnings expected, got %v", msgs)
+		t.Fatalf("no warnings expected, got %v", msgs)
 	}
 }
 
-// Ссылки на несуществующие серверы — и в domain_resolver, и в
-// route.default_domain_resolver.
-func TestDNSDialIssues_UnknownResolverRefs(t *testing.T) {
-	cfg := NewEmptyConfig()
-	cfg.DNS.Servers = []DNSServer{
-		{Tag: "dot", Type: "tls", Server: "dns.example.com", DomainResolver: &DomainResolver{Server: "ghost"}},
-		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
-	}
-	cfg.Route.DefaultDomainResolver = &DomainResolver{Server: "phantom"}
-	msgs := dialIssueMessages(cfg)
-	requireIssueContaining(t, msgs, `domain_resolver ссылается на несуществующий DNS-сервер "ghost"`)
-	requireIssueContaining(t, msgs, `default_domain_resolver ссылается на несуществующий DNS-сервер "phantom"`)
-}
-
-// domain_strategy на сервере — удалено в sing-box 1.14.
-func TestDNSDialIssues_DeprecatedDomainStrategy(t *testing.T) {
-	cfg := NewEmptyConfig()
-	cfg.DNS.Servers = []DNSServer{
-		{Tag: "direct", Type: "udp", Server: "77.88.8.8", Strategy: "ipv4_only"},
-	}
-	requireIssueContaining(t, dialIssueMessages(cfg), "domain_strategy — поле удалено")
-}
-
-// detour + domain_resolver: dial-поля при detour игнорируются.
+// detour + domain_resolver: dial-поля при detour игнорируются. Ровно одно
+// предупреждение, IP-сервер не задет.
 func TestDNSDialIssues_DetourIgnoresDialFields(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.DNS.Servers = []DNSServer{
 		{Tag: "remote", Type: "udp", Server: "1.1.1.1", Detour: "vpn", DomainResolver: &DomainResolver{Server: "direct"}},
 		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
 	}
-	requireIssueContaining(t, dialIssueMessages(cfg), "при заданном detour остальные dial-поля игнорируются")
+	msgs := dialIssueMessages(cfg)
+	if len(msgs) != 1 {
+		t.Fatalf("want exactly 1 issue, got %v", msgs)
+	}
+	requireIssueContaining(t, msgs, "при заданном detour остальные dial-поля игнорируются")
 }
 
-// Цикл резолверов: dot → doh → dot.
-func TestDNSDialIssues_ResolverCycle(t *testing.T) {
+// Доменный сервер с detour и без резолвера — НЕ предупреждение: адрес уедет
+// на удалённое разрешение через detour-outbound. Закрепляем исключение.
+func TestDNSDialIssues_DetouredDomainServerNeedsNoResolver(t *testing.T) {
+	cfg := NewEmptyConfig()
+	cfg.DNS.Servers = []DNSServer{
+		{Tag: "dot", Type: "tls", Server: "dot.example.com", Detour: "vpn"},
+		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
+	}
+	if msgs := dialIssueMessages(cfg); len(msgs) != 0 {
+		t.Fatalf("no warnings expected, got %v", msgs)
+	}
+}
+
+// Цикл резолверов: репортится ровно ОДИН раз на цикл, а не по разу на
+// каждого участника.
+func TestDNSDialIssues_ResolverCycleReportedOnce(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.DNS.Servers = []DNSServer{
 		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "doh"}},
 		{Tag: "doh", Type: "https", Server: "doh.example.com", DomainResolver: &DomainResolver{Server: "dot"}},
 	}
 	msgs := dialIssueMessages(cfg)
+	if len(msgs) != 1 {
+		t.Fatalf("want exactly 1 cycle issue, got %v", msgs)
+	}
 	requireIssueContaining(t, msgs, "цикл domain_resolver")
+}
 
-	// Самозацикливание.
+// Сервер, чья цепочка лишь ВЕДЁТ в чужой цикл (a → b → c → b), — жертва:
+// цикл репортится один раз участникам (b, c), без третьего сообщения для a.
+func TestDNSDialIssues_CycleVictimNotBlamed(t *testing.T) {
+	cfg := NewEmptyConfig()
 	cfg.DNS.Servers = []DNSServer{
-		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "dot"}},
-		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
+		{Tag: "a", Type: "tls", Server: "a.example.com", DomainResolver: &DomainResolver{Server: "b"}},
+		{Tag: "b", Type: "tls", Server: "b.example.com", DomainResolver: &DomainResolver{Server: "c"}},
+		{Tag: "c", Type: "tls", Server: "c.example.com", DomainResolver: &DomainResolver{Server: "b"}},
 	}
-	requireIssueContaining(t, dialIssueMessages(cfg), "цикл domain_resolver")
-
-	// Цепочка, оканчивающаяся IP-сервером, — не цикл.
-	cfg.DNS.Servers = []DNSServer{
-		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "direct"}},
-		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
+	msgs := dialIssueMessages(cfg)
+	if len(msgs) != 1 {
+		t.Fatalf("want exactly 1 cycle issue, got %v", msgs)
 	}
-	for _, m := range dialIssueMessages(cfg) {
-		if strings.Contains(m, "цикл") {
-			t.Fatalf("IP-terminated chain is not a cycle: %v", dialIssueMessages(cfg))
+	requireIssueContaining(t, msgs, "b → c → b")
+	for _, m := range msgs {
+		if strings.Contains(m, "(a →") {
+			t.Fatalf("victim 'a' must not be blamed for the cycle: %v", msgs)
 		}
 	}
 }
 
-// Цикл через default_domain_resolver: доменный сервер без своего резолвера
-// падает в default, указывающий на него самого.
-func TestDNSDialIssues_CycleViaDefaultResolver(t *testing.T) {
+// Самозацикливание и цикл через default_domain_resolver.
+func TestDNSDialIssues_SelfAndDefaultResolverCycles(t *testing.T) {
 	cfg := NewEmptyConfig()
+	cfg.DNS.Servers = []DNSServer{
+		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "dot"}},
+		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
+	}
+	msgs := dialIssueMessages(cfg)
+	if len(msgs) != 1 {
+		t.Fatalf("self-cycle: want exactly 1 issue, got %v", msgs)
+	}
+	requireIssueContaining(t, msgs, "dot → dot")
+
 	cfg.DNS.Servers = []DNSServer{
 		{Tag: "dot", Type: "tls", Server: "dot.example.com"},
 		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
 	}
 	cfg.Route.DefaultDomainResolver = &DomainResolver{Server: "dot"}
-	requireIssueContaining(t, dialIssueMessages(cfg), "цикл domain_resolver")
+	msgs = dialIssueMessages(cfg)
+	if len(msgs) != 1 {
+		t.Fatalf("default-cycle: want exactly 1 issue, got %v", msgs)
+	}
+	requireIssueContaining(t, msgs, "цикл domain_resolver")
 }
 
-// local/fakeip не имеют upstream-адреса — dial-проверки не применяются;
-// IPv6-литерал в скобках — не домен.
-func TestDNSDialIssues_NonUpstreamAndIPv6(t *testing.T) {
+// Обрывы цепочки: IP-сервер, detour-сервер и кросс-слотовый тег — не циклы.
+func TestDNSDialIssues_ChainTerminators(t *testing.T) {
+	// IP-терминированная цепочка.
 	cfg := NewEmptyConfig()
 	cfg.DNS.Servers = []DNSServer{
-		{Tag: "loc", Type: "local"},
-		{Tag: "fake", Type: "fakeip", Inet4Range: "198.18.0.0/15"},
-		{Tag: "v6", Type: "udp", Server: "[2a02:6b8::feed:0ff]"},
+		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "direct"}},
+		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
 	}
 	if msgs := dialIssueMessages(cfg); len(msgs) != 0 {
-		t.Fatalf("no warnings expected, got %v", msgs)
+		t.Fatalf("IP-terminated chain: no issues expected, got %v", msgs)
 	}
+
+	// Detour-узел обрывает цепочку — default, указывающий на него, не цикл.
+	cfg = NewEmptyConfig()
+	cfg.DNS.Servers = []DNSServer{
+		{Tag: "dot", Type: "tls", Server: "dot.example.com", Detour: "vpn"},
+		{Tag: "other", Type: "tls", Server: "other.example.com"},
+	}
+	cfg.Route.DefaultDomainResolver = &DomainResolver{Server: "dot"}
+	if msgs := dialIssueMessages(cfg); len(msgs) != 0 {
+		t.Fatalf("detour terminates chain: no issues expected, got %v", msgs)
+	}
+
+	// Кросс-слотовый резолвер (тег вне слота) обрывает цепочку.
+	cfg = NewEmptyConfig()
+	cfg.DNS.Servers = []DNSServer{
+		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "dns-bootstrap"}},
+	}
+	if msgs := dialIssueMessages(cfg); len(msgs) != 0 {
+		t.Fatalf("cross-slot ref terminates chain: no issues expected, got %v", msgs)
+	}
+}
+
+// IP:port, IPv6 (в т.ч. с портом) и URL — не домены: ни предупреждений,
+// ни участия в цепочках циклов.
+func TestDNSServerAddrIsDomain(t *testing.T) {
+	domains := []string{"dns.google", "common.dot.dns.yandex.net"}
+	notDomains := []string{
+		"", "8.8.8.8", "8.8.8.8:53", "[2a02:6b8::feed:ff]", "2a02:6b8::feed:ff",
+		"[2a02:6b8::feed:ff]:853", "https://dns.google/dns-query", "1.1.1.1:853",
+	}
+	for _, d := range domains {
+		if !dnsServerAddrIsDomain(d) {
+			t.Errorf("%q must be a domain", d)
+		}
+	}
+	for _, n := range notDomains {
+		if dnsServerAddrIsDomain(n) {
+			t.Errorf("%q must NOT be a domain", n)
+		}
+	}
+}
+
+// Дубликаты тегов — предупреждение (sing-box отвергнет конфиг), и walker
+// циклов не маскируется last-wins картой.
+func TestDNSDialIssues_DuplicateTags(t *testing.T) {
+	cfg := NewEmptyConfig()
+	cfg.DNS.Servers = []DNSServer{
+		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "dot"}},
+		{Tag: "dot", Type: "udp", Server: "8.8.8.8"},
+	}
+	msgs := dialIssueMessages(cfg)
+	requireIssueContaining(t, msgs, `дублирующийся тег DNS-сервера "dot"`)
 }
 
 // computeIssues прокидывает dial-предупреждения в общий список.
@@ -157,8 +209,7 @@ func TestComputeIssues_IncludesDNSDialIssues(t *testing.T) {
 	svc := &ServiceImpl{deps: Deps{}}
 	cfg := NewEmptyConfig()
 	cfg.DNS.Servers = []DNSServer{
-		{Tag: "dot", Type: "tls", Server: "dns.example.com"},
-		{Tag: "direct", Type: "udp", Server: "77.88.8.8"},
+		{Tag: "dot", Type: "tls", Server: "dot.example.com", DomainResolver: &DomainResolver{Server: "dot"}},
 	}
 	found := false
 	for _, i := range svc.computeIssues(cfg) {
