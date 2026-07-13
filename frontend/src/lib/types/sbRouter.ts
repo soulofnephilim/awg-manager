@@ -80,7 +80,11 @@ export interface SingboxRouterWANInterface {
 
 export interface SingboxRouterIssue {
 	severity: 'warning' | 'error';
-	kind: 'orphan-rule' | 'policy-missing';
+	// Открытый набор: бэкенд добавляет kind'ы (orphan-rule, orphan-outbound,
+	// orphan-rule-set, policy-missing, dns-domain-resolver, dns-detour-dial,
+	// dns-duplicate-tag, ...) — закрытый union здесь молча превращал бы новые
+	// значения в «невозможные» для switch-narrowing.
+	kind: string;
 	ruleIndex?: number;
 	tag?: string;
 	message: string;
