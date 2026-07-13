@@ -60,7 +60,10 @@ struct awg_proxy {
 	struct socket *listen_sock;     /* UDP, binds 127.0.0.1:0 (auto port) */
 	struct socket *remote_sock;     /* UDP, connected to AWG server */
 
-	/* Client address — protected by client_lock (written by c2s, read by s2c) */
+	/* Client address — protected by client_lock (written by c2s, read by
+	 * s2c). Always sockaddr_in: the local WG client talks to us over the
+	 * IPv4 loopback listen socket (127.0.0.1:auto) regardless of the
+	 * remote endpoint's family, so this side never becomes IPv6. */
 	struct sockaddr_in client_addr;
 	spinlock_t client_lock;
 	bool has_client;
@@ -135,11 +138,11 @@ struct awg_proxy {
 int awg_proxy_add(const char *config_line);
 
 /*
- * Remove a proxy by remote endpoint.
+ * Remove a proxy by remote endpoint (IPv4 or IPv6, matched by family).
  * Stops threads, closes sockets.
  * Returns 0 on success.
  */
-int awg_proxy_del(__be32 ip, __be16 port);
+int awg_proxy_del(const struct awg_endpoint_addr *addr, __be16 port);
 
 /* Stop all proxies and free resources */
 void awg_proxy_cleanup(void);

@@ -15,10 +15,10 @@
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
-#include <linux/inet.h>
 #include <linux/version.h>
 
 #include "proxy.h"
+#include "tunnel.h"
 
 #ifndef AWG_PROXY_VERSION
 #define AWG_PROXY_VERSION "dev"
@@ -37,7 +37,8 @@ static struct proc_dir_entry *proc_dir;
 
 /*
  * /proc/awg_proxy/add - write tunnel config to create a proxy
- * Format: "IP:PORT H1=min-max H2=... S1=N ... PUB_SERVER=hex PUB_CLIENT=hex I1=\"...\" ..."
+ * Format: "ENDPOINT H1=min-max H2=... S1=N ... PUB_SERVER=hex PUB_CLIENT=hex I1=\"...\" ..."
+ * ENDPOINT is "IP:PORT" (IPv4) or "[IPV6]:PORT" (bracketed IPv6, kmod >= 1.3.0).
  */
 static ssize_t proc_add_write(struct file *file, const char __user *buf,
 			      size_t count, loff_t *ppos)
@@ -82,16 +83,15 @@ static const struct file_operations proc_add_ops = {
 #endif
 
 /*
- * /proc/awg_proxy/del - write "IP:PORT" to remove a proxy
+ * /proc/awg_proxy/del - write "IP:PORT" (or "[IPV6]:PORT") to remove a proxy
  */
 static ssize_t proc_del_write(struct file *file, const char __user *buf,
 			      size_t count, loff_t *ppos)
 {
 	char kbuf[64];
-	char *colon;
-	__be32 ip;
+	struct awg_endpoint_addr addr;
 	__be16 port;
-	int port_int, ret;
+	int ret;
 
 	if (count >= sizeof(kbuf))
 		return -EINVAL;
@@ -103,17 +103,11 @@ static ssize_t proc_del_write(struct file *file, const char __user *buf,
 	if (count > 0 && kbuf[count - 1] == '\n')
 		kbuf[count - 1] = '\0';
 
-	colon = strrchr(kbuf, ':');
-	if (!colon)
+	/* Same parser as /proc add — both endpoint forms work for del. */
+	if (awg_endpoint_parse(kbuf, &addr, &port))
 		return -EINVAL;
-	*colon = '\0';
 
-	ip = in_aton(kbuf);
-	if (kstrtoint(colon + 1, 10, &port_int) || port_int <= 0 || port_int > 65535)
-		return -EINVAL;
-	port = htons(port_int);
-
-	ret = awg_proxy_del(ip, port);
+	ret = awg_proxy_del(&addr, port);
 	if (ret)
 		return ret;
 	return count;

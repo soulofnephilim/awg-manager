@@ -17,6 +17,9 @@ type procStub struct {
 	mu       sync.Mutex
 	listBody string
 	writes   []procWrite
+	// version overrides what /proc/awg_proxy/version reports (default
+	// "1.1.10"). IPv6-endpoint tests raise it past kmodVersionIPv6.
+	version string
 	// failAdd lets tests force /proc/awg_proxy/add to return a specific
 	// errno (e.g. EEXIST) on the next attempt and clears itself after.
 	failAddOnce error
@@ -75,6 +78,9 @@ func (p *procStub) read(path string) ([]byte, error) {
 	case "/proc/awg_proxy/list":
 		return []byte(p.listBody), nil
 	case "/proc/awg_proxy/version":
+		if p.version != "" {
+			return []byte(p.version + "\n"), nil
+		}
 		return []byte("1.1.10\n"), nil
 	default:
 		return nil, fmt.Errorf("unexpected read: %s", path)
@@ -320,3 +326,26 @@ var _ = func() bool {
 	e := &errnoPathErr{err: syscall.EEXIST}
 	return errors.Is(e, syscall.EEXIST)
 }()
+
+// Все 16 слотов awg_proxy заняты: ядро отвечает -ENOSPC на /proc/add, и
+// ошибка старта обязана нести понятное русское пояснение про предел kmod
+// (срабатывает при старте туннеля с обфускацией, а не при создании).
+func TestAddTunnel_SlotsExhausted_ENOSPC(t *testing.T) {
+	km, stub := newKmodManagerForTest()
+	stub.failAddOnce = &errnoPathErr{op: "write", path: "/proc/awg_proxy/add", err: syscall.ENOSPC}
+
+	_, err := km.AddTunnel("awg20", defaultCfg())
+	if err == nil {
+		t.Fatal("AddTunnel with ENOSPC: want error, got nil")
+	}
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("error must preserve ENOSPC in the chain: %v", err)
+	}
+	if !strings.Contains(err.Error(), "достигнут предел awg_proxy: 16 туннелей с обфускацией") {
+		t.Fatalf("error = %q, want kmod slot-limit hint", err.Error())
+	}
+	// ENOSPC — не EEXIST: fallback-del и повторный add не должны выполняться.
+	if got := stub.countWritesTo("/proc/awg_proxy/del"); got != 0 {
+		t.Fatalf("ENOSPC must not trigger EEXIST del-retry; got %d del writes", got)
+	}
+}

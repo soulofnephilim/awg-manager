@@ -1,7 +1,10 @@
 # Standalone out-of-tree build (for development/testing on host)
 # For cross-compilation, use the SDK package or build.sh
 
-AWG_PROXY_VERSION ?= 1.1.12
+# 1.3.0: IPv6 endpoint support — "[v6]:port" accepted by /proc add/del,
+# printed in /proc list; per-family remote socket + udp_tunnel6 TX path.
+# Keep in sync with package/Makefile PKG_VERSION.
+AWG_PROXY_VERSION ?= 1.3.0
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 

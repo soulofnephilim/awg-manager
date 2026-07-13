@@ -382,7 +382,7 @@
 						</div>
 						<div class="flex flex-col gap-1.5" style="margin-bottom:12px">
 							<label class="field-label" for="endpoint">Endpoint</label>
-							<input type="text" id="endpoint" class="field-input" bind:value={$form.endpoint} />
+							<input type="text" id="endpoint" class="field-input" placeholder="vpn.example.com:51820 или [2001:db8::1]:51820" bind:value={$form.endpoint} />
 							{#if $errors.endpoint}<p class="text-xs text-error-500 mt-1">{$errors.endpoint}</p>{/if}
 						</div>
 						<div class="inline-fields">

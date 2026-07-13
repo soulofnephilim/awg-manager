@@ -15,6 +15,7 @@
 
 #define _DEFAULT_SOURCE  /* expose htobe32 / htole32 from <endian.h> */
 #include <stdint.h>
+#include <stdbool.h>     /* kernel <linux/types.h> provides bool; host gets C99's */
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>

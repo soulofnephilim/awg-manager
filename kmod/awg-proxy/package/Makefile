@@ -2,7 +2,8 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=awg-proxy
-PKG_VERSION:=1.2.0
+# 1.3.0: IPv6 endpoint support ("[v6]:port" procfs syntax, udp_tunnel6 TX).
+PKG_VERSION:=1.3.0
 
 PKG_LICENSE:=GPL-2.0
 PKG_LICENSE_FILES:=COPYING
@@ -58,7 +59,9 @@ define KernelPackage/awg-proxy
   SUBMENU:=Network Support
   TITLE:=AWG Proxy netfilter module
   # udp_tunnel: setup_udp_tunnel_sock (encap rx) + udp_tunnel_xmit_skb (tx) — FASTNAT/PPE bypass
-  DEPENDS:=+kmod-udptunnel4
+  # udptunnel6: udp_tunnel6_xmit_skb for IPv6 endpoints (only when the
+  # kernel has IPv6; module loads need ipv6.ko + udp_tunnel6 present)
+  DEPENDS:=+kmod-udptunnel4 +IPV6:kmod-udptunnel6
   FILES:=$(PKG_BUILD_DIR)/src/awg_proxy.ko
 endef
 

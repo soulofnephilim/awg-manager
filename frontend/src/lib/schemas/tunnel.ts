@@ -19,7 +19,22 @@ export const editTunnelSchema = z.object({
         });
     }, { message: 'Введите IP-адреса через запятую (например, 1.1.1.1, 8.8.8.8)' }),
     // Peer fields
-    endpoint: z.string().min(1, 'Endpoint обязателен'),
+    // Accepts host:port, IPv4:port, and [IPv6]:port. IPv6 literals MUST be
+    // bracketed — a bare "2001:db8::1:51820" is ambiguous with the port
+    // separator (and awg_proxy.ko rejects it). Bracketed form is checked
+    // for shape: non-empty v6-ish content (hex digits/colons/dots, at
+    // least one colon) plus a 1-65535 port. Hostnames/IPv4 stay lax as
+    // before: at most one colon (the host:port separator).
+    endpoint: z.string().min(1, 'Endpoint обязателен').refine(val => {
+        if (val.startsWith('[')) {
+            const m = val.match(/^\[([0-9a-fA-F:.]+)\]:(\d{1,5})$/);
+            if (!m || !m[1].includes(':')) return false; // empty/garbage brackets or no port
+            const port = Number(m[2]);
+            return port >= 1 && port <= 65535;
+        }
+        // No brackets: at most one colon (the host:port separator) is allowed.
+        return (val.match(/:/g) || []).length <= 1;
+    }, { message: 'IPv6 endpoint указывается в квадратных скобках: [2001:db8::1]:51820' }),
     allowedIPs: z.string().min(1, 'AllowedIPs обязателен'),
     persistentKeepalive: z.coerce.number().int().min(0).max(65535).default(25),
     // AWG params

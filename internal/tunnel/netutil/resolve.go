@@ -9,6 +9,11 @@ import (
 // preferIPv4 picks the first IPv4 address from a list.
 // Falls back to the first address (IPv6) if no IPv4 found.
 // Returns nil for empty input.
+//
+// Dual-stack hosts deliberately resolve to IPv4 (stability: no dependency
+// on the router's WAN IPv6 health); IPv6-only hosts get their IPv6 address,
+// which works end-to-end — awg_proxy.ko supports IPv6 endpoints since
+// kmod v1.3.0 (bracketed "[v6]:port" procfs form, see nwg.kmodVersionIPv6).
 func preferIPv4(addrs []net.IP) net.IP {
 	for _, addr := range addrs {
 		if addr.To4() != nil {
