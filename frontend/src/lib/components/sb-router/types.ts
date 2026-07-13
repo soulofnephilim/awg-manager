@@ -9,7 +9,7 @@
 import type { RuleSetDisplayType } from '$lib/utils/ruleSetType';
 import type { RuleSimplicity } from './simpleRule';
 
-export type RuleAction = 'route' | 'block' | 'direct' | 'sniff' | 'hijack-dns';
+export type RuleAction = 'route' | 'block' | 'direct' | 'sniff' | 'hijack-dns' | 'udp-timeout';
 
 /** Категория matcher chip — соответствует labelMap из дизайна. */
 export type MatcherKind = 'domain' | 'ip' | 'port' | 'ruleset' | 'src' | 'protocol' | 'private';
@@ -38,7 +38,8 @@ export type OutboundKind =
 	| 'via-route'
 	| 'unknown'
 	| 'sniff'
-	| 'hijack-dns';
+	| 'hijack-dns'
+	| 'udp-timeout';
 
 export interface OutboundDisplay {
   /** Имя outbound'а из singbox config (raw key) */

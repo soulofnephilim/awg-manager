@@ -45,7 +45,8 @@
   import RoutingTable from './RoutingTable.svelte';
   import RuleSetsTable from './RuleSetsTable.svelte';
   import SbRouterRuleSetCatalogModal from './SbRouterRuleSetCatalogModal.svelte';
-  import { applyCatalogPresetsAsRuleSets } from './rulesetCatalogActions';
+  import SbRouterGeositeCatalogModal from './SbRouterGeositeCatalogModal.svelte';
+  import { addGeositeRuleSets, applyCatalogPresetsAsRuleSets } from './rulesetCatalogActions';
   import OutboundsCompact from './OutboundsCompact.svelte';
   import DnsServersCompact from './DnsServersCompact.svelte';
   import DeviceProxyCompact from './DeviceProxyCompact.svelte';
@@ -235,6 +236,8 @@
   let rsAddOpen = $state(false);
   let rsCatalogOpen = $state(false);
   let rsCatalogBusy = $state(false);
+  let geositeCatalogOpen = $state(false);
+  let geositeCatalogBusy = $state(false);
   let outboundEditTag = $state<string | null>(null);
   let outboundAddOpen = $state(false);
   let dnsServerEditTag = $state<string | null>(null);
@@ -333,6 +336,11 @@
     ruleEditIdx === null
       ? new Map<string, number>()
       : computeRuleSetUsage($storeRules, ruleEditIdx)
+  );
+  // Catalog «добавлено»-tile differentiation: a set counts as used when ANY rule —
+  // route or DNS — references it (route-only usage would mislabel DNS-only sets).
+  const ruleSetUsageForCatalog = $derived(
+    computeRuleSetUsage([...$storeRules, ...$storeDnsRules])
   );
   // ruleSetUsage for DNSRuleEditModal: exclude currently edited index
   const ruleSetUsageForDnsAdd = $derived(computeRuleSetUsage($storeDnsRules));
@@ -565,6 +573,34 @@
     }
   }
 
+  async function handleGeositeCatalogConfirm(names: string[], baseUrl: string) {
+    if (geositeCatalogBusy || names.length === 0) return;
+    geositeCatalogBusy = true;
+    try {
+      const result = await addGeositeRuleSets(names, baseUrl, $storeRuleSets);
+      await singboxRouterStore.loadAll();
+
+      if (result.added.length > 0) {
+        notifications.success(
+          `Добавлено ${pluralize(result.added.length, SET_WORDS)} из каталога SagerNet`,
+        );
+      } else if (result.failures.length === 0) {
+        notifications.info('Выбранные наборы уже есть в конфиге');
+      }
+
+      if (result.failures.length > 0) {
+        const msg = result.failures.map((f) => `${f.tag}: ${f.error}`).join('; ');
+        notifications.error(`Не удалось добавить: ${msg}`);
+      } else {
+        geositeCatalogOpen = false;
+      }
+    } catch (e) {
+      notifications.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      geositeCatalogBusy = false;
+    }
+  }
+
   // Outbound handlers
   async function handleOutboundAddSave(o: SingboxRouterOutbound) {
     await api.singboxRouterAddOutbound(o);
@@ -688,6 +724,14 @@
               {/snippet}
               Каталог
             </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onclick={() => (geositeCatalogOpen = true)}
+              title="Все geosite-наборы из репозитория SagerNet/sing-geosite"
+            >
+              SagerNet
+            </Button>
             <Button variant="primary" size="sm" onclick={() => (rsAddOpen = true)}>+ Набор</Button>
           </div>
         {/snippet}
@@ -719,6 +763,8 @@
           outbounds={$storeOutbounds}
           subscriptions={$subscriptionsStore.data ?? []}
           usage={outboundUsageContext}
+          proxyGroups={$singboxProxies.data ?? []}
+          outboundOptions={$storeOptions}
           onEdit={(tag) => (outboundEditTag = tag)}
           onDelete={handleDeleteOutbound}
         />
@@ -827,11 +873,22 @@
 <SbRouterRuleSetCatalogModal
   open={rsCatalogOpen}
   existingRuleSetTags={$storeRuleSets.map((rs) => rs.tag)}
+  ruleSetUsage={ruleSetUsageForCatalog}
   submitting={rsCatalogBusy}
   onclose={() => {
     if (!rsCatalogBusy) rsCatalogOpen = false;
   }}
   onconfirm={handleRsCatalogConfirm}
+/>
+
+<SbRouterGeositeCatalogModal
+  open={geositeCatalogOpen}
+  existingRuleSetTags={$storeRuleSets.map((rs) => rs.tag)}
+  submitting={geositeCatalogBusy}
+  onclose={() => {
+    if (!geositeCatalogBusy) geositeCatalogOpen = false;
+  }}
+  onconfirm={handleGeositeCatalogConfirm}
 />
 
 <!-- RuleSetAddModal: add -->
@@ -959,6 +1016,10 @@
   .rs-head-actions {
     display: flex;
     align-items: center;
+    /* Три кнопки не влезают в шапку панели на узких телефонах — перенос
+       вместо молчаливого обрезания overflow:hidden родителя. */
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 8px;
   }
   .panel-cap {

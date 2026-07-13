@@ -15,6 +15,19 @@ func (o *Orchestrator) activePath(meta SlotMeta) string {
 	return filepath.Join(o.configDir, meta.Filename)
 }
 
+// ActivePath returns the enabled-location path for a registered slot, so
+// callers persist to the orchestrator-owned filename instead of re-joining
+// ConfigDir() with a hardcoded literal that would silently desync on rename.
+func (o *Orchestrator) ActivePath(slot Slot) (string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	meta, ok := o.slots[slot]
+	if !ok {
+		return "", ErrUnknownSlot
+	}
+	return o.activePath(meta), nil
+}
+
 // disabledPath returns the path where the slot's file lives when disabled.
 func (o *Orchestrator) disabledPath(meta SlotMeta) string {
 	return filepath.Join(o.configDir, disabledSubdir, meta.Filename)

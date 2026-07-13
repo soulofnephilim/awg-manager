@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
@@ -444,6 +445,7 @@ func (h *DNSRouteHandler) BulkBackend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	changed := 0
 	for _, id := range req.ListIDs {
 		list, err := h.svc.Get(r.Context(), id)
 		if err != nil {
@@ -454,6 +456,10 @@ func (h *DNSRouteHandler) BulkBackend(w http.ResponseWriter, r *http.Request) {
 			h.log.Warn("bulk-backend", id, "Failed to update backend: "+err.Error())
 			continue
 		}
+		changed++
+	}
+	if changed > 0 {
+		h.log.Info("bulk-backend", req.Backend, fmt.Sprintf("bulk backend change: %d lists → %s", changed, req.Backend))
 	}
 
 	fresh, err := h.svc.List(r.Context())

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/heavyop"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
@@ -129,6 +130,7 @@ type SelectiveHandler struct {
 	rebuilding atomic.Bool
 	builder    SelectiveRebuildTriggerer
 	status     SelectiveStatusProvider
+	log        *logging.ScopedLogger
 }
 
 // Настенного таймаута фоновой пересборки ipset больше нет: медленная, но
@@ -175,8 +177,15 @@ type SelectiveCancelData struct {
 
 // NewSelectiveHandler creates a new handler. configDir is the sing-box config.d
 // path used to read NDJSON matcher snapshots. status may be nil.
-func NewSelectiveHandler(settings *storage.SettingsStore, configDir string, builder SelectiveRebuildTriggerer, status SelectiveStatusProvider) *SelectiveHandler {
-	return &SelectiveHandler{settings: settings, configDir: configDir, builder: builder, status: status}
+// appLogger may be nil — the scoped logger is nil-safe.
+func NewSelectiveHandler(settings *storage.SettingsStore, configDir string, builder SelectiveRebuildTriggerer, status SelectiveStatusProvider, appLogger logging.AppLogger) *SelectiveHandler {
+	return &SelectiveHandler{
+		settings:  settings,
+		configDir: configDir,
+		builder:   builder,
+		status:    status,
+		log:       logging.NewScopedLogger(appLogger, logging.GroupRouting, logging.SubSelective),
+	}
 }
 
 // GetStatus handles GET /api/singbox/router/selective/status.
@@ -294,8 +303,12 @@ func (h *SelectiveHandler) InstallDeps(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
+	// Свежий вердикт вместо кэша: бинарь мог сломаться или исчезнуть минуту
+	// назад, и «уже установлено» по пятиминутному кэшу оставляло бы
+	// пользователя без починки через UI.
+	selective.RecheckIPSet()
 	if selective.IsIPSetAvailable() {
-		// Already installed — just return current status.
+		// Already installed and runnable — just return current status.
 		h.GetStatus(w, r)
 		return
 	}
@@ -312,6 +325,7 @@ func (h *SelectiveHandler) InstallDeps(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), installTimeout)
 	defer cancel()
 	if err := selective.InstallIPSet(ctx, nil); err != nil { // progress delivered via SSE by the builder
+		h.log.Warn("install-deps", "ipset", "installation failed: "+err.Error())
 		response.InternalError(w, "ipset installation failed: "+err.Error())
 		return
 	}
@@ -319,6 +333,7 @@ func (h *SelectiveHandler) InstallDeps(w http.ResponseWriter, r *http.Request) {
 	// Try to load xt_set now that ipset is installed.
 	_ = selective.EnsureXtSetModule(ctx)
 
+	h.log.Info("install-deps", "ipset", "ipset package installed")
 	h.GetStatus(w, r)
 }
 
@@ -351,9 +366,11 @@ func (h *SelectiveHandler) InstallConntrack(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), installTimeout)
 	defer cancel()
 	if err := selective.InstallConntrackTools(ctx, nil); err != nil {
+		h.log.Warn("install-conntrack", "conntrack-tools", "installation failed: "+err.Error())
 		response.InternalError(w, "conntrack installation failed: "+err.Error())
 		return
 	}
+	h.log.Info("install-conntrack", "conntrack-tools", "conntrack-tools package installed")
 	h.GetStatus(w, r)
 }
 
@@ -470,6 +487,9 @@ func (h *SelectiveHandler) CancelRebuild(w http.ResponseWriter, r *http.Request)
 	cancelled := false
 	if c, ok := h.status.(SelectiveRebuildCanceller); ok {
 		cancelled = c.CancelRun(selective.ErrCancelledByUser)
+	}
+	if cancelled {
+		h.log.Info("rebuild-cancel", "", "ipset rebuild cancellation requested")
 	}
 	response.Success(w, SelectiveCancelData{Cancelled: cancelled})
 }

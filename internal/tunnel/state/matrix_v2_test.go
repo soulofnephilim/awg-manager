@@ -13,9 +13,9 @@ func TestStateMatrixV2_DetermineState(t *testing.T) {
 	m := StateMatrixV2{}
 
 	tests := []struct {
-		name    string
-		input   StateInputs
-		want    tunnel.State
+		name  string
+		input StateInputs
+		want  tunnel.State
 	}{
 		// === NotCreated: no OpkgTun ===
 		{

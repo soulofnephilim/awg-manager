@@ -145,7 +145,7 @@ func (s *Service) UpdatePeer(ctx context.Context, id, pubkey string, req UpdateP
 	}
 
 	s.log.Info("peer updated", "interface", iface, "pubkey", pubkey[:8]+"...")
-	s.appLog.Full("update-peer", req.Description, fmt.Sprintf("Peer %s updated", req.Description))
+	s.appLog.Info("update-peer", req.Description, fmt.Sprintf("Peer %s updated", req.Description))
 	return nil
 }
 
@@ -225,7 +225,7 @@ func (s *Service) TogglePeer(ctx context.Context, id, pubkey string, enabled boo
 	if enabled {
 		state = "enabled"
 	}
-	s.appLog.Full("toggle-peer", peerName, fmt.Sprintf("Peer %s %s", peerName, state))
+	s.appLog.Info("toggle-peer", peerName, fmt.Sprintf("Peer %s %s", peerName, state))
 	return nil
 }
 

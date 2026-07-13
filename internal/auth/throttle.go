@@ -136,7 +136,10 @@ func (t *LoginThrottle) Done(ip string) {
 
 // Fail records a failed login attempt for ip. Reaching the failure limit
 // (re-)arms the block window.
-func (t *LoginThrottle) Fail(ip string) {
+// Fail регистрирует неудачную попытку и сообщает, активировала ли именно
+// она блокировку (переход через порог) — вызывающий код логирует
+// активацию один раз, а не на каждый заблокированный запрос.
+func (t *LoginThrottle) Fail(ip string) (nowBlocked bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sweepLocked()
@@ -150,8 +153,10 @@ func (t *LoginThrottle) Fail(ip string) {
 	e.failures++
 	e.lastSeen = now
 	if e.failures >= throttleMaxFailures {
+		nowBlocked = e.blockedUntil.Before(now) || e.blockedUntil.IsZero()
 		e.blockedUntil = now.Add(throttleBlockDuration)
 	}
+	return nowBlocked
 }
 
 // Success clears the failure counter and any block for ip (sliding reset on

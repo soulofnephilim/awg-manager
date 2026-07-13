@@ -134,7 +134,7 @@ func TestMinorLine_DevelopRevisions(t *testing.T) {
 	entries := map[string]Entry{
 		"2.11.2+r93": {Version: "2.11.2+r93"},
 		"2.11.2+r95": {Version: "2.11.2+r95"},
-		"2.10.9+r4":  {Version: "2.10.9+r4"}, // other minor → excluded
+		"2.10.9+r4":  {Version: "2.10.9+r4"},  // other minor → excluded
 		"2.11.2+r99": {Version: "2.11.2+r99"}, // newer than current → excluded
 	}
 	got := MinorLine(entries, "2.11.2+r95")

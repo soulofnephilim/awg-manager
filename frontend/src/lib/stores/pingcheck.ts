@@ -56,7 +56,7 @@ export async function loadPingLogs(): Promise<void> {
 }
 
 export function appendPingLog(entry: PingCheckLogEvent) {
-	const logEntry = entry as unknown as PingLogEntry;
+	const logEntry = entry;
 	const k = keyOf(logEntry);
 	if (seenKeys.has(k)) return;
 	seenKeys.add(k);

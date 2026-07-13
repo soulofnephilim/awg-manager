@@ -79,7 +79,9 @@ func QuarantineCorrupt(path string, parseErr error) {
 	quarantine := path + ".corrupt"
 	if err := os.Rename(path, quarantine); err != nil {
 		fmt.Fprintf(os.Stderr, "storage: %s is corrupt (%v); quarantine failed: %v\n", path, parseErr, err)
+		recordNotice("quarantine", path, fmt.Sprintf("state file corrupt (%v); quarantine failed: %v", parseErr, err))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "storage: %s is corrupt (%v); moved to %s, continuing with defaults\n", path, parseErr, quarantine)
+	recordNotice("quarantine", path, fmt.Sprintf("state file corrupt (%v); moved to %s, continuing with defaults — recover manually if needed", parseErr, quarantine))
 }

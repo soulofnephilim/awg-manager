@@ -57,6 +57,14 @@
 
   const subgroupFamily = $derived(familyOf(log.subgroup));
 
+  // Схлопнутые повторы: бейдж «×N» = всего появлений записи; тултип —
+  // время последнего повтора (timestamp строки — первое появление).
+  const repeatTitle = $derived(
+    log.lastSeen
+      ? `Повторялось, последний раз: ${formatDateTimeWithOffset(log.lastSeen, routerOffset ?? undefined)}`
+      : 'Повторяющаяся запись',
+  );
+
   // Sing-box stderr lines (and any other ANSI-emitting source) may carry
   // raw colour escapes. Strip at the render boundary — sing-box has no
   // config-level switch to suppress colour, and its CLI --disable-color
@@ -148,6 +156,9 @@
   <span class="target">{log.target}</span>
   <span class="arrow">→</span>
   <span class="message" class:truncate={!isExpanded}>{cleanMessage}</span>
+  {#if (log.repeats ?? 0) > 0}
+    <span class="repeat-badge" title={repeatTitle}>×{(log.repeats ?? 0) + 1}</span>
+  {/if}
 </div>
 
 <style>
@@ -188,6 +199,18 @@
 
   .row.level-error { border-left-color: var(--color-error); }
   .row.level-warn { border-left-color: var(--color-warning); }
+
+  .repeat-badge {
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
 
   .time {
     color: var(--color-text-muted);

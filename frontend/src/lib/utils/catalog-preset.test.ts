@@ -4,16 +4,23 @@ import {
 	DNS_LARGE_LIST_THRESHOLD,
 	DNS_LARGE_LIST_NOTICE,
 	applyPresetToggle,
+	catalogCardMarker,
 	catalogPresetCardNotice,
 	dnsRouteCatalogPresetFilter,
+	findAddedCompositeForMember,
 	findCoveringPreset,
 	hrNeoCatalogPresetFilter,
+	isPresetFullyAdded,
+	memberOfAddedCompositeTitle,
 	normalizeCatalogSelection,
+	presetAddedBadge,
 	presetDnsLargeListRisk,
+	presetSetReuseBadge,
 	resolvePresetDnsEntries,
 	resolvePresetManualDomains,
 	singboxRouterCatalogPresetFilter,
 	splitPresetDnsEntries,
+	addedCompositesByMember,
 } from './catalog-preset';
 
 const base = {
@@ -202,5 +209,187 @@ describe('catalog covers selection', () => {
 	it('finds covering preset for a child', () => {
 		const parent = findCoveringPreset('instagram', new Set(['meta']), catalog);
 		expect(parent?.id).toBe('meta');
+	});
+});
+
+function sbPreset(
+	id: string,
+	name: string,
+	tags: string[],
+	covers?: string[],
+): CatalogPreset {
+	return {
+		...base,
+		id,
+		name,
+		covers,
+		engines: {
+			singbox: {
+				action: 'tunnel',
+				ruleSets: tags.map((tag) => ({ tag, url: `https://example.com/${tag}.srs` })),
+			},
+		},
+	};
+}
+
+describe('findAddedCompositeForMember (#450)', () => {
+	const composite = sbPreset(
+		'category-ai',
+		'Все AI сервисы',
+		['geosite-category-ai-!cn'],
+		['anthropic', 'openai'],
+	);
+	const anthropic = sbPreset('anthropic', 'Anthropic', ['geosite-anthropic']);
+	const catalog = [composite, anthropic];
+
+	it('returns composite when its own rule sets are fully added', () => {
+		const found = findAddedCompositeForMember(
+			'anthropic',
+			catalog,
+			new Set(['geosite-category-ai-!cn']),
+		);
+		expect(found?.id).toBe('category-ai');
+	});
+
+	it('ignores composites whose rule sets are not fully added', () => {
+		expect(
+			findAddedCompositeForMember('anthropic', catalog, new Set(['geosite-anthropic'])),
+		).toBeUndefined();
+	});
+
+	it('ignores composites without singbox rule sets (empty covers source)', () => {
+		const dnsComposite: CatalogPreset = {
+			...base,
+			id: 'dns-bundle',
+			covers: ['anthropic'],
+			engines: { dns: { domains: ['a.com'] } },
+		};
+		expect(
+			findAddedCompositeForMember('anthropic', [dnsComposite, anthropic], new Set(['x'])),
+		).toBeUndefined();
+	});
+
+	it('returns undefined for non-members and empty covers', () => {
+		const noCovers = sbPreset('solo', 'Solo', ['geosite-solo']);
+		const tags = new Set(['geosite-category-ai-!cn', 'geosite-solo']);
+		expect(findAddedCompositeForMember('openai-x', catalog, tags)).toBeUndefined();
+		expect(findAddedCompositeForMember('anthropic', [noCovers], tags)).toBeUndefined();
+	});
+
+	it('first-wins is deterministic over the passed catalog order', () => {
+		// Два ДОБАВЛЕННЫХ композита покрывают одного участника: побеждает первый
+		// в переданном (отсортированном вызывающими) порядке каталога.
+		const compA = sbPreset('comp-a', 'А-композит', ['geosite-comp-a'], ['member-x']);
+		const compB = sbPreset('comp-b', 'Б-композит', ['geosite-comp-b'], ['member-x']);
+		const tags = new Set(['geosite-comp-a', 'geosite-comp-b']);
+		expect(addedCompositesByMember([compA, compB], tags).get('member-x')?.id).toBe('comp-a');
+		expect(addedCompositesByMember([compB, compA], tags).get('member-x')?.id).toBe('comp-b');
+	});
+
+	it('never reports a composite as covering itself', () => {
+		const selfRef = sbPreset('weird', 'Weird', ['geosite-weird'], ['weird']);
+		expect(
+			findAddedCompositeForMember('weird', [selfRef], new Set(['geosite-weird'])),
+		).toBeUndefined();
+	});
+});
+
+describe('isPresetFullyAdded', () => {
+	it('requires a non-empty rule set list with every tag present', () => {
+		const p = sbPreset('netflix', 'Netflix', ['geosite-netflix', 'geoip-netflix']);
+		expect(isPresetFullyAdded(p, new Set(['geosite-netflix', 'geoip-netflix']))).toBe(true);
+		expect(isPresetFullyAdded(p, new Set(['geosite-netflix']))).toBe(false);
+		expect(isPresetFullyAdded({ ...base, engines: {} }, new Set(['x']))).toBe(false);
+	});
+});
+
+describe('catalogCardMarker precedence ladder', () => {
+	const none = {
+		added: false,
+		coveredBySelection: false,
+		ownSetAdded: false,
+		memberOfAddedComposite: false,
+	};
+
+	it('added (own tag in config) wins over everything', () => {
+		expect(
+			catalogCardMarker({
+				added: true,
+				coveredBySelection: true,
+				ownSetAdded: true,
+				memberOfAddedComposite: true,
+			}),
+		).toBe('added');
+	});
+
+	it('in-session covered wins over set-added and member marks', () => {
+		expect(
+			catalogCardMarker({
+				...none,
+				coveredBySelection: true,
+				ownSetAdded: true,
+				memberOfAddedComposite: true,
+			}),
+		).toBe('covered');
+	});
+
+	it('member itself added takes precedence over member-of-added mark', () => {
+		expect(
+			catalogCardMarker({ ...none, ownSetAdded: true, memberOfAddedComposite: true }),
+		).toBe('own-set-added');
+	});
+
+	it('member-of-added only when nothing else applies', () => {
+		expect(catalogCardMarker({ ...none, memberOfAddedComposite: true })).toBe(
+			'member-of-added',
+		);
+		expect(catalogCardMarker(none)).toBe('none');
+	});
+});
+
+describe('presetAddedBadge', () => {
+	const netflix = sbPreset('netflix', 'Netflix', ['geosite-netflix']);
+
+	it('falls back to plain «добавлено» without usage info', () => {
+		expect(presetAddedBadge(netflix, undefined)).toEqual({ text: 'добавлено' });
+	});
+
+	it('reports a set referenced by at least one rule as used', () => {
+		const badge = presetAddedBadge(netflix, new Map([['geosite-netflix', 2]]));
+		expect(badge.text).toBe('добавлено');
+		expect(badge.tooltip).toContain('используется правилами');
+	});
+
+	it('flags a set not referenced by any rule', () => {
+		const badge = presetAddedBadge(netflix, new Map([['other-tag', 1]]));
+		expect(badge.text).toBe('добавлено, без правил');
+		expect(badge.tooltip).toBe('Добавлен как набор — не используется ни одним правилом');
+	});
+
+	it('multi-set preset counts as used when any of its tags is referenced', () => {
+		const p = sbPreset('multi', 'Multi', ['a', 'b']);
+		expect(presetAddedBadge(p, new Map([['b', 1]])).text).toBe('добавлено');
+	});
+
+	it('preset without singbox tags falls back to plain «добавлено»', () => {
+		expect(presetAddedBadge({ ...base, engines: {} }, new Map())).toEqual({
+			text: 'добавлено',
+		});
+	});
+});
+
+describe('wizard reuse badge and member mark tooltip', () => {
+	it('presetSetReuseBadge explains that only a rule will be created', () => {
+		expect(presetSetReuseBadge()).toEqual({
+			text: 'набор уже есть',
+			tooltip: 'Набор уже добавлен — будет создано только правило',
+		});
+	});
+
+	it('memberOfAddedCompositeTitle names the composite and stays non-blocking', () => {
+		const title = memberOfAddedCompositeTitle('Все AI сервисы');
+		expect(title).toBe(
+			'Уже входит в добавленный композитный список «Все AI сервисы». Можно добавить и отдельно.',
+		);
 	});
 });

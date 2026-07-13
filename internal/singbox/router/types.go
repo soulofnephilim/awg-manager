@@ -101,9 +101,19 @@ type Rule struct {
 	// transparent listener on every router LAN IP; a side-effect packet
 	// that slips into sing-box from there gets routed `direct` instead
 	// of ending up at `final: proxy` and being silently dropped.
-	IPIsPrivate *bool  `json:"ip_is_private,omitempty"`
-	Action      string `json:"action,omitempty"`
-	Outbound    string `json:"outbound,omitempty"`
+	IPIsPrivate *bool `json:"ip_is_private,omitempty"`
+	// Network matches the connection L4 protocol ("tcp" | "udp"). The system
+	// route-options rule uses it to scope the udp_timeout override to UDP.
+	Network  string `json:"network,omitempty"`
+	Action   string `json:"action,omitempty"`
+	Outbound string `json:"outbound,omitempty"`
+	// UDPTimeout carries the `udp_timeout` route option for an
+	// `action:"route-options"` rule. sing-box otherwise applies short
+	// per-protocol idle timeouts to sniffed UDP (STUN/DNS 10s, QUIC/DTLS 30s)
+	// that ignore the inbound udp_timeout; a route-options rule raising it to the
+	// inbound value keeps games/VoIP sessions alive. A route rule action carries
+	// no outbound, so this and Action are the only fields it sets.
+	UDPTimeout string `json:"udp_timeout,omitempty"`
 	// AwgmManaged marks auto-generated route rules owned by AWG Manager.
 	// "selective-ip" rules map resolved domain IPs to proxy outbounds for
 	// selective TPROXY mode; they are replaced on each ipset rebuild.

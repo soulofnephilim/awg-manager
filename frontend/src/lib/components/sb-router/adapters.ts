@@ -54,6 +54,10 @@ export function systemRuleTooltip(rule: SingboxRouterRule): string | undefined {
   if (rule.ip_is_private && rule.outbound === 'direct') {
     return 'Трафик в локальные и приватные сети (RFC1918, loopback, link-local) идёт напрямую, минуя VPN. Нужен для доступа к роутеру, NAS и устройствам в LAN.';
   }
+  if (rule.action === 'route-options') {
+    const to = rule.udp_timeout ? ` (${rule.udp_timeout})` : '';
+    return `Автоматически поднимает таймаут UDP-сессий${to} до значения таймаута движка. Без него игры, VoIP и QUIC рвутся из-за коротких протокольных таймаутов (10–30 с). Задаётся системой, редактировать нельзя.`;
+  }
   return undefined;
 }
 
@@ -63,6 +67,7 @@ export function mapRuleAction(rule: SingboxRouterRule): RuleAction {
   if (rule.action === 'reject') return 'block';
   if (rule.action === 'sniff') return 'sniff';
   if (rule.action === 'hijack-dns') return 'hijack-dns';
+  if (rule.action === 'route-options') return 'udp-timeout';
   if (rule.outbound === 'direct') return 'direct';
   return 'route';
 }
@@ -126,6 +131,10 @@ export function resolveOutboundDisplay(
   }
   if (action === 'hijack-dns') {
     return { name: name ?? 'hijack-dns', label: 'HIJACK-DNS', kind: 'hijack-dns', tone: 'system' };
+  }
+
+  if (action === 'udp-timeout') {
+    return { name: name ?? 'udp-timeout', label: 'UDP TIMEOUT', kind: 'udp-timeout', tone: 'system' };
   }
 
   if (action === 'block') {
@@ -340,6 +349,7 @@ function fallbackTitle(
   if (rule.ip_is_private) return 'Локальная сеть';
   if (rule.action === 'sniff') return 'Анализ протокола';
   if (rule.action === 'hijack-dns') return 'Перехват DNS';
+  if (rule.action === 'route-options') return 'UDP таймаут';
   if (rule.domain_suffix?.length) return rule.domain_suffix[0];
   if (rule.ip_cidr?.length) return rule.ip_cidr[0];
   if (rule.rule_set?.length) return displayRuleSetTag(rule.rule_set[0]);
@@ -352,6 +362,9 @@ function systemSubtitle(rule: SingboxRouterRule): string | undefined {
   if (rule.action === 'sniff') return 'sniff';
   if (rule.action === 'hijack-dns') return 'protocol=dns OR port=53';
   if (rule.ip_is_private) return 'RFC1918 · loopback · link-local · CGNAT';
+  if (rule.action === 'route-options') {
+    return rule.udp_timeout ? `udp · timeout=${rule.udp_timeout}` : 'udp · timeout';
+  }
   return undefined;
 }
 

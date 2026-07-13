@@ -3,11 +3,13 @@
 -->
 
 <script lang="ts">
-  import type { SingboxRouterOutbound, Subscription } from '$lib/types';
+  import type { SingboxProxyGroup, SingboxRouterOutbound, Subscription } from '$lib/types';
+  import type { OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
   import { Badge } from '$lib/components/ui';
   import { Edit3, Trash2 } from 'lucide-svelte';
   import { isSubscriptionOutbound, outboundDisplay } from './outboundLabel';
   import { outboundDeleteBlockReasons, type OutboundUsageInput } from './outboundUsage';
+  import { COMPOSITE_OUTBOUND_TYPES, resolveCompositeOutboundView } from './compositeOutboundDisplay';
 
   interface Props {
     outbounds: SingboxRouterOutbound[];
@@ -16,9 +18,31 @@
     /** Subscriptions, to resolve sub-<hash> composite tags to their names. */
     subscriptions?: Subscription[];
     usage?: Omit<OutboundUsageInput, 'tag'>;
+    /** Живые clash-группы (`now`) — для строки «активен: …» у композитов. */
+    proxyGroups?: SingboxProxyGroup[];
+    /** Каталог outbound-опций — для человекочитаемых имён участников. */
+    outboundOptions?: OutboundGroup[];
   }
 
-  let { outbounds, onEdit, onDelete, subscriptions = [], usage }: Props = $props();
+  let {
+    outbounds,
+    onEdit,
+    onDelete,
+    subscriptions = [],
+    usage,
+    proxyGroups = [],
+    outboundOptions = [],
+  }: Props = $props();
+
+  // Активный участник композита — только по живому clash `now`: без
+  // запущенного движка выбор urltest/selector неизвестен, и фолбэк
+  // «первый в списке» вводил бы в заблуждение.
+  function activeView(o: SingboxRouterOutbound) {
+    if (!COMPOSITE_OUTBOUND_TYPES.has(o.type)) return null;
+    const now = proxyGroups.find((g) => g.tag === o.tag)?.now;
+    if (!now) return null;
+    return resolveCompositeOutboundView(o.tag, outbounds, outboundOptions, subscriptions, proxyGroups);
+  }
 
   function toneFor(type: string): 'success' | 'accent' | 'info' | 'muted' | 'error' {
     if (type === 'direct') return 'muted';
@@ -40,12 +64,22 @@
   {#each outbounds as o (o.tag)}
     {@const d = outboundDisplay(o, subscriptions)}
     {@const deleteReason = deleteReasons?.get(o.tag) ?? null}
+    {@const av = activeView(o)}
     <div class="row">
       <span class="dot" data-tone={toneFor(o.type)}></span>
       <button type="button" class="meta-btn" onclick={() => onEdit(o.tag)}>
         <div class="meta">
           <div class="tag">{d.title}</div>
           <div class="sub">{d.subtitle}</div>
+          {#if av}
+            <div class="active-line" title="Текущий выбор {o.type === 'selector' ? 'selector' : 'urltest'}">
+              <span class="active-dot" aria-hidden="true"></span>
+              <span class="active-label">активен: {av.activeMemberLabel}</span>
+              {#if av.otherMemberTags.length > 0}
+                <span class="active-rest">+{av.otherMemberTags.length}</span>
+              {/if}
+            </div>
+          {/if}
         </div>
       </button>
       <Badge variant="default" size="sm">{kindLabel(o)}</Badge>
@@ -135,6 +169,31 @@
   .sub {
     font-size: 11px;
     color: var(--text-muted);
+  }
+  .active-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    min-width: 0;
+    max-width: 100%;
+  }
+  .active-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success, #22c55e);
+    flex-shrink: 0;
+  }
+  .active-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .active-rest {
+    color: var(--text-muted);
+    flex-shrink: 0;
   }
   .actions {
     display: inline-flex;

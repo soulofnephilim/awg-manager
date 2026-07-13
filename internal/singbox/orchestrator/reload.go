@@ -58,7 +58,6 @@ func (o *Orchestrator) Reload() error {
 		return nil // collapse re-entrancy
 	}
 	o.reloading = true
-	o.dirty = false
 	// Defense-in-depth: strip dangling selector/urltest members and defaults
 	// (a tag whose outbound was deleted from another slot) BEFORE validating.
 	// sing-box check does not catch these — like composite cycles, a missing
@@ -76,7 +75,11 @@ func (o *Orchestrator) Reload() error {
 		o.reloading = false
 		o.mu.Unlock()
 		for _, m := range pruneLogs {
-			o.log("info", m)
+			// Prune mutated a producer's slot to keep sing-box alive — that is
+			// self-healing of an inconsistency, not routine housekeeping. Warn
+			// so the trace survives default log levels (issue #465: silent
+			// prune of device-proxy selector members hid the corruption).
+			o.log("warn", m)
 		}
 		msg := fmt.Sprintf("orchestrator validation failed; reload skipped: %s", res.Error())
 		o.log("error", msg)
@@ -90,7 +93,7 @@ func (o *Orchestrator) Reload() error {
 	newHasTun := res.HasTun
 	o.mu.Unlock()
 	for _, m := range pruneLogs {
-		o.log("info", m)
+		o.log("warn", m) // см. комментарий на warn-логировании prune выше
 	}
 
 	var err error
@@ -156,26 +159,7 @@ func (o *Orchestrator) Reload() error {
 // all-dangling selector is left untouched so validateLocked still reports it.
 func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
 	var logs []string
-	// builtins sing-box defines implicitly (mirrors validateWith).
-	known := map[string]bool{"direct": true, "block": true, "dns": true}
-	for _, m := range KnownSlots() {
-		if _, ok := o.slots[m.Slot]; !ok || !o.enabled[m.Slot] {
-			continue
-		}
-		data, err := o.readActiveBytes(m.Slot)
-		if err != nil || len(data) == 0 {
-			continue
-		}
-		var c slotConfig
-		if json.Unmarshal(data, &c) != nil {
-			continue
-		}
-		for _, ob := range c.Outbounds {
-			if ob.Tag != "" {
-				known[ob.Tag] = true
-			}
-		}
-	}
+	known := o.enabledOutboundTagsLocked(nil)
 
 	for _, m := range KnownSlots() {
 		meta := m
@@ -248,6 +232,57 @@ func (o *Orchestrator) pruneDanglingSelectorRefsLocked() []string {
 		}
 	}
 	return logs
+}
+
+// enabledOutboundTagsLocked builds the set of outbound tags the merged
+// enabled config declares, plus the builtins sing-box defines implicitly
+// (mirrors validateWith). Slots listed in exclude are skipped. Caller
+// MUST hold o.mu. This is the availability oracle both prune (above)
+// and EnabledOutboundTags share — a selector member/default is valid
+// exactly when its tag is in this set.
+func (o *Orchestrator) enabledOutboundTagsLocked(exclude map[Slot]bool) map[string]bool {
+	known := map[string]bool{"direct": true, "block": true, "dns": true}
+	for _, m := range KnownSlots() {
+		if exclude[m.Slot] {
+			continue
+		}
+		if _, ok := o.slots[m.Slot]; !ok || !o.enabled[m.Slot] {
+			continue
+		}
+		data, err := o.readActiveBytes(m.Slot)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var c slotConfig
+		if json.Unmarshal(data, &c) != nil {
+			continue
+		}
+		for _, ob := range c.Outbounds {
+			if ob.Tag != "" {
+				known[ob.Tag] = true
+			}
+		}
+	}
+	return known
+}
+
+// EnabledOutboundTags returns the outbound tags declared by ENABLED
+// slots (plus sing-box builtins direct/block/dns) — the same visibility
+// rule pruneDanglingSelectorRefsLocked applies before every reload.
+// Producers that reference tags across slots (device-proxy selectors →
+// router composites, issue #465) use it to detect that a referenced tag
+// would be dangling in the merged config and degrade gracefully at
+// generation time instead of letting prune strip the reference. Slots
+// passed in exclude are ignored (a producer excludes its own slot: its
+// selectors are consumers, not member candidates).
+func (o *Orchestrator) EnabledOutboundTags(exclude ...Slot) map[string]bool {
+	ex := make(map[Slot]bool, len(exclude))
+	for _, s := range exclude {
+		ex[s] = true
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.enabledOutboundTagsLocked(ex)
 }
 
 // HasActiveWork reports (under the lock) whether sing-box currently has

@@ -179,6 +179,9 @@ func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Se
 		if err := s.deps.Orch.SetEnabled(orchestrator.SlotFakeIP, false); err != nil {
 			s.appLog.Warn("fakeip-disable", iface, "disable slot: "+err.Error())
 		}
+		// Композиты слота 21 пропали из merged-конфига — device-proxy
+		// перегенерирует слот 30 до ближайшего reload (issue #465).
+		s.notifyRoutingSlotsChanged()
 	}
 
 	// (4b) Delete the iface (down then delete) — NDMS name. With the pool route

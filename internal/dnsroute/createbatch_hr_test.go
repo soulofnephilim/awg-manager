@@ -57,11 +57,11 @@ func TestCreateBatch_HydraRouteSubscriptions(t *testing.T) {
 		// manual + subscription → создаётся из ручных, подписка игнорируется.
 		{Name: "hr-mixed", Backend: "hydraroute", ManualDomains: []string{"x.com"},
 			Subscriptions: []Subscription{{URL: "http://example/list", Name: "sub"}},
-			Routes: []RouteTarget{{TunnelID: "t1"}}},
+			Routes:        []RouteTarget{{TunnelID: "t1"}}},
 		// subscription-only (нет ручных) → пропускается, batch не падает.
 		{Name: "hr-subonly", Backend: "hydraroute",
 			Subscriptions: []Subscription{{URL: "http://example/list2", Name: "sub2"}},
-			Routes: []RouteTarget{{TunnelID: "t1"}}},
+			Routes:        []RouteTarget{{TunnelID: "t1"}}},
 	})
 	if err != nil {
 		t.Fatal(err)

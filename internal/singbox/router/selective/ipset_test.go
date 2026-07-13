@@ -60,23 +60,32 @@ func TestNormalizeEntry_Whitespace(t *testing.T) {
 // ── IPSetBinary path detection ────────────────────────────────────────────────
 
 func TestIPSetBinary_ReturnsPresentPath(t *testing.T) {
-	// Override the candidate paths with a guaranteed-present binary.
+	// Stub executable that passes the health probe (`ipset version` → exit 0).
+	bin := writeStubIPSet(t, "#!/bin/sh\nexit 0\n")
 	original := ipsetBinaryPaths
-	ipsetBinaryPaths = []string{"/usr/bin/env"} // always exists
-	defer func() { ipsetBinaryPaths = original }()
+	ipsetBinaryPaths = []string{bin}
+	defer func() {
+		ipsetBinaryPaths = original
+		resetIPSetHealthForTest()
+	}()
+	resetIPSetHealthForTest()
 
-	if got := IPSetBinary(); got != "/usr/bin/env" {
-		t.Errorf("expected /usr/bin/env, got %q", got)
+	if got := IPSetBinary(); got != bin {
+		t.Errorf("expected %q, got %q", bin, got)
 	}
 	if !IsIPSetAvailable() {
-		t.Error("IsIPSetAvailable() should be true when binary exists")
+		t.Error("IsIPSetAvailable() should be true when binary exists and runs")
 	}
 }
 
 func TestIPSetBinary_ReturnsEmptyWhenNotFound(t *testing.T) {
 	original := ipsetBinaryPaths
 	ipsetBinaryPaths = []string{"/nonexistent/path/ipset-xyz"}
-	defer func() { ipsetBinaryPaths = original }()
+	defer func() {
+		ipsetBinaryPaths = original
+		resetIPSetHealthForTest()
+	}()
+	resetIPSetHealthForTest()
 
 	if got := IPSetBinary(); got != "" {
 		t.Errorf("expected empty, got %q", got)

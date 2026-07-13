@@ -52,7 +52,7 @@ function mixHex(a: string, b: string, weight: number): string {
 	if (!ca || !cb) return a;
 	const w = Math.min(1, Math.max(0, weight));
 	return toHex(
-		ca.map((channel, index) => channel * (1 - w) + cb[index]! * w) as [number, number, number],
+		ca.map((channel, index) => channel * (1 - w) + cb[index] * w) as [number, number, number],
 	);
 }
 
@@ -65,7 +65,7 @@ function relativeLuminance(hex: string): number {
 		return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
 	});
 
-	return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+	return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
 }
 
 function hexHue(hex: string): number | null {

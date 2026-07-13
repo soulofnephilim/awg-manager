@@ -17,9 +17,9 @@ type DomainList struct {
 	// dedup layer only. NDMS object-group network has no exclude semantics,
 	// so these CIDRs are NEVER rendered to NDMS. They exist purely to allow
 	// another list to claim a child subnet without being marked as a dup.
-	ExcludeSubnets   []string       `json:"excludeSubnets,omitempty"`
-	Subnets          []string       `json:"subnets,omitempty"`
-	ManualDomains    []string       `json:"manualDomains"`
+	ExcludeSubnets []string `json:"excludeSubnets,omitempty"`
+	Subnets        []string `json:"subnets,omitempty"`
+	ManualDomains  []string `json:"manualDomains"`
 	// ManualText preserves the raw manual editor text, including comments and blank lines.
 	// Active ManualDomains are derived from it when the field is present in a request.
 	ManualText       *string        `json:"manualText,omitempty"`

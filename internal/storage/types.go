@@ -122,7 +122,8 @@ type SingboxRouterSettings struct {
 	// Only meaningful when WANAutoDetect == false.
 	WANInterface string `json:"wanInterface,omitempty"`
 	// BypassPresets lists named protocol presets to exclude from TPROXY/REDIRECT.
-	// Valid values: "l2tp", "ntp", "netbios-smb". nil/[] = nothing excluded.
+	// Valid values: "l2tp", "ntp", "netbios-smb" (port-based), "keendns"
+	// (destination-IP 78.47.125.180, KeenDNS/CrazeDNS). nil/[] = nothing excluded.
 	BypassPresets []string `json:"bypassPresets,omitempty"`
 	// BypassExtraPorts is a user-supplied comma-separated list of extra port
 	// exclusions in "PORT UDP|TCP" format (e.g. "51820 UDP, 1194 TCP").
@@ -153,10 +154,17 @@ type SingboxRouterSettings struct {
 	FakeIPPool6 string `json:"fakeipPool6,omitempty"`
 	// FakeIPMTU is the tun MTU (default 1500).
 	FakeIPMTU int `json:"fakeipMtu,omitempty"`
-	// UDPTimeout задаёт таймаут UDP-сессий в tproxy-in inbound (формат Go duration,
-	// например "3m0s", "10m0s"). Пустая строка = использовать значение по умолчанию
-	// (DefaultUDPTimeout). Увеличение помогает при работе игр и других UDP-приложений,
-	// которые могут молчать дольше стандартных 3 минут.
+	// FakeIPRealServer is the true upstream resolver the engine-managed "real"
+	// DNS server forwards to (default "1.1.1.1"). Must be a plain IP address —
+	// the fakeip topology resolves every domain through "real" itself, so a
+	// domain upstream could never bootstrap. Captured from a user edit of the
+	// "real" server address in the fakeip DNS panel (issue #487) or set
+	// directly via the settings API.
+	FakeIPRealServer string `json:"fakeipRealServer,omitempty"`
+	// UDPTimeout задаёт таймаут UDP-сессий в tproxy-in / fakeip tun-in inbound
+	// (формат Go duration, например "5m0s", "10m0s"). Пустая строка = значение по
+	// умолчанию (DefaultUDPTimeout, 5m). Увеличение помогает играм и другим
+	// UDP-приложениям, которые могут молчать дольше и терять сессию.
 	UDPTimeout string `json:"udpTimeout,omitempty"`
 	// SelectiveBypass, when true, installs an iptables -m set guard in front
 	// of the TPROXY/REDIRECT catch-all rules so only traffic whose destination
@@ -266,8 +274,17 @@ type ManagedPeer struct {
 
 // ServerSettings contains HTTP server configuration.
 type ServerSettings struct {
-	Port      int    `json:"port"`
+	Port int `json:"port"`
+	// Interface is the legacy single bind interface. Superseded by
+	// Interfaces (migrateToV30 copies it there); kept populated so a
+	// downgrade to an older release still binds where it used to.
+	// New code must read Interfaces only.
 	Interface string `json:"interface"`
+	// Interfaces lists kernel interface names (e.g. "br0") whose IPv4
+	// addresses the HTTP server binds to (one listener per interface, plus
+	// an always-on 127.0.0.1 listener for the NDMS reverse proxy and health
+	// probes). Empty = bind all interfaces (0.0.0.0).
+	Interfaces []string `json:"interfaces,omitempty"`
 }
 
 // PingCheckSettings contains global ping check configuration.

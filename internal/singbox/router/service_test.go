@@ -136,6 +136,19 @@ type fakeSingbox struct {
 	restartSuppressedUntil time.Time
 }
 
+// newReadyTestSingbox returns a fakeSingbox that reads as ALIVE and — via the
+// singboxListeningProbe seam — as bound/ready. That is the state a config-change
+// reinstall requires now that reconcileInstalled gates the iptables install on
+// singboxReady (inbound sockets bound), not bare IsRunning (safety-3). Dead and
+// up-but-unbound cases set their own isRunningFn / probe stub instead.
+func newReadyTestSingbox(t *testing.T) *fakeSingbox {
+	t.Helper()
+	stubListeningProbe(t, func() bool { return true })
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	return sb
+}
+
 func (f *fakeSingbox) Reload() error { return nil }
 func (f *fakeSingbox) IsRunning() (bool, int) {
 	if f.isRunningFn != nil {
@@ -440,7 +453,7 @@ func TestReconcile_PolicyMarkChanged_Reinstalls(t *testing.T) {
 			Policies:       &fakeAccessPolicyProvider{mark: "0xffffaab"},
 			IPTables:       ipt,
 			WANIPCollector: collector,
-			Singbox:        newTestSingbox(t),
+			Singbox:        newReadyTestSingbox(t),
 			// Tests call prepareNetfilter via reconcileInstalled when
 			// needsInstall is true — override to avoid real syscalls.
 			NetfilterPreflight: func(context.Context) error { return nil },
@@ -533,6 +546,75 @@ func TestUpdateSettings_SelectiveBypassRejectedWhenFinalNotDirect(t *testing.T) 
 	}
 }
 
+// #486: селективный перехват, включённый в tproxy, вне tproxy СПИТ и не
+// должен блокировать несвязанные изменения настроек в fakeip-режиме —
+// в частности переключение TCP/IP-стека.
+func TestUpdateSettings_FakeIPStackChangeAllowedWithDormantSelective(t *testing.T) {
+	svc, _ := newOrchedTestService(t)
+
+	// Наследие tproxy: selectiveBypass уже включён в персисте.
+	all, err := svc.deps.Settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	all.SingboxRouter.SelectiveBypass = true
+	all.SingboxRouter.RoutingMode = "fakeip-tun"
+	if err := svc.deps.Settings.Save(all); err != nil {
+		t.Fatal(err)
+	}
+
+	// Репро issue: фронт мержит патч стека с текущими настройками и шлёт
+	// полный объект, включая унаследованный selectiveBypass=true.
+	err = svc.UpdateSettings(context.Background(), storage.SingboxRouterSettings{
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		RoutingMode:     "fakeip-tun",
+		SelectiveBypass: true,
+		FakeIPStack:     "system",
+	})
+	if err != nil {
+		t.Fatalf("stack switch must not be blocked by dormant selectiveBypass: %v", err)
+	}
+
+	saved, err := svc.deps.Settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.SingboxRouter.FakeIPStack != "system" {
+		t.Errorf("fakeipStack not persisted: %q", saved.SingboxRouter.FakeIPStack)
+	}
+	if !saved.SingboxRouter.SelectiveBypass {
+		t.Error("dormant selectiveBypass must survive the settings update (не сбрасывается молча)")
+	}
+}
+
+// #486 (обратная сторона): ВКЛЮЧИТЬ селективный перехват, находясь вне
+// tproxy, по-прежнему нельзя — dormant-послабление касается только уже
+// включённого флага.
+func TestUpdateSettings_SelectiveEnableRejectedOutsideTproxy(t *testing.T) {
+	svc, _ := newOrchedTestService(t)
+
+	err := svc.UpdateSettings(context.Background(), storage.SingboxRouterSettings{
+		PolicyName:      "Policy0",
+		WANAutoDetect:   true,
+		RoutingMode:     "fakeip-tun",
+		SelectiveBypass: true,
+	})
+	if err == nil {
+		t.Fatal("expected enabling selectiveBypass outside tproxy to be rejected")
+	}
+	if !strings.Contains(err.Error(), "tproxy") {
+		t.Errorf("error should mention tproxy, got %q", err.Error())
+	}
+	saved, err := svc.deps.Settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.SingboxRouter.SelectiveBypass {
+		t.Error("selectiveBypass must not be persisted when enable is rejected")
+	}
+}
+
 func TestSetRouteFinal_DisablesSelectiveBypass(t *testing.T) {
 	singbox := newTestSingbox(t)
 	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
@@ -581,6 +663,9 @@ func TestReconcileInstalled_SelectiveSelfHealWhenFinalNotDirect(t *testing.T) {
 	svc.deps.WANIPCollector = &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}}
 	svc.deps.NetfilterPreflight = func(context.Context) error { return nil }
 	svc.currentSelectiveBypass = true
+	// Ready engine so reconcile's iptables install (which updates
+	// currentSelectiveBypass) runs — it now gates on singboxReady (safety-3).
+	svc.deps.Singbox = newReadyTestSingbox(t)
 
 	// The incompatible config must be APPLIED (not a pending draft): the
 	// self-heal judges only what is actually running.
@@ -816,7 +901,7 @@ func TestReconcile_WANIPsChanged_Reinstalls(t *testing.T) {
 			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:           ipt,
 			WANIPCollector:     collector,
-			Singbox:            newTestSingbox(t),
+			Singbox:            newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error { return nil },
 		},
 		currentMark:   "0xffffaaa",
@@ -1005,7 +1090,7 @@ func TestReconcile_DeviceModeChanged_ReinstallsImmediately(t *testing.T) {
 					Policies:           policies,
 					IPTables:           newStubIPTables(func(_ context.Context, input string) error { restoreInput = input; restoreCalls++; return nil }),
 					WANIPCollector:     &fakeWANIPCollector{},
-					Singbox:            newTestSingbox(t),
+					Singbox:            newReadyTestSingbox(t),
 					NetfilterPreflight: func(context.Context) error { return nil },
 				},
 				currentMark:         tc.currentMark,
@@ -1112,7 +1197,7 @@ func TestReconcile_StateUnknown_ForcesInitialReinstall(t *testing.T) {
 			Policies:       &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:       ipt,
 			WANIPCollector: collector,
-			Singbox:        newTestSingbox(t),
+			Singbox:        newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error {
 				preflightCalls++
 				return nil
@@ -1472,6 +1557,9 @@ func TestNormalizeSingboxRouterSettings_DefaultsFakeIPFields(t *testing.T) {
 	if out.FakeIPMTU != def.MTU {
 		t.Errorf("FakeIPMTU = %d, want %d", out.FakeIPMTU, def.MTU)
 	}
+	if out.FakeIPRealServer != def.RealServer {
+		t.Errorf("FakeIPRealServer = %q, want %q", out.FakeIPRealServer, def.RealServer)
+	}
 }
 
 func TestNormalizeSingboxRouterSettings_PreservesFakeIPFields(t *testing.T) {
@@ -1520,6 +1608,11 @@ func TestValidateSingboxRouterSettings_FakeIPFields(t *testing.T) {
 		{"mtu too big", func(s *storage.SingboxRouterSettings) { s.FakeIPMTU = 99999 }, true},
 		{"mtu min ok", func(s *storage.SingboxRouterSettings) { s.FakeIPMTU = 576 }, false},
 		{"mtu max ok", func(s *storage.SingboxRouterSettings) { s.FakeIPMTU = 9000 }, false},
+		{"real server v4 ok", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "9.9.9.9" }, false},
+		{"real server v6 ok", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "2606:4700:4700::1111" }, false},
+		{"real server domain", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "dns.google" }, true},
+		{"real server zoned", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "fe80::1%eth0" }, true},
+		{"real server garbage", func(s *storage.SingboxRouterSettings) { s.FakeIPRealServer = "not an ip" }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1919,7 +2012,7 @@ func TestReconcile_BypassPresetsChanged_Reinstalls(t *testing.T) {
 			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:           ipt,
 			WANIPCollector:     collector,
-			Singbox:            newTestSingbox(t),
+			Singbox:            newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error { return nil },
 		},
 		currentMark:          "0xffffaaa",
@@ -2061,7 +2154,7 @@ func TestReconcile_IngressChangeTriggersInstall(t *testing.T) {
 			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 			IPTables:           ipt,
 			WANIPCollector:     collector,
-			Singbox:            newTestSingbox(t),
+			Singbox:            newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error { return nil },
 			IngressResolver:    resolver,
 		},

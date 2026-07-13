@@ -23,7 +23,7 @@ type HookDispatcher interface {
 // HookWANModel is the narrow surface HookHandler needs from the WAN
 // model. Kept local so api/hook.go doesn't depend on *wan.Model.
 type HookWANModel interface {
-	SetUp(kernelName string, up bool)
+	SetUp(kernelName string, up bool) (changed bool)
 }
 
 // TunnelHookInvalidator is invoked on ifcreated / ifdestroyed hooks so
@@ -41,6 +41,7 @@ type HookHandler struct {
 	wanModel       HookWANModel   // may be nil until SetWANModel is called
 	refreshTunnels TunnelHookInvalidator
 	log            *logging.ScopedLogger
+	wanLog         *logging.ScopedLogger
 	// selfCreateGate counts in-flight awg-manager-initiated NDMS interface
 	// creations. While > 0, ifcreated hook events suppress their automatic
 	// snapshot rebroadcast — the caller (importer / Create path) is
@@ -68,6 +69,9 @@ func NewHookHandler(svc TunnelService, orch *orchestrator.Orchestrator, appLogge
 		svc:  svc,
 		orch: orch,
 		log:  logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubBoot),
+		// Переходы WAN — отдельная подгруппа: их ищут при разборе обрывов,
+		// не смешивая с потоком NDMS-хуков.
+		wanLog: logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubWan),
 	}
 }
 
@@ -100,25 +104,26 @@ func (h *HookHandler) SetTunnelRefresher(fn TunnelHookInvalidator) {
 // forwards to the orchestrator for tunnel-lifecycle decisions.
 //
 // POST /api/hook/ndms
-//   type=iflayerchanged|ifcreated|ifdestroyed|ifipchanged
-//   id=<ndms-interface-id>
-//   system_name=<kernel-name>
-//   layer=<conf|link|ipv4|ipv6|ctrl>      (layerchanged only)
-//   level=<running|disabled|...>          (layerchanged only)
-//   address=<ipv4>                        (ipchanged only)
-//   up=<0|1>
-//   connected=<0|1>
 //
-//	@Summary		NDMS shell hook
-//	@Description	Called from router scripts (public). Form fields: type, id, system_name, layer, etc.
-//	@Tags			hook
-//	@Accept			x-www-form-urlencoded
-//	@Produce		json
-//	@Param			type	formData	string	true	"Event type (iflayerchanged, ifcreated, ...)"
-//	@Success		200	{object}	APIEnvelope
-//	@Failure		400	{object}	APIErrorEnvelope
-//	@Failure		500	{object}	APIErrorEnvelope
-//	@Router			/hook/ndms [post]
+//	  type=iflayerchanged|ifcreated|ifdestroyed|ifipchanged
+//	  id=<ndms-interface-id>
+//	  system_name=<kernel-name>
+//	  layer=<conf|link|ipv4|ipv6|ctrl>      (layerchanged only)
+//	  level=<running|disabled|...>          (layerchanged only)
+//	  address=<ipv4>                        (ipchanged only)
+//	  up=<0|1>
+//	  connected=<0|1>
+//
+//		@Summary		NDMS shell hook
+//		@Description	Called from router scripts (public). Form fields: type, id, system_name, layer, etc.
+//		@Tags			hook
+//		@Accept			x-www-form-urlencoded
+//		@Produce		json
+//		@Param			type	formData	string	true	"Event type (iflayerchanged, ifcreated, ...)"
+//		@Success		200	{object}	APIEnvelope
+//		@Failure		400	{object}	APIErrorEnvelope
+//		@Failure		500	{object}	APIErrorEnvelope
+//		@Router			/hook/ndms [post]
 func (h *HookHandler) HandleNDMS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		response.MethodNotAllowed(w)
@@ -229,7 +234,17 @@ func (h *HookHandler) handleWANLayerEvent(e events.Event) {
 
 	// Sync WAN model update — must happen before the orch decides
 	// whether any WAN is up. SetUp handles hot-plug via repopulateFn.
-	h.wanModel.SetUp(kernelName, up)
+	changed := h.wanModel.SetUp(kernelName, up)
+
+	// Логируем только реальные переходы: NDMS повторяет hook-события с
+	// неизменным уровнем, и без этого фильтра каждый повтор писал бы строку.
+	if h.wanLog != nil && changed {
+		if up {
+			h.wanLog.Info("wan-state", kernelName, "WAN interface up")
+		} else {
+			h.wanLog.Warn("wan-state", kernelName, "WAN interface down")
+		}
+	}
 
 	if h.orch == nil {
 		return

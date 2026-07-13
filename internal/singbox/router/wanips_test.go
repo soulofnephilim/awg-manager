@@ -94,10 +94,10 @@ func TestParseInetAddrs_NoAddrs(t *testing.T) {
 
 // fakeWANRunner records calls and returns canned outputs per arg-prefix.
 type fakeWANRunner struct {
-	routeOut   string
-	addrByDev  map[string]string
-	addrErr    map[string]error
-	routeErr   error
+	routeOut  string
+	addrByDev map[string]string
+	addrErr   map[string]error
+	routeErr  error
 }
 
 func (f *fakeWANRunner) run(_ context.Context, args ...string) (string, error) {

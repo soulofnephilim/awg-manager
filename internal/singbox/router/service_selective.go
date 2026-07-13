@@ -26,7 +26,21 @@ var errSelectiveIncompatible = errors.New("selective bypass incompatible")
 // it validates against the EFFECTIVE config — including a staged draft — so
 // the UI rejects enabling selective bypass against the route.final the user
 // is currently editing.
+//
+// Вне tproxy селективный перехват СПИТ: fakeip-пути ipset-цепочки не ставят
+// (Reconcile и Enable диспатчатся по режиму раньше tproxy-ветки), поэтому
+// унаследованный включённый флаг — валидное «спящее» состояние и не должен
+// блокировать несвязанные изменения настроек в fakeip (смену TCP/IP-стека
+// и т.п., #486). Отклоняется только ПОПЫТКА включения вне tproxy.
 func (s *ServiceImpl) validateSelectiveBypassSettings(ctx context.Context, sr storage.SingboxRouterSettings) error {
+	if sr.SelectiveBypass && sr.RoutingMode != "tproxy" {
+		if s.deps.Settings != nil {
+			if prev, err := s.deps.Settings.Load(); err == nil && prev.SingboxRouter.SelectiveBypass {
+				return nil // dormant: был включён — остаётся включённым-спящим
+			}
+		}
+		return fmt.Errorf("%w: selectiveBypass можно включить только в режиме tproxy", errSelectiveIncompatible)
+	}
 	return s.validateSelectiveBypass(sr, s.loadRouterConfig)
 }
 
@@ -118,9 +132,15 @@ func (s *ServiceImpl) triggerSelectiveRebuild(_ context.Context) {
 		return
 	}
 	go func() {
+		// Пересборка на MIPS может занимать минуты и меняет поведение
+		// bypass — старт и завершение видны в журнале, детали и счётчики
+		// живут в selective-панели (SSE-статус билдера).
+		s.appLog.Info("selective-rebuild", "", "ipset rebuild started")
 		if err := s.deps.SelectiveBuilder.Rebuild(context.Background()); err != nil {
 			s.appLog.Warn("selective-rebuild", "", fmt.Sprintf("ipset rebuild failed: %v", err))
+			return
 		}
+		s.appLog.Info("selective-rebuild", "", "ipset rebuild complete")
 	}()
 }
 

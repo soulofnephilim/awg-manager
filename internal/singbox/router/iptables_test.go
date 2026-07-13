@@ -429,8 +429,11 @@ func TestWriteNetfilterHookContainsPidofGuard(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	body := string(data)
-	if !strings.Contains(body, "pidof sing-box >/dev/null 2>&1 || exit 0") {
-		t.Errorf("hook missing pidof guard:\n%s", body)
+	// The pidof guard now branches (alive → real interception, dead → fail-closed
+	// blackhole) instead of `|| exit 0`, so interception is only restored for a
+	// live engine while a dead engine still re-asserts the blackhole.
+	if !strings.Contains(body, "if pidof sing-box >/dev/null 2>&1; then") {
+		t.Errorf("hook missing pidof branch guard:\n%s", body)
 	}
 	if !strings.Contains(body, "iptables-restore --noflush") {
 		t.Errorf("hook missing restore line:\n%s", body)
@@ -1696,5 +1699,38 @@ func TestIsXtDscpAvailable_PositiveResultCachedForever(t *testing.T) {
 	}
 	if *calls != 1 {
 		t.Fatalf("positive result must be cached forever, got %d probes", *calls)
+	}
+}
+
+// Issue #490: keendns-пресет (destination-IP) должен долетать до всех трёх
+// цепочек ранним `-d <ip> -j RETURN` — ДО DNS-перехвата в mangle и до
+// catch-all в nat, ровно как ручные bypassExtraSubnets.
+func TestBuildRestoreInput_KeenDNSPresetCIDR(t *testing.T) {
+	cidrs, err := resolveBypassCIDRs([]string{"keendns"}, "")
+	if err != nil {
+		t.Fatalf("resolveBypassCIDRs: %v", err)
+	}
+	spec := RestoreInputSpec{PolicyMark: "0xffffaaa", BypassCIDRs: cidrs}
+
+	out := buildRestoreInput(spec)
+	ret := "-d 78.47.125.180/32 -j RETURN"
+	tproxyRet := "-A " + ChainName + " " + ret
+	redirectRet := "-A " + RedirectChain + " " + ret
+	if !strings.Contains(out, tproxyRet) {
+		t.Errorf("TPROXY chain missing keendns bypass: %s", out)
+	}
+	if !strings.Contains(out, redirectRet) {
+		t.Errorf("REDIRECT chain missing keendns bypass: %s", out)
+	}
+	// RETURN стоит раньше DNS-перехвата — иначе DNS к роутеру на этом IP
+	// всё равно уходил бы в sing-box.
+	dnsIntercept := strings.Index(out, "--dport 53 -j TPROXY")
+	if bypassIdx := strings.Index(out, tproxyRet); dnsIntercept >= 0 && bypassIdx > dnsIntercept {
+		t.Errorf("keendns bypass must precede DNS intercept: bypass@%d, dns@%d", bypassIdx, dnsIntercept)
+	}
+
+	bh := buildBlackholeRestoreInput(spec)
+	if !strings.Contains(bh, "-A "+BlackholeChain+" "+ret) {
+		t.Errorf("blackhole chain missing keendns bypass: %s", bh)
 	}
 }

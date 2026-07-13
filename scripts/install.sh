@@ -1,9 +1,11 @@
 #!/bin/sh
 # AWG Manager — установщик для роутеров Keenetic
 #
-# Установка / обновление:
+# Установка / обновление. curl не требуется: busybox wget есть на любом
+# Keenetic, а зеркало отдаёт скрипт по plain-HTTP (busybox wget прошивки
+# может не уметь HTTPS — для GitHub-варианта нужен curl или полноценный wget):
+#   wget -qO- http://repo.hoaxisr.ru/install.sh | sh
 #   curl -sL https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
-#   wget -qO- https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
 #
 # Скрипт добавляет репозиторий http://repo.hoaxisr.ru и делает
 # `opkg update && opkg install awg-manager`. Повторный запуск —
@@ -80,14 +82,12 @@ start_service() {
 }
 
 # --- Проверка работоспособности ---
-# curl не входит в зависимости пакета и на свежем Entware его обычно нет —
-# без fallback на busybox wget проверка всегда «падала» с ложным warning.
+# Только busybox wget: он есть на любом Keenetic/Entware, а проба — plain-HTTP
+# на localhost, где curl не даёт ничего сверх wget. curl намеренно не
+# используется, чтобы установка не поощряла лишнюю зависимость (#482) —
+# awg-manager не требует curl/libcurl ни на одном этапе.
 probe_health() {
-    if command -v curl >/dev/null 2>&1; then
-        curl -sf "$1" >/dev/null 2>&1
-    else
-        wget -q -O /dev/null "$1" 2>/dev/null
-    fi
+    wget -q -O /dev/null "$1" 2>/dev/null
 }
 
 health_check() {

@@ -56,4 +56,3 @@ type Store interface {
 	GetAllTables() map[string]int
 	DeleteFile() error
 }
-

@@ -53,12 +53,12 @@ func TestState_IsTerminal(t *testing.T) {
 
 func TestNewNames(t *testing.T) {
 	tests := []struct {
-		tunnelID     string
-		wantNum      string
-		wantNDMS     string
-		wantIface    string
-		wantConf     string
-		wantSocket   string
+		tunnelID   string
+		wantNum    string
+		wantNDMS   string
+		wantIface  string
+		wantConf   string
+		wantSocket string
 	}{
 		{
 			tunnelID:   "awg0",

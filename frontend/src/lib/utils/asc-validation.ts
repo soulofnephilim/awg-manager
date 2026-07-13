@@ -29,14 +29,14 @@ export function isZeroASCState(params: ASCParams): boolean {
 	}
 
 	if ('s3' in params) {
-		const raw = (params as ASCParamsExtended).s3 as unknown;
+		const raw = (params).s3 as unknown;
 		if (!(raw === undefined || raw === null || raw === '' || isZeroLike(raw))) {
 			return false;
 		}
 	}
 
 	if ('s4' in params) {
-		const raw = (params as ASCParamsExtended).s4 as unknown;
+		const raw = (params).s4 as unknown;
 		if (!(raw === undefined || raw === null || raw === '' || isZeroLike(raw))) {
 			return false;
 		}

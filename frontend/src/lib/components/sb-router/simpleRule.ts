@@ -4,6 +4,8 @@ import { resolveRuleSetByTag } from '$lib/utils/singboxInlineRules';
 export function isSystemRule(rule: SingboxRouterRule): boolean {
   if (rule.action === 'sniff' || rule.action === 'hijack-dns') return true;
   if (rule.ip_is_private && rule.outbound === 'direct') return true;
+  // System UDP-timeout override (route-options scoped to udp).
+  if (rule.action === 'route-options' && rule.network === 'udp') return true;
   return false;
 }
 
@@ -79,7 +81,7 @@ export function classifyRuleSimplicity(
     return { simple: false };
   }
 
-  const tag = tags[0]!;
+  const tag = tags[0];
   const rs = resolveRuleSetByTag(tag, ruleSets);
   if (!rs) return { simple: false };
 

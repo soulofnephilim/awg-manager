@@ -69,9 +69,9 @@ type Catalog interface {
 type TunnelWithStatus struct {
 	ID       string
 	Name     string
-	Backend  string       // "kernel" or "nativewg"
+	Backend  string // "kernel" or "nativewg"
 	State    tunnel.State
-	NWGIndex int          // only for nativewg
+	NWGIndex int // only for nativewg
 }
 
 // TunnelProvider abstracts the tunnel service for Catalog.
@@ -119,8 +119,8 @@ type CatalogImpl struct {
 	snapAccessPolicies   SnapshotFunc
 	snapPolicyDevices    SnapshotFunc
 	snapPolicyInterfaces SnapshotFunc
-	snapClientRoutes         SnapshotFunc
-	snapHydraRouteStatus     SnapshotFunc
+	snapClientRoutes     SnapshotFunc
+	snapHydraRouteStatus SnapshotFunc
 }
 
 // NewCatalog creates a new CatalogImpl.

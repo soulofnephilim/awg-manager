@@ -30,15 +30,17 @@
 
 ## Установка (стабильная версия)
 
+curl не требуется — установка идёт встроенным busybox wget (полезно на устройствах с малой внутренней памятью):
+
 ```sh
 opkg update && opkg upgrade
-opkg install curl
-curl -sL https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
+wget -qO- http://repo.hoaxisr.ru/install.sh | sh
 ```
 
-Если у вас недоступен GitHub или при выполнении скрипта установки он "зависает", можете воспользоваться зеркалом: 
+Вариант через GitHub (HTTPS): нужен curl, т.к. busybox wget прошивки может не поддерживать HTTPS:
 ```sh
-wget -qO- http://repo.hoaxisr.ru/install.sh | sh
+opkg install curl
+curl -sL https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
 ```
 
 После установки веб-интерфейс доступен по адресу роутера и обычно по 2222 порту.

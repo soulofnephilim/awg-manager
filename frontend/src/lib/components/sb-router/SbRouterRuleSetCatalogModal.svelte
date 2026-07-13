@@ -8,6 +8,9 @@
   interface Props {
     open: boolean;
     existingRuleSetTags: string[];
+    /** rule_set tag → number of referencing rules (route + DNS). With it the disabled
+     *  «добавлено» tile differentiates «используется правилами» vs «без правил». */
+    ruleSetUsage?: Map<string, number>;
     submitting?: boolean;
     onclose: () => void;
     onconfirm: (presets: CatalogPreset[]) => void;
@@ -16,6 +19,7 @@
   let {
     open = false,
     existingRuleSetTags,
+    ruleSetUsage = undefined,
     submitting = false,
     onclose,
     onconfirm,
@@ -35,6 +39,8 @@
   warnLargeDnsLists={false}
   markExisting
   {existingNames}
+  {existingRuleSetTags}
+  {ruleSetUsage}
   confirmLabel="Добавить наборы"
   {submitting}
   {onclose}

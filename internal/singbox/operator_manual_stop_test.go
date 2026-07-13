@@ -173,7 +173,7 @@ func TestOperator_SetManualStop_PersistFailure_RollsBackFlag(t *testing.T) {
 	})
 	// Pre-set flag to false; attempt to set to true; expect rollback.
 	if err := op.setManualStop(true); err == nil {
-			t.Fatalf("setManualStop: want error, got nil")
+		t.Fatalf("setManualStop: want error, got nil")
 	}
 	if op.manuallyStopped.Load() {
 		t.Errorf("in-memory flag must roll back to false on persist failure")

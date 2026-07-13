@@ -65,9 +65,9 @@ function highlightJsonQuotedString(src: string, openIndex: number): { html: stri
 	let closed = false;
 
 	while (i < n) {
-		const d = src[i]!;
+		const d = src[i];
 		if (d === '\\' && i + 1 < n) {
-			inner += escapeHtml(d) + escapeHtml(src[i + 1]!);
+			inner += escapeHtml(d) + escapeHtml(src[i + 1]);
 			i += 2;
 			continue;
 		}
@@ -201,7 +201,7 @@ function highlightMixedYamlAndLinks(raw: string): string {
 	const lines = raw.split('\n');
 	const parts: string[] = [];
 	for (let li = 0; li < lines.length; li++) {
-		parts.push(highlightYamlOrPlainLine(lines[li]!));
+		parts.push(highlightYamlOrPlainLine(lines[li]));
 		if (li < lines.length - 1) parts.push('\n');
 	}
 	return parts.join('');

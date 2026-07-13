@@ -36,11 +36,6 @@ type Orchestrator struct {
 	slots   map[Slot]SlotMeta
 	enabled map[Slot]bool
 
-	// dirty signals that on-disk state changed since the last successful
-	// reload. Task 4 wires this into a debounced reloader. For now Save
-	// / SetEnabled just flip it.
-	dirty bool
-
 	// validator runs `sing-box check` on a directory. nil = skip
 	// check (used by tests that don't need it).
 	validator DraftValidator
@@ -173,10 +168,16 @@ func (o *Orchestrator) Bootstrap() error {
 	if err := o.ensureDirs(); err != nil {
 		return err
 	}
-	if err := o.sweepStaleApplyCheckDirs(); err != nil {
+	if err := o.sweepStaleCheckDirs(); err != nil {
 		// Sweep failure is non-fatal — log and continue. Stale dirs
 		// are harmless cosmetic noise.
-		o.log("warn", fmt.Sprintf("orchestrator: sweep .apply-check: %v", err))
+		o.log("warn", fmt.Sprintf("orchestrator: sweep check dirs: %v", err))
+	}
+	if err := o.sweepStaleTempFiles(); err != nil {
+		// Same best-effort treatment: a crash between AtomicWrite's temp write
+		// and rename leaves a `*.tmp.<pid>.<nanotime>` file behind. sing-box's
+		// `*.json` glob ignores it, so it is cosmetic flash accumulation.
+		o.log("warn", fmt.Sprintf("orchestrator: sweep .tmp: %v", err))
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -223,10 +224,17 @@ func (o *Orchestrator) removeDisabledCopy(meta SlotMeta) error {
 	return removeIfExists(o.disabledPath(meta))
 }
 
-// sweepStaleApplyCheckDirs removes leftover .apply-check-* directories
-// from crashed Apply runs. Tmpdir creation uses MkdirTemp with a
-// well-known prefix; cleanup is best-effort.
-func (o *Orchestrator) sweepStaleApplyCheckDirs() error {
+// checkDirPrefixes are the MkdirTemp prefixes of every validation tmpdir
+// the orchestrator creates inside configDir (ApplyDraft, CheckMerged /
+// SaveAndValidate, CheckSlotAlone). The sweep must know them all: a crash
+// between MkdirTemp and the deferred RemoveAll strands the dir on flash
+// storage forever otherwise.
+var checkDirPrefixes = []string{".apply-check-", ".save-check-", ".alone-check-"}
+
+// sweepStaleCheckDirs removes leftover validation tmpdirs from crashed
+// check runs. Tmpdir creation uses MkdirTemp with a well-known prefix;
+// cleanup is best-effort.
+func (o *Orchestrator) sweepStaleCheckDirs() error {
 	entries, err := os.ReadDir(o.configDir)
 	if err != nil {
 		return err
@@ -236,7 +244,14 @@ func (o *Orchestrator) sweepStaleApplyCheckDirs() error {
 		if !e.IsDir() {
 			continue
 		}
-		if !strings.HasPrefix(e.Name(), ".apply-check-") {
+		stale := false
+		for _, p := range checkDirPrefixes {
+			if strings.HasPrefix(e.Name(), p) {
+				stale = true
+				break
+			}
+		}
+		if !stale {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(o.configDir, e.Name())); err != nil && firstErr == nil {
@@ -246,9 +261,46 @@ func (o *Orchestrator) sweepStaleApplyCheckDirs() error {
 	return firstErr
 }
 
+// tempFileMarker is the infix AtomicWritePerm gives its temp files
+// (`<name>.tmp.<pid>.<nanotime>`) before the rename into place.
+const tempFileMarker = ".tmp."
+
+// sweepStaleTempFiles removes leftover AtomicWrite temp files (`*.tmp.<pid>.<n>`)
+// from a crash between the temp write and the rename. It scans the active dir
+// plus disabled/ and pending/, since slot writes land in all three. Best-effort:
+// the first removal error is returned but the sweep continues.
+func (o *Orchestrator) sweepStaleTempFiles() error {
+	dirs := []string{
+		o.configDir,
+		filepath.Join(o.configDir, disabledSubdir),
+		o.pendingDir(),
+	}
+	var firstErr error
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // disabled/ or pending/ may not exist yet
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.Contains(e.Name(), tempFileMarker) {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
 // Save writes the slot's JSON atomically to whichever location matches
-// the slot's CURRENT enabled state. Marks the orchestrator dirty so a
-// later Reload (Task 4) will pick it up.
+// the slot's CURRENT enabled state, then schedules a debounced reload.
 func (o *Orchestrator) Save(slot Slot, jsonBytes []byte) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -272,9 +324,9 @@ func (o *Orchestrator) SaveSilent(slot Slot, jsonBytes []byte) error {
 	return o.saveLocked(slot, jsonBytes)
 }
 
-// saveLocked is the shared body. Caller MUST hold o.mu. Marks the
-// orchestrator dirty but does not arm the reload timer — that is the
-// caller's responsibility (Save does, SaveSilent does not).
+// saveLocked is the shared body. Caller MUST hold o.mu. It does not arm
+// the reload timer — that is the caller's responsibility (Save does,
+// SaveSilent does not).
 func (o *Orchestrator) saveLocked(slot Slot, jsonBytes []byte) error {
 	meta, ok := o.slots[slot]
 	if !ok {
@@ -289,13 +341,12 @@ func (o *Orchestrator) saveLocked(slot Slot, jsonBytes []byte) error {
 	if err := writeAtomic(path, jsonBytes); err != nil {
 		return fmt.Errorf("save %s: %w", slot, err)
 	}
-	o.dirty = true
 	return nil
 }
 
 // SetEnabled toggles slot activity by renaming the file between
 // active and disabled locations. AlwaysOn slots reject disable.
-// Marks the orchestrator dirty and schedules a debounced reload.
+// Schedules a debounced reload.
 func (o *Orchestrator) SetEnabled(slot Slot, enabled bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -338,7 +389,6 @@ func (o *Orchestrator) setEnabledLocked(slot Slot, enabled, scheduleReload bool)
 		return fmt.Errorf("toggle %s: %w", slot, err)
 	}
 	o.enabled[slot] = enabled
-	o.dirty = true
 	if scheduleReload {
 		o.scheduleReload()
 	}

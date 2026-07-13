@@ -401,7 +401,7 @@
     </MobileBottomBar>
 
     {#if $mode === 'beginner'}
-      <SbRouterServiceCatalogModal />
+      <SbRouterServiceCatalogModal existingRuleSetTags={$ruleSets.map((r) => r.tag)} />
     {:else}
       <TemplatesModal mode="collect" servicesOnly={false} />
     {/if}

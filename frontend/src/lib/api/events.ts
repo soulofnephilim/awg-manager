@@ -19,6 +19,9 @@ export interface LogEntryEvent {
 	target: string;
 	message: string;
 	bucket: 'app' | 'singbox';
+	/** Повтор, свёрнутый в существующую запись: счётчик и время последнего. */
+	repeats?: number;
+	lastSeen?: string;
 }
 
 export interface SystemBootingEvent {
@@ -144,7 +147,9 @@ export interface SSEEventHandlers {
 
 export function parseConnectedEvent(data: string): { ok?: boolean; instanceId?: string } | undefined {
 	try {
-		return JSON.parse(data) as { ok?: boolean; instanceId?: string };
+		const parsed: unknown = JSON.parse(data);
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+		return parsed;
 	} catch {
 		return undefined;
 	}
@@ -153,11 +158,13 @@ export function parseConnectedEvent(data: string): { ok?: boolean; instanceId?: 
 export function connectSSE(handlers: SSEEventHandlers): () => void {
 	const es = new EventSource('/api/events');
 
-	const handle = (type: string, handler?: (data: any) => void) => {
+	const handle = <T>(type: string, handler?: (data: T) => void) => {
 		if (!handler) return;
 		es.addEventListener(type, ((e: MessageEvent) => {
 			try {
-				handler(JSON.parse(e.data));
+				// SSE payloads arrive as JSON strings; each handler declares its own
+				// data shape on SSEEventHandlers, so narrow at this trust boundary.
+				handler(JSON.parse(e.data) as T);
 			} catch {
 				/* ignore parse errors */
 			}

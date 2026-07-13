@@ -37,7 +37,7 @@ const sub = (over: Partial<Subscription>): Subscription =>
 		enabled: true,
 		mode: 'selector',
 		...over,
-	}) as Subscription;
+	});
 
 describe('buildAtomicEgresses', () => {
 	it('excludes the Специальные and Composite outbounds groups', () => {

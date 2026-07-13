@@ -50,6 +50,11 @@ type LogEntryEvent struct {
 	Target    string `json:"target"`
 	Message   string `json:"message"`
 	Bucket    string `json:"bucket"` // "app" | "singbox"
+	// Повтор, свёрнутый в существующую запись (Timestamp — её первое
+	// появление): Repeats — счётчик схлопнутых повторов, LastSeen — время
+	// последнего. Клиент обновляет строку по составному ключу вместо append.
+	Repeats  int    `json:"repeats,omitempty"`
+	LastSeen string `json:"lastSeen,omitempty"`
 }
 
 // Traffic update payload (sent by Traffic Collector).
@@ -143,21 +148,21 @@ type ResourceInvalidatedEvent struct {
 // selective-bypass feature. Phase drives the step indicator in the
 // frontend rebuild modal. Delivered on "singbox-router:selective-progress".
 type SelectiveProgressEvent struct {
-	Phase      string `json:"phase"`   // "collecting"|"resolving"|"populating"|"done"|"error"
-	Message    string `json:"message"` // human-readable description of current step
-	Current    int    `json:"current"` // number of items processed so far
-	Total      int    `json:"total"`   // total items in this phase (0 = unknown)
-	Matcher    string `json:"matcher,omitempty"`
-	QueryHost  string `json:"queryHost,omitempty"`
+	Phase     string `json:"phase"`   // "collecting"|"resolving"|"populating"|"done"|"error"
+	Message   string `json:"message"` // human-readable description of current step
+	Current   int    `json:"current"` // number of items processed so far
+	Total     int    `json:"total"`   // total items in this phase (0 = unknown)
+	Matcher   string `json:"matcher,omitempty"`
+	QueryHost string `json:"queryHost,omitempty"`
 }
 
 // SelectiveRebuildSnapshotEvent is the persisted ipset rebuild outcome in SSE.
 type SelectiveRebuildSnapshotEvent struct {
-	RebuiltAt          string `json:"rebuiltAt"`
-	EntryCount         int    `json:"entryCount"`
-	StaticCIDRCount    int    `json:"staticCidrCount,omitempty"`
-	DomainMatcherCount int    `json:"domainMatcherCount,omitempty"`
-	LastCDNRefresh     string `json:"lastCDNRefresh,omitempty"`
+	RebuiltAt          string   `json:"rebuiltAt"`
+	EntryCount         int      `json:"entryCount"`
+	StaticCIDRCount    int      `json:"staticCidrCount,omitempty"`
+	DomainMatcherCount int      `json:"domainMatcherCount,omitempty"`
+	LastCDNRefresh     string   `json:"lastCDNRefresh,omitempty"`
 	StaticCIDRs        []string `json:"staticCidrs,omitempty"`
 }
 
@@ -165,11 +170,11 @@ type SelectiveRebuildSnapshotEvent struct {
 // entry count changes (e.g. after a successful rebuild or after ipset is
 // installed). Delivered on "singbox-router:selective-status".
 type SelectiveStatusEvent struct {
-	Available          bool   `json:"available"`             // ipset binary present
-	XtSetAvailable     bool   `json:"xtSetAvailable"`        // xt_set kernel module present
-	ConntrackAvailable bool   `json:"conntrackAvailable"`    // conntrack binary present
-	Enabled            bool   `json:"enabled"`               // setting enabled in storage
-	EntryCount         int    `json:"entryCount"`            // current ipset entry count
+	Available          bool                           `json:"available"`             // ipset binary present
+	XtSetAvailable     bool                           `json:"xtSetAvailable"`        // xt_set kernel module present
+	ConntrackAvailable bool                           `json:"conntrackAvailable"`    // conntrack binary present
+	Enabled            bool                           `json:"enabled"`               // setting enabled in storage
+	EntryCount         int                            `json:"entryCount"`            // current ipset entry count
 	LastRebuild        string                         `json:"lastRebuild,omitempty"` // RFC3339 timestamp
 	LastError          string                         `json:"lastError,omitempty"`
 	Snapshot           *SelectiveRebuildSnapshotEvent `json:"snapshot,omitempty"`

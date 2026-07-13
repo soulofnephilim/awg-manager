@@ -16,6 +16,11 @@ import (
 // steady state needs no re-Install.
 func newReconcileInstalledService(t *testing.T, sb *fakeSingbox) *ServiceImpl {
 	t.Helper()
+	// singboxReady (tproxy) gates on the inbound-socket probe; stub it "bound"
+	// by default so an alive engine reads as ready. Dead-engine cases short-
+	// circuit on IsRunning before the probe; the up-but-unbound case overrides
+	// this stub to return false.
+	stubListeningProbe(t, func() bool { return true })
 	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
 	return &ServiceImpl{
 		deps: Deps{
@@ -37,91 +42,33 @@ var reconcileInstalledSettings = storage.SingboxRouterSettings{
 	WANAutoDetect: true,
 }
 
-// Мёртвый sing-box при живых iptables (#456): tproxy-reconcile обязан
-// попытаться перезапустить процесс через AutoRestartIfCrashed.
-func TestReconcileInstalled_DeadSingboxRestarted(t *testing.T) {
+// Единственный рестарт-авторитет — watchdog (Operator.Reconcile). Мёртвый
+// sing-box: tproxy-reconcile НЕ рестартит сам (раньше это был второй авторитет,
+// #456). Fail-closed при этом держит blackhole (при снесённых джампах) или
+// перехват в мёртвый порт (при целых). Движок поднимет watchdog своим тиком.
+func TestReconcileInstalled_DeadSingboxNotRestartedByReconcile(t *testing.T) {
 	sb := newTestSingbox(t) // IsRunning по умолчанию false — «процесс мёртв»
 	svc := newReconcileInstalledService(t, sb)
 
 	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
 		t.Fatalf("reconcileInstalled: %v", err)
 	}
-	if sb.startCalls != 1 {
-		t.Errorf("restart attempts = %d, want 1 (dead process must be respawned)", sb.startCalls)
+	if sb.startCalls != 0 {
+		t.Errorf("reconcile must NOT restart (watchdog is the sole authority): startCalls = %d, want 0", sb.startCalls)
 	}
 }
 
-// Живой sing-box не трогаем: ни одного вызова AutoRestartIfCrashed/Start.
+// Живой sing-box не трогаем: ни рестарта, ни спавна.
 func TestReconcileInstalled_AliveSingboxUntouched(t *testing.T) {
 	sb := newTestSingbox(t)
 	sb.isRunningFn = func() (bool, int) { return true, 1234 }
-	autoCalls := 0
-	sb.autoRestartFn = func() (bool, bool, error) { autoCalls++; return true, false, nil }
-	svc := newReconcileInstalledService(t, sb)
-
-	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
-		t.Fatalf("reconcileInstalled: %v", err)
-	}
-	if autoCalls != 0 || sb.startCalls != 0 {
-		t.Errorf("alive process must be untouched: autoRestart=%d start=%d, want 0/0", autoCalls, sb.startCalls)
-	}
-}
-
-// Подавленный перезапуск (ручной Stop или backoff внутри Operator) не
-// валит reconcile и не спавнит процесс: остальная работа (iptables)
-// продолжается штатно.
-func TestReconcileInstalled_SuppressedRestartRespected(t *testing.T) {
-	sb := newTestSingbox(t)
-	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
 	svc := newReconcileInstalledService(t, sb)
 
 	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
 		t.Fatalf("reconcileInstalled: %v", err)
 	}
 	if sb.startCalls != 0 {
-		t.Errorf("suppressed restart must not spawn: startCalls = %d, want 0", sb.startCalls)
-	}
-}
-
-// Ошибка перезапуска логируется и не прерывает reconcile (best-effort,
-// как остальные heal-шаги).
-func TestReconcileInstalled_RestartErrorIsSoft(t *testing.T) {
-	sb := newTestSingbox(t)
-	sb.autoRestartFn = func() (bool, bool, error) { return false, false, errors.New("boom") }
-	svc := newReconcileInstalledService(t, sb)
-
-	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
-		t.Fatalf("reconcileInstalled must not fail on restart error: %v", err)
-	}
-}
-
-// fakeip drift-heal: подавленный перезапуск (ручной Stop или backoff —
-// решает Operator внутри AutoRestartIfCrashed) не спавнит процесс и не
-// ждёт readiness. Регресс-защита: до #456 drift-heal звал Start() напрямую
-// и воскрешал остановленный пользователем движок.
-func TestReconcileFakeIPTun_DriftHealRespectsSuppression(t *testing.T) {
-	h := newFakeIPEnableHarness(t, "")
-	if err := h.svc.Enable(context.Background()); err != nil {
-		t.Fatalf("Enable: %v", err)
-	}
-	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
-	h.log.calls = nil
-
-	sb := h.svc.deps.Singbox.(*fakeSingbox)
-	sb.isRunningFn = func() (bool, int) { return false, 0 } // мёртв весь тест
-	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil }
-
-	all, _ := h.store.Load()
-	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
-	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
-		t.Fatalf("reconcileFakeIPTun: %v", err)
-	}
-	if sb.startCalls != 0 {
-		t.Errorf("suppressed drift-heal must not spawn: startCalls = %d, want 0", sb.startCalls)
-	}
-	// Остальной heal (маршруты) продолжается best-effort.
-	if !h.log.has("AddRoute:198.18.0.0:255.254.0.0:OpkgTun0") {
-		t.Errorf("route heal must still run, got %v", h.log.calls)
+		t.Errorf("alive process must be untouched: start=%d, want 0", sb.startCalls)
 	}
 }
 
@@ -192,23 +139,133 @@ func chainsOnlyDump() string {
 		"-N " + RedirectChain + "\n"
 }
 
-// FIX-B: движок мёртв и рестарт подавлен (backoff/ручной Stop) → jump-heal
-// НЕ восстанавливает перехват в мёртвый порт: Install не вызывается,
-// существующие правила не трогаются (fail-closed остаётся).
-func TestReconcileInstalled_DeadEngineSkipsJumpHeal(t *testing.T) {
-	sb := newTestSingbox(t)                                                   // IsRunning=false весь тест
-	sb.autoRestartFn = func() (bool, bool, error) { return false, true, nil } // suppressed
+// Fail-closed: движок мёртв, рестарт подавлен И PREROUTING-джампы снесены
+// (chainsOnlyDump) → НЕ восстанавливаем перехват в мёртвый порт, а ставим
+// blackhole-DROP policy-трафика, чтобы он не утёк в WAN. Ровно один restore —
+// blackhole-блоб, не реальный перехват; флаг blackholeActive выставлен.
+func TestReconcileInstalled_DeadEngineInstallsBlackhole(t *testing.T) {
+	sb := newTestSingbox(t) // IsRunning=false весь тест
 	svc := newReconcileInstalledService(t, sb)
-	installs := 0
-	ipt := newStubIPTables(func(_ context.Context, _ string) error { installs++; return nil })
+	var restores []string
+	ipt := newStubIPTables(func(_ context.Context, in string) error { restores = append(restores, in); return nil })
 	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) { return chainsOnlyDump(), nil }
 	svc.deps.IPTables = ipt
 
 	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
 		t.Fatalf("reconcileInstalled: %v", err)
 	}
-	if installs != 0 {
-		t.Errorf("Install calls = %d, want 0 (no jump restore into a dead port)", installs)
+	if len(restores) != 1 {
+		t.Fatalf("restore calls = %d, want 1 (blackhole only, no real interception)", len(restores))
+	}
+	if !strings.Contains(restores[0], "-A "+BlackholeChain+" -j DROP") {
+		t.Errorf("restored blob is not the fail-closed blackhole:\n%s", restores[0])
+	}
+	if strings.Contains(restores[0], ChainName) {
+		t.Errorf("must NOT restore real interception (%s) into a dead port:\n%s", ChainName, restores[0])
+	}
+	if !svc.blackholeActive {
+		t.Error("blackholeActive must be set after installing the fail-closed blackhole")
+	}
+}
+
+// safety-3: движок ЖИВ, но inbound-сокеты НЕ привязаны (up-but-unbound, порт
+// занят / отклонённый hot-reload). reconcile трактует это как «не готов»:
+// НЕ ставит реальный перехват (REDIRECT/TPROXY в непривязанный сокет
+// заблэкхолил бы весь policy-трафик, вкл. DNS:53), а при снесённых джампах
+// включает fail-closed blackhole.
+func TestReconcileInstalled_LiveButUnboundInstallsBlackhole(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 } // процесс жив
+	var restores []string
+	ipt := newStubIPTables(func(_ context.Context, in string) error { restores = append(restores, in); return nil })
+	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) { return chainsOnlyDump(), nil } // джампы снесены
+	svc := newReconcileInstalledService(t, sb)
+	svc.deps.IPTables = ipt
+	// ПОСЛЕ харнесса (тот стабит probe=true) переопределяем: сокеты не привязаны.
+	stubListeningProbe(t, func() bool { return false })
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if len(restores) != 1 {
+		t.Fatalf("restore calls = %d, want 1 (blackhole only, no real interception into an unbound socket)", len(restores))
+	}
+	if !strings.Contains(restores[0], "-A "+BlackholeChain+" -j DROP") {
+		t.Errorf("restored blob is not the fail-closed blackhole:\n%s", restores[0])
+	}
+	if strings.Contains(restores[0], ChainName) {
+		t.Errorf("must NOT install real interception (%s) while sockets are unbound:\n%s", ChainName, restores[0])
+	}
+	if !svc.blackholeActive {
+		t.Error("blackholeActive must be set for an up-but-unbound engine")
+	}
+}
+
+// safety-3 (покрытие): движок up-but-unbound, но PREROUTING-джампы ЦЕЛЫ →
+// установку iptables откладываем (любой триггер, здесь markChanged), blackhole
+// НЕ ставим — перехват в мёртвый порт сам дропает трафик (fail-closed).
+func TestReconcileInstalled_LiveButUnboundJumpsIntactDefers(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	restores := 0
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { restores++; return nil })
+	// runIPTablesOut по умолчанию = jumpsPresentDump → джампы целы.
+	svc := newReconcileInstalledService(t, sb)
+	svc.deps.IPTables = ipt
+	svc.currentMark = "0xstale" // форсируем markChanged → needsInstall
+	stubListeningProbe(t, func() bool { return false })
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if restores != 0 {
+		t.Errorf("установка должна быть отложена (unbound, джампы целы): restore calls = %d, want 0", restores)
+	}
+	if svc.blackholeActive {
+		t.Error("blackhole не нужен при целых джампах — перехват в мёртвый порт держит fail-closed")
+	}
+}
+
+// Regression (ревью lifecycle): probe-ОШИБКА при мёртвом движке НЕ должна
+// снимать blackhole. Иначе транзиентная -S ошибка во время NDMS-reload (ровно
+// когда blackhole и нужен) снесла бы DROP при живой утечке. blackhole сохраняем.
+func TestReconcileInstalled_ProbeErrorPreservesBlackhole(t *testing.T) {
+	sb := newTestSingbox(t) // dead
+	svc := newReconcileInstalledService(t, sb)
+	svc.blackholeActive = true // прошлый тик поставил blackhole
+	removed := false
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	ipt.runIPTablesOut = func(_ context.Context, _ ...string) (string, error) {
+		return "", errors.New("iptables -S failed (NDMS reload)")
+	}
+	ipt.cleanupBlackhole = func() { removed = true }
+	svc.deps.IPTables = ipt
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if removed || !svc.blackholeActive {
+		t.Errorf("probe error + dead engine must PRESERVE blackhole: removed=%v active=%v", removed, svc.blackholeActive)
+	}
+}
+
+// Движок вернулся (jumps present, IsRunning=true) → ранее поставленный
+// fail-closed blackhole снимается: cleanupBlackhole вызван, флаг сброшен.
+func TestReconcileInstalled_EngineRecoveryRemovesBlackhole(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 4242 } // alive
+	svc := newReconcileInstalledService(t, sb)
+	svc.blackholeActive = true // как будто прошлый тик поставил blackhole
+	removed := false
+	ipt := newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	ipt.cleanupBlackhole = func() { removed = true }
+	svc.deps.IPTables = ipt
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if !removed || svc.blackholeActive {
+		t.Errorf("engine recovery must drop the blackhole: cleanup=%v active=%v", removed, svc.blackholeActive)
 	}
 }
 

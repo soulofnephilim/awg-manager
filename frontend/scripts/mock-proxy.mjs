@@ -70,6 +70,12 @@ async function getUnifiedPresets() {
 }
 
 const UPSTREAM = process.env.UPSTREAM ?? 'http://127.0.0.1:8080';
+// MOCK_DETERMINISTIC=1: вся "живость" (jitter трафика, delay-пробы,
+// вероятностные сбои) становится воспроизводимой — скриншот-сравнение
+// рефакторингов UI требует бит-в-бит одинаковых ответов между прогонами.
+const DETERMINISTIC = ['1', 'true'].includes(String(process.env.MOCK_DETERMINISTIC ?? ''));
+const rand = () => (DETERMINISTIC ? 0.5 : rand());
+
 const PORT = Number(process.env.PORT ?? 8081);
 const VALID = new Set(['basic', 'advanced', 'expert']);
 
@@ -1087,7 +1093,7 @@ const AWG_BASE_LATENCY = (() => {
 	};
 	const map = {};
 	for (const [id, range] of Object.entries(ranges)) {
-		map[id] = range ? range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1)) : null;
+		map[id] = range ? range[0] + Math.floor(rand() * (range[1] - range[0] + 1)) : null;
 	}
 	return map;
 })();
@@ -1226,8 +1232,8 @@ function buildConnectivityMatrixEvent({ forced = false } = {}) {
 			const failed = !profile.up || profile.failedTargets?.has(target.id);
 			const base = Number(profile.base) || 80;
 			const hash = hashNumber(target.id, tunnel.id);
-			const drift = Math.round(Math.sin((Date.now() / 1800) + hash) * 9);
-			const forceJitter = forced ? Math.floor(Math.random() * 15) - 7 : 0;
+			const drift = DETERMINISTIC ? 0 : Math.round(Math.sin((Date.now() / 1800) + hash) * 9);
+			const forceJitter = forced ? Math.floor(rand() * 15) - 7 : 0;
 			const latency = blank || failed
 				? null
 				: Math.max(10, Math.min(520, base + (hash % 55) + drift + forceJitter + ti * 6));
@@ -1382,14 +1388,14 @@ function tickAwgTraffic() {
 		traffic.rxBytes +=
 			traffic.rxStep +
 			Math.round(Math.sin(traffic.tick / 3) * profile.waveRx * 0.25) +
-			Math.floor(Math.random() * profile.jitterRx) +
+			Math.floor(rand() * profile.jitterRx) +
 			(burst ? profile.burstRx : 0);
 		traffic.txBytes +=
 			traffic.txStep +
 			Math.round(Math.cos(traffic.tick / 4) * profile.waveTx * 0.25) +
-			Math.floor(Math.random() * profile.jitterTx) +
+			Math.floor(rand() * profile.jitterTx) +
 			(burst ? profile.burstTx : 0);
-		traffic.lastHandshake = new Date(Date.now() - (20_000 + Math.floor(Math.random() * 70_000))).toISOString();
+		traffic.lastHandshake = new Date(Date.now() - (20_000 + Math.floor(rand() * 70_000))).toISOString();
 		events.push({
 			id: traffic.eventId,
 			rxBytes: traffic.rxBytes,
@@ -1418,12 +1424,12 @@ function tickSingboxTraffic() {
 		traffic.download +=
 			traffic.downloadStep +
 			Math.round(Math.sin(traffic.tick / 3.2) * profile.waveRx * 0.35) +
-			Math.floor(Math.random() * profile.jitterRx) +
+			Math.floor(rand() * profile.jitterRx) +
 			(burst ? profile.burstRx : 0);
 		traffic.upload +=
 			traffic.uploadStep +
 			Math.round(Math.cos(traffic.tick / 4.1) * profile.waveTx * 0.35) +
-			Math.floor(Math.random() * profile.jitterTx) +
+			Math.floor(rand() * profile.jitterTx) +
 			(burst ? profile.burstTx : 0);
 		return {
 			tag: traffic.tag,
@@ -1454,8 +1460,8 @@ function tickSubscriptionTraffic() {
 		const baseUp = 8_000_000 + (hash % 7) * 1_500_000;
 		const waveDown = Math.round(Math.sin(phase / 12) * profile.waveRx * 0.4);
 		const waveUp = Math.round(Math.cos(phase / 15) * profile.waveTx * 0.4);
-		const jitterDown = Math.floor(Math.random() * Math.max(1, Math.floor(profile.jitterRx * 0.8)));
-		const jitterUp = Math.floor(Math.random() * Math.max(1, Math.floor(profile.jitterTx * 0.8)));
+		const jitterDown = Math.floor(rand() * Math.max(1, Math.floor(profile.jitterRx * 0.8)));
+		const jitterUp = Math.floor(rand() * Math.max(1, Math.floor(profile.jitterTx * 0.8)));
 
 		events.push({
 			tag: activeTag,
@@ -1480,8 +1486,8 @@ function buildSingboxTrafficEvent() {
 
 /** Clamp mock latency to 10..600 ms (0 = timeout). */
 function mockDelayJitter(base, spread = 70) {
-	if (Math.random() < 0.05) return 0;
-	const jitter = Math.round((Math.random() - 0.5) * spread);
+	if (rand() < 0.05) return 0;
+	const jitter = Math.round((rand() - 0.5) * spread);
 	return Math.max(10, Math.min(600, base + jitter));
 }
 
@@ -2821,6 +2827,9 @@ const mockSingboxRules = [
 	{ ip_is_private: true, outbound: 'direct' },
 	{ action: 'route', domain_suffix: ['youtube.com', 'ytimg.com'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-openai'], outbound: 'sub-demo0001' },
+	// Composite «Все AI сервисы» (#450): added + used → its catalog tile is
+	// «добавлено», and member presets (anthropic/gemini/...) get the Layers mark.
+	{ action: 'route', rule_set: ['geosite-category-ai-!cn'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['inline-neo-demo'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-google'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-discord'], outbound: 'manual-eu' },
@@ -2837,6 +2846,13 @@ const mockSingboxRules = [
 
 const mockSingboxRuleSets = [
 	{ tag: 'geosite-cn', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-cn.srs', update_interval: '24h', download_detour: 'direct' },
+	// #450 catalog badges: composite tag from internal/presets/defaults.json
+	// («Все AI сервисы») — added + referenced by a rule above → members get
+	// the «в Все AI сервисы» member mark in the rule-set catalog.
+	{ tag: 'geosite-category-ai-!cn', type: 'remote', format: 'binary', url: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ai-!cn.srs', update_interval: '24h', download_detour: 'direct' },
+	// #450: added but NOT referenced by any route/DNS rule → the Telegram
+	// catalog tile renders the «добавлено, без правил» state.
+	{ tag: 'geosite-telegram', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-telegram.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-youtube', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-youtube.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-openai', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-openai.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-discord', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-discord.srs', update_interval: '24h', download_detour: 'direct' },
@@ -3307,12 +3323,12 @@ function maybeInjectDownloadFault(req, res, path) {
 	if (!downloadFaultsEnabled) return false;
 	const route = DOWNLOAD_FAULT_ROUTES.find((r) => r.method === req.method && r.path === path);
 	if (!route) return false;
-	if (Math.random() >= downloadFaultProbability) return false;
+	if (rand() >= downloadFaultProbability) return false;
 
 	// Drain any request body so keep-alive sockets don't stall.
 	if (req.method !== 'GET' && req.method !== 'HEAD') req.resume();
 
-	const message = DOWNLOAD_FAULT_MESSAGES[Math.floor(Math.random() * DOWNLOAD_FAULT_MESSAGES.length)];
+	const message = DOWNLOAD_FAULT_MESSAGES[Math.floor(rand() * DOWNLOAD_FAULT_MESSAGES.length)];
 	if (route.style === 'updateInfo') {
 		send(res, 200, {
 			success: true,
@@ -4468,7 +4484,7 @@ const server = http.createServer(async (req, res) => {
 					let h = 0;
 					for (let i = 0; i < tag.length; i++) h = ((h << 5) - h + tag.charCodeAt(i)) | 0;
 					const base = Math.abs(h) % 370 + 30;
-					const jitter = Math.floor(Math.random() * 40) - 20;
+					const jitter = Math.floor(rand() * 40) - 20;
 					delays[tag] = Math.max(1, base + jitter);
 				}
 				send(res, 200, { success: true, data: { delays } });
@@ -6128,7 +6144,8 @@ const server = http.createServer(async (req, res) => {
 		let now = sub.activeMember || '';
 		if (sub.mode === 'urltest' && sub.memberTags && sub.memberTags.length > 0) {
 			// Rotate every 15 seconds — visible auto-switching for testing.
-			const idx = Math.floor(Date.now() / 15000) % sub.memberTags.length;
+			// (в детерминированном режиме — фиксированный первый член)
+			const idx = DETERMINISTIC ? 0 : Math.floor(Date.now() / 15000) % sub.memberTags.length;
 			now = sub.memberTags[idx];
 		}
 		send(res, 200, { success: true, data: { now } });
@@ -6445,9 +6462,9 @@ const server = http.createServer(async (req, res) => {
 			return;
 		}
 		const base = AWG_BASE_LATENCY[id];
-		const jitter = Math.floor(Math.random() * 25) - 12;
+		const jitter = Math.floor(rand() * 25) - 12;
 		const latency =
-			base !== null ? Math.max(10, Math.min(300, base + jitter)) : 42 + Math.floor(Math.random() * 40);
+			base !== null ? Math.max(10, Math.min(300, base + jitter)) : 42 + Math.floor(rand() * 40);
 		send(res, 200, {
 			success: true,
 			data: { connected: true, latency, httpCode: 204 },
@@ -6463,7 +6480,7 @@ const server = http.createServer(async (req, res) => {
 			send(res, 200, {
 				success: true,
 				data: up
-					? { connected: true, latency: 38 + Math.floor(Math.random() * 20) }
+					? { connected: true, latency: 38 + Math.floor(rand() * 20) }
 					: { connected: false, reason: 'interface down' },
 			});
 		}, 800);
@@ -6509,7 +6526,7 @@ const server = http.createServer(async (req, res) => {
 		const totalSeconds = 5;
 		const iv = setInterval(() => {
 			second++;
-			const bw = baseBw + Math.floor((Math.random() - 0.5) * 2_000_000);
+			const bw = baseBw + Math.floor((rand() - 0.5) * 2_000_000);
 			const bytes = Math.floor(bw);
 			sent += bytes;
 			res.write(`event: interval\ndata: ${JSON.stringify({ second, bandwidth: bw })}\n\n`);
@@ -6990,7 +7007,7 @@ function makeMockSnapshot() {
 	const outbounds = ['vless-1', 'urltest:auto', 'DIRECT'];
 	const rules = ['DOMAIN-SUFFIX', 'RULE-SET', 'GEOIP'];
 	const networks = ['tcp', 'tcp', 'tcp', 'udp'];
-	const conns = Array.from({ length: 6 + Math.floor(Math.random() * 4) }, (_, i) => {
+	const conns = Array.from({ length: 6 + Math.floor(rand() * 4) }, (_, i) => {
 		const out = outbounds[i % outbounds.length];
 		return {
 			id: `mock-${i}-${Date.now()}`,
@@ -7003,8 +7020,8 @@ function makeMockSnapshot() {
 				destinationPort: '443',
 				host: hosts[i % hosts.length],
 			},
-			upload: 1024 * (50 + Math.floor(Math.random() * 5000)),
-			download: 1024 * (200 + Math.floor(Math.random() * 50000)),
+			upload: 1024 * (50 + Math.floor(rand() * 5000)),
+			download: 1024 * (200 + Math.floor(rand() * 50000)),
 			start: new Date(Date.now() - (60 + i * 30) * 1000).toISOString(),
 			chains: [out],
 			rule: rules[i % rules.length],

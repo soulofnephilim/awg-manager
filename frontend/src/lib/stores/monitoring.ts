@@ -1,7 +1,48 @@
 import { writable } from 'svelte/store';
+import * as v from 'valibot';
 import type { MonitoringSnapshot } from '$lib/types';
 
 const CACHE_KEY = 'awgm_monitoring_snapshot_v1';
+
+// Кэш в localStorage переживает обновления awg-manager, поэтому форма
+// снапшота из прошлой версии — недоверенный вход: слепой каст здесь уже
+// приводил бы к падению матрицы на deref'ах до первого свежего снапшота.
+// Валидируются поля, которые UI читает структурно; лишние ключи допустимы
+// (looseObject), несовпадение — кэш молча игнорируется (self-heal).
+// Массивы nullable: Go-DTO без omitempty маршалит nil-слайс в null (пустой
+// роутер отдаёт {"targets":null,...}) — это валидный кэш, а не мусор;
+// null нормализуется в [] в loadCached, потому что UI ждёт массивы.
+const cachedSnapshotSchema = v.looseObject({
+	targets: v.nullable(
+		v.array(v.looseObject({ id: v.string(), host: v.string(), name: v.string() })),
+	),
+	tunnels: v.nullable(
+		v.array(
+			v.looseObject({
+				id: v.string(),
+				name: v.string(),
+				ifaceName: v.string(),
+				pingcheckTarget: v.string(),
+				selfTarget: v.string(),
+				selfMethod: v.string(),
+			}),
+		),
+	),
+	cells: v.nullable(
+		v.array(
+			v.looseObject({
+				targetId: v.string(),
+				tunnelId: v.string(),
+				latencyMs: v.nullable(v.number()),
+				ok: v.boolean(),
+				activeForRestart: v.boolean(),
+				isSelf: v.boolean(),
+				ts: v.string(),
+			}),
+		),
+	),
+	updatedAt: v.string(),
+});
 
 interface MonitoringState {
 	snapshot: MonitoringSnapshot | null;
@@ -27,7 +68,16 @@ function createMonitoringStore() {
 			try {
 				const raw = localStorage.getItem(CACHE_KEY);
 				if (!raw) return;
-				const snap: MonitoringSnapshot = JSON.parse(raw);
+				const result = v.safeParse(cachedSnapshotSchema, JSON.parse(raw));
+				if (!result.success) return;
+				const out = result.output;
+				const snap: MonitoringSnapshot = {
+					...out,
+					targets: out.targets ?? [],
+					tunnels: out.tunnels ?? [],
+					cells: out.cells ?? [],
+					updatedAt: out.updatedAt,
+				};
 				update((s) => ({
 					...s,
 					snapshot: snap,

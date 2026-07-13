@@ -137,9 +137,20 @@ func (h *SubscriptionHandler) toSubscriptionGroupDTO(g subscription.AggregateGro
 	}
 }
 
-// respondGroupServiceError маппит ошибки Group-CRUD на HTTP-статусы.
-func (h *SubscriptionHandler) respondGroupServiceError(w http.ResponseWriter, err error) {
+// respondGroupServiceError маппит ошибки Group-CRUD на HTTP-статусы
+// и журналит сбой мутации.
+func (h *SubscriptionHandler) respondGroupServiceError(w http.ResponseWriter, action string, err error) {
+	// См. respondServiceError: клиентские 4xx — Debug, внутренние — Warn.
 	var filterErr *subscription.FilterError
+	isInternal := !errors.As(err, &filterErr) &&
+		!errors.Is(err, subscription.ErrGroupSubscriptionNotFound) &&
+		!errors.Is(err, subscription.ErrValidation) &&
+		!errors.Is(err, subscription.ErrGroupNotFound)
+	if isInternal {
+		h.log.Warn(action, "", err.Error())
+	} else {
+		h.log.Debug(action, "", err.Error())
+	}
 	switch {
 	case errors.As(err, &filterErr):
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
@@ -217,10 +228,10 @@ func (h *SubscriptionHandler) CreateGroup(w http.ResponseWriter, r *http.Request
 		Enabled:            req.Enabled,
 	})
 	if err != nil {
-		h.log.Warn("subscription-group-create", req.Label, "failed: "+err.Error())
-		h.respondGroupServiceError(w, err)
+		h.respondGroupServiceError(w, "subscription-group-create", err)
 		return
 	}
+	h.log.Info("subscription-group-create", g.Label, "Subscription group created: "+g.Label)
 	response.Success(w, h.toSubscriptionGroupDTO(*g))
 }
 
@@ -273,9 +284,10 @@ func (h *SubscriptionHandler) UpdateGroup(w http.ResponseWriter, r *http.Request
 	}
 	g, err := h.svc.UpdateGroup(r.Context(), id, patch)
 	if err != nil {
-		h.respondGroupServiceError(w, err)
+		h.respondGroupServiceError(w, "subscription-group-update", err)
 		return
 	}
+	h.log.Info("subscription-group-update", g.Label, "Subscription group updated: "+g.Label)
 	response.Success(w, h.toSubscriptionGroupDTO(*g))
 }
 
@@ -306,10 +318,15 @@ func (h *SubscriptionHandler) DeleteGroup(w http.ResponseWriter, r *http.Request
 		response.ErrorWithStatus(w, http.StatusBadRequest, "id required", "MISSING_ID")
 		return
 	}
+	label := req.ID
+	if g, err := h.svc.GetGroup(req.ID); err == nil && g.Label != "" {
+		label = g.Label
+	}
 	if err := h.svc.DeleteGroup(r.Context(), req.ID); err != nil {
-		h.respondGroupServiceError(w, err)
+		h.respondGroupServiceError(w, "subscription-group-delete", err)
 		return
 	}
+	h.log.Info("subscription-group-delete", req.ID, "Subscription group deleted: "+label)
 	response.Success(w, struct {
 		OK bool `json:"ok"`
 	}{true})

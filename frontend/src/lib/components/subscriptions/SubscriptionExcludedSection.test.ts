@@ -9,10 +9,10 @@ const members: SubscriptionMember[] = [
 ];
 
 function cards(container: HTMLElement): HTMLElement[] {
-	return Array.from(container.querySelectorAll('.excluded-card')) as HTMLElement[];
+	return Array.from(container.querySelectorAll('.excluded-card'));
 }
 function cardCheckboxes(container: HTMLElement): HTMLInputElement[] {
-	return Array.from(container.querySelectorAll('.excluded-sel input[type="checkbox"]')) as HTMLInputElement[];
+	return Array.from(container.querySelectorAll('.excluded-sel input[type="checkbox"]'));
 }
 
 describe('SubscriptionExcludedSection', () => {
