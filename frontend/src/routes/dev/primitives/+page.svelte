@@ -455,7 +455,6 @@
         bind:filter={toolbarFilter}
         onFilterChange={(f) => console.log('filter', f)}
         bucket="app"
-        onBucketChange={(b) => console.log('bucket', b)}
         paused={toolbarPaused}
         bufferCount={0}
         onTogglePause={() => toolbarPaused = !toolbarPaused}

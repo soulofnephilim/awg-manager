@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
   import { TriangleAlert } from 'lucide-svelte';
-  import { appLogEntries, singboxLogEntries, logStoreFor, type LogBucket, type LogStore } from '$lib/stores/logs';
+  import { logStoreFor, type LogBucket, type LogStore } from '$lib/stores/logs';
   import { LoadingSpinner, EmptyState } from '$lib/components/layout';
   import { Button } from '$lib/components/ui';
   import { api } from '$lib/api/client';
@@ -14,19 +14,28 @@
   import { diagnosticsSanitized, toggleDiagnosticsSanitized } from '$lib/stores/diagnosticsPrivacy';
   import { sanitizeLogEntry } from '$lib/utils/log-privacy';
   import LogRow from './LogRow.svelte';
-  import LogsToolbar, { ALL_LEVELS } from './LogsToolbar.svelte';
+  import LogsToolbar, { ALL_LEVELS, SINGBOX_GROUPS } from './LogsToolbar.svelte';
   import LogsContextMenu from './LogsContextMenu.svelte';
   import type { LogsFilter } from './LogsToolbar.svelte';
   import type { LogEntry } from '$lib/types';
 
-  // lockBucket: фиксирует журнал на один bucket (напр. FakeIP-чип «Журнал» —
-  // только 'singbox') и прячет переключатель app/singbox в тулбаре. Не задан —
-  // прежнее поведение (переключаемый, как на странице Диагностики).
-  let { lockBucket }: { lockBucket?: LogBucket } = $props();
+  // lockBucket: bucket инстанса. Каждый терминал в приложении показывает ровно
+  // одну корзину (Журнал — 'app'; FakeIP и TProxy — 'singbox'), переключателя
+  // app/singbox больше нет.
+  // storagePrefix: пространство localStorage-ключей инстанса. Терминалы на
+  // разных страницах (Диагностика, FakeIP, TProxy) обязаны хранить фильтры
+  // раздельно, иначе они перетекают между страницами через общие ключи.
+  let { lockBucket, storagePrefix = 'awgm.diagnostics' }: {
+    lockBucket: LogBucket;
+    storagePrefix?: string;
+  } = $props();
 
-  const STORAGE_KEY = 'awgm.diagnostics.logsFilter';
-  const BUCKET_KEY = 'awgm.diagnostics.logsBucket';
-  const FULL_TIMESTAMP_KEY = 'awgm.diagnostics.logsFullTimestamp';
+  // Пропы фиксированы на всё время жизни инстанса — захват начальных значений
+  // намеренный.
+  // svelte-ignore state_referenced_locally
+  const STORAGE_KEY = `${storagePrefix}.logsFilter`;
+  // svelte-ignore state_referenced_locally
+  const FULL_TIMESTAMP_KEY = `${storagePrefix}.logsFullTimestamp`;
   const PAGE_SIZE = 200;
   type LogsQueryParams = {
     bucket: 'app' | 'singbox';
@@ -83,18 +92,11 @@
 
   function saveFilter(f: LogsFilter) {
     if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(f));
-  }
-
-  function loadBucket(): LogBucket {
-    if (typeof localStorage === 'undefined') return 'app';
-    const raw = localStorage.getItem(BUCKET_KEY);
-    return raw === 'singbox' ? 'singbox' : 'app';
-  }
-
-  function saveBucket(b: LogBucket) {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(BUCKET_KEY, b);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(f));
+    } catch {
+      /* quota / private mode — фильтр живёт в памяти */
+    }
   }
 
   function loadFullTimestamp(): boolean {
@@ -104,14 +106,34 @@
 
   function saveFullTimestamp(v: boolean) {
     if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(FULL_TIMESTAMP_KEY, v ? '1' : '0');
+    try {
+      localStorage.setItem(FULL_TIMESTAMP_KEY, v ? '1' : '0');
+    } catch {
+      /* quota / private mode — настройка живёт в памяти */
+    }
   }
 
-  let filter = $state<LogsFilter>(loadFilter());
+  // Санация сохранённого фильтра: раньше терминалы делили один localStorage-ключ
+  // (FakeIP-журнал писал в него singbox-подгруппы, не трогая маркер bucket'а),
+  // поэтому в groups могут лежать группы чужого bucket'а. Наборы имён не
+  // пересекаются — фильтруем по принадлежности к SINGBOX_GROUPS, а не доверяем
+  // маркеру. Санация чистая (без записи): исправленный фильтр сохранится при
+  // первом же applyFilter.
+  function initialFilter(): LogsFilter {
+    const f = loadFilter();
+    const singbox = new Set<string>(SINGBOX_GROUPS);
+    const groups = f.groups.filter((g) =>
+      lockBucket === 'singbox' ? singbox.has(g) : !singbox.has(g),
+    );
+    if (groups.length === f.groups.length) return f;
+    return { ...f, groups, subgroups: [] };
+  }
+
   // lockBucket — фиксированный проп (не меняется в рантайме): захват начального
   // значения — намеренный.
   // svelte-ignore state_referenced_locally
-  let bucket = $state<LogBucket>(lockBucket ?? loadBucket());
+  let filter = $state<LogsFilter>(initialFilter());
+  const bucket = $derived(lockBucket);
   let showFullTimestamp = $state(loadFullTimestamp());
   let paused = $state(false);
   /** User clicked Pause — do not auto-resume when scrolled back to the top. */
@@ -194,16 +216,11 @@
     };
   }
 
-  async function loadBucketFresh(b: LogBucket) {
-    const store = logStoreFor(b);
+  async function loadBucketFresh() {
+    const store = logStoreFor(bucket);
     pageOffset = 0;
     try {
-      const query = b === bucket
-        ? buildLogQuery(PAGE_SIZE, 0)
-        : (b === 'singbox'
-          ? { bucket: b, groups: ['singbox'], subgroups: [], limit: PAGE_SIZE, offset: 0 }
-          : { bucket: b, groups: [], subgroups: [], limit: PAGE_SIZE, offset: 0 });
-      const resp = await api.getLogs(query);
+      const resp = await api.getLogs(buildLogQuery(PAGE_SIZE, 0));
       store.setEntries(resp.logs);
       store.setTotal(resp.total);
       store.setEnabled(resp.enabled);
@@ -268,7 +285,7 @@
     if (filterLoadWarning) {
       notifications.warning('Не удалось прочитать сохранённые фильтры журнала, применены значения по умолчанию');
     }
-    await loadBucketFresh(bucket);
+    await loadBucketFresh();
     await refreshSubgroups();
     setTimeout(() => (initialFetchDone = true), 100);
     window.addEventListener('keydown', handleKeydown);
@@ -370,23 +387,7 @@
     saveFilter(f);
     // Group changed → refresh subgroup catalog; subgroup change keeps catalog.
     await refreshSubgroups();
-    await loadBucketFresh(bucket);
-  }
-
-  async function setBucket(b: LogBucket) {
-    if (lockBucket) return; // bucket зафиксирован — переключение запрещено
-    if (b === bucket) return;
-    manualPause = false;
-    paused = false;
-    bufferCount = 0;
-    manualFrozenLogs = null;
-    bucket = b;
-    saveBucket(b);
-    // Reset filters on bucket switch — group sets are disjoint per bucket.
-    filter = { ...filter, groups: [], subgroups: [] };
-    saveFilter(filter);
-    await loadBucketFresh(b);
-    await refreshSubgroups();
+    await loadBucketFresh();
   }
 
   const filteredLogs = $derived.by(() => {
@@ -437,7 +438,7 @@
     }
     saveFilter(filter);
     await refreshSubgroups();
-    await loadBucketFresh(bucket);
+    await loadBucketFresh();
   }
 
   function handleClickLevel(level: string) {
@@ -456,7 +457,7 @@
     paused = false;
     bufferCount = 0;
     manualFrozenLogs = null;
-    await loadBucketFresh(bucket);
+    await loadBucketFresh();
   }
 
   function formatLine(log: LogEntry, routerOffset: number): string {
@@ -656,8 +657,6 @@
       bind:filter
       onFilterChange={applyFilter}
       {bucket}
-      bucketLocked={!!lockBucket}
-      onBucketChange={setBucket}
       {paused}
       {bufferCount}
       onTogglePause={togglePause}

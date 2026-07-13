@@ -7,6 +7,7 @@
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { StagingBanner, RouteInspector, JsonConfigDrawer, ConfigSlotsDrawer } from '$lib/components/singbox-routing';
   import { ConnectionsSubTab } from '$lib/components/routing/singboxRouter';
+  import { LogsTerminal } from '$lib/components/diagnostics';
   import {
     PageShell,
     RulesPanel,
@@ -59,7 +60,7 @@
   const singboxInitialized = singboxRouterStore.initialized;
   let singboxRulesCount = $derived($singboxRulesStore.length);
 
-  const SUB_VIEWS = new Set(['connections']);
+  const SUB_VIEWS = new Set(['connections', 'logs']);
   const LEGACY_SUBS = new Set(['deviceproxy', 'rules', 'rulesets', 'outbounds', 'dns', 'engine']);
 
   function resetSingboxOverlayState() {
@@ -68,10 +69,12 @@
   }
 
   onMount(() => {
-    // Не восстанавливаем визард (?add=1) и sub=connections после ухода на другие вкладки routing.
+    // Не восстанавливаем визард (?add=1) и sub=connections после ухода на другие
+    // вкладки routing. sub=logs — намеренное исключение: лог-вью должен переживать
+    // F5 и открываться по прямой ссылке.
     resetSingboxOverlayState();
     const sub = $page.url.searchParams.get('sub');
-    if (!sub) {
+    if (!sub || sub === 'logs') {
       void singboxRouterStore.loadAll();
       return;
     }
@@ -102,10 +105,10 @@
     void singboxRouterStore.loadAll();
   });
 
-  // Явный переход в sub=connections — закрыть визард/trace, но sub оставить.
+  // Явный переход в sub-вид (connections/logs) — закрыть визард/trace, но sub оставить.
   $effect(() => {
     const sub = activeSingboxSub;
-    if (sub === 'connections') {
+    if (sub && SUB_VIEWS.has(sub)) {
       resetSingboxOverlayState();
     }
   });
@@ -125,11 +128,25 @@
     prevMode = current;
   });
 
-  let inSubView = $derived(activeSingboxSub === 'connections');
+  let inSubView = $derived(!!activeSingboxSub && SUB_VIEWS.has(activeSingboxSub));
 
   function clearSub() {
     const url = new URL(window.location.href);
     url.searchParams.delete('sub');
+    void goto(`${url.pathname}${url.search}`, { keepFocus: true, noScroll: true });
+  }
+
+  // Toggle, как у чипа соединений: повторный клик закрывает вид, а не наслаивает
+  // одинаковые записи в истории. tab=singbox фиксируем явно — window.location мог
+  // ещё не получить его от асинхронного goto тулбара вкладок.
+  function toggleLogsSub() {
+    const url = new URL(window.location.href);
+    if (activeSingboxSub === 'logs') {
+      url.searchParams.delete('sub');
+    } else {
+      url.searchParams.set('tab', 'singbox');
+      url.searchParams.set('sub', 'logs');
+    }
     void goto(`${url.pathname}${url.search}`, { keepFocus: true, noScroll: true });
   }
 </script>
@@ -138,6 +155,8 @@
   onOpenInspector={() => (inspectorOpen = true)}
   onOpenJson={() => (jsonOpen = true)}
   onOpenConfigEditor={$sbMode === 'expert' ? () => (configEditorOpen = true) : undefined}
+  onOpenLogs={toggleLogsSub}
+  logsActive={activeSingboxSub === 'logs'}
 >
   <StagingBanner />
   {#if inSubView}
@@ -147,6 +166,10 @@
   {/if}
   {#if activeSingboxSub === 'connections'}
     <ConnectionsSubTab />
+  {:else if activeSingboxSub === 'logs'}
+    <!-- Логи sing-box (bucket singbox: stdout движка + process/runtime-события).
+         Действия над конфигурацией остаются в Инструменты → Журнал (bucket app). -->
+    <LogsTerminal lockBucket="singbox" storagePrefix="awgm.sb-router" />
   {:else if $sbMode === 'beginner'}
     {#if $addWizardOpen}
       <AddWizardPanel />
