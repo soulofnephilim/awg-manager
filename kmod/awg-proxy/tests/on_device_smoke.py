@@ -88,7 +88,7 @@ def add_tunnel() -> int:
     ep = endpoint_str()
     line = (
         f"{ep}"
-        f" H1= H2= H3= H4= S1=0 S2=0 S3=0 S4=0"
+        f" H1=1 H2=2 H3=3 H4=4 S1=0 S2=0 S3=0 S4=0"
         f" Jc=2 Jmin=60 Jmax=80"
         f" PUB_SERVER={pub} PUB_CLIENT={pub}"
         f' I1="<c><t><r 10>" I2="<rc 16><rd 4>"'
