@@ -4,7 +4,7 @@ import { singboxTraffic } from './singbox';
 import { singboxTrafficLive } from './singboxEngineStats';
 
 function trafficMap(entries: Array<[string, { upload: number; download: number }]>) {
-	return new Map(entries);
+	return new Map(entries.map(([tag, t]) => [tag, { tag, ...t }]));
 }
 
 describe('singboxTrafficLive', () => {
