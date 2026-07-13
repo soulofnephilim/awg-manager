@@ -34,7 +34,7 @@
 	import { systemInfo } from '$lib/stores/system';
 	import { subscriptionsStore } from '$lib/stores/subscriptions';
 	import { feedTraffic } from '$lib/stores/traffic';
-	import { applyTraffic as singboxApplyTraffic, applyDelay as singboxApplyDelay } from '$lib/stores/singbox';
+	import { applyTraffic as singboxApplyTraffic, applyTrafficTotals as singboxApplyTrafficTotals, applyDelay as singboxApplyDelay } from '$lib/stores/singbox';
 	import { applySingboxMemory } from '$lib/stores/singboxMemory';
 	import { singboxRouter } from '$lib/stores/singboxRouter';
 	import { fakeipTransition } from '$lib/stores/fakeipTransition';
@@ -188,6 +188,7 @@
 					feedTraffic(t.tag, t.download, t.upload);
 				}
 			},
+			onSingboxTrafficTotals: singboxApplyTrafficTotals,
 			onSingboxDelay: (data) => singboxApplyDelay(data.tag, data.delay),
 			onSingboxMemory: applySingboxMemory,
 

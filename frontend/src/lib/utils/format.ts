@@ -10,9 +10,24 @@ export function formatBytes(bytes: number, decimals = 2): string {
     const dm = decimals < 0 ? 0 : decimals;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
 
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    // Дробные значения < 1 (например, скорость 0.5 Б/с) дают log < 0 и
+    // sizes[-1] === undefined; сверху ограничиваем последним юнитом.
+    const i = Math.min(Math.max(Math.floor(Math.log(bytes) / Math.log(k)), 0), sizes.length - 1);
 
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+/**
+ * Скорость в байтах/с с ФИКСИРОВАННЫМ одним знаком после запятой — ширина
+ * строки не прыгает между тиками живых обновлений (та же причина, что у
+ * formatTrafficStable в liveConnectionsStore).
+ */
+export function formatByteRate(bytesPerSec: number): string {
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    if (bytesPerSec <= 0) return `0.0 ${sizes[0]}/с`;
+    const i = Math.min(Math.max(Math.floor(Math.log(bytesPerSec) / Math.log(k)), 0), sizes.length - 1);
+    return `${(bytesPerSec / Math.pow(k, i)).toFixed(1)} ${sizes[i]}/с`;
 }
 
 /**

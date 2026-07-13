@@ -34,6 +34,8 @@ func TestTrafficAggregator_Ingest(t *testing.T) {
 	pub := &fakePublisher{}
 	agg := NewTrafficAggregator("unused", pub, nil)
 	msg := []byte(`{
+		"downloadTotal": 900000,
+		"uploadTotal": 40000,
 		"connections": [
 			{"chains":["Germany"],"upload":100,"download":500},
 			{"chains":["Germany"],"upload":50,"download":200},
@@ -50,6 +52,9 @@ func TestTrafficAggregator_Ingest(t *testing.T) {
 	if agg.tags["Finland"].Upload != 10 {
 		t.Errorf("Finland: %+v", agg.tags["Finland"])
 	}
+	if agg.downloadTotal != 900000 || agg.uploadTotal != 40000 {
+		t.Errorf("totals: down=%d up=%d, want 900000/40000", agg.downloadTotal, agg.uploadTotal)
+	}
 }
 
 func TestTrafficAggregator_Publish(t *testing.T) {
@@ -57,10 +62,12 @@ func TestTrafficAggregator_Publish(t *testing.T) {
 	agg := NewTrafficAggregator("unused", pub, nil)
 	agg.tags["A"] = &TrafficSnapshot{Tag: "A", Upload: 1, Download: 2}
 	agg.tags["B"] = &TrafficSnapshot{Tag: "B", Upload: 3, Download: 4}
+	agg.downloadTotal = 123
+	agg.uploadTotal = 45
 	agg.publish()
-	// publish emits singbox:traffic + singbox:memory.
-	if len(pub.events) != 2 {
-		t.Fatalf("events: %d, want 2", len(pub.events))
+	// publish emits singbox:traffic + singbox:traffic-totals + singbox:memory.
+	if len(pub.events) != 3 {
+		t.Fatalf("events: %d, want 3", len(pub.events))
 	}
 	if pub.events[0].name != "singbox:traffic" {
 		t.Fatalf("first event name: %q", pub.events[0].name)
@@ -71,6 +78,16 @@ func TestTrafficAggregator_Publish(t *testing.T) {
 	}
 	if len(snap) != 2 {
 		t.Errorf("snap len: %d", len(snap))
+	}
+	if pub.events[1].name != "singbox:traffic-totals" {
+		t.Fatalf("second event name: %q", pub.events[1].name)
+	}
+	totals, ok := pub.events[1].data.(TrafficTotalsEvent)
+	if !ok {
+		t.Fatalf("totals event data type: %T", pub.events[1].data)
+	}
+	if totals.DownloadTotal != 123 || totals.UploadTotal != 45 {
+		t.Errorf("totals event: %+v", totals)
 	}
 }
 
@@ -159,16 +176,16 @@ func TestTrafficAggregator_PublishEmitsMemoryEvent(t *testing.T) {
 	agg := NewTrafficAggregator("unused", pub, nil)
 	agg.ingest([]byte(`{"memory":99999,"connections":[]}`))
 	agg.publish()
-	// publish emits two events: singbox:traffic and singbox:memory.
-	if len(pub.events) != 2 {
-		t.Fatalf("events: got %d, want 2", len(pub.events))
+	// publish emits singbox:traffic, singbox:traffic-totals and singbox:memory.
+	if len(pub.events) != 3 {
+		t.Fatalf("events: got %d, want 3", len(pub.events))
 	}
-	if pub.events[1].name != "singbox:memory" {
-		t.Fatalf("second event name: %q", pub.events[1].name)
+	if pub.events[2].name != "singbox:memory" {
+		t.Fatalf("third event name: %q", pub.events[2].name)
 	}
-	ev, ok := pub.events[1].data.(MemoryEvent)
+	ev, ok := pub.events[2].data.(MemoryEvent)
 	if !ok {
-		t.Fatalf("second event data type: %T, want MemoryEvent", pub.events[1].data)
+		t.Fatalf("third event data type: %T, want MemoryEvent", pub.events[2].data)
 	}
 	if ev.Memory != 99999 {
 		t.Errorf("MemoryEvent.Memory: got %d, want 99999", ev.Memory)

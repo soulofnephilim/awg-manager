@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { aggregateTotals, computeRate, type RateSnapshot } from './liveTraffic';
+import { aggregateTotals, computeRate, type RateSnapshot } from './singboxTrafficRate';
 import type { SingboxTraffic } from '$lib/types';
 
 function map(...entries: SingboxTraffic[]): Map<string, SingboxTraffic> {

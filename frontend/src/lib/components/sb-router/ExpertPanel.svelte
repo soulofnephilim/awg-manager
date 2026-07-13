@@ -20,6 +20,9 @@
   import { subscriptionsStore } from '$lib/stores/subscriptions';
   import { singboxProxies } from '$lib/stores/singboxProxies';
   import { singboxTunnels } from '$lib/stores/singbox';
+  import { singboxMemory } from '$lib/stores/singboxMemory';
+  import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
+  import { formatBytes, formatByteRate } from '$lib/utils/format';
   import { notifications } from '$lib/stores/notifications';
   import { api } from '$lib/api/client';
   import { computeRuleSetUsage, DNSGlobalsEditModal } from '$lib/components/routing/singboxRouter';
@@ -363,6 +366,26 @@
       : { value: 'СБОЙ', tone: 'error' };
   });
 
+  // Живые ресурсы движка: память из SSE singbox:memory, скорость и объём —
+  // кумулятивные totals Clash (singbox:traffic-totals). Значения честные:
+  // без работающего TProxy-движка (в т.ч. в режиме FakeIP, где ячейка
+  // «Движок» показывает НЕАКТИВЕН) или до второго снимка — «—», а не
+  // протухшие числа.
+  const engineRunning = $derived(
+    ($storeStatus?.enabled ?? false)
+    && ($storeStatus?.active ?? false)
+    && $storeSettings?.routingMode !== 'fakeip-tun',
+  );
+  const liveStats = $derived($singboxTrafficLive);
+  const memCellValue = $derived(
+    engineRunning && $singboxMemory > 0 ? formatBytes($singboxMemory) : '—',
+  );
+  const rateCellValue = $derived(
+    engineRunning && liveStats.rate.hasRate
+      ? formatByteRate(liveStats.rate.downloadRate)
+      : '—',
+  );
+
   const statCells: StatCellData[] = $derived([
     {
       label: 'Движок',
@@ -378,6 +401,24 @@
           ? () => (engineFatalOpen = true)
           : undefined,
       actionLabel: 'подробнее',
+    },
+    {
+      label: 'Память',
+      value: memCellValue,
+      compact: true,
+      helpTitle: 'Память sing-box',
+      helpText: 'Память Go-рантайма sing-box по данным Clash API (фактический RSS процесса выше). Обновляется каждые ~2 секунды, пока движок работает.',
+    },
+    {
+      label: 'Трафик ↓',
+      value: rateCellValue,
+      compact: true,
+      helpTitle: 'Трафик через движок',
+      helpText: 'Агрегатная скорость скачивания через sing-box (кумулятивные счётчики Clash, включая закрытые соединения).',
+      helpItems: [
+        `Отдача: ${engineRunning && liveStats.rate.hasRate ? formatByteRate(liveStats.rate.uploadRate) : '—'}`,
+        `За сессию: ${engineRunning ? formatBytes(liveStats.totals.downloadBytes + liveStats.totals.uploadBytes) : '—'}`,
+      ],
     },
     {
       label: 'Правил',
