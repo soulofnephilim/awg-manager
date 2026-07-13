@@ -2,21 +2,17 @@
   Панель «Трафик · live» по мокапу dash3: бар-график (TrafficSpark) + строка
   `.tline` с агрегатной скоростью ↓/↑ и объёмом за сессию.
 
-  ИСТОЧНИК (§4): store singboxTraffic — кумулятивные байты по тегам. Объём ↓/↑ =
-  сумма (formatBytes); скорость ↓/↑ = дельта суммы между снимками (computeRate).
-  Память (/memory): реального Clash-store нет — поле опущено (не выдумываем).
+  ИСТОЧНИК: singboxTrafficLive — кумулятивные totals Clash (включая закрытые
+  соединения, монотонны до рестарта движка) + скорость как дельта между
+  SSE-снимками. Прежний расчёт по per-tag карте занижал объём (закрытые
+  соединения исчезали из сумм) и считал каждое звено chain'а.
+  Память (/memory): отображается в других местах — поле здесь опущено.
 
   Живой блок: вне live — честный empty-state.
 -->
 <script lang="ts">
-	import { singboxTraffic } from '$lib/stores/singbox';
-	import { formatBytes } from '$lib/utils/format';
-	import {
-		aggregateTotals,
-		computeRate,
-		type RateSnapshot,
-		type TrafficRate,
-	} from '$lib/utils/singboxTrafficRate';
+	import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
+	import { formatBytes, formatByteRate } from '$lib/utils/format';
 	import TrafficSpark from './TrafficSpark.svelte';
 
 	interface Props {
@@ -28,29 +24,9 @@
 
 	let { engineLive, notLiveReason }: Props = $props();
 
-	const totals = $derived(aggregateTotals($singboxTraffic));
-
-	// Скорость: дельта кумулятивных сумм между двумя SSE-снимками (та же техника,
-	// что в TrafficSpark — но тут нужно мгновенное значение для `.tline`).
-	let prevSnapshot: RateSnapshot | null = null;
-	let rate = $state<TrafficRate>({ downloadRate: 0, uploadRate: 0, hasRate: false });
-
-	$effect(() => {
-		const next: RateSnapshot = {
-			timestamp: Date.now(),
-			downloadBytes: totals.downloadBytes,
-			uploadBytes: totals.uploadBytes,
-		};
-		rate = computeRate(prevSnapshot, next);
-		prevSnapshot = next;
-	});
-
-	// Байт-скорость как в мокапе (MB/s), а не бит/с — formatBytes + «/с».
-	function byteRate(v: number): string {
-		return `${formatBytes(v)}/с`;
-	}
-
-	const sessionTotal = $derived(totals.downloadBytes + totals.uploadBytes);
+	const live = $derived($singboxTrafficLive);
+	const rate = $derived(live.rate);
+	const sessionTotal = $derived(live.totals.downloadBytes + live.totals.uploadBytes);
 
 	const notLiveText = $derived(
 		notLiveReason === 'clash-down'
@@ -70,8 +46,8 @@
 	{:else}
 		<TrafficSpark {engineLive} />
 		<div class="tline">
-			<span class="dn">&darr; <b>{rate.hasRate ? byteRate(rate.downloadRate) : '—'}</b></span>
-			<span class="up">&uarr; <b>{rate.hasRate ? byteRate(rate.uploadRate) : '—'}</b></span>
+			<span class="dn">&darr; <b>{rate.hasRate ? formatByteRate(rate.downloadRate) : '—'}</b></span>
+			<span class="up">&uarr; <b>{rate.hasRate ? formatByteRate(rate.uploadRate) : '—'}</b></span>
 			<span>за сессию <b>{formatBytes(sessionTotal)}</b></span>
 		</div>
 	{/if}

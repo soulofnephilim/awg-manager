@@ -11,7 +11,7 @@
   import { singboxStatus } from '$lib/stores/singbox';
   import { singboxMemory } from '$lib/stores/singboxMemory';
   import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
-  import { formatBytes } from '$lib/utils/format';
+  import { formatBytes, formatByteRate } from '$lib/utils/format';
   import { systemInfo } from '$lib/stores/system';
   import { notifications } from '$lib/stores/notifications';
   import { drawerOpen, closeDrawer } from './drawerStore';
@@ -103,15 +103,17 @@
   let crashSuppressedLabel = $derived(formatSuppressedUntil(s?.restartSuppressedUntil));
   let showCrashInfo = $derived(crashCount > 0 || crashSuppressedLabel !== null);
 
-  // ── Ресурсы: живая память (SSE singbox:memory) и агрегатный трафик (дельта
-  // кумулятивных сумм singbox:traffic — общий стор с FakeIP «Обзор»). Секция
-  // видна только при работающем перехвате: после остановки движка SSE-поток
-  // замолкает и сторы держат протухшие числа мёртвого процесса.
+  // ── Ресурсы: живая память (SSE singbox:memory, Go-рантайм по Clash API) и
+  // агрегатный трафик (кумулятивные totals Clash, singbox:traffic-totals).
+  // Секция видна только при работающем TProxy-перехвате: в режиме FakeIP или
+  // после остановки движка SSE замолкает и сторы держат протухшие числа
+  // (окно до ближайшего тика watchdog'а ~30 с — принятая задержка статуса).
+  let resourcesVisible = $derived(engineActive && $settings?.routingMode === 'tproxy');
   let liveStats = $derived($singboxTrafficLive);
   let memoryLabel = $derived($singboxMemory > 0 ? formatBytes($singboxMemory) : '—');
   let rateLabel = $derived(
     liveStats.rate.hasRate
-      ? `↓ ${formatBytes(liveStats.rate.downloadRate)}/с · ↑ ${formatBytes(liveStats.rate.uploadRate)}/с`
+      ? `↓ ${formatByteRate(liveStats.rate.downloadRate)} · ↑ ${formatByteRate(liveStats.rate.uploadRate)}`
       : '—',
   );
   let sessionLabel = $derived(
@@ -319,10 +321,10 @@
     </section>
 
     <!-- Ресурсы: живая память и трафик движка -->
-    {#if engineActive}
+    {#if resourcesVisible}
       <section class="sec">
         <div class="sec-cap">Ресурсы</div>
-        <div class="stat-line">
+        <div class="stat-line" title="Память Go-рантайма sing-box по данным Clash API; фактический RSS процесса выше">
           <span class="stat-label">Память sing-box</span>
           <span class="stat-value">{memoryLabel}</span>
         </div>

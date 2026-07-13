@@ -6,6 +6,9 @@
   export interface StatCellData {
     label: string;
     value: string;
+    /** Компактное значение (живые метрики вида «999.9 KB/с»): шрифт меньше,
+        переполнение обрезается — в 9-колоночном гриде широкой строке тесно. */
+    compact?: boolean;
     tone?: 'success' | 'error' | 'muted' | 'default';
     helpTitle?: string;
     helpText?: string;
@@ -103,7 +106,7 @@
     <div class="cell-shell" class:last={i === cells.length - 1}>
       <div class="cell">
         <div class="label">{cell.label}</div>
-        <div class="value" style:color={colorFor(cell.tone)}>{cell.value}</div>
+        <div class="value" class:value-compact={cell.compact} style:color={colorFor(cell.tone)}>{cell.value}</div>
 
         {#if cell.onClick}
           <button type="button" class="cell-action" onclick={cell.onClick}>
@@ -204,6 +207,11 @@
     font-weight: 700;
     font-family: var(--font-mono);
     white-space: nowrap;
+  }
+  .value-compact {
+    font-size: 16px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .help-btn {
     position: absolute;
@@ -352,10 +360,12 @@
   }
   @media (max-width: 1023px) and (min-width: 769px) {
     .strip {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
     }
-    /* 6 KPI после движка — 2 ряда по 3, без пустого слота */
-    .cell-shell:not(:first-child):nth-child(3n + 1) {
+    /* 8 KPI после движка (на всю ширину) — 2 ряда по 4, без пустого слота.
+       Правая граница гасится на последней колонке каждого ряда KPI
+       (дети 5 и 9 при первом ребёнке-«движке»). */
+    .cell-shell:not(:first-child):nth-child(4n + 1) {
       border-right: 0;
     }
   }
@@ -364,7 +374,7 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       margin: 0.75rem 0 0.875rem;
     }
-    .cell-shell:not(:first-child):nth-child(3n + 1) {
+    .cell-shell:not(:first-child):nth-child(4n + 1) {
       border-right: 1px solid var(--border);
     }
     .cell-shell:not(:first-child):nth-child(even) {

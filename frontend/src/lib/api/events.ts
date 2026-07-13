@@ -107,6 +107,9 @@ export interface SSEEventHandlers {
 
 	// Sing-box streams (traffic + delay remain push-only)
 	onSingboxTraffic?: (data: SingboxTraffic[]) => void;
+	// Кумулятивные счётчики Clash за всю жизнь процесса (включая закрытые
+	// соединения) — монотонны до рестарта движка.
+	onSingboxTrafficTotals?: (data: { downloadTotal: number; uploadTotal: number }) => void;
 	onSingboxDelay?: (data: SingboxDelayEvent) => void;
 	onSingboxMemory?: (data: { memory: number }) => void;
 
@@ -183,6 +186,7 @@ export function connectSSE(handlers: SSEEventHandlers): () => void {
 
 	// Sing-box streams
 	handle('singbox:traffic', handlers.onSingboxTraffic);
+	handle('singbox:traffic-totals', handlers.onSingboxTrafficTotals);
 	handle('singbox:delay', handlers.onSingboxDelay);
 	handle('singbox:memory', handlers.onSingboxMemory);
 

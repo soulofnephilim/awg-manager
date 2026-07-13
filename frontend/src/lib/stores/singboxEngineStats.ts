@@ -1,36 +1,54 @@
-// Живой агрегатный трафик движка sing-box (скорость + объём за сессию) для
-// TProxy-вкладки. Дельта кумулятивных сумм между двумя снимками SSE
-// singbox:traffic — та же техника, что TrafficPanel на FakeIP «Обзор».
+// Живой агрегатный трафик движка sing-box (скорость + объём за сессию).
 //
-// Память сюда НЕ входит: singbox:memory приходит отдельным SSE-событием почти
-// одновременно с traffic, и общий derived стрелял бы дважды за тик —
-// computeRate с защитой dt ≤ 0.5s сбрасывал бы скорость в «—» на каждом
-// втором пересчёте. Память читается напрямую из singboxMemory.
-import { derived } from 'svelte/store';
-import { singboxTraffic } from './singbox';
+// Источник — singboxTrafficTotals: кумулятивные счётчики Clash за всю жизнь
+// процесса (включая закрытые соединения), монотонные до рестарта движка.
+// Per-tag карта singboxTraffic для агрегатов непригодна: она пересобирается
+// из ОТКРЫТЫХ соединений (суммы падают при каждом закрытии) и считает каждое
+// звено chain'а по разу.
+//
+// readable с closure-состоянием, а не module-scope prev: снимок «прошлого
+// тика» живёт ровно столько, сколько есть подписчики. После отписки всех
+// (уход со вкладки) и повторной подписки первый пересчёт честно отдаёт
+// hasRate:false, а не среднюю скорость за всё время отсутствия.
+import { readable } from 'svelte/store';
+import { singboxTrafficTotals, type SingboxTrafficTotals } from './singbox';
 import {
-	aggregateTotals,
 	computeRate,
 	type RateSnapshot,
 	type TrafficRate,
-	type TrafficTotals,
 } from '$lib/utils/singboxTrafficRate';
 
 export interface SingboxTrafficLive {
-	totals: TrafficTotals;
+	totals: SingboxTrafficTotals;
 	rate: TrafficRate;
 }
 
-let prev: RateSnapshot | null = null;
+const IDLE: SingboxTrafficLive = {
+	totals: { downloadBytes: 0, uploadBytes: 0 },
+	rate: { downloadRate: 0, uploadRate: 0, hasRate: false },
+};
 
-export const singboxTrafficLive = derived(singboxTraffic, (map): SingboxTrafficLive => {
-	const totals = aggregateTotals(map);
-	const next: RateSnapshot = {
-		timestamp: Date.now(),
-		downloadBytes: totals.downloadBytes,
-		uploadBytes: totals.uploadBytes,
+// SSE публикует totals каждые ~2 с; дельта старше нескольких тиков означает
+// разрыв потока (движок умер, вкладка спала) — скорость по такому интервалу
+// была бы «средним за простой», а не текущим значением.
+const MAX_RATE_INTERVAL_MS = 10_000;
+
+export const singboxTrafficLive = readable<SingboxTrafficLive>(IDLE, (set) => {
+	let prev: RateSnapshot | null = null;
+	const unsubscribe = singboxTrafficTotals.subscribe((totals) => {
+		const next: RateSnapshot = {
+			timestamp: Date.now(),
+			downloadBytes: totals.downloadBytes,
+			uploadBytes: totals.uploadBytes,
+		};
+		let rate = computeRate(prev, next);
+		if (rate.hasRate && prev && next.timestamp - prev.timestamp > MAX_RATE_INTERVAL_MS) {
+			rate = { downloadRate: 0, uploadRate: 0, hasRate: false };
+		}
+		prev = next;
+		set({ totals, rate });
+	});
+	return () => {
+		unsubscribe();
 	};
-	const rate = computeRate(prev, next);
-	prev = next;
-	return { totals, rate };
 });
