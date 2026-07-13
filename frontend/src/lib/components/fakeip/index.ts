@@ -54,4 +54,4 @@ export {
 	type TrafficTotals,
 	type TrafficRate,
 	type RateSnapshot,
-} from './overview/liveTraffic';
+} from '$lib/utils/singboxTrafficRate';

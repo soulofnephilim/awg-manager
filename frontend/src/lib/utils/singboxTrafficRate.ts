@@ -1,4 +1,4 @@
-// Pure model for the FakeIP «Обзор» live-traffic strip (FE-spec §5.1).
+// Pure model для живого трафика sing-box (FakeIP «Обзор» и TProxy «Ресурсы»).
 //
 // SOURCE & HONESTY (§4): the `singboxTraffic` store is a Map<tag, {upload,
 // download}> of CUMULATIVE byte counters per sing-box outbound tag (fed by the

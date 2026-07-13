@@ -20,6 +20,9 @@
   import { subscriptionsStore } from '$lib/stores/subscriptions';
   import { singboxProxies } from '$lib/stores/singboxProxies';
   import { singboxTunnels } from '$lib/stores/singbox';
+  import { singboxMemory } from '$lib/stores/singboxMemory';
+  import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
+  import { formatBytes } from '$lib/utils/format';
   import { notifications } from '$lib/stores/notifications';
   import { api } from '$lib/api/client';
   import { computeRuleSetUsage, DNSGlobalsEditModal } from '$lib/components/routing/singboxRouter';
@@ -363,6 +366,21 @@
       : { value: 'СБОЙ', tone: 'error' };
   });
 
+  // Живые ресурсы движка: память из SSE singbox:memory, скорость — дельта
+  // кумулятивных сумм singbox:traffic (общий стор с FakeIP «Обзор»). Значения
+  // честные: без работающего движка (или пока нет двух снимков) — «—», чтобы
+  // не показывать протухшие числа мёртвого процесса.
+  const engineRunning = $derived(($storeStatus?.enabled ?? false) && ($storeStatus?.active ?? false));
+  const liveStats = $derived($singboxTrafficLive);
+  const memCellValue = $derived(
+    engineRunning && $singboxMemory > 0 ? formatBytes($singboxMemory) : '—',
+  );
+  const rateCellValue = $derived(
+    engineRunning && liveStats.rate.hasRate
+      ? `↓ ${formatBytes(liveStats.rate.downloadRate)}/с`
+      : '—',
+  );
+
   const statCells: StatCellData[] = $derived([
     {
       label: 'Движок',
@@ -378,6 +396,22 @@
           ? () => (engineFatalOpen = true)
           : undefined,
       actionLabel: 'подробнее',
+    },
+    {
+      label: 'Память',
+      value: memCellValue,
+      helpTitle: 'Память sing-box',
+      helpText: 'Занятая память процесса sing-box по данным Clash API. Обновляется каждые ~2 секунды, пока движок работает.',
+    },
+    {
+      label: 'Трафик',
+      value: rateCellValue,
+      helpTitle: 'Трафик через движок',
+      helpText: 'Агрегатная скорость скачивания по всем outbound процесса sing-box.',
+      helpItems: [
+        `Отдача: ${engineRunning && liveStats.rate.hasRate ? `${formatBytes(liveStats.rate.uploadRate)}/с` : '—'}`,
+        `За сессию: ${engineRunning ? formatBytes(liveStats.totals.downloadBytes + liveStats.totals.uploadBytes) : '—'}`,
+      ],
     },
     {
       label: 'Правил',

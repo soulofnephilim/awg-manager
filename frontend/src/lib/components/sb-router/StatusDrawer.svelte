@@ -9,6 +9,9 @@
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { modeSwitch, modeSwitchBusy } from '$lib/stores/modeSwitch';
   import { singboxStatus } from '$lib/stores/singbox';
+  import { singboxMemory } from '$lib/stores/singboxMemory';
+  import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
+  import { formatBytes } from '$lib/utils/format';
   import { systemInfo } from '$lib/stores/system';
   import { notifications } from '$lib/stores/notifications';
   import { drawerOpen, closeDrawer } from './drawerStore';
@@ -99,6 +102,21 @@
   let crashCount = $derived(s?.crashCount ?? 0);
   let crashSuppressedLabel = $derived(formatSuppressedUntil(s?.restartSuppressedUntil));
   let showCrashInfo = $derived(crashCount > 0 || crashSuppressedLabel !== null);
+
+  // ── Ресурсы: живая память (SSE singbox:memory) и агрегатный трафик (дельта
+  // кумулятивных сумм singbox:traffic — общий стор с FakeIP «Обзор»). Секция
+  // видна только при работающем перехвате: после остановки движка SSE-поток
+  // замолкает и сторы держат протухшие числа мёртвого процесса.
+  let liveStats = $derived($singboxTrafficLive);
+  let memoryLabel = $derived($singboxMemory > 0 ? formatBytes($singboxMemory) : '—');
+  let rateLabel = $derived(
+    liveStats.rate.hasRate
+      ? `↓ ${formatBytes(liveStats.rate.downloadRate)}/с · ↑ ${formatBytes(liveStats.rate.uploadRate)}/с`
+      : '—',
+  );
+  let sessionLabel = $derived(
+    `↓ ${formatBytes(liveStats.totals.downloadBytes)} · ↑ ${formatBytes(liveStats.totals.uploadBytes)}`,
+  );
 
   onMount(async () => {
     void singboxRouterStore.loadAll();
@@ -299,6 +317,25 @@
         </div>
       {/if}
     </section>
+
+    <!-- Ресурсы: живая память и трафик движка -->
+    {#if engineActive}
+      <section class="sec">
+        <div class="sec-cap">Ресурсы</div>
+        <div class="stat-line">
+          <span class="stat-label">Память sing-box</span>
+          <span class="stat-value">{memoryLabel}</span>
+        </div>
+        <div class="stat-line">
+          <span class="stat-label">Скорость</span>
+          <span class="stat-value">{rateLabel}</span>
+        </div>
+        <div class="stat-line">
+          <span class="stat-label">За сессию</span>
+          <span class="stat-value">{sessionLabel}</span>
+        </div>
+      </section>
+    {/if}
 
     <!-- Зависимости -->
     <section class="sec">

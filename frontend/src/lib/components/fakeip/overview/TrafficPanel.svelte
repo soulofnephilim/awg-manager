@@ -16,7 +16,7 @@
 		computeRate,
 		type RateSnapshot,
 		type TrafficRate,
-	} from './liveTraffic';
+	} from '$lib/utils/singboxTrafficRate';
 	import TrafficSpark from './TrafficSpark.svelte';
 
 	interface Props {
