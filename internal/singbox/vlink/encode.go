@@ -274,16 +274,17 @@ func encodeMieru(ob map[string]any, label string) (string, error) {
 		}
 	}
 	q.Set("profile", profile)
-	q.Add("protocol", transport)
 
 	port := intFromAny(ob["server_port"])
 	if port > 0 {
 		q.Add("port", strconv.Itoa(port))
+		q.Add("protocol", transport)
 	}
 	for _, spec := range stringSliceFromAny(ob["server_ports"]) {
 		q.Add("port", decodeMieruPortSpec(spec))
+		q.Add("protocol", transport)
 	}
-	if port <= 0 && len(q["port"]) == 0 {
+	if len(q["port"]) == 0 {
 		return "", errors.New("vlink: mieru: missing server port")
 	}
 	if mux, _ := ob["multiplexing"].(string); mux != "" {
