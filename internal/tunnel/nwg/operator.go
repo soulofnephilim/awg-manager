@@ -34,8 +34,11 @@ import (
 const (
 	resolveAttempts       = 3
 	resolveAttemptTimeout = 1500 * time.Millisecond
-	resolveRetryGap       = 300 * time.Millisecond
 )
+
+// resolveRetryGap — пауза между попытками резолва. Var ради тестов
+// (failing-resolve сценарии не должны спать по 2×300ms).
+var resolveRetryGap = 300 * time.Millisecond
 
 // OperatorNativeWG manages tunnels via Keenetic native WireGuard + awg_proxy.ko.
 type OperatorNativeWG struct {
@@ -933,6 +936,26 @@ func (o *OperatorNativeWG) fallbackResolve(stored *storage.AWGTunnel, resolveErr
 	port, _ := strconv.Atoi(portStr)
 	o.appLog.Warn("resolve-endpoint", stored.Peer.Endpoint, "DNS failed, using cached IP "+stored.ResolvedEndpointIP)
 	return stored.ResolvedEndpointIP, port, nil
+}
+
+// resolveEndpointFresh — как resolveEndpointWithFallback, но БЕЗ фолбэка на
+// кэшированный ResolvedEndpointIP. Вызывающему нужно живое состояние DNS
+// (SyncPeer по результату решает судьбу endpoint-стража), а кэш может нести
+// адрес ПРЕЖНЕГО endpoint'а — «подтверждённый» им v4/v6 снял бы стража или
+// увёз в ядро чужой адрес.
+func (o *OperatorNativeWG) resolveEndpointFresh(endpoint string) (string, int, error) {
+	var lastErr error
+	for attempt := 1; attempt <= resolveAttempts; attempt++ {
+		ip, port, err := o.resolveOnce(endpoint, resolveAttemptTimeout)
+		if err == nil {
+			return ip, port, nil
+		}
+		lastErr = err
+		if attempt < resolveAttempts {
+			time.Sleep(resolveRetryGap)
+		}
+	}
+	return "", 0, lastErr
 }
 
 // resolveEndpointWithFallback resolves the tunnel's endpoint with a short retry

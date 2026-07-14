@@ -34,13 +34,17 @@ func EndpointHostIsIPv6(endpoint string) bool {
 // несёт заглушку — после ребута роутера такому туннелю нужен полный Start
 // (orchestrator/decideBoot). IPv4-литерал → false: у него в NDMS реальный
 // endpoint и boot ничего делать не должен (историческое поведение).
+//
+// Критерий v6-литерала — форма с двоеточиями (как в EndpointHostIsIPv6),
+// НЕ ip.To4(): IPv4-mapped "::ffff:1.2.3.4" даёт To4()!=nil, но NDMS эту
+// форму отвергает и SyncPeer/Start кладут для неё заглушку — boot обязан
+// классифицировать её так же, иначе после ребута туннель не самолечится.
 func EndpointMayResolveIPv6(endpoint string) bool {
 	host, ok := splitEndpointHost(strings.TrimSpace(endpoint))
 	if !ok {
 		return false
 	}
-	ip := net.ParseIP(host)
-	return ip == nil || ip.To4() == nil
+	return net.ParseIP(host) == nil || strings.Contains(host, ":")
 }
 
 // canonicalV6Endpoint нормализует v6-endpoint к "[addr]:port" — форме,

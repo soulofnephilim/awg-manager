@@ -33,9 +33,12 @@ func TestEndpointMayResolveIPv6(t *testing.T) {
 	cases := map[string]bool{
 		"[2a02:6b8::feed:ff]:51820": true,  // v6-литерал
 		"2a02:6b8::feed:ff:51820":   true,  // небракетированный v6:port
+		"[2a02::1]":                 true,  // v6 без порта — форма с двоеточиями, NDMS отвергнет
+		"[::ffff:1.2.3.4]:51820":    true,  // IPv4-mapped: To4()!=nil, но NDMS отвергает — Start кладёт заглушку, boot обязан чинить
 		"vpn.example.com:51820":     true,  // hostname — может резолвиться в v6 (DDNS c AAAA)
 		"1.2.3.4:51820":             false, // v4-литерал — в NDMS реальный endpoint, boot no-op
 		"1.2.3.4":                   false,
+		"vpn.example.com":           false, // hostname без порта — стартовать нечем, boot бессилен
 		"":                          false,
 	}
 	for ep, want := range cases {

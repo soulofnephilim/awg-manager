@@ -220,8 +220,15 @@ func TestStartNative_IPv6EndpointViaWGTool(t *testing.T) {
 		t.Fatalf("wg set must come after the RCI batch, events: %v", events)
 	}
 
-	if !op.guardHas(stored.ID) {
+	entry, ok := op.guardGet(stored.ID)
+	if !ok {
 		t.Fatal("v6 tunnel must be registered in the endpoint guard")
+	}
+	// spec обязателен: без него DDNS-перерезолв в sweep молча мёртв для
+	// туннелей, взятых под стражу при старте (главный путь наполнения).
+	if entry.pubkey != "PUBKEY" || entry.endpoint != "[2a02:6b8::feed:ff]:51820" ||
+		entry.spec != stored.Peer.Endpoint || entry.iface != "nwg3" {
+		t.Fatalf("guard entry incomplete: %+v", entry)
 	}
 }
 

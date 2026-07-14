@@ -360,7 +360,6 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	req.CreatedAt = existing.CreatedAt
 	req.Type = existing.Type
 	req.Enabled = existing.Enabled
-	req.ResolvedEndpointIP = existing.ResolvedEndpointIP
 	req.ActiveWAN = existing.ActiveWAN
 	req.Backend = existing.Backend
 	req.NWGIndex = existing.NWGIndex
@@ -369,6 +368,13 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	mergeInterfaceWhitelist(&req, existing)
 	mergePeerWhitelist(&req, existing)
+	// Кэш резолва валиден только для endpoint'а, под которым был получен:
+	// перенос через смену endpoint'а подставлял бы DNS-фолбэкам адрес
+	// ПРЕЖНЕГО имени. Сравнение — после mergePeerWhitelist (partial-update
+	// без Peer наследует endpoint из existing).
+	if req.Peer.Endpoint == existing.Peer.Endpoint {
+		req.ResolvedEndpointIP = existing.ResolvedEndpointIP
+	}
 	if !req.DefaultRouteSet {
 		req.DefaultRoute = existing.DefaultRoute
 		req.DefaultRouteSet = existing.DefaultRouteSet

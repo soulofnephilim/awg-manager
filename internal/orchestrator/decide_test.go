@@ -53,6 +53,29 @@ func TestDecide_Boot_SkipsNativeWGWithASC(t *testing.T) {
 // ASC + v6-endpoint: после ребута роутера NDMS поднимает интерфейс из своего
 // конфига с заглушкой 127.0.0.1:1 — реальный endpoint жил только в ядре.
 // Boot обязан сделать полный Start (wg set + регистрация endpoint-стража).
+// Связка stored→state: EndpointMayV6 обязан вычисляться из endpoint'а
+// хранилища так, чтобы boot чинил и hostname, и v6-формы (включая
+// IPv4-mapped), но не трогал v4-литералы. Пиннит выбор
+// nwg.EndpointMayResolveIPv6 (а не EndpointHostIsIPv6) в state.go.
+func TestTunnelStateFromStored_EndpointMayV6(t *testing.T) {
+	cases := map[string]bool{
+		"vpn.example.com:51820":  true,
+		"[2a02::1]:51820":        true,
+		"[::ffff:1.2.3.4]:51820": true,
+		"1.2.3.4:51820":          false,
+	}
+	for ep, want := range cases {
+		st := tunnelStateFromStored(&storage.AWGTunnel{
+			ID:      "awg20",
+			Backend: "nativewg",
+			Peer:    storage.AWGPeer{Endpoint: ep},
+		})
+		if st.EndpointMayV6 != want {
+			t.Errorf("EndpointMayV6 for %q = %v, want %v", ep, st.EndpointMayV6, want)
+		}
+	}
+}
+
 func TestDecide_Boot_StartsNativeWGWithASCAndV6Endpoint(t *testing.T) {
 	s := newState()
 	s.supportsASC = true
