@@ -62,6 +62,22 @@ func TestParseMieruStandard_UsesActiveProfile(t *testing.T) {
 	assertStringSlice(t, tcp["server_ports"], []string{"9999-9999"})
 }
 
+func TestParseMieruSimple_SingleProtocolForAllPorts(t *testing.T) {
+	// issue #516: панели кладут один protocol на несколько port'ов
+	res := ParseBatch([]string{"mierus://admin:pass@80.100.80.100?multiplexing=MULTIPLEXING_LOW&port=2012&port=2012-2022&profile=mieru&protocol=TCP&traffic-pattern=EAEaAggAIgQIARAB"})
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors: %+v", res.Errors)
+	}
+	if len(res.Outbounds) != 1 {
+		t.Fatalf("got %d outbounds, want 1", len(res.Outbounds))
+	}
+	out := decodeOutbound(t, res.Outbounds[0])
+	if out["transport"] != "TCP" || out["server_port"] != float64(2012) {
+		t.Fatalf("unexpected outbound: %+v", out)
+	}
+	assertStringSlice(t, out["server_ports"], []string{"2012-2022"})
+}
+
 func TestParseMieruSimple_RejectsBadPortProtocolPairs(t *testing.T) {
 	res := ParseBatch([]string{"mierus://u:p@h?profile=default&port=443&protocol=TCP&protocol=UDP"})
 	if len(res.Outbounds) != 0 {
