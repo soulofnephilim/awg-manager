@@ -49,6 +49,12 @@
 			label: 'НАСТРОЙКИ',
 			matches: (p) => p.startsWith('/settings'),
 		},
+		{
+			section: 'freeturn',
+			href: '/freeturn',
+			label: 'FREETURN',
+			matches: (p) => p.startsWith('/freeturn'),
+		},
 	];
 
 	interface Props {

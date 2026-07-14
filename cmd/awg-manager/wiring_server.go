@@ -88,6 +88,7 @@ func (a *app) setupServer() {
 			Settings:            a.settingsStore,
 			Tunnels:             a.awgStore,
 			PingCheckService:    a.pingCheckFacade,
+			FreeTurnService:     a.freeturnService,
 			LoggingService:      a.loggingService,
 			ActiveBackend:       a.backendImpl,
 			KmodLoader:          a.kmodLoader,

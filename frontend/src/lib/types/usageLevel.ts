@@ -22,7 +22,8 @@ export type Section =
 	| 'monitoring'
 	| 'diagnostics'
 	| 'settings'
-	| 'terminal';
+	| 'terminal'
+	| 'freeturn';
 
 export type RoutingSubTab =
 	| 'accessPolicies'
@@ -44,6 +45,7 @@ const SECTION_MIN_LEVEL: Record<Section, UsageLevel> = {
 	subscriptions: 'advanced',
 	monitoring: 'advanced',
 	terminal: 'advanced',
+	freeturn: 'advanced',
 };
 
 const ROUTING_SUBTAB_MIN_LEVEL: Record<RoutingSubTab, UsageLevel> = {
@@ -110,6 +112,7 @@ export function pathToSection(pathname: string): Section | null {
 	if (pathname.startsWith('/diagnostics') || pathname.startsWith('/logs')) return 'diagnostics';
 	if (pathname.startsWith('/settings')) return 'settings';
 	if (pathname.startsWith('/terminal')) return 'terminal';
+	if (pathname.startsWith('/freeturn')) return 'freeturn';
 	return null;
 }
 
@@ -124,4 +127,5 @@ export const SECTION_LABELS: Record<Section, string> = {
 	diagnostics: 'Инструменты',
 	settings: 'Настройки',
 	terminal: 'Терминал',
+	freeturn: 'FreeTurn',
 };

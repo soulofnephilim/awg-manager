@@ -87,6 +87,7 @@ type Server struct {
 	settings                   *storage.SettingsStore
 	tunnels                    *storage.AWGTunnelStore
 	pingCheckService           api.PingCheckService
+	freeturnService            api.FreeTurnService
 	loggingService             *logging.Service
 	activeBackend              backend.Backend
 	kmodLoader                 *kmod.Loader
@@ -170,6 +171,7 @@ type Deps struct {
 	Settings             *storage.SettingsStore
 	Tunnels              *storage.AWGTunnelStore
 	PingCheckService     api.PingCheckService
+	FreeTurnService      api.FreeTurnService
 	LoggingService       *logging.Service
 	ActiveBackend        backend.Backend
 	KmodLoader           *kmod.Loader
@@ -229,6 +231,7 @@ func New(cfg Config, deps Deps) *Server {
 		settings:               deps.Settings,
 		tunnels:                deps.Tunnels,
 		pingCheckService:       deps.PingCheckService,
+		freeturnService:        deps.FreeTurnService,
 		loggingService:         deps.LoggingService,
 		activeBackend:          deps.ActiveBackend,
 		kmodLoader:             deps.KmodLoader,
@@ -570,6 +573,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	s.registerSingboxRoutes(mux, h)
 	s.registerStaticRoutes(mux, h)
 }
+
 
 // spaHandler serves static files with SPA fallback to index.html.
 func spaHandler(staticFS fs.FS) http.Handler {

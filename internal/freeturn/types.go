@@ -1,0 +1,109 @@
+// Package freeturn manages the FreeTurn TURN-tunnel client and server as
+// child processes: persisting their configuration, building CLI arguments
+// from it, and tracking process lifecycle (start/stop/status).
+//
+// See https://github.com/samosvalishe/free-turn-proxy/blob/master/docs/flags.md
+// for the upstream flag reference this package mirrors.
+package freeturn
+
+import "time"
+
+// ClientConfig mirrors the flags accepted by the freeturn client binary.
+type ClientConfig struct {
+	Enabled bool `json:"enabled"`
+
+	Listen    string `json:"listen"`         // -listen, local addr WG/Xray connects to (default 127.0.0.1:9000)
+	Peer      string `json:"peer"`           // -peer, required: VPS server addr host:port
+	Provider  string `json:"provider"`       // -provider, default "vk"
+	Link      string `json:"link,omitempty"` // -link, required when provider=vk
+	Streams   int    `json:"streams"`        // -n, parallel TURN streams (default 10)
+	Transport string `json:"transport"`      // -transport, tcp|udp (transport to TURN relay)
+	Mode      string `json:"mode"`           // -mode, udp|tcp (tunnel mode)
+	Bond      bool   `json:"bond"`           // -bond, only meaningful with mode=tcp
+
+	TurnHost string `json:"turnHost,omitempty"` // -turn, override TURN server IP
+	TurnPort int    `json:"turnPort,omitempty"` // -port, override TURN server port
+
+	ObfProfile string `json:"obfProfile"`       // -obf-profile, none|rtpopus|rtpopus2
+	ObfKey     string `json:"obfKey,omitempty"` // -obf-key, 64 hex chars, required if obfProfile != none
+
+	StreamsPerCred int    `json:"streamsPerCred"` // -streams-per-cred, provider=vk only
+	Browser        string `json:"browser"`        // -browser, chrome|firefox, provider=vk only
+	ManualCaptcha  bool   `json:"manualCaptcha"`  // -manual-captcha, provider=vk only
+
+	DNSMode    string `json:"dnsMode"`              // -dns-mode, plain|doh|auto
+	DNSServers string `json:"dnsServers,omitempty"` // -dns-servers, ip[:port][,ip[:port]...]
+
+	ClientID string `json:"clientId,omitempty"` // -client-id, auto-generated if empty
+	Sub      string `json:"sub,omitempty"`      // -sub, subscription URL (see docs/sub.md)
+	Debug    bool   `json:"debug"`
+}
+
+// DefaultClientConfig mirrors the binary's own flag defaults so an empty
+// saved config behaves the same as `freeturn-client` with no flags at all.
+func DefaultClientConfig() ClientConfig {
+	return ClientConfig{
+		Listen:         "127.0.0.1:9000",
+		Provider:       "vk",
+		Streams:        10,
+		Transport:      "tcp",
+		Mode:           "udp",
+		ObfProfile:     "none",
+		StreamsPerCred: 10,
+		Browser:        "firefox",
+		DNSMode:        "auto",
+	}
+}
+
+// ServerConfig mirrors the flags accepted by the freeturn server binary.
+type ServerConfig struct {
+	Enabled bool `json:"enabled"`
+
+	Listen      string `json:"listen"`                // -listen, default 0.0.0.0:56000
+	Connect     string `json:"connect"`               // -connect, required: local backend host:port
+	Mode        string `json:"mode"`                  // -mode, udp|tcp
+	ObfProfile  string `json:"obfProfile"`            // -obf-profile, none|rtpopus|rtpopus2
+	ObfKey      string `json:"obfKey,omitempty"`      // -obf-key
+	ClientsFile string `json:"clientsFile,omitempty"` // -clients-file, enables Client-ID allowlist auth
+	Debug       bool   `json:"debug"`
+}
+
+// DefaultServerConfig mirrors the binary's own flag defaults.
+func DefaultServerConfig() ServerConfig {
+	return ServerConfig{
+		Listen:     "0.0.0.0:56000",
+		Mode:       "udp",
+		ObfProfile: "none",
+	}
+}
+
+// Config is the full persisted FreeTurn configuration (both roles can be
+// configured independently; a given router instance might only ever run
+// one of the two).
+type Config struct {
+	Client ClientConfig `json:"client"`
+	Server ServerConfig `json:"server"`
+}
+
+// DefaultConfig returns a Config with both roles at upstream defaults and
+// Enabled=false.
+func DefaultConfig() Config {
+	return Config{Client: DefaultClientConfig(), Server: DefaultServerConfig()}
+}
+
+// ProcessStatus describes the live state of one managed child process.
+type ProcessStatus struct {
+	Running   bool       `json:"running"`
+	PID       int        `json:"pid,omitempty"`
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+	// LastError holds the tail of stderr from the most recent exit, only
+	// populated when the process is not currently running and the last
+	// run ended in a failure (e.g. missing -peer, captcha required, etc).
+	LastError string `json:"lastError,omitempty"`
+}
+
+// Status is the combined client+server status returned to the API/frontend.
+type Status struct {
+	Client ProcessStatus `json:"client"`
+	Server ProcessStatus `json:"server"`
+}

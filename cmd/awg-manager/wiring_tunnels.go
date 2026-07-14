@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/auth"
 	"github.com/hoaxisr/awg-manager/internal/clientroute"
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
 	"github.com/hoaxisr/awg-manager/internal/events"
+	"github.com/hoaxisr/awg-manager/internal/freeturn"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	ndmscommand "github.com/hoaxisr/awg-manager/internal/ndms/command"
@@ -185,6 +187,15 @@ func (a *app) setupServices() {
 	a.pingCheckService = pingcheck.NewService(a.settingsStore, a.awgStore, a.wgClient, a.loggingService)
 	a.pingCheckService.Start()
 	a.deferOnExit(a.pingCheckService.Stop)
+
+	// FreeTurn service (TURN-tunnel client/server)
+	a.freeturnService = freeturn.NewService(
+		a.dataDir,
+		filepath.Join(a.dataDir, "run"),
+		"/opt/bin/freeturn-client",
+		"/opt/bin/freeturn-server",
+	)
+	a.deferOnExit(a.freeturnService.Stop)
 
 	// Unified facade: kernel → custom loop, NativeWG → NDMS native
 	a.pingCheckFacade = pingcheck.NewFacade(a.pingCheckService, a.awgStore, a.nwgOp)

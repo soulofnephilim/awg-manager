@@ -1,0 +1,178 @@
+package freeturn
+
+import (
+	"errors"
+	"strconv"
+)
+
+// Service is the public facade consumed by the API layer (one instance per
+// running awg-manager process — wired up in cmd/awg-manager/main.go the
+// same way pingcheck.Service is).
+type Service struct {
+	store *Store
+
+	clientBin string
+	serverBin string
+
+	clientProc *process
+	serverProc *process
+}
+
+// NewService wires up config storage and the two process managers.
+//
+//   - dataDir:    e.g. /opt/etc/awg-manager — where freeturn.json lives.
+//   - runtimeDir: e.g. filepath.Join(dataDir, "run") — where PID files live.
+//   - clientBin / serverBin: paths to the freeturn client/server binaries.
+//     The upstream project ships them as two separate binaries (see
+//     docs/quickstart.md) — e.g. /opt/bin/freeturn-client, /opt/bin/freeturn-server.
+//     Adjust to match whatever the install script actually drops on the router.
+func NewService(dataDir, runtimeDir, clientBin, serverBin string) *Service {
+	return &Service{
+		store:      NewStore(dataDir),
+		clientBin:  clientBin,
+		serverBin:  serverBin,
+		clientProc: newProcess("client", clientBin, runtimeDir),
+		serverProc: newProcess("server", serverBin, runtimeDir),
+	}
+}
+
+func (s *Service) GetConfig() (Config, error) {
+	return s.store.Load()
+}
+
+func (s *Service) UpdateClientConfig(cfg ClientConfig) error {
+	full, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	full.Client = cfg
+	return s.store.Save(full)
+}
+
+func (s *Service) UpdateServerConfig(cfg ServerConfig) error {
+	full, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	full.Server = cfg
+	return s.store.Save(full)
+}
+
+func (s *Service) Status() Status {
+	return Status{
+		Client: s.clientProc.Status(),
+		Server: s.serverProc.Status(),
+	}
+}
+
+// StartClient validates the required flags (-peer always; -link when
+// provider=vk, per docs/flags.md) before spawning, so the API can return a
+// clear Russian-language error instead of an opaque process-exit message.
+func (s *Service) StartClient() error {
+	cfg, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.Client.Peer == "" {
+		return errors.New("укажите адрес сервера (-peer)")
+	}
+	if cfg.Client.Provider == "vk" && cfg.Client.Link == "" {
+		return errors.New("укажите ссылку VK Calls (-link) — обязательна для provider=vk")
+	}
+	return s.clientProc.Start(buildClientArgs(cfg.Client))
+}
+
+func (s *Service) StopClient() error {
+	return s.clientProc.Stop()
+}
+
+func (s *Service) StartServer() error {
+	cfg, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.Server.Connect == "" {
+		return errors.New("укажите backend-адрес (-connect)")
+	}
+	return s.serverProc.Start(buildServerArgs(cfg.Server))
+}
+
+func (s *Service) StopServer() error {
+	return s.serverProc.Stop()
+}
+
+// Stop is wired into the app shutdown-hook chain in cmd/awg-manager/main.go
+// (srv.AddShutdownHook(freeturnService.Stop)), same pattern as pingCheckService.
+func (s *Service) Stop() {
+	_ = s.clientProc.Stop()
+	_ = s.serverProc.Stop()
+}
+
+// buildClientArgs / buildServerArgs translate Config into the exact CLI
+// flags from free-turn-proxy's docs/flags.md. Only non-zero-value fields
+// are emitted explicitly, so the binary's own defaults stay in effect for
+// anything left unset — saves users from having to know every default.
+func buildClientArgs(c ClientConfig) []string {
+	var args []string
+	str := func(flag, val string) {
+		if val != "" {
+			args = append(args, flag, val)
+		}
+	}
+	flag := func(name string, on bool) {
+		if on {
+			args = append(args, name)
+		}
+	}
+
+	str("-listen", c.Listen)
+	str("-peer", c.Peer)
+	str("-provider", c.Provider)
+	str("-link", c.Link)
+	if c.Streams > 0 {
+		args = append(args, "-n", strconv.Itoa(c.Streams))
+	}
+	str("-transport", c.Transport)
+	str("-mode", c.Mode)
+	flag("-bond", c.Bond)
+	str("-turn", c.TurnHost)
+	if c.TurnPort > 0 {
+		args = append(args, "-port", strconv.Itoa(c.TurnPort))
+	}
+	str("-obf-profile", c.ObfProfile)
+	str("-obf-key", c.ObfKey)
+	if c.StreamsPerCred > 0 {
+		args = append(args, "-streams-per-cred", strconv.Itoa(c.StreamsPerCred))
+	}
+	str("-browser", c.Browser)
+	flag("-manual-captcha", c.ManualCaptcha)
+	str("-dns-mode", c.DNSMode)
+	str("-dns-servers", c.DNSServers)
+	str("-client-id", c.ClientID)
+	str("-sub", c.Sub)
+	flag("-debug", c.Debug)
+	return args
+}
+
+func buildServerArgs(c ServerConfig) []string {
+	var args []string
+	str := func(flag, val string) {
+		if val != "" {
+			args = append(args, flag, val)
+		}
+	}
+	flag := func(name string, on bool) {
+		if on {
+			args = append(args, name)
+		}
+	}
+
+	str("-listen", c.Listen)
+	str("-connect", c.Connect)
+	str("-mode", c.Mode)
+	str("-obf-profile", c.ObfProfile)
+	str("-obf-key", c.ObfKey)
+	str("-clients-file", c.ClientsFile)
+	flag("-debug", c.Debug)
+	return args
+}
