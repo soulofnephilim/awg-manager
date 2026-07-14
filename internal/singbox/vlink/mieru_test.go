@@ -79,12 +79,18 @@ func TestParseMieruSimple_SingleProtocolForAllPorts(t *testing.T) {
 }
 
 func TestParseMieruSimple_RejectsBadPortProtocolPairs(t *testing.T) {
-	res := ParseBatch([]string{"mierus://u:p@h?profile=default&port=443&protocol=TCP&protocol=UDP"})
-	if len(res.Outbounds) != 0 {
-		t.Fatalf("got outbounds: %+v", res.Outbounds)
+	links := []string{
+		"mierus://u:p@h?profile=default&port=443&protocol=TCP&protocol=UDP",
+		"mierus://u:p@h?profile=default&port=443&port=500-600",
 	}
-	if len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Message, "mismatched") {
-		t.Fatalf("errors=%+v", res.Errors)
+	for _, link := range links {
+		res := ParseBatch([]string{link})
+		if len(res.Outbounds) != 0 {
+			t.Fatalf("%s: got outbounds: %+v", link, res.Outbounds)
+		}
+		if len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Message, "mismatched") {
+			t.Fatalf("%s: errors=%+v", link, res.Errors)
+		}
 	}
 }
 

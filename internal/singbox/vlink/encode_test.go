@@ -2,6 +2,7 @@ package vlink
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -88,7 +89,15 @@ func TestEncodeOutbound_MieruMultiPort_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(encoded, "&port=")+strings.Count(encoded, "?port=") != strings.Count(encoded, "protocol=") {
+	u, err := url.Parse(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q["port"]) != len(q["protocol"]) {
 		t.Fatalf("port/protocol pairs mismatch: %q", encoded)
 	}
 	reparsed := ParseBatch([]string{encoded})
