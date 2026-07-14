@@ -101,6 +101,17 @@ func (o *OperatorNativeWG) createViaImport(ctx context.Context, stored *storage.
 	// Generate .conf with all AWG params
 	confData := config.GenerateForExport(stored)
 
+	// NDMS RCI-импорт отвергает IPv6-endpoint в .conf («"WireguardN": invalid
+	// endpoint format») и создание падает целиком. Endpoint на этапе create —
+	// временный: Start переставляет его в любом случае (127.0.0.1:proxy у
+	// kmod-пути, реальный у нативного ASC). Для v6 подменяем строку Endpoint
+	// заглушкой; v4 и hostname NDMS принимает — оставляем как есть.
+	if endpointHostIsIPv6(stored.Peer.Endpoint) {
+		confData = replaceConfEndpointLine(confData, ndmsEndpointPlaceholder(stored.Peer.Endpoint))
+		o.appLog.Info("create", stored.Name,
+			"IPv6 endpoint: импорт .conf с endpoint-заглушкой (NDMS не принимает v6 в импорте), реальный endpoint выставит Start")
+	}
+
 	// Import via RCI — NDMS creates the interface and parses all params.
 	// ImportWireguardConfig is a multipart-upload helper with no new-layer equivalent yet.
 	res, err := o.commands.Wireguard.ImportWireguardConfig(ctx, []byte(confData), stored.Name+".conf")
@@ -203,15 +214,16 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 		cmds = append(cmds, payloads.CmdInterfaceIPv6Address(ndmsName, ipv6Addr))
 	}
 
-	// Peer
+	// Peer. Endpoint на этапе create — временный (Start переставит его на
+	// 127.0.0.1:proxy или реальный); IPv6-литерал NDMS в create-команде не
+	// принимает — заглушка, как в createViaImport.
+	peerEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
+	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+		peerEndpoint = fmt.Sprintf("127.0.0.1:%d", endpointPort)
+	}
 	peerCfg := payloads.PeerConfig{
-		PublicKey: stored.Peer.PublicKey,
-		// Deliberately unbracketed "%s:%d" even for IPv6 literals: the
-		// NDMS RCI contract for the native-ASC endpoint field is unknown
-		// (bracketed form untested against real firmware), so the format
-		// is left as-is. IPv6 endpoints through the native ASC path are
-		// out of scope / unverified — the supported v6 path is awg_proxy.
-		Endpoint:    fmt.Sprintf("%s:%d", endpointIP, endpointPort),
+		PublicKey:   stored.Peer.PublicKey,
+		Endpoint:    peerEndpoint,
 		AllowedIPv4: []payloads.AllowedIP{{Address: "0.0.0.0", Mask: "0"}},
 	}
 	if hasIPv6AllowedIPs(stored.Peer.AllowedIPs) {
@@ -300,11 +312,15 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 	}
 	o.appLog.Full("start", stored.Name, fmt.Sprintf("Resolving endpoint %s -> %s:%d", stored.Peer.Endpoint, endpointIP, endpointPort))
 
-	// Deliberately unbracketed "%s:%d" even for IPv6 literals — the NDMS
-	// RCI contract for the native-ASC peer endpoint is unknown, so the
-	// historical format is preserved. IPv6 through the native ASC path is
-	// untested/out of scope; the verified v6 path is the awg_proxy kmod.
+	// v4 — исторический "%s:%d" байт-в-байт; v6 — стандартная скобочная
+	// форма [addr]:port (небракетированный v6 для парсера гарантированный
+	// мусор: адрес обрезается по последнему двоеточию). Поддержка v6
+	// нативным ASC-путём NDMS не подтверждена — при отказе NDMS вернёт
+	// явную ошибку старта; верифицированный v6-путь — awg_proxy kmod (#455).
 	realEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
+	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+		realEndpoint = net.JoinHostPort(endpointIP, strconv.Itoa(endpointPort))
+	}
 
 	// Sync address/MTU from storage
 	if err := o.SyncAddressMTU(ctx, stored); err != nil {
