@@ -10,6 +10,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/diagnostics"
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/openapi"
+	"github.com/hoaxisr/awg-manager/internal/response"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
@@ -679,6 +680,15 @@ func (s *Server) registerSingboxRoutes(mux *http.ServeMux, h *routeHandlers) {
 		mux.HandleFunc("/api/singbox/tunnels", h.guarded(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
+				// Одиночный туннель переехал на /api/singbox/tunnels/get
+				// (#520). Старый вариант ?tag= отвечаем громким 400, а не
+				// тихим списком другой формы — чтобы не обновившийся клиент
+				// (закешированная вкладка SPA, чей-то скрипт) получил
+				// диагностику, а не молчаливую порчу данных.
+				if r.URL.Query().Has("tag") {
+					response.BadRequest(w, "single-tunnel GET moved: use /api/singbox/tunnels/get?tag=")
+					return
+				}
 				s.singboxHandler.ListTunnels(w, r)
 			case http.MethodPost:
 				s.singboxHandler.AddTunnels(w, r)

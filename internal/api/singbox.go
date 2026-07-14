@@ -589,7 +589,7 @@ func (h *SingboxHandler) ExportShareLink(w http.ResponseWriter, r *http.Request)
 //	@Accept			json
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Success		200	{object}	APIEnvelope
+//	@Success		200	{object}	SingboxTunnelsResponse
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/tunnels [put]
@@ -619,17 +619,32 @@ func (h *SingboxHandler) UpdateTunnel(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, out)
 }
 
+// SingboxRenameRequest is the body for PATCH /singbox/tunnels/rename.
+type SingboxRenameRequest struct {
+	OldTag string `json:"oldTag" example:"proxy-01"`
+	NewTag string `json:"newTag" example:"proxy-eu"`
+}
+
 // RenameTunnel handles PATCH /api/singbox/tunnels/rename.
-// Body: {"oldTag":"old","newTag":"new"}.
+//
+//	@Summary		Rename sing-box tunnel tag
+//	@Tags			singbox
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			request	body		SingboxRenameRequest	true	"Old and new tag"
+//	@Success		200		{object}	SingboxTunnelsResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		409		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/tunnels/rename [patch]
 func (h *SingboxHandler) RenameTunnel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		response.MethodNotAllowed(w)
 		return
 	}
-	var body struct {
-		OldTag string `json:"oldTag"`
-		NewTag string `json:"newTag"`
-	}
+	var body SingboxRenameRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		response.BadRequest(w, "invalid request")
 		return
@@ -956,7 +971,7 @@ func (h *SingboxHandler) SpeedTestStream(w http.ResponseWriter, r *http.Request)
 //	@Tags			singbox
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Success		200	{object}	APIEnvelope
+//	@Success		200	{object}	SingboxTunnelsResponse
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/tunnels [delete]

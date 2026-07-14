@@ -151,10 +151,14 @@ export class SingboxClient extends RoutingClient {
 		const isMockDev = this.isMockDevMode();
 		try {
 			const raw = await this.request<unknown>(`/singbox/tunnels/get?tag=${encodeURIComponent(tag)}`);
-			// Normal backend shape.
+			// Normal backend shape. Пустой outbound ({}) не считается ответом:
+			// prism в dev:mock генерирует из swagger именно {tag:'proxy-01',
+			// outbound:{}} — такой ответ должен провалиться в list-based
+			// фолбэк ниже, который найдёт настоящий мок-туннель по tag.
 			if (raw && typeof raw === 'object' && 'outbound' in raw && 'tag' in raw) {
 				const obj = raw as { tag: string; outbound: unknown };
-				if (obj.outbound) return obj;
+				const ob = obj.outbound;
+				if (ob && typeof ob === 'object' && Object.keys(ob).length > 0) return obj;
 			}
 			// Prism may return a SingboxTunnel-like item directly instead of {tag,outbound}.
 			if (isMockDev && raw && typeof raw === 'object' && 'tag' in raw) {
