@@ -1104,8 +1104,15 @@ func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 	}
 	installedComplete := s.deps.IPTables.IsInstalled(ctx)
 	installedAny := s.deps.IPTables.HasAnyInstalled(ctx)
+	// Запаркованный слот 20 при живых цепочках — тоже дрейф (issue #523):
+	// rollback провального Enable паркует слот, а netfilter.d-hook
+	// восстанавливает перехват из rules-файла. reconcileInstalled видел
+	// installed=true, считал engineDown и вечно ждал watchdog, которому
+	// нечего чинить — процесс жив, просто в конфиге нет tproxy-in. Лечится
+	// полным Enable: перепромоут слота + переустановка iptables.
+	routerSlotParked := s.deps.Orch != nil && !s.routerSlotEnabled()
 	switch {
-	case sr.Enabled && !installedComplete:
+	case sr.Enabled && (!installedComplete || routerSlotParked):
 		// Drift-heal, NOT user-initiated: must honour a prior master-Stop, so
 		// do not clear the sticky intent (clearManualStop=false).
 		return s.enableLocked(ctx, false)
@@ -1115,6 +1122,19 @@ func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 		return s.reconcileInstalled(ctx, sr)
 	}
 	return nil
+}
+
+// routerSlotEnabled reports whether 20-router.json currently lives in
+// config.d/ (true) or is parked under disabled/ (false). Caller guarantees
+// deps.Orch != nil. Unregistered slot reads as parked — Reconcile then routes
+// to Enable, whose SetEnabled surfaces the real error.
+func (s *ServiceImpl) routerSlotEnabled() bool {
+	for _, st := range s.deps.Orch.Snapshot() {
+		if st.Slot == orchestrator.SlotRouter {
+			return st.Enabled
+		}
+	}
+	return false
 }
 
 // reconcileInstalled handles the "Enabled && installed" branch:

@@ -158,3 +158,37 @@ func TestEnable_Tproxy_NotifiesRoutingSlotsChanged(t *testing.T) {
 		t.Error("hook fired BEFORE the router slot became active")
 	}
 }
+
+// Запаркованный слот 20 при живых iptables-цепочках (rollback провального
+// Enable + netfilter.d-hook, восстановивший перехват из rules-файла) —
+// Reconcile обязан перепромоутить слот полным Enable, а не уходить в
+// reconcileInstalled и вечно ждать watchdog, которому нечего чинить
+// (issue #523, вторичный тупик).
+func TestReconcile_ParkedSlotWithLiveChains_RepromotesSlot(t *testing.T) {
+	stubListeningProbe(t, func() bool { return true })
+	svc, dir := newQoSSlotTestService(t, "vpn")
+	ensureDisabledDir(t, dir)
+	orch := svc.deps.Orch
+	if err := orch.SetEnabledSilent(orchestrator.SlotRouter, false); err != nil {
+		t.Fatal(err)
+	}
+	svc.deps.Settings = newTestSettingsStore(t, storage.SingboxRouterSettings{
+		RoutingMode:   "tproxy",
+		DeviceMode:    "all",
+		WANAutoDetect: true,
+		Enabled:       true,
+	})
+	svc.deps.Singbox = &fakeSingbox{dir: dir, isRunningFn: func() (bool, int) { return true, 1234 }}
+	// jumpsPresentDump в стабе → IsInstalled()=true: ровно состояние
+	// «цепочки живы, слот запаркован».
+	svc.deps.IPTables = newStubIPTables(func(_ context.Context, _ string) error { return nil })
+	svc.deps.WANIPCollector = &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}}
+	svc.deps.NetfilterPreflight = func(context.Context) error { return nil }
+
+	if err := svc.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !routerSlotEnabled(orch) {
+		t.Fatal("parked router slot must be re-promoted by Reconcile drift-heal, not left waiting for watchdog")
+	}
+}
