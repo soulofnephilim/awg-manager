@@ -393,9 +393,8 @@ func (h *SingboxHandler) Control(w http.ResponseWriter, r *http.Request) {
 
 // ListTunnels handles GET /api/singbox/tunnels.
 // Returns all tunnels enriched with per-tunnel connectivity from the Clash API.
-// (server.go still routes GET with ?tag= to GetTunnel for compatibility, but
-// that variant returns a different shape — it is documented at its canonical
-// path /singbox/tunnels/get, which is what the frontend calls.)
+// The single-tunnel variant lives at its own path /singbox/tunnels/get — the
+// response shapes differ, so they must not share a path/method (#520).
 //
 //	@Summary		List sing-box tunnels
 //	@Tags			singbox
@@ -505,10 +504,9 @@ func (h *SingboxHandler) AddTunnels(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, resp)
 }
 
-// GetTunnel handles GET /api/singbox/tunnels/get?tag={tag} (and the legacy
-// GET /api/singbox/tunnels?tag= dispatch kept for external callers). The
-// response data shape differs from the list endpoint — a dedicated path keeps
-// the swagger spec (and the frontend runtime validation generated from it)
+// GetTunnel handles GET /api/singbox/tunnels/get?tag={tag}. The response
+// data shape differs from the list endpoint — a dedicated path keeps the
+// swagger spec (and the frontend runtime validation generated from it)
 // truthful: one path/method — one schema (#520).
 //
 //	@Summary		Get single sing-box tunnel outbound

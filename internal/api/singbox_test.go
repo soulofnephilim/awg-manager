@@ -40,7 +40,7 @@ func TestSingboxHandler_MethodNotAllowed_AddTunnels(t *testing.T) {
 
 func TestSingboxHandler_MethodNotAllowed_GetTunnel(t *testing.T) {
 	h := &SingboxHandler{op: nil}
-	req := httptest.NewRequest(http.MethodPost, "/api/singbox/tunnels?tag=foo", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/tunnels/get?tag=foo", nil)
 	w := httptest.NewRecorder()
 	h.GetTunnel(w, req)
 	if w.Code != http.StatusMethodNotAllowed {
@@ -80,7 +80,7 @@ func TestSingboxHandler_MethodNotAllowed_DeleteTunnel(t *testing.T) {
 
 func TestSingboxHandler_MissingTag_GetTunnel(t *testing.T) {
 	h := &SingboxHandler{op: nil}
-	req := httptest.NewRequest(http.MethodGet, "/api/singbox/tunnels", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/singbox/tunnels/get", nil)
 	w := httptest.NewRecorder()
 	h.GetTunnel(w, req)
 	if w.Code != http.StatusBadRequest {

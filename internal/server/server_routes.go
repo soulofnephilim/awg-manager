@@ -679,11 +679,7 @@ func (s *Server) registerSingboxRoutes(mux *http.ServeMux, h *routeHandlers) {
 		mux.HandleFunc("/api/singbox/tunnels", h.guarded(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
-				if r.URL.Query().Has("tag") {
-					s.singboxHandler.GetTunnel(w, r)
-				} else {
-					s.singboxHandler.ListTunnels(w, r)
-				}
+				s.singboxHandler.ListTunnels(w, r)
 			case http.MethodPost:
 				s.singboxHandler.AddTunnels(w, r)
 			case http.MethodPut:
