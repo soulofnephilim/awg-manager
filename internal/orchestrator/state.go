@@ -20,6 +20,11 @@ type tunnelState struct {
 	NWGIndex     int
 	PingCheck    *storage.TunnelPingCheck
 	ISPInterface string
+	// EndpointMayV6: peer endpoint — IPv6-литерал или hostname (может
+	// резолвиться в v6). Для nativewg на ASC-прошивке это значит, что реальный
+	// endpoint может жить только в ядре (wg set), а конфиг NDMS — нести
+	// заглушку: после ребута нужен полный Start (decideBoot).
+	EndpointMayV6 bool
 
 	// quiescentUntil: while now < this, a conf=disabled edge for this tunnel
 	// is treated as transient NDMS settling (do not stop). Set on (re)start.
@@ -91,14 +96,15 @@ func (s *State) ensureTunnel(tunnelID string, store *storage.AWGTunnelStore) boo
 // tunnelStateFromStored creates a tunnelState from stored data.
 func tunnelStateFromStored(t *storage.AWGTunnel) *tunnelState {
 	return &tunnelState{
-		ID:           t.ID,
-		Name:         t.Name,
-		Backend:      t.Backend,
-		Enabled:      t.Enabled,
-		NWGIndex:     t.NWGIndex,
-		PingCheck:    t.PingCheck,
-		ISPInterface: t.ISPInterface,
-		ActiveWAN:    t.ActiveWAN,
+		ID:            t.ID,
+		Name:          t.Name,
+		Backend:       t.Backend,
+		Enabled:       t.Enabled,
+		NWGIndex:      t.NWGIndex,
+		PingCheck:     t.PingCheck,
+		ISPInterface:  t.ISPInterface,
+		ActiveWAN:     t.ActiveWAN,
+		EndpointMayV6: nwg.EndpointMayResolveIPv6(t.Peer.Endpoint),
 	}
 }
 
