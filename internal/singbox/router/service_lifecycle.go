@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -984,6 +985,11 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Каждый teardown — в журнал: выключение бывает не только по кнопке
+	// (fail-safe при удалённой политике, drift-heal), и без записи причину
+	// «тумблер сам выключился» не восстановить (issue #523).
+	s.appLog.Info("disable", "", "выключение движка маршрутизации")
+
 	// fakeip-tun teardown is an entirely separate path (no iptables; opkgtun +
 	// pool/CIDR routes + a fail-closed drain). Dispatch by mode before the
 	// tproxy body so the tproxy path below stays byte-for-byte unchanged for
@@ -1166,8 +1172,19 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	mark := ""
 	if policyMode {
 		mark, err = s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName)
+		if err != nil && !errors.Is(err, query.ErrPolicyMarkNotFound) {
+			// Транзиентная ошибка чтения метки (RCI недоступен/медленный —
+			// ранняя загрузка, shutdown-гонка при перезагрузке): это НЕ
+			// «политика удалена». Раньше здесь срабатывал fail-safe disable —
+			// молча и без авто-восстановления гасил движок (issue #523).
+			// Оставляем состояние как есть, ретрай на следующем тике.
+			return fmt.Errorf("policy %q mark: %w", sr.PolicyName, err)
+		}
 		if err != nil || mark == "" {
-			// Policy gone upstream — fail-safe disable, no auto-recovery.
+			// NDMS ответил, а политики/метки нет — политика действительно
+			// удалена. Fail-safe disable, no auto-recovery; причина — в журнал.
+			s.appLog.Warn("reconcile", sr.PolicyName,
+				"политика не найдена в NDMS — движок маршрутизации выключается (fail-safe)")
 			return s.Disable(ctx)
 		}
 	}

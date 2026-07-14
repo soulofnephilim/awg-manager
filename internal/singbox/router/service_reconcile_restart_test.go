@@ -3,10 +3,13 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -345,5 +348,78 @@ func TestGetStatus_DeadEngineWithInterceptionIssue(t *testing.T) {
 		if i.Kind == "engine-dead-interception" {
 			t.Fatalf("alive engine must not carry the issue, got %+v", st.Issues)
 		}
+	}
+}
+
+// recordingAppLogger captures AppLog calls for assertions (issue #523:
+// fail-safe disable обязан оставлять причину в журнале).
+type recordingAppLogger struct {
+	entries []string
+}
+
+func (r *recordingAppLogger) AppLog(_ logging.Level, _, _, action, target, message string) {
+	r.entries = append(r.entries, action+"|"+target+"|"+message)
+}
+
+// Транзиентная ошибка чтения метки политики (RCI недоступен — ранняя
+// загрузка, shutdown-гонка) НЕ должна выключать движок: состояние не
+// трогаем, ошибка уходит наверх (scheduler залогирует), ретрай следующим
+// тиком (issue #523).
+func TestReconcileInstalled_TransientPolicyMarkError_NoDisable(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := newReconcileInstalledService(t, sb)
+	store := newTestSettingsStore(t, reconcileInstalledSettings)
+	svc.deps.Settings = store
+	svc.deps.Policies = &fakeAccessPolicyProvider{
+		markErr: errors.New("fetch policy marks: connection refused"),
+	}
+
+	err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings)
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("want propagated transient error, got %v", err)
+	}
+	settings, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("settings.Load: %v", loadErr)
+	}
+	if !settings.SingboxRouter.Enabled {
+		t.Fatal("transient RCI error must NOT persist enabled=false (fail-safe disable fired)")
+	}
+}
+
+// NDMS ответил, но политики/метки нет — политика действительно удалена:
+// fail-safe disable срабатывает, enabled=false персистится, причина
+// пишется в журнал (issue #523).
+func TestReconcileInstalled_PolicyMarkNotFound_DisablesAndLogs(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := newReconcileInstalledService(t, sb)
+	store := newTestSettingsStore(t, reconcileInstalledSettings)
+	svc.deps.Settings = store
+	svc.deps.Policies = &fakeAccessPolicyProvider{
+		markErr: fmt.Errorf("policy %q: %w", "Policy0", query.ErrPolicyMarkNotFound),
+	}
+	rec := &recordingAppLogger{}
+	svc.appLog = logging.NewScopedLogger(rec, logging.GroupRouting, logging.SubSingboxRouter)
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	settings, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("settings.Load: %v", loadErr)
+	}
+	if settings.SingboxRouter.Enabled {
+		t.Fatal("policy-not-found must persist enabled=false (fail-safe disable)")
+	}
+	found := false
+	for _, e := range rec.entries {
+		if strings.Contains(e, "политика не найдена") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("fail-safe disable must log the reason, got %v", rec.entries)
 	}
 }
