@@ -136,9 +136,16 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 	ndmsName := NewNWGNames(stored.NWGIndex).NDMSName
 	o.appLog.Full("replace-config", stored.Name, "Syncing peer parameters to NDMS")
 
+	// NDMS отвергает IPv6-endpoint в peer-командах: в RCI уходит заглушка,
+	// реальный endpoint живёт в ядре (wg set ниже + endpoint-страж).
+	rciEndpoint := stored.Peer.Endpoint
+	kernelEndpoint, kernelV6 := canonicalV6Endpoint(stored.Peer.Endpoint)
+	if kernelV6 {
+		rciEndpoint = ndmsEndpointPlaceholder
+	}
 	peerCfg := payloads.PeerConfig{
 		PublicKey: stored.Peer.PublicKey,
-		Endpoint:  stored.Peer.Endpoint,
+		Endpoint:  rciEndpoint,
 	}
 	if stored.Peer.PersistentKeepalive > 0 {
 		peerCfg.KeepaliveInterval = stored.Peer.PersistentKeepalive
@@ -190,6 +197,23 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 	if stored.ISPInterface != "" {
 		if _, err := o.transport.Post(ctx, payloads.CmdWireguardPeerConnect(ndmsName, stored.Peer.PublicKey, stored.ISPInterface)); err != nil {
 			o.appLog.Warn("sync-peer", ndmsName, "peer connect via: "+err.Error())
+		}
+	}
+
+	// Работающий v6-туннель: смена ключа/endpoint'а должна доехать до ядра
+	// сразу, а реестр стража — обновиться (иначе он восстановит старые
+	// значения поверх новых).
+	if kernelV6 && o.guardHas(stored.ID) {
+		ifaceName := NewNWGNames(stored.NWGIndex).IfaceName
+		if err := setKernelPeerEndpoint(ctx, ifaceName, stored.Peer.PublicKey, kernelEndpoint); err != nil {
+			o.appLog.Warn("sync-peer", ndmsName, "kernel endpoint: "+err.Error())
+		} else {
+			o.guardRegister(stored.ID, guardEntry{
+				iface:    ifaceName,
+				pubkey:   stored.Peer.PublicKey,
+				endpoint: kernelEndpoint,
+				name:     ndmsName,
+			})
 		}
 	}
 

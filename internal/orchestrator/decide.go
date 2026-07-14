@@ -57,6 +57,15 @@ func decideBoot(state *State) []Action {
 				// without our kmod proxy → conf=running but no handshake).
 				actions = append(actions, Action{Type: ActionReconcileNativeWG, Tunnel: t.ID})
 				actions = appendPostStartActions(actions, t)
+			} else if t.EndpointV6 {
+				// На ASC-прошивке NDMS сам поднимает интерфейс из своего
+				// конфига, и для v4 это самодостаточно (boot ничего не
+				// делает намеренно). Для v6 конфиг NDMS несёт заглушку
+				// 127.0.0.1:1 — реальный endpoint жил только в ядре и после
+				// ребута роутера потерян. Полный Start возвращает его
+				// (wg set) и заново регистрирует endpoint-страж.
+				actions = append(actions, Action{Type: ActionStartNativeWG, Tunnel: t.ID})
+				actions = appendPostStartActions(actions, t)
 			}
 		}
 	}

@@ -50,6 +50,27 @@ func TestDecide_Boot_SkipsNativeWGWithASC(t *testing.T) {
 	}
 }
 
+// ASC + v6-endpoint: после ребута роутера NDMS поднимает интерфейс из своего
+// конфига с заглушкой 127.0.0.1:1 — реальный endpoint жил только в ядре.
+// Boot обязан сделать полный Start (wg set + регистрация endpoint-стража).
+func TestDecide_Boot_StartsNativeWGWithASCAndV6Endpoint(t *testing.T) {
+	s := newState()
+	s.supportsASC = true
+	s.tunnels["awg0"] = &tunnelState{ID: "awg0", Backend: "nativewg", Enabled: true, NWGIndex: 0, EndpointV6: true}
+	s.tunnels["awg1"] = &tunnelState{ID: "awg1", Backend: "nativewg", Enabled: false, NWGIndex: 1, EndpointV6: true}
+
+	actions := decide(Event{Type: EventBoot}, &s)
+
+	starts := filterActions(actions, ActionStartNativeWG)
+	if len(starts) != 1 {
+		t.Fatalf("expected 1 StartNativeWG for enabled ASC+v6 tunnel, got %d", len(starts))
+	}
+	if starts[0].Tunnel != "awg0" {
+		t.Errorf("StartNativeWG for wrong tunnel: %q", starts[0].Tunnel)
+	}
+	assertNoActionForTunnel(t, actions, "awg1", ActionStartNativeWG)
+}
+
 func TestDecide_Boot_IncludesMonitoring(t *testing.T) {
 	s := newState()
 	s.tunnels["awg0"] = &tunnelState{

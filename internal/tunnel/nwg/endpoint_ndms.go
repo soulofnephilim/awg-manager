@@ -2,41 +2,94 @@ package nwg
 
 import (
 	"net"
+	"strconv"
 	"strings"
 )
 
-// endpointHostIsIPv6 reports whether the "host:port" / "[host]:port" endpoint
-// carries an IPv6-literal host. Hostnames and IPv4 return false.
-func endpointHostIsIPv6(endpoint string) bool {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(endpoint))
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.To4() == nil
+// ndmsEndpointPlaceholder — endpoint-заглушка для NDMS: RCI не принимает
+// IPv6-endpoint ни в импорте .conf, ни в peer-командах, а endpoint в конфиге
+// NDMS для v6-туннеля в любом случае фиктивен — реальный живёт в ядре
+// (wg set, см. wg_tool.go/endpoint_guard.go).
+//
+// Порт 1 выбран сознательно: kmod-слоты awg_proxy слушают на 127.0.0.1 с
+// kernel-ephemeral портами (32768+), и заглушка с реальным remote-портом
+// (например 51820, попадает в ephemeral-диапазон) могла бы указать в ЧУЖОЙ
+// живой слот — kernel WG слал бы хендшейки в прокси другого туннеля. На
+// порт 1 ядро эфемерные сокеты не вешает.
+const ndmsEndpointPlaceholder = "127.0.0.1:1"
+
+// EndpointHostIsIPv6 — endpoint несёт IPv6-литерал хоста. Понимает все
+// реальные формы: "[v6]:port", "[v6]" без порта, голый "v6",
+// небракетированный "v6:port" (некоторые провайдеры так выгружают конфиги)
+// и IPv4-mapped "::ffff:1.2.3.4" (форма с двоеточиями — NDMS отвергает и
+// её). Hostname и IPv4 → false.
+func EndpointHostIsIPv6(endpoint string) bool {
+	host, ok := splitEndpointHost(strings.TrimSpace(endpoint))
+	return ok && strings.Contains(host, ":") && net.ParseIP(host) != nil
 }
 
-// ndmsEndpointPlaceholder — endpoint-заглушка для NDMS на этапе create.
-// Порт сохраняем из реального endpoint'а (информативно в NDMS UI), хост —
-// loopback: NDMS RCI-импорт и batch-команды отвергают IPv6-endpoint
-// («invalid endpoint format»), а endpoint на этапе create — временный:
-// Start в любом случае переставляет его (127.0.0.1:proxy у kmod-пути,
-// реальный у нативного ASC).
-func ndmsEndpointPlaceholder(endpoint string) string {
-	_, port, err := net.SplitHostPort(strings.TrimSpace(endpoint))
-	if err != nil || port == "" {
-		port = "51820"
+// canonicalV6Endpoint нормализует v6-endpoint к "[addr]:port" — форме,
+// которую принимает wg set. ok=false, если это не v6-литерал с валидным
+// портом (в т.ч. для форм без порта — их нечего ставить в ядро).
+func canonicalV6Endpoint(endpoint string) (string, bool) {
+	addr := strings.TrimSpace(endpoint)
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		if net.ParseIP(host) != nil && strings.Contains(host, ":") && validPortString(port) {
+			return net.JoinHostPort(host, port), true
+		}
+		return "", false
 	}
-	return "127.0.0.1:" + port
+	// Небракетированный v6:port — сплит по последнему двоеточию.
+	if i := strings.LastIndex(addr, ":"); i > 0 {
+		host, port := strings.Trim(addr[:i], "[]"), addr[i+1:]
+		if net.ParseIP(host) != nil && strings.Contains(host, ":") && validPortString(port) {
+			return net.JoinHostPort(host, port), true
+		}
+	}
+	return "", false
 }
 
-// replaceConfEndpointLine переписывает строку `Endpoint = ...` в .conf,
-// сгенерированном config.GenerateForExport (там ровно одна такая строка).
+func validPortString(p string) bool {
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+// splitEndpointHost достаёт хост из endpoint'а в любой из принимаемых форм.
+func splitEndpointHost(addr string) (string, bool) {
+	if addr == "" || strings.Contains(addr, "/") {
+		return "", false
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host, true
+	}
+	// "[v6]" без порта / голый IP-литерал.
+	if trimmed := strings.Trim(addr, "[]"); net.ParseIP(trimmed) != nil {
+		return trimmed, true
+	}
+	// Небракетированный v6:port.
+	if i := strings.LastIndex(addr, ":"); i > 0 {
+		host := strings.Trim(addr[:i], "[]")
+		if net.ParseIP(host) != nil && strings.Contains(host, ":") && validPortString(addr[i+1:]) {
+			return host, true
+		}
+	}
+	return "", false
+}
+
+// replaceConfEndpointLine переписывает строку `Endpoint = ...` в секции
+// [Peer] .conf'а, сгенерированного config.GenerateForExport. Скоуп по секции
+// принципиален: свободнотекстовые I-параметры в [Interface] могут содержать
+// строку с префиксом "Endpoint" — трогать её нельзя.
 func replaceConfEndpointLine(conf, endpoint string) string {
 	lines := strings.Split(conf, "\n")
+	inPeer := false
 	for i, l := range lines {
 		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(trimmed, "Endpoint") && strings.Contains(trimmed, "=") {
+		if strings.HasPrefix(trimmed, "[") {
+			inPeer = strings.EqualFold(trimmed, "[peer]")
+			continue
+		}
+		if inPeer && strings.HasPrefix(trimmed, "Endpoint") && strings.Contains(trimmed, "=") {
 			lines[i] = "Endpoint = " + endpoint
 		}
 	}
