@@ -312,14 +312,22 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 	}
 	o.appLog.Full("start", stored.Name, fmt.Sprintf("Resolving endpoint %s -> %s:%d", stored.Peer.Endpoint, endpointIP, endpointPort))
 
-	// v4 — исторический "%s:%d" байт-в-байт; v6 — стандартная скобочная
-	// форма [addr]:port (небракетированный v6 для парсера гарантированный
-	// мусор: адрес обрезается по последнему двоеточию). Поддержка v6
-	// нативным ASC-путём NDMS не подтверждена — при отказе NDMS вернёт
-	// явную ошибку старта; верифицированный v6-путь — awg_proxy kmod (#455).
-	realEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
+	// v4 — исторический "%s:%d" через RCI байт-в-байт. v6 через RCI NDMS не
+	// принимает вовсе (ни импорт, ни peer-команды — подтверждено автором на
+	// устройстве): endpoint выставляется напрямую в ядро через
+	// wireguard-tools по kernel-имени nwgN, ПОСЛЕ поднятия интерфейса —
+	// up/down у NDMS сбрасывает kernel-endpoint на значение из его конфига.
+	endpointIsV6 := false
 	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+		endpointIsV6 = true
+	}
+	realEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
+	if endpointIsV6 {
 		realEndpoint = net.JoinHostPort(endpointIP, strconv.Itoa(endpointPort))
+		// Fail fast до RCI-команд: без wg поднимать интерфейс бессмысленно.
+		if wgToolLookup() == "" {
+			return fmt.Errorf("IPv6 endpoint на прошивке с нативным ASC выставляется только через wireguard-tools, бинарь wg не найден — установите пакет: opkg install wireguard-tools")
+		}
 	}
 
 	// Sync address/MTU from storage
@@ -337,14 +345,26 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 		o.hookNotifier.ExpectHook(names.NDMSName, "running")
 	}
 
-	// Batch: set endpoint + connect via + up
-	cmds := []any{
-		payloads.CmdWireguardPeerEndpoint(names.NDMSName, pubkey, realEndpoint),
+	// Batch: (v4) set endpoint + connect via + up; (v6) endpoint не входит —
+	// его RCI отвергнет, ставим в ядро после up.
+	var cmds []any
+	if !endpointIsV6 {
+		cmds = append(cmds, payloads.CmdWireguardPeerEndpoint(names.NDMSName, pubkey, realEndpoint))
+	}
+	cmds = append(cmds,
 		payloads.CmdWireguardPeerConnect(names.NDMSName, pubkey, stored.ISPInterface),
 		payloads.CmdInterfaceUp(names.NDMSName, true),
-	}
+	)
 	if _, err := o.transport.PostBatch(ctx, cmds); err != nil {
 		return fmt.Errorf("start native: %w", err)
+	}
+
+	if endpointIsV6 {
+		if err := setKernelPeerEndpoint(ctx, names.IfaceName, pubkey, realEndpoint); err != nil {
+			return fmt.Errorf("start native: %w", err)
+		}
+		o.appLog.Info("start", names.NDMSName,
+			fmt.Sprintf("IPv6 endpoint %s выставлен в ядро через wg set %s (RCI NDMS v6 не принимает); при ребуте/up-down переустановит reconcile", realEndpoint, names.IfaceName))
 	}
 
 	viaInfo := ""
