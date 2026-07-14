@@ -56,8 +56,8 @@ func TestDecide_Boot_SkipsNativeWGWithASC(t *testing.T) {
 func TestDecide_Boot_StartsNativeWGWithASCAndV6Endpoint(t *testing.T) {
 	s := newState()
 	s.supportsASC = true
-	s.tunnels["awg0"] = &tunnelState{ID: "awg0", Backend: "nativewg", Enabled: true, NWGIndex: 0, EndpointV6: true}
-	s.tunnels["awg1"] = &tunnelState{ID: "awg1", Backend: "nativewg", Enabled: false, NWGIndex: 1, EndpointV6: true}
+	s.tunnels["awg0"] = &tunnelState{ID: "awg0", Backend: "nativewg", Enabled: true, NWGIndex: 0, EndpointMayV6: true}
+	s.tunnels["awg1"] = &tunnelState{ID: "awg1", Backend: "nativewg", Enabled: false, NWGIndex: 1, EndpointMayV6: true}
 
 	actions := decide(Event{Type: EventBoot}, &s)
 

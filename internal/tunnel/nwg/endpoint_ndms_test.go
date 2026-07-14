@@ -29,6 +29,22 @@ func TestEndpointHostIsIPv6(t *testing.T) {
 	}
 }
 
+func TestEndpointMayResolveIPv6(t *testing.T) {
+	cases := map[string]bool{
+		"[2a02:6b8::feed:ff]:51820": true,  // v6-литерал
+		"2a02:6b8::feed:ff:51820":   true,  // небракетированный v6:port
+		"vpn.example.com:51820":     true,  // hostname — может резолвиться в v6 (DDNS c AAAA)
+		"1.2.3.4:51820":             false, // v4-литерал — в NDMS реальный endpoint, boot no-op
+		"1.2.3.4":                   false,
+		"":                          false,
+	}
+	for ep, want := range cases {
+		if got := EndpointMayResolveIPv6(ep); got != want {
+			t.Errorf("EndpointMayResolveIPv6(%q) = %v, want %v", ep, got, want)
+		}
+	}
+}
+
 func TestCanonicalV6Endpoint(t *testing.T) {
 	cases := map[string]struct {
 		out string

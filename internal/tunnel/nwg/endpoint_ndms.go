@@ -28,6 +28,21 @@ func EndpointHostIsIPv6(endpoint string) bool {
 	return ok && strings.Contains(host, ":") && net.ParseIP(host) != nil
 }
 
+// EndpointMayResolveIPv6 — endpoint МОЖЕТ дать IPv6-адрес при старте:
+// v6-литерал или hostname (во что резолвится — заранее неизвестно, например
+// DDNS только с AAAA). Если последний Start ушёл по v6-пути, конфиг NDMS
+// несёт заглушку — после ребута роутера такому туннелю нужен полный Start
+// (orchestrator/decideBoot). IPv4-литерал → false: у него в NDMS реальный
+// endpoint и boot ничего делать не должен (историческое поведение).
+func EndpointMayResolveIPv6(endpoint string) bool {
+	host, ok := splitEndpointHost(strings.TrimSpace(endpoint))
+	if !ok {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || ip.To4() == nil
+}
+
 // canonicalV6Endpoint нормализует v6-endpoint к "[addr]:port" — форме,
 // которую принимает wg set. ok=false, если это не v6-литерал с валидным
 // портом (в т.ч. для форм без порта — их нечего ставить в ядро).
