@@ -673,6 +673,7 @@ func (s *Server) registerSingboxRoutes(mux *http.ServeMux, h *routeHandlers) {
 		mux.HandleFunc("/api/singbox/tunnels/test/connectivity", h.guarded(s.singboxHandler.CheckConnectivity))
 		mux.HandleFunc("/api/singbox/tunnels/test/ip", h.guarded(s.singboxHandler.CheckIP))
 		mux.HandleFunc("/api/singbox/tunnels/test/speed/stream", h.guarded(s.singboxHandler.SpeedTestStream))
+		mux.HandleFunc("/api/singbox/tunnels/get", h.guarded(s.singboxHandler.GetTunnel))
 		mux.HandleFunc("/api/singbox/tunnels/rename", h.guarded(s.singboxHandler.RenameTunnel))
 		mux.HandleFunc("/api/singbox/tunnels/share-link", h.guarded(s.singboxHandler.ExportShareLink))
 		mux.HandleFunc("/api/singbox/tunnels", h.guarded(func(w http.ResponseWriter, r *http.Request) {

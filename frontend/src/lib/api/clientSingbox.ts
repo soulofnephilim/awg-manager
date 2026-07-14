@@ -150,7 +150,7 @@ export class SingboxClient extends RoutingClient {
 	async singboxGetTunnel(tag: string): Promise<{ tag: string; outbound: unknown }> {
 		const isMockDev = this.isMockDevMode();
 		try {
-			const raw = await this.request<unknown>(`/singbox/tunnels?tag=${encodeURIComponent(tag)}`);
+			const raw = await this.request<unknown>(`/singbox/tunnels/get?tag=${encodeURIComponent(tag)}`);
 			// Normal backend shape.
 			if (raw && typeof raw === 'object' && 'outbound' in raw && 'tag' in raw) {
 				const obj = raw as { tag: string; outbound: unknown };
