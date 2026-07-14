@@ -397,6 +397,7 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 			iface:    names.IfaceName,
 			pubkey:   pubkey,
 			endpoint: realEndpoint,
+			spec:     stored.Peer.Endpoint,
 			name:     names.NDMSName,
 		})
 		o.appLog.Info("start", names.NDMSName,

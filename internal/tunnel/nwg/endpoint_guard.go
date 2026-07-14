@@ -3,6 +3,8 @@ package nwg
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,6 +16,9 @@ import (
 // ping-check'ом. Событийной интеграции, покрывающей все эти случаи, нет —
 // страж СХОДИТСЯ к желаемому состоянию опросом: каждые guardInterval
 // сверяет `wg show <iface> endpoints` с ожидаемым и возвращает endpoint.
+// Для hostname-endpoint'ов (DDNS) ожидаемый адрес перерезолвливается на
+// каждом проходе — смена адреса за именем доезжает до ядра за один
+// интервал; при недоступном DNS страж работает по последнему известному.
 //
 // Реестр живёт в памяти демона и наполняется в startNative; после рестарта
 // awgm его восстанавливает Start (EventReconnect для работающих
@@ -28,7 +33,8 @@ var guardInterval = 20 * time.Second
 type guardEntry struct {
 	iface    string // kernel-имя (nwgN)
 	pubkey   string
-	endpoint string // каноническая форма [v6]:port
+	endpoint string // последний известный резолв, каноническая форма host:port
+	spec     string // endpoint из конфига (hostname:port или литерал) — для перерезолва DDNS
 	name     string // NDMS-имя для логов
 }
 
@@ -49,10 +55,26 @@ func (o *OperatorNativeWG) guardUnregister(id string) {
 }
 
 func (o *OperatorNativeWG) guardHas(id string) bool {
+	_, ok := o.guardGet(id)
+	return ok
+}
+
+func (o *OperatorNativeWG) guardGet(id string) (guardEntry, bool) {
 	o.guardMu.Lock()
 	defer o.guardMu.Unlock()
-	_, ok := o.guard[id]
-	return ok
+	e, ok := o.guard[id]
+	return e, ok
+}
+
+// guardUpdateEndpoint обновляет ожидаемый endpoint записи, только если она
+// всё ещё в реестре — иначе гонка со Stop/Delete воскресила бы удалённую.
+func (o *OperatorNativeWG) guardUpdateEndpoint(id, endpoint string) {
+	o.guardMu.Lock()
+	defer o.guardMu.Unlock()
+	if e, ok := o.guard[id]; ok {
+		e.endpoint = endpoint
+		o.guard[id] = e
+	}
 }
 
 func (o *OperatorNativeWG) guardLoop() {
@@ -79,7 +101,21 @@ func (o *OperatorNativeWG) guardSweep(ctx context.Context) {
 	if bin == "" {
 		return
 	}
-	for _, e := range entries {
+	for id, e := range entries {
+		// Hostname-spec (DDNS): перерезолвить — адрес мог смениться, а
+		// kernel WG сам за чужим DNS не следит. Ошибка резолва не фатальна:
+		// работаем по последнему известному адресу.
+		expected := e.endpoint
+		if host, ok := splitEndpointHost(e.spec); ok && net.ParseIP(host) == nil {
+			if ip, port, rerr := o.resolveOnce(e.spec, resolveAttemptTimeout); rerr == nil {
+				if fresh := net.JoinHostPort(ip, strconv.Itoa(port)); fresh != expected {
+					o.appLog.Info("endpoint-guard", e.name,
+						fmt.Sprintf("%s резолвится в новый адрес %s (был %s)", e.spec, fresh, expected))
+					expected = fresh
+					o.guardUpdateEndpoint(id, fresh)
+				}
+			}
+		}
 		out, err := wgToolOutput(ctx, bin, "show", e.iface, "endpoints")
 		if err != nil {
 			// Интерфейс может отсутствовать переходно (пересоздание) —
@@ -87,15 +123,15 @@ func (o *OperatorNativeWG) guardSweep(ctx context.Context) {
 			o.appLog.Full("endpoint-guard", e.name, "wg show: "+err.Error())
 			continue
 		}
-		if wgShowHasEndpoint(out, e.pubkey, e.endpoint) {
+		if wgShowHasEndpoint(out, e.pubkey, expected) {
 			continue
 		}
-		if err := wgToolRun(ctx, bin, "set", e.iface, "peer", e.pubkey, "endpoint", e.endpoint); err != nil {
+		if err := wgToolRun(ctx, bin, "set", e.iface, "peer", e.pubkey, "endpoint", expected); err != nil {
 			o.appLog.Warn("endpoint-guard", e.name, "восстановление endpoint не удалось: "+err.Error())
 			continue
 		}
 		o.appLog.Info("endpoint-guard", e.name,
-			fmt.Sprintf("kernel-endpoint слетел (NDMS переприменил конфиг) — восстановлен %s на %s", e.endpoint, e.iface))
+			fmt.Sprintf("kernel-endpoint слетел (NDMS переприменил конфиг или сменился DDNS-адрес) — выставлен %s на %s", expected, e.iface))
 	}
 }
 

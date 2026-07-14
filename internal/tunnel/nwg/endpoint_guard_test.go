@@ -84,6 +84,64 @@ func TestGuardSweep_UnregisteredTunnelIgnored(t *testing.T) {
 	}
 }
 
+// DDNS-имя стало резолвиться в новый адрес: страж перерезолвливает spec на
+// каждом проходе, обновляет ожидание в реестре и доводит ядро до нового
+// адреса, даже если старый endpoint в ядре «на месте».
+func TestGuardSweep_ReresolvesDDNSAndUpdatesKernel(t *testing.T) {
+	op := newGuardTestOperator()
+	op.resolveFn = func(string) (string, int, error) { return "2a02::feed", 51820, nil }
+	op.guardRegister("awg20", guardEntry{iface: "nwg3", pubkey: "PUB", endpoint: "[2a02::1]:51820", spec: "vpn.example.com:51820", name: "Wireguard3"})
+	calls := stubGuardWG(t, "PUB\t[2a02::1]:51820\n", nil)
+
+	op.guardSweep(context.Background())
+
+	if len(*calls) != 1 {
+		t.Fatalf("wg set calls = %d, want 1: %v", len(*calls), *calls)
+	}
+	got := strings.Join((*calls)[0], " ")
+	if got != "/opt/bin/wg set nwg3 peer PUB endpoint [2a02::feed]:51820" {
+		t.Fatalf("unexpected wg set: %q", got)
+	}
+	entry, _ := op.guardGet("awg20")
+	if entry.endpoint != "[2a02::feed]:51820" {
+		t.Fatalf("guard entry endpoint not updated: %+v", entry)
+	}
+}
+
+// DNS недоступен: страж работает по последнему известному адресу —
+// восстановление слетевшего endpoint'а не блокируется сбоем резолва.
+func TestGuardSweep_ResolveFailureFallsBackToLastKnown(t *testing.T) {
+	op := newGuardTestOperator()
+	op.resolveFn = func(string) (string, int, error) { return "", 0, context.DeadlineExceeded }
+	op.guardRegister("awg20", guardEntry{iface: "nwg3", pubkey: "PUB", endpoint: "[2a02::1]:51820", spec: "vpn.example.com:51820", name: "Wireguard3"})
+	calls := stubGuardWG(t, "PUB\t127.0.0.1:1\n", nil)
+
+	op.guardSweep(context.Background())
+
+	if len(*calls) != 1 {
+		t.Fatalf("wg set calls = %d, want 1: %v", len(*calls), *calls)
+	}
+	got := strings.Join((*calls)[0], " ")
+	if got != "/opt/bin/wg set nwg3 peer PUB endpoint [2a02::1]:51820" {
+		t.Fatalf("unexpected wg set: %q", got)
+	}
+}
+
+// Литеральный spec не перерезолвливается — резолвер не дёргается вовсе.
+func TestGuardSweep_LiteralSpecSkipsResolve(t *testing.T) {
+	op := newGuardTestOperator()
+	resolves := 0
+	op.resolveFn = func(string) (string, int, error) { resolves++; return "", 0, context.DeadlineExceeded }
+	op.guardRegister("awg20", guardEntry{iface: "nwg3", pubkey: "PUB", endpoint: "[2a02::1]:51820", spec: "[2a02::1]:51820", name: "Wireguard3"})
+	_ = stubGuardWG(t, "PUB\t[2a02::1]:51820\n", nil)
+
+	op.guardSweep(context.Background())
+
+	if resolves != 0 {
+		t.Fatalf("resolver must not run for literal spec, ran %d times", resolves)
+	}
+}
+
 func TestWGShowHasEndpoint(t *testing.T) {
 	out := "OTHER\t1.2.3.4:51820\nPUB\t[2a02::1]:51820\n"
 	if !wgShowHasEndpoint(out, "PUB", "[2a02::1]:51820") {

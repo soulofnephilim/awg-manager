@@ -138,8 +138,25 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 
 	// NDMS отвергает IPv6-endpoint в peer-командах: в RCI уходит заглушка,
 	// реальный endpoint живёт в ядре (wg set ниже + endpoint-страж).
+	// Hostname резолвим здесь же (v4 предпочтителен — netutil.preferIPv4):
+	// AAAA-only-имя NDMS резолвить не умеет, ему тоже нужна заглушка.
 	rciEndpoint := stored.Peer.Endpoint
 	kernelEndpoint, kernelV6 := canonicalV6Endpoint(stored.Peer.Endpoint)
+	v4Confirmed := false
+	if !kernelV6 {
+		if host, ok := splitEndpointHost(stored.Peer.Endpoint); ok && net.ParseIP(host) != nil {
+			v4Confirmed = true // v4-литерал — endpoint'ом управляет сам NDMS
+		} else if ip, port, err := o.resolveEndpointWithFallback(stored); err == nil {
+			if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() == nil {
+				kernelEndpoint = net.JoinHostPort(ip, strconv.Itoa(port))
+				kernelV6 = true
+			} else {
+				v4Confirmed = true
+			}
+		}
+		// Ошибка резолва: ни v4, ни v6 не подтверждены — hostname уходит
+		// в RCI как раньше, судьба стража решается ниже.
+	}
 	if kernelV6 {
 		rciEndpoint = ndmsEndpointPlaceholder
 	}
@@ -202,8 +219,10 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 
 	// Работающий v6-туннель: смена ключа/endpoint'а должна доехать до ядра
 	// сразу, а реестр стража — обновиться (иначе он восстановит старые
-	// значения поверх новых).
-	if kernelV6 && o.guardHas(stored.ID) {
+	// значения поверх новых, а wg set по старому ключу вообще ВОСКРЕШАЕТ
+	// удалённого пира на интерфейсе).
+	switch {
+	case kernelV6 && o.guardHas(stored.ID):
 		ifaceName := NewNWGNames(stored.NWGIndex).IfaceName
 		if err := setKernelPeerEndpoint(ctx, ifaceName, stored.Peer.PublicKey, kernelEndpoint); err != nil {
 			o.appLog.Warn("sync-peer", ndmsName, "kernel endpoint: "+err.Error())
@@ -212,8 +231,25 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 				iface:    ifaceName,
 				pubkey:   stored.Peer.PublicKey,
 				endpoint: kernelEndpoint,
+				spec:     stored.Peer.Endpoint,
 				name:     ndmsName,
 			})
+		}
+	case v4Confirmed:
+		// Туннель вернулся на v4 — endpoint'ом снова управляет NDMS
+		// (реальный адрес ушёл в RCI выше), стражу здесь делать нечего.
+		if o.guardHas(stored.ID) {
+			o.guardUnregister(stored.ID)
+			o.appLog.Info("sync-peer", ndmsName, "endpoint теперь v4 — endpoint-страж снят, адресом управляет NDMS")
+		}
+	default:
+		// Резолв hostname'а не удался. Если ключ или endpoint изменились,
+		// реестр стража устарел — снять, иначе он воскресит старого пира.
+		if e, ok := o.guardGet(stored.ID); ok &&
+			(e.pubkey != stored.Peer.PublicKey || e.spec != stored.Peer.Endpoint) {
+			o.guardUnregister(stored.ID)
+			o.appLog.Warn("sync-peer", ndmsName,
+				"endpoint не резолвится, параметры пира изменились — endpoint-страж снят; если имя резолвится только в IPv6, перезапустите туннель")
 		}
 	}
 
