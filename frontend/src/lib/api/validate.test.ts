@@ -78,6 +78,25 @@ describe('validateApiResponse', () => {
 			validateApiResponse('GET', '/tunnels/list', { success: true, data: { not: 'array' } }),
 		).toThrow(ApiValidationError);
 	});
+
+	// #520: одиночный туннель ({tag, outbound}) раньше запрашивался как
+	// GET /singbox/tunnels?tag=X — query-строка отрезается при матчинге, и
+	// объект проверялся схемой СПИСКА (data: массив) → «Некорректный ответ
+	// сервера» на каждом открытии туннеля. Канонический путь — свой эндпоинт
+	// со своей схемой.
+	it('#520: одиночный туннель валиден на /singbox/tunnels/get и невалиден на списке', () => {
+		const single = {
+			success: true,
+			data: { tag: 'Hy2 NL', outbound: { type: 'hysteria2', tag: 'Hy2 NL' } },
+		};
+		expect(() =>
+			validateApiResponse('GET', '/singbox/tunnels/get?tag=Hy2%20NL', single),
+		).not.toThrow();
+		// Закрепляем механику бага: та же форма против схемы списка — ошибка.
+		expect(() => validateApiResponse('GET', '/singbox/tunnels?tag=Hy2%20NL', single)).toThrow(
+			ApiValidationError,
+		);
+	});
 });
 
 describe('schemas.gen.ts инварианты', () => {

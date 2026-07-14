@@ -11,6 +11,33 @@ permissions:
   contents: read
 
 jobs:
+  swagger:
+    name: Swagger drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Setup go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: 1.26.4
+
+      - name: Check swagger.yaml is fresh
+        # swagger.yaml генерируется swaggo из Go-аннотаций; правка аннотаций
+        # без перегенерации рассинхронизирует спеку с кодом — из этого класса
+        # был #520 (schemas.gen.ts проверяется ниже, но он «свежий» лишь
+        # относительно swagger.yaml — первое звено цепочки защищаем здесь).
+        run: |
+          set -euo pipefail
+          go generate ./cmd/awg-manager
+          git diff --exit-code -- internal/openapi/swagger.yaml || {
+            echo "::error::internal/openapi/swagger.yaml устарел — запустите 'go generate ./cmd/awg-manager' и закоммитьте результат"
+            exit 1
+          }
+
   frontend:
     name: Frontend checks
     runs-on: ubuntu-latest

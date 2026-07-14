@@ -1613,6 +1613,16 @@ const api_SingboxTunnelDTO: v.GenericSchema = v.looseObject({
 	transport: v.optional(v.nullable(v.string())),
 });
 
+const api_SingboxTunnelGetData: v.GenericSchema = v.looseObject({
+	outbound: v.optional(v.nullable(v.record(v.string(), v.unknown()))),
+	tag: v.optional(v.nullable(v.string())),
+});
+
+const api_SingboxTunnelGetResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SingboxTunnelGetData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
 const api_SingboxTunnelsResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.array(v.lazy(() => api_SingboxTunnelDTO)))),
 	success: v.optional(v.nullable(v.boolean())),
@@ -2216,7 +2226,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"DELETE /servers/{name}/peers/{pubkey}": v.lazy(() => api_ServersAllResponse),
 	"DELETE /servers/mark": v.lazy(() => api_ServersAllResponse),
 	"DELETE /singbox/subscriptions/delete": v.lazy(() => api_APIEnvelope),
-	"DELETE /singbox/tunnels": v.lazy(() => api_APIEnvelope),
+	"DELETE /singbox/tunnels": v.lazy(() => api_SingboxTunnelsResponse),
 	"GET /access-policies": v.lazy(() => api_AccessPoliciesListResponse),
 	"GET /access-policies/devices": v.lazy(() => api_PolicyDevicesListResponse),
 	"GET /access-policies/interfaces": v.lazy(() => api_PolicyInterfacesListResponse),
@@ -2332,6 +2342,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /singbox/subscriptions/get": v.lazy(() => api_SubscriptionResponse),
 	"GET /singbox/subscriptions/groups": v.lazy(() => api_SubscriptionGroupListResponse),
 	"GET /singbox/tunnels": v.lazy(() => api_SingboxTunnelsResponse),
+	"GET /singbox/tunnels/get": v.lazy(() => api_SingboxTunnelGetResponse),
 	"GET /singbox/tunnels/test/connectivity": v.lazy(() => api_APIEnvelope),
 	"GET /singbox/tunnels/test/ip": v.lazy(() => api_APIEnvelope),
 	"GET /static-routes/list": v.lazy(() => api_StaticRoutesListResponse),
@@ -2357,6 +2368,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /tunnels/pingcheck": v.lazy(() => api_NativePingCheckStatusResponse),
 	"GET /tunnels/traffic": v.lazy(() => api_TunnelTrafficResponse),
 	"GET /wan/status": v.lazy(() => api_WANStatusEnvelope),
+	"PATCH /singbox/tunnels/rename": v.lazy(() => api_SingboxTunnelsResponse),
 	"POST /access-policies/assign": v.lazy(() => api_OkResponse),
 	"POST /access-policies/create": v.lazy(() => api_AccessPolicyResponse),
 	"POST /access-policies/description": v.lazy(() => api_OkResponse),
@@ -2548,5 +2560,5 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"PUT /singbox/router/settings": v.lazy(() => api_OkResponse),
 	"PUT /singbox/subscriptions/groups/update": v.lazy(() => api_SubscriptionGroupResponse),
 	"PUT /singbox/subscriptions/update": v.lazy(() => api_SubscriptionResponse),
-	"PUT /singbox/tunnels": v.lazy(() => api_APIEnvelope),
+	"PUT /singbox/tunnels": v.lazy(() => api_SingboxTunnelsResponse),
 };

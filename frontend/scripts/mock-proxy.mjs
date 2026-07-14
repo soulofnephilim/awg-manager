@@ -925,6 +925,39 @@ const singboxTrafficCounters = new Map(
 	]),
 );
 
+// Полный outbound-JSON для страницы редактирования туннеля — то, что на
+// реальном бэке лежит в 10-tunnels.json (упрощённое зеркало
+// clientCore.buildMockOutboundFromTunnel).
+function mockOutboundFromTunnel(t) {
+	const outbound = { type: t.protocol, tag: t.tag, server: t.server, server_port: t.port };
+	const tls = {};
+	if (t.sni) tls.server_name = t.sni;
+	if (t.fingerprint) tls.utls = { enabled: true, fingerprint: t.fingerprint };
+	if (t.security === 'reality') {
+		tls.enabled = true;
+		tls.reality = { enabled: true, public_key: 'EXAMPLE_PUBLIC_KEY', short_id: 'abcd1234' };
+	} else if (t.security === 'tls') {
+		tls.enabled = true;
+	}
+	if (t.protocol === 'vless') {
+		outbound.uuid = '00000000-0000-4000-8000-000000000001';
+		outbound.transport = { type: t.transport || 'tcp' };
+		if (Object.keys(tls).length > 0) outbound.tls = tls;
+	} else if (t.protocol === 'naive' || t.protocol === 'mieru') {
+		outbound.username = 'demo-user';
+		outbound.password = 'demo-password';
+		if (Object.keys(tls).length > 0) outbound.tls = tls;
+	} else if (t.protocol === 'shadowsocks') {
+		outbound.method = 'aes-256-gcm';
+		outbound.password = 'demo-password';
+	} else {
+		// hysteria2 / trojan / прочие password-протоколы
+		outbound.password = 'demo-password';
+		outbound.tls = { enabled: true, server_name: t.sni || t.server, ...tls };
+	}
+	return outbound;
+}
+
 function isSingboxTunnelTrafficActive(tag) {
 	const t = MOCK_SINGBOX_TUNNELS.find((x) => x.tag === tag);
 	return !!(t && t.running && t.connectivity?.connected);
@@ -5052,6 +5085,21 @@ const server = http.createServer(async (req, res) => {
 			success: true,
 			data: MOCK_SINGBOX_TUNNELS.map((t) => ({ ...t })),
 		});
+		return;
+	}
+
+	// Одиночный туннель — канонический путь (#520). Без хендлера запрос
+	// провалился бы в prism, который отвечает примером из swagger
+	// ({tag:'proxy-01', outbound:{}}), и list-based фолбэк клиента
+	// никогда бы не отработал.
+	if (req.method === 'GET' && path === '/singbox/tunnels/get') {
+		const tag = url.searchParams.get('tag') || '';
+		const t = MOCK_SINGBOX_TUNNELS.find((x) => x.tag === tag);
+		if (!t) {
+			send(res, 404, { error: true, message: `tunnel not found: ${tag}`, code: 'NOT_FOUND' });
+			return;
+		}
+		send(res, 200, { success: true, data: { tag: t.tag, outbound: mockOutboundFromTunnel(t) } });
 		return;
 	}
 

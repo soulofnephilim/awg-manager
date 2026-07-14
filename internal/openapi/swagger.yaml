@@ -3527,6 +3527,15 @@ definitions:
       type:
         type: string
     type: object
+  api.SingboxRenameRequest:
+    properties:
+      newTag:
+        example: proxy-eu
+        type: string
+      oldTag:
+        example: proxy-01
+        type: string
+    type: object
   api.SingboxRouterApplyPresetRequest:
     properties:
       id:
@@ -4584,6 +4593,23 @@ definitions:
       transport:
         example: tcp
         type: string
+    type: object
+  api.SingboxTunnelGetData:
+    properties:
+      outbound:
+        additionalProperties: true
+        type: object
+      tag:
+        example: proxy-01
+        type: string
+    type: object
+  api.SingboxTunnelGetResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SingboxTunnelGetData'
+      success:
+        example: true
+        type: boolean
     type: object
   api.SingboxTunnelsResponse:
     properties:
@@ -14326,7 +14352,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/api.APIEnvelope'
+            $ref: '#/definitions/api.SingboxTunnelsResponse'
         "400":
           description: Bad Request
           schema:
@@ -14341,11 +14367,6 @@ paths:
       tags:
       - singbox
     get:
-      parameters:
-      - description: When set, returns single tunnel
-        in: query
-        name: tag
-        type: string
       produces:
       - application/json
       responses:
@@ -14363,7 +14384,7 @@ paths:
             $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: List or get sing-box tunnel(s)
+      summary: List sing-box tunnels
       tags:
       - singbox
     post:
@@ -14398,7 +14419,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/api.APIEnvelope'
+            $ref: '#/definitions/api.SingboxTunnelsResponse'
         "400":
           description: Bad Request
           schema:
@@ -14438,6 +14459,77 @@ paths:
       security:
       - CookieAuth: []
       summary: Sing-box delay check
+      tags:
+      - singbox
+  /singbox/tunnels/get:
+    get:
+      parameters:
+      - description: Outbound tag
+        in: query
+        name: tag
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxTunnelGetResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Get single sing-box tunnel outbound
+      tags:
+      - singbox
+  /singbox/tunnels/rename:
+    patch:
+      consumes:
+      - application/json
+      parameters:
+      - description: Old and new tag
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRenameRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxTunnelsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Rename sing-box tunnel tag
       tags:
       - singbox
   /singbox/tunnels/share-link:
