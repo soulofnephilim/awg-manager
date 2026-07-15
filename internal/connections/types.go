@@ -39,6 +39,15 @@ type ProtocolStats struct {
 	ICMP int `json:"icmp"`
 }
 
+// Bucket is one row of a breakdown aggregate for the donut panels.
+type Bucket struct {
+	Key      string `json:"key"`
+	Label    string `json:"label,omitempty"`
+	Count    int    `json:"count"`
+	BytesIn  int64  `json:"bytesIn"`
+	BytesOut int64  `json:"bytesOut"`
+}
+
 // TunnelConnectionInfo describes a tunnel's connection count for the summary.
 type TunnelConnectionInfo struct {
 	Name      string `json:"name"`
@@ -62,6 +71,9 @@ type ListParams struct {
 type ListResponse struct {
 	Stats       ConnectionStats                 `json:"stats"`
 	Tunnels     map[string]TunnelConnectionInfo `json:"tunnels"`
+	ByTunnel    []Bucket                        `json:"byTunnel"`
+	ByClient    []Bucket                        `json:"byClient"`
+	ByDst       []Bucket                        `json:"byDst"`
 	Connections []Connection                    `json:"connections"`
 	Pagination  PaginationInfo                  `json:"pagination"`
 	FetchedAt   string                          `json:"fetchedAt"`
