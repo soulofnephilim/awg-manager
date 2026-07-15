@@ -193,11 +193,14 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 		return 0, fmt.Errorf("resolve endpoint: %w", err)
 	}
 
+	// Маска — из пользовательского CIDR (голый IP → /32): /24 и т.п. дают
+	// connected-маршрут на туннельную подсеть (LAN-to-LAN, issue #531).
+	ipv4Addr, ipv4Mask := splitAddressMask(extractIPv4(stored.Interface.Address))
 	cmds := []any{
 		payloads.CmdInterfaceCreate(ndmsName),
 		payloads.CmdInterfaceDescription(ndmsName, stored.Name),
 		payloads.CmdInterfaceSecurityLevel(ndmsName, "public"),
-		payloads.CmdInterfaceIPAddress(ndmsName, extractIPv4(stored.Interface.Address), "255.255.255.255"),
+		payloads.CmdInterfaceIPAddress(ndmsName, ipv4Addr, ipv4Mask),
 		payloads.CmdInterfaceMTU(ndmsName, stored.Interface.MTU),
 		payloads.CmdInterfaceAdjustMSS(ndmsName, true),
 		payloads.CmdInterfaceIPGlobal(ndmsName, true),
@@ -1039,16 +1042,19 @@ func splitAddressMask(addr string) (string, string) {
 	return ip.String(), net.IP(ipNet.Mask).String()
 }
 
-// extractIPv4 extracts the bare IPv4 address from a WireGuard Address field
-// which may contain comma-separated IPv4 and IPv6 (e.g. "172.16.0.2/32, 2606::1/128").
-// Returns the IPv4 without CIDR suffix (caller provides mask separately for RCI).
+// extractIPv4 extracts the IPv4 entry from a WireGuard Address field which
+// may contain comma-separated IPv4 and IPv6 (e.g. "172.16.0.2/24, 2606::1/128").
+// The CIDR suffix is PRESERVED ("172.16.0.2/24") — callers pass the result
+// through splitAddressMask to get (ip, mask) for RCI. Раньше суффикс срезался
+// здесь, и splitAddressMask всегда получал голый IP → пользовательская маска
+// молча превращалась в /32 (issue #531).
 func extractIPv4(addr string) string {
 	for _, part := range strings.Split(addr, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		// Strip existing CIDR for the check
+		// Strip existing CIDR for the family check only.
 		host := part
 		if idx := strings.Index(part, "/"); idx != -1 {
 			host = part[:idx]
@@ -1057,7 +1063,7 @@ func extractIPv4(addr string) string {
 		if strings.Contains(host, ":") {
 			continue
 		}
-		return host
+		return part
 	}
 	return addr
 }
