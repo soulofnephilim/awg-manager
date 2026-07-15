@@ -52,16 +52,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PRESETS_PATH = resolve(__dirname, 'mock-data/presets-snapshot.json');
 const UNIFIED_PRESETS_PATH = resolve(__dirname, '../../internal/presets/defaults.json');
-let presetsCache = null;
 let unifiedPresetsCache = null;
-async function getPresets() {
-	if (!presetsCache) {
-		presetsCache = JSON.parse(await readFile(PRESETS_PATH, 'utf8'));
-	}
-	return presetsCache;
-}
 async function getUnifiedPresets() {
 	if (!unifiedPresetsCache) {
 		unifiedPresetsCache = JSON.parse(await readFile(UNIFIED_PRESETS_PATH, 'utf8'));
@@ -484,39 +476,6 @@ const MOCK_SYSTEM_TUNNELS = [
 		},
 	},
 ];
-
-/** Merge tunnel summary for GET /connections mocks (Prism omits map entries). */
-function enrichConnectionsTunnels(body) {
-	if (!body || typeof body !== 'object' || !body.data || typeof body.data !== 'object') return body;
-	const data = body.data;
-	const stats = data.stats;
-	if (!stats || typeof stats !== 'object') return body;
-
-	const direct = Math.max(0, Number(stats.direct) || 0);
-	const tunneled = Math.max(0, Number(stats.tunneled) || 0);
-	const tunnels = {
-		'': {
-			name: 'Direct',
-			interface: '—',
-			count: direct,
-		},
-	};
-	const list = MOCK_AWG_TUNNELS;
-	const n = list.length;
-	let rem = tunneled;
-	for (let i = 0; i < n; i++) {
-		const t = list[i];
-		const share = i === n - 1 ? rem : Math.floor(tunneled / n);
-		if (i < n - 1) rem -= share;
-		tunnels[t.id] = {
-			name: t.name,
-			interface: t.interfaceName ?? '—',
-			count: share,
-		};
-	}
-	data.tunnels = tunnels;
-	return body;
-}
 
 const MOCK_CONNECTIONS_POOL = (() => {
 	const items = [];
@@ -1290,50 +1249,6 @@ function buildConnectivityMatrixEvent({ forced = false } = {}) {
 		cells,
 		updatedAt: nowIso,
 	};
-}
-
-function buildAwgTunnelMetaMap() {
-	const byId = new Map();
-	const byName = new Map();
-	const byIface = new Map();
-	for (const t of MOCK_AWG_TUNNELS) {
-		if (t.id) byId.set(String(t.id).toLowerCase(), t);
-		if (t.name) byName.set(String(t.name).toLowerCase(), t);
-		if (t.interfaceName) byIface.set(String(t.interfaceName).toLowerCase(), t);
-	}
-	return { byId, byName, byIface };
-}
-
-function enrichMonitoringMatrixAwgTunnels(tunnels) {
-	if (!Array.isArray(tunnels) || tunnels.length === 0) return;
-	const meta = buildAwgTunnelMetaMap();
-	let anyMatched = false;
-	for (let i = 0; i < tunnels.length; i++) {
-		const row = tunnels[i];
-		if (!row || typeof row !== 'object') continue;
-		const idKey = row.id ? String(row.id).toLowerCase() : '';
-		const nameKey = row.name ? String(row.name).toLowerCase() : '';
-		const ifaceKey = row.ifaceName ? String(row.ifaceName).toLowerCase() : '';
-		const match =
-			(idKey && meta.byId.get(idKey)) ||
-			(nameKey && meta.byName.get(nameKey)) ||
-			(ifaceKey && meta.byIface.get(ifaceKey));
-		if (!match) continue;
-		anyMatched = true;
-		row.source = 'awg';
-		row.backend = match.backend;
-		row.awgVersion = match.awgVersion;
-		row.defaultRoute = !!match.defaultRoute;
-		row.ifaceName = row.ifaceName || match.interfaceName || '';
-	}
-	// Prism mock often returns a single generic tunnel row; force a representative AWG row.
-	if (!anyMatched && tunnels[0] && typeof tunnels[0] === 'object') {
-		const first = tunnels[0];
-		first.source = 'awg';
-		first.backend = 'nativewg';
-		first.awgVersion = 'awg2.0';
-		first.defaultRoute = true;
-	}
 }
 
 const TRAFFIC_PERIOD_MS = {
