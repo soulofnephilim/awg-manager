@@ -52,3 +52,27 @@ func TestStoreLoadBackfillsRawEditorText(t *testing.T) {
 		t.Fatalf("ExcludesText = %q", *list.ExcludesText)
 	}
 }
+
+func TestMigrateRuleSetSubscriptionURLs(t *testing.T) {
+	data := &StoreData{Lists: []DomainList{{
+		Subscriptions: []Subscription{
+			{URL: "https://github.com/vernette/rulesets/raw/master/raw/unavailable-in-russia.txt"},
+			{URL: "https://example.com/other.txt"},
+		},
+	}}}
+
+	if !migrateRuleSetSubscriptionURLs(data) {
+		t.Fatal("ожидался changed=true")
+	}
+	if got := data.Lists[0].Subscriptions[0].URL; got != "https://repo.hoaxisr.ru/rulesets/raw/unavailable-in-russia.txt" {
+		t.Errorf("vernette не переписан: %s", got)
+	}
+	if got := data.Lists[0].Subscriptions[1].URL; got != "https://example.com/other.txt" {
+		t.Errorf("чужой URL изменён: %s", got)
+	}
+
+	// Идемпотентность / no-op.
+	if migrateRuleSetSubscriptionURLs(data) {
+		t.Error("2-й прогон должен вернуть false")
+	}
+}

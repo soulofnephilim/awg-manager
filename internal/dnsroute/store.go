@@ -54,9 +54,10 @@ func (s *Store) Load() (*StoreData, error) {
 	migrateLegacyExcludes(&data)
 	migrateRawEditorText(&data)
 	dropped := dropLegacyHRRows(&data)
+	forkMigrated := migrateRuleSetSubscriptionURLs(&data)
 
 	s.data = &data
-	if dropped > 0 {
+	if dropped > 0 || forkMigrated {
 		// Persist the cleanup so the file itself is cleaned, not just the
 		// in-memory cache. Best-effort: on write error the cache is already
 		// clean and the next Save() rewrites disk — failing startup over
@@ -66,6 +67,29 @@ func (s *Store) Load() (*StoreData, error) {
 		_ = s.writeLocked(&data)
 	}
 	return s.data, nil
+}
+
+// migrateRuleSetSubscriptionURLs rewrites snapshotted vernette subscription
+// URLs to the repo.hoaxisr.ru mirror (raw.githubusercontent.com заблокирован
+// у части провайдеров — awgm#534). Returns true if any URL changed (caller
+// persists). Idempotent — after the swap no vernette prefix remains.
+func migrateRuleSetSubscriptionURLs(data *StoreData) bool {
+	if data == nil {
+		return false
+	}
+	const old = "github.com/vernette/rulesets/raw/master/"
+	const next = "repo.hoaxisr.ru/rulesets/"
+	changed := false
+	for i := range data.Lists {
+		subs := data.Lists[i].Subscriptions
+		for j := range subs {
+			if u := strings.Replace(subs[j].URL, old, next, 1); u != subs[j].URL {
+				subs[j].URL = u
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // migrateLegacyExcludes splits any CIDR-shaped entries out of Excludes
