@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -393,6 +394,12 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 			return ErrPolicyNotConfigured
 		}
 		mark, err = s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName)
+		if err != nil && !errors.Is(err, query.ErrPolicyMarkNotFound) {
+			// Транзиентная ошибка чтения (RCI недоступен) — не «политика
+			// отсутствует»: наверх уходит настоящая причина, а не ложный
+			// ErrPolicyMissing (ревью #523).
+			return fmt.Errorf("policy %q mark: %w", sr.PolicyName, err)
+		}
 		if err != nil || mark == "" {
 			return fmt.Errorf("policy %q: %w", sr.PolicyName, ErrPolicyMissing)
 		}
@@ -984,6 +991,11 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Каждый teardown — в журнал: выключение бывает не только по кнопке
+	// (fail-safe при удалённой политике, drift-heal), и без записи причину
+	// «тумблер сам выключился» не восстановить (issue #523).
+	s.appLog.Info("disable", "", "выключение движка маршрутизации")
+
 	// fakeip-tun teardown is an entirely separate path (no iptables; opkgtun +
 	// pool/CIDR routes + a fail-closed drain). Dispatch by mode before the
 	// tproxy body so the tproxy path below stays byte-for-byte unchanged for
@@ -1098,8 +1110,24 @@ func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 	}
 	installedComplete := s.deps.IPTables.IsInstalled(ctx)
 	installedAny := s.deps.IPTables.HasAnyInstalled(ctx)
+	// Запаркованный слот 20 при живых цепочках — тоже дрейф (issue #523):
+	// rollback провального Enable паркует слот, а netfilter.d-hook
+	// восстанавливает перехват из rules-файла. reconcileInstalled видел
+	// installed=true, считал engineDown и вечно ждал watchdog, которому
+	// нечего чинить — процесс жив, просто в конфиге нет tproxy-in. Лечится
+	// полным Enable: перепромоут слота + переустановка iptables.
+	//
+	// Гейт на живой процесс: при мёртвом sing-box Enable потратил бы до 60с
+	// на waitForSingbox и отложил бы fail-closed blackhole — вместо этого
+	// идём в reconcileInstalled (DROP сразу), watchdog оживляет процесс, и
+	// следующий тик при живом движке перепромоутит слот.
+	engineUp := true
+	if s.deps.Singbox != nil {
+		engineUp, _ = s.deps.Singbox.IsRunning()
+	}
+	routerSlotParked := s.deps.Orch != nil && !s.routerSlotEnabled()
 	switch {
-	case sr.Enabled && !installedComplete:
+	case sr.Enabled && (!installedComplete || (routerSlotParked && engineUp)):
 		// Drift-heal, NOT user-initiated: must honour a prior master-Stop, so
 		// do not clear the sticky intent (clearManualStop=false).
 		return s.enableLocked(ctx, false)
@@ -1109,6 +1137,28 @@ func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 		return s.reconcileInstalled(ctx, sr)
 	}
 	return nil
+}
+
+// routerSlotEnabled reports whether 20-router.json currently lives in
+// config.d/ AND the file exists (Present) — «включён» флаг при отсутствующем
+// файле даёт тот же тупик (в конфиге нет tproxy-in), а enableLocked его
+// лечит, переписав файл. Caller guarantees deps.Orch != nil. Unregistered
+// slot reads as parked — Reconcile then routes to Enable, whose SetEnabled
+// surfaces the real error.
+func (s *ServiceImpl) routerSlotEnabled() bool {
+	st, ok := s.slotSnapshot(orchestrator.SlotRouter)
+	return ok && st.Enabled && st.Present
+}
+
+// slotSnapshot returns the orchestrator state of one slot. Caller guarantees
+// deps.Orch != nil.
+func (s *ServiceImpl) slotSnapshot(slot orchestrator.Slot) (orchestrator.SlotState, bool) {
+	for _, st := range s.deps.Orch.Snapshot() {
+		if st.Slot == slot {
+			return st, true
+		}
+	}
+	return orchestrator.SlotState{}, false
 }
 
 // reconcileInstalled handles the "Enabled && installed" branch:
@@ -1166,8 +1216,19 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	mark := ""
 	if policyMode {
 		mark, err = s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName)
+		if err != nil && !errors.Is(err, query.ErrPolicyMarkNotFound) {
+			// Транзиентная ошибка чтения метки (RCI недоступен/медленный —
+			// ранняя загрузка, shutdown-гонка при перезагрузке): это НЕ
+			// «политика удалена». Раньше здесь срабатывал fail-safe disable —
+			// молча и без авто-восстановления гасил движок (issue #523).
+			// Оставляем состояние как есть, ретрай на следующем тике.
+			return fmt.Errorf("policy %q mark: %w", sr.PolicyName, err)
+		}
 		if err != nil || mark == "" {
-			// Policy gone upstream — fail-safe disable, no auto-recovery.
+			// NDMS ответил, а политики/метки нет — политика действительно
+			// удалена. Fail-safe disable, no auto-recovery; причина — в журнал.
+			s.appLog.Warn("reconcile", sr.PolicyName,
+				"политика не найдена в NDMS — движок маршрутизации выключается (fail-safe)")
 			return s.Disable(ctx)
 		}
 	}

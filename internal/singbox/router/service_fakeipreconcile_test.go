@@ -481,3 +481,26 @@ func TestReconcileFakeIPTun_RevivalEnablesSlotFakeIPNotSlotRouter(t *testing.T) 
 		t.Error("SlotRouter must remain DISABLED after fakeip-reconcile revival — tproxy slot must not be touched")
 	}
 }
+
+// Запаркованный слот 21 при ЖИВОМ процессе (provisioned + живой iface) —
+// drift-heal обязан вернуть слот в merged-конфиг (ревью #523: раньше слот
+// чинился только при мёртвом sing-box, при живом merged-конфиг оставался
+// без tun-in навсегда).
+func TestReconcileFakeIPTun_ParkedSlotAliveEngine_RepromotesSlot(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	captureDrain(t)
+	provisionForDisable(t, h) // Enabled=true персистнут, live index 0
+
+	if err := h.svc.deps.Orch.SetEnabledSilent(orchestrator.SlotFakeIP, false); err != nil {
+		t.Fatal(err)
+	}
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("reconcileFakeIPTun: %v", err)
+	}
+	st, ok := h.svc.slotSnapshot(orchestrator.SlotFakeIP)
+	if !ok || !st.Enabled {
+		t.Fatal("parked fakeip slot must be re-promoted by drift-heal while the engine is alive")
+	}
+}
