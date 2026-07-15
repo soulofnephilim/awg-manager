@@ -76,9 +76,10 @@ func (o *OperatorNativeWG) SyncAWGParams(ctx context.Context, stored *storage.AW
 // and on Update (to hot-apply changes to a running tunnel).
 func (o *OperatorNativeWG) SyncAddressMTU(ctx context.Context, stored *storage.AWGTunnel) error {
 	ndmsName := NewNWGNames(stored.NWGIndex).NDMSName
-	ipv4 := extractIPv4(stored.Interface.Address)
 
-	addr, mask := splitAddressMask(ipv4)
+	// extractIPv4 сохраняет CIDR-суффикс — маска пользователя доезжает до
+	// RCI, а не заменяется дефолтным /32 (issue #531).
+	addr, mask := splitAddressMask(extractIPv4(stored.Interface.Address))
 	if err := o.commands.Interfaces.SetAddress(ctx, ndmsName, addr, mask); err != nil {
 		return fmt.Errorf("sync address: %w", err)
 	}
@@ -96,7 +97,7 @@ func (o *OperatorNativeWG) SyncAddressMTU(ctx context.Context, stored *storage.A
 		return fmt.Errorf("sync mtu: %w", err)
 	}
 
-	o.appLog.Info("sync-address-mtu", ndmsName, fmt.Sprintf("address=%s ipv6=%s mtu=%d", ipv4, ipv6, stored.Interface.MTU))
+	o.appLog.Info("sync-address-mtu", ndmsName, fmt.Sprintf("address=%s mask=%s ipv6=%s mtu=%d", addr, mask, ipv6, stored.Interface.MTU))
 	return nil
 }
 
