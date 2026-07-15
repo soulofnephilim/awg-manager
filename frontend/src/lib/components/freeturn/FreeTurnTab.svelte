@@ -32,6 +32,10 @@
 	let statusPoll: ReturnType<typeof setInterval> | undefined;
 	let routerHost = $state('');
 
+	function errText(e: unknown): string {
+		return e instanceof Error ? e.message : String(e ?? '');
+	}
+
 	const ftTabs = $derived.by(() => [
 		{
 			id: 'client',
@@ -62,8 +66,8 @@
 	async function loadConfig() {
 		try {
 			config = normalizeConfig(await api.getFreeTurnConfig());
-		} catch (e: any) {
-			notifications.error('Не удалось загрузить конфигурацию FreeTurn: ' + (e.message || ''));
+		} catch (e) {
+			notifications.error('Не удалось загрузить конфигурацию FreeTurn: ' + errText(e));
 		}
 	}
 
@@ -105,8 +109,8 @@
 			const updated = await api.updateFreeTurnClientConfig(cfg);
 			if (config) config = { ...config, client: updated };
 			notifications.success('Настройки клиента сохранены');
-		} catch (e: any) {
-			notifications.error('Не удалось сохранить: ' + (e.message || ''));
+		} catch (e) {
+			notifications.error('Не удалось сохранить: ' + errText(e));
 		} finally {
 			saving = false;
 		}
@@ -118,8 +122,8 @@
 			const updated = await api.updateFreeTurnServerConfig(cfg);
 			if (config) config = { ...config, server: updated };
 			notifications.success('Настройки сервера сохранены');
-		} catch (e: any) {
-			notifications.error('Не удалось сохранить: ' + (e.message || ''));
+		} catch (e) {
+			notifications.error('Не удалось сохранить: ' + errText(e));
 		} finally {
 			saving = false;
 		}
@@ -134,8 +138,8 @@
 				await api.stopFreeTurnClient();
 				notifications.success('FreeTurn клиент остановлен');
 			}
-		} catch (e: any) {
-			notifications.error(e.message || 'Не удалось переключить клиент');
+		} catch (e) {
+			notifications.error(errText(e) || 'Не удалось переключить клиент');
 		} finally {
 			await loadStatus();
 		}
@@ -150,8 +154,8 @@
 				await api.stopFreeTurnServer();
 				notifications.success('FreeTurn сервер остановлен');
 			}
-		} catch (e: any) {
-			notifications.error(e.message || 'Не удалось переключить сервер');
+		} catch (e) {
+			notifications.error(errText(e) || 'Не удалось переключить сервер');
 		} finally {
 			await loadStatus();
 		}
@@ -186,13 +190,13 @@
 				try {
 					const tunnel = await api.importConfig(wg, `FreeTurn ${payload.peer}`.slice(0, 60));
 					msg += `. Создан туннель «${tunnel.name}»`;
-				} catch (e: any) {
-					notifications.error('Поля заполнены, но не удалось создать туннель из конфига: ' + (e.message || ''));
+				} catch (e) {
+					notifications.error('Поля заполнены, но не удалось создать туннель из конфига: ' + errText(e));
 				}
 			}
 			notifications.success(msg);
-		} catch (e: any) {
-			notifications.error('Не удалось разобрать ссылку: ' + (e.message || ''));
+		} catch (e) {
+			notifications.error('Не удалось разобрать ссылку: ' + errText(e));
 		} finally {
 			importing = false;
 		}
@@ -208,8 +212,8 @@
 			});
 			generatedLink = result.link;
 			generatedPeer = result.peer;
-		} catch (e: any) {
-			notifications.error('Не удалось сгенерировать ссылку: ' + (e.message || ''));
+		} catch (e) {
+			notifications.error('Не удалось сгенерировать ссылку: ' + errText(e));
 		} finally {
 			generating = false;
 		}
