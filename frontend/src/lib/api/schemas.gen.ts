@@ -2233,6 +2233,8 @@ const freeturn_LinkPayload: v.GenericSchema = v.looseObject({
 });
 
 const freeturn_ProcessStatus: v.GenericSchema = v.looseObject({
+	binary: v.optional(v.nullable(v.string())),
+	binaryPresent: v.optional(v.nullable(v.boolean())),
 	lastError: v.optional(v.nullable(v.string())),
 	log: v.optional(v.nullable(v.string())),
 	pid: v.optional(v.nullable(v.number())),

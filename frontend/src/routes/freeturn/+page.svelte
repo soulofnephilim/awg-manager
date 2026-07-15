@@ -274,10 +274,20 @@
 					<Toggle
 						checked={!!clientStatus?.running}
 						onchange={toggleClient}
+						disabled={clientStatus ? !clientStatus.binaryPresent : false}
 						label=""
 					/>
 				</div>
 			{/snippet}
+
+			{#if clientStatus && !clientStatus.binaryPresent}
+				<div class="ft-binary-warn">
+					Бинарь <code>{clientStatus.binary}</code> не найден — awg-manager не поставляет
+					freeturn. Установите клиент из
+					<a href="https://github.com/samosvalishe/free-turn-proxy" target="_blank" rel="noopener">free-turn-proxy</a>
+					и обновите страницу.
+				</div>
+			{/if}
 
 			{#if !clientStatus?.running && clientStatus?.lastError}
 				<div class="ft-section-label" style="margin-top: 0">Ошибка последнего запуска</div>
@@ -414,9 +424,23 @@
 							<span class="ft-uptime">запущен · {formatUptime(serverStatus.startedAt)}</span>
 						{/if}
 					</div>
-					<Toggle checked={!!serverStatus?.running} onchange={toggleServer} label="" />
+					<Toggle
+						checked={!!serverStatus?.running}
+						onchange={toggleServer}
+						disabled={serverStatus ? !serverStatus.binaryPresent : false}
+						label=""
+					/>
 				</div>
 			{/snippet}
+
+			{#if serverStatus && !serverStatus.binaryPresent}
+				<div class="ft-binary-warn">
+					Бинарь <code>{serverStatus.binary}</code> не найден — awg-manager не поставляет
+					freeturn. Установите сервер из
+					<a href="https://github.com/samosvalishe/free-turn-proxy" target="_blank" rel="noopener">free-turn-proxy</a>
+					и обновите страницу.
+				</div>
+			{/if}
 
 			{#if !serverStatus?.running && serverStatus?.lastError}
 				<div class="ft-section-label" style="margin-top: 0">Ошибка последнего запуска</div>
@@ -560,6 +584,21 @@
 	.ft-error-box {
 		color: var(--color-error);
 		border-color: var(--color-error);
+	}
+
+	.ft-binary-warn {
+		padding: 0.625rem 0.75rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-warning);
+		background: var(--color-warning-tint);
+		color: var(--color-text-primary);
+		font-size: 0.8125rem;
+		margin-bottom: 0.75rem;
+	}
+
+	.ft-binary-warn a {
+		color: inherit;
+		text-decoration: underline;
 	}
 
 	.ft-section-label {

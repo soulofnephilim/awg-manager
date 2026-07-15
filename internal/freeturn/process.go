@@ -69,6 +69,9 @@ func (p *process) Start(args []string) error {
 	if p.binary == "" {
 		return fmt.Errorf("freeturn %s: binary path not configured", p.name)
 	}
+	if !binaryPresent(p.binary) {
+		return fmt.Errorf("бинарь %s не найден или не исполняем — awg-manager не поставляет freeturn, установите его отдельно", p.binary)
+	}
 	if err := os.MkdirAll(filepath.Dir(p.pidPath), 0755); err != nil {
 		return err
 	}
@@ -205,12 +208,29 @@ func (p *process) Status() ProcessStatus {
 	running, pid := p.IsRunning()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	st := ProcessStatus{Running: running, LastError: p.lastErr, Log: p.logTail.String()}
+	st := ProcessStatus{
+		Running:       running,
+		LastError:     p.lastErr,
+		Log:           p.logTail.String(),
+		Binary:        p.binary,
+		BinaryPresent: binaryPresent(p.binary),
+	}
 	if running {
 		st.PID = pid
 		st.StartedAt = p.startedAt
 	}
 	return st
+}
+
+// binaryPresent reports whether an executable regular file exists at path.
+// awg-manager does not ship the freeturn binaries, so the panel needs to
+// distinguish «не установлен» from a real start failure.
+func binaryPresent(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() {
+		return false
+	}
+	return st.Mode().Perm()&0111 != 0
 }
 
 func (p *process) drain(r io.Reader) {

@@ -6118,6 +6118,15 @@ definitions:
     type: object
   freeturn.ProcessStatus:
     properties:
+      binary:
+        description: |-
+          Binary is the configured binary path; BinaryPresent reports whether
+          an executable actually exists there. awg-manager does NOT ship the
+          freeturn binaries — the panel uses this to show an honest
+          «установите бинарь» hint instead of an opaque exec error on Start.
+        type: string
+      binaryPresent:
+        type: boolean
       lastError:
         description: |-
           LastError holds the tail of stderr from the most recent exit, only

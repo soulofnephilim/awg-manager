@@ -49,6 +49,9 @@ export interface FreeTurnProcessStatus {
 	startedAt?: string;
 	lastError?: string;
 	log?: string;
+	/** Путь к бинарю и признак его наличия — awg-manager freeturn не поставляет */
+	binary: string;
+	binaryPresent: boolean;
 }
 
 export interface FreeTurnStatus {

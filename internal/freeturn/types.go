@@ -108,6 +108,12 @@ type ProcessStatus struct {
 	// confirmations — so the panel can show whether the tunnel actually
 	// connected instead of just "running".
 	Log string `json:"log,omitempty"`
+	// Binary is the configured binary path; BinaryPresent reports whether
+	// an executable actually exists there. awg-manager does NOT ship the
+	// freeturn binaries — the panel uses this to show an honest
+	// «установите бинарь» hint instead of an opaque exec error on Start.
+	Binary        string `json:"binary"`
+	BinaryPresent bool   `json:"binaryPresent"`
 }
 
 // Status is the combined client+server status returned to the API/frontend.
