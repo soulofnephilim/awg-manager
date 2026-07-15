@@ -3,6 +3,7 @@ package dnsroute
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,4 +76,96 @@ func TestMigrateRuleSetSubscriptionURLs(t *testing.T) {
 	if migrateRuleSetSubscriptionURLs(data) {
 		t.Error("2-й прогон должен вернуть false")
 	}
+}
+
+func TestMigrateDiscordDNSSubnet(t *testing.T) {
+	mt := "discord.com\ndiscordapp.com\n162.158.0.0/15"
+	data := &StoreData{Lists: []DomainList{
+		{ // applied Discord DNS list — должен мигрировать
+			Name:          "Discord",
+			Domains:       []string{"discord.com", "discordapp.com", "discord.gg"},
+			ManualDomains: []string{"discord.com", "discordapp.com", "162.158.0.0/15"},
+			ManualText:    &mt,
+			Subnets:       []string{"162.158.0.0/15"},
+		},
+		{ // чужой список — НЕ трогать
+			Name:    "My stuff",
+			Domains: []string{"example.com"},
+			Subnets: []string{"1.2.3.0/24"},
+		},
+	}}
+
+	if !migrateDiscordDNSSubnet(data) {
+		t.Fatal("ожидался changed=true")
+	}
+	d := data.Lists[0]
+	if !slicesHas(d.Subnets, "104.29.0.0/16") {
+		t.Errorf("Subnets без CIDR: %v", d.Subnets)
+	}
+	if !slicesHas(d.ManualDomains, "104.29.0.0/16") {
+		t.Errorf("ManualDomains без CIDR: %v", d.ManualDomains)
+	}
+	if d.ManualText == nil || !strings.Contains(*d.ManualText, "104.29.0.0/16") {
+		t.Errorf("ManualText без CIDR: %v", d.ManualText)
+	}
+	if other := data.Lists[1]; slicesHas(other.Subnets, "104.29.0.0/16") {
+		t.Errorf("чужой список затронут: %v", other.Subnets)
+	}
+
+	// Идемпотентность.
+	if migrateDiscordDNSSubnet(data) {
+		t.Error("2-й прогон должен вернуть false")
+	}
+}
+
+func TestMigrateDiscordDNSSubnet_Negatives(t *testing.T) {
+	// Один сигнатурный домен — НЕ Discord, не матчим.
+	one := &StoreData{Lists: []DomainList{{Domains: []string{"discord.com", "example.com"}}}}
+	if migrateDiscordDNSSubnet(one) {
+		t.Error("один сигнатурный домен не должен матчиться")
+	}
+
+	// ManualText == nil, обе сигнатуры в ManualDomains — матч; ManualText остаётся nil.
+	noText := &StoreData{Lists: []DomainList{{
+		ManualDomains: []string{"discord.com", "discordapp.com"},
+	}}}
+	if !migrateDiscordDNSSubnet(noText) {
+		t.Fatal("ManualDomains-сигнатура должна матчиться")
+	}
+	if noText.Lists[0].ManualText != nil {
+		t.Error("ManualText не должен создаваться из nil")
+	}
+	if !slicesHas(noText.Lists[0].Subnets, "104.29.0.0/16") {
+		t.Error("Subnets должны получить CIDR")
+	}
+
+	// HydraRoute-список не трогаем даже при сигнатуре.
+	hr := &StoreData{Lists: []DomainList{{
+		Backend: "hydraroute",
+		Domains: []string{"discord.com", "discordapp.com"},
+	}}}
+	if migrateDiscordDNSSubnet(hr) {
+		t.Error("HydraRoute-список не должен мигрировать")
+	}
+
+	// Уже есть CIDR во всех полях — no-op.
+	mt := "discord.com\ndiscordapp.com\n104.29.0.0/16"
+	full := &StoreData{Lists: []DomainList{{
+		Domains:       []string{"discord.com", "discordapp.com"},
+		ManualDomains: []string{"discord.com", "discordapp.com", "104.29.0.0/16"},
+		ManualText:    &mt,
+		Subnets:       []string{"104.29.0.0/16"},
+	}}}
+	if migrateDiscordDNSSubnet(full) {
+		t.Error("полностью мигрированный список — no-op")
+	}
+}
+
+func slicesHas(ss []string, v string) bool {
+	for _, s := range ss {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
