@@ -58,7 +58,7 @@ func (c *Client) recordPerf(start time.Time, method, path string) {
 	if durMs > 500 {
 		c.slowReqCount.Add(1)
 		if c.appLog != nil {
-			c.appLog.Warn(method, path, fmt.Sprintf("perf: slow rci %dms", durMs))
+			c.appLog.Debug(method, path, fmt.Sprintf("perf: slow rci %dms", durMs))
 		}
 	}
 }

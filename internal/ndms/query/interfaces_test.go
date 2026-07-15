@@ -895,7 +895,7 @@ func TestInterfaceStore_Concurrent_ReadWrite(t *testing.T) {
 
 // === ListAll dedup ===
 
-// dedupCaptureLogger records every Warnf call so tests can assert
+// dedupCaptureLogger records every Warnf/Debugf call so tests can assert
 // observability of duplicate-kernel-name collisions.
 type dedupCaptureLogger struct {
 	mu   sync.Mutex
@@ -903,6 +903,12 @@ type dedupCaptureLogger struct {
 }
 
 func (c *dedupCaptureLogger) Warnf(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, fmt.Sprintf(format, args...))
+}
+
+func (c *dedupCaptureLogger) Debugf(format string, args ...any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.msgs = append(c.msgs, fmt.Sprintf(format, args...))
