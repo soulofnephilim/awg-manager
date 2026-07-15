@@ -1,17 +1,19 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import type { ConnectionsResponse } from '$lib/types';
+	import type { DropdownOption } from '$lib/components/ui';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
-	import { ConnectionsTable, ConnectionsTotalsBar } from '$lib/components/connections';
+	import { ConnectionsTable, ConnectionsTotalsBar, ConnectionsFilterPanel } from '$lib/components/connections';
 	let data = $state<ConnectionsResponse | null>(null);
 	let loading = $state(false);
 	const AUTO_REFRESH_MS = 30_000;
 	let nowTs = $state(Date.now());
 	let lastFetchedAtTs = $state(0);
 
-	let tunnel = $state('all');
-	let protocol = $state('all');
+	let fTunnel = $state('all');
+	let fProto = $state('all');
+	let fState = $state('all');
 	let search = $state('');
 	let offset = $state(0);
 	let sortBy = $state<'' | 'proto' | 'src' | 'dst' | 'iface' | 'state' | 'bytes'>('');
@@ -27,16 +29,28 @@
 	const totalOut = $derived((data?.byTunnel ?? []).reduce((s, b) => s + b.bytesOut, 0));
 	const totalIn = $derived((data?.byTunnel ?? []).reduce((s, b) => s + b.bytesIn, 0));
 
+	const tunnelOptions = $derived.by((): DropdownOption[] => {
+		const opts: DropdownOption[] = [{ value: 'all', label: 'Все' }, { value: 'direct', label: 'Напрямую' }];
+		for (const [id, info] of Object.entries(data?.tunnels ?? {})) {
+			if (id === '@direct') continue;
+			if (id === '@singbox') opts.push({ value: 'singbox', label: 'sing-box' });
+			else if (id === '@local') opts.push({ value: 'local', label: 'Локально' });
+			else opts.push({ value: id, label: info.name });
+		}
+		return opts;
+	});
+
 	async function fetchData() {
 		const seq = ++requestSeq;
 		loading = true;
 		try {
 			const nextData = await api.getConnections({
-				tunnel,
-				protocol,
+				tunnel: fTunnel,
+				protocol: fProto,
+				state: fState,
 				search,
 				offset,
-				limit: 50,
+				limit: 200,
 				sortBy: sortBy || undefined,
 				sortDir,
 			});
@@ -54,24 +68,12 @@
 		}
 	}
 
-	function setTunnel(value: string) {
-		if (tunnel === value) return;
-		tunnel = value;
+	function setFilter(patch: Partial<{ fTunnel: string; fProto: string; fState: string }>): void {
+		if (patch.fTunnel !== undefined) fTunnel = patch.fTunnel;
+		if (patch.fProto !== undefined) fProto = patch.fProto;
+		if (patch.fState !== undefined) fState = patch.fState;
 		offset = 0;
 		fetchData();
-	}
-
-	function setProtocol(value: string) {
-		if (protocol === value) return;
-		protocol = value;
-		offset = 0;
-		fetchData();
-	}
-
-	function handleTunnelChipClick(chipId: string) {
-		// chipId from data.tunnels: '' = direct, otherwise tunnel id.
-		const target = chipId === '' ? 'direct' : chipId;
-		setTunnel(tunnel === target ? 'all' : target);
 	}
 
 	function handleSortChange(column: 'proto' | 'src' | 'dst' | 'iface' | 'state' | 'bytes') {
@@ -126,64 +128,21 @@
 		onRefresh={fetchData}
 	/>
 
-	<!-- Filter row 1: tunnel chips -->
-	{#if data && Object.keys(data.tunnels).length > 0}
-		<div class="filter-row">
-			<button
-				type="button"
-				class="chip"
-				class:chip-active={tunnel === 'all'}
-				onclick={() => setTunnel('all')}
-			>
-				ALL <span class="chip-count">{data.stats.total}</span>
-			</button>
-			{#each Object.entries(data.tunnels).sort((a, b) => b[1].count - a[1].count) as [id, info]}
-				{@const target = id === '' ? 'direct' : id}
-				{@const isActive = tunnel === target}
-				<button
-					type="button"
-					class="chip"
-					class:chip-active={isActive}
-					onclick={() => handleTunnelChipClick(id)}
-				>
-					<span class="chip-led" class:chip-led-vpn={id !== ''}></span>
-					{info.name}
-					<span class="chip-count">{info.count}</span>
-				</button>
-			{/each}
-		</div>
-	{:else if loading && !data}
-		<div class="filter-row" aria-hidden="true">
-			<span class="chip chip-active chip-skel-static">
-				ALL <span class="chip-count"><span class="chip-count-skel"></span></span>
-			</span>
-		</div>
-	{/if}
-
-	<!-- Filter row 2: proto chips + search + counter -->
-	<div class="filter-row filter-row-secondary">
-		<div class="proto-chips">
-			{#each [['all', 'ALL'], ['tcp', 'TCP'], ['udp', 'UDP'], ['icmp', 'ICMP']] as [val, label]}
-				<button
-					type="button"
-					class="chip"
-					class:chip-active={protocol === val}
-					onclick={() => setProtocol(val)}
-				>{label}</button>
-			{/each}
-		</div>
-		<input
-			type="search"
-			class="field-input compact search-input"
-			placeholder="Поиск по IP, порту, имени..."
-			value={search}
-			oninput={(e) => handleSearchInput(e.currentTarget.value)}
-		/>
-	</div>
+	<ConnectionsFilterPanel
+		{search}
+		{fTunnel}
+		{fProto}
+		{fState}
+		{tunnelOptions}
+		onSearchInput={handleSearchInput}
+		onTunnel={(v) => setFilter({ fTunnel: v })}
+		onProto={(v) => setFilter({ fProto: v })}
+		onState={(v) => setFilter({ fState: v })}
+	/>
 
 	<ConnectionsTable
 		connections={data?.connections ?? []}
-		pagination={data?.pagination ?? { total: 0, offset: 0, limit: 50, returned: 0 }}
+		pagination={data?.pagination ?? { total: 0, offset: 0, limit: 200, returned: 0 }}
 		showSkeleton={loading && !data}
 		{sortBy}
 		{sortDir}
@@ -191,89 +150,3 @@
 		onPageChange={handlePageChange}
 	/>
 {/if}
-
-<style>
-	.filter-row {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 0.375rem;
-		margin-bottom: 0.625rem;
-	}
-
-	.filter-row-secondary {
-		gap: 0.5rem;
-	}
-
-	.proto-chips {
-		display: inline-flex;
-		gap: 0.25rem;
-	}
-
-	.search-input {
-		flex: 1;
-		min-width: 180px;
-		max-width: 280px;
-	}
-
-	@keyframes pulse {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.4; }
-	}
-
-	.chip-count {
-		font-family: var(--font-mono);
-		font-size: 10px;
-		opacity: 0.7;
-		margin-left: 0.25rem;
-	}
-
-	.chip-led {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--color-text-muted);
-		display: inline-block;
-		margin-right: 0.25rem;
-	}
-
-	.chip-led-vpn {
-		background: var(--color-accent);
-	}
-
-	/* Active chips on bright accent must keep dark readable text. */
-	.filter-row .chip.chip-active,
-	.filter-row .chip.chip-active:hover:not(:disabled) {
-		color: var(--color-bg-primary);
-	}
-
-	.filter-row .chip.chip-active .chip-count {
-		color: inherit;
-		opacity: 0.7;
-	}
-
-	/* Keep hover readable across themes (avoid white-on-accent collisions). */
-	.chip:hover:not(.chip-active) {
-		color: var(--color-text-primary);
-		background: var(--color-bg-hover);
-		border-color: var(--color-border-strong, var(--color-border));
-	}
-
-	.chip-skel-static {
-		pointer-events: none;
-	}
-
-	.chip-count-skel {
-		display: inline-block;
-		width: 1.625rem;
-		height: 10px;
-		border-radius: 4px;
-		background: color-mix(in srgb, currentColor 22%, transparent);
-		animation: pulse 1s ease-in-out infinite;
-		vertical-align: middle;
-	}
-
-	@media (max-width: 640px) {
-		.search-input { max-width: 100%; }
-	}
-</style>
