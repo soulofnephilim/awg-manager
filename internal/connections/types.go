@@ -10,6 +10,10 @@ type Connection struct {
 	State      string    `json:"state"`
 	Packets    int64     `json:"packets"`
 	Bytes      int64     `json:"bytes"`
+	BytesIn    int64     `json:"bytesIn"`
+	BytesOut   int64     `json:"bytesOut"`
+	TTL        int64     `json:"ttl"`
+	RouteClass string    `json:"routeClass"`
 	Interface  string    `json:"interface"`
 	TunnelID   string    `json:"tunnelId"`
 	TunnelName string    `json:"tunnelName"`
@@ -23,6 +27,8 @@ type ConnectionStats struct {
 	Total     int           `json:"total"`
 	Direct    int           `json:"direct"`
 	Tunneled  int           `json:"tunneled"`
+	Singbox   int           `json:"singbox"`
+	Local     int           `json:"local"`
 	Protocols ProtocolStats `json:"protocols"`
 }
 
@@ -31,6 +37,15 @@ type ProtocolStats struct {
 	TCP  int `json:"tcp"`
 	UDP  int `json:"udp"`
 	ICMP int `json:"icmp"`
+}
+
+// Bucket is one row of a breakdown aggregate for the donut panels.
+type Bucket struct {
+	Key      string `json:"key"`
+	Label    string `json:"label,omitempty"`
+	Count    int    `json:"count"`
+	BytesIn  int64  `json:"bytesIn"`
+	BytesOut int64  `json:"bytesOut"`
 }
 
 // TunnelConnectionInfo describes a tunnel's connection count for the summary.
@@ -44,6 +59,7 @@ type TunnelConnectionInfo struct {
 type ListParams struct {
 	Tunnel   string // "all", "direct", or tunnel ID
 	Protocol string // "all", "tcp", "udp", "icmp"
+	State    string // "all"/"" = любое; иначе точное значение (ESTABLISHED, ...)
 	Search   string // substring match on src, dst, clientName
 	Offset   int
 	Limit    int    // default 50, max 500
@@ -55,6 +71,9 @@ type ListParams struct {
 type ListResponse struct {
 	Stats       ConnectionStats                 `json:"stats"`
 	Tunnels     map[string]TunnelConnectionInfo `json:"tunnels"`
+	ByTunnel    []Bucket                        `json:"byTunnel"`
+	ByClient    []Bucket                        `json:"byClient"`
+	ByDst       []Bucket                        `json:"byDst"`
 	Connections []Connection                    `json:"connections"`
 	Pagination  PaginationInfo                  `json:"pagination"`
 	FetchedAt   string                          `json:"fetchedAt"`

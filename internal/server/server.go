@@ -111,6 +111,7 @@ type Server struct {
 	singboxHandler             *api.SingboxHandler
 	singboxConnsHandler        *api.SingboxConnectionsHandler
 	singboxRouterHandler       *api.SingboxRouterHandler
+	connectionsMarkProvider    func(context.Context) (string, bool)
 	singboxFakeIPConfigHandler *api.SingboxFakeIPConfigHandler
 	singboxConfigHandler       *api.SingboxConfigHandler
 	singboxConfigEditorHandler *api.SingboxConfigEditorHandler
@@ -323,6 +324,13 @@ func (s *Server) SetDownloadService(svc *downloader.Service) {
 // /api/singbox/router/* routes can be registered.
 func (s *Server) SetSingboxRouterHandler(h *api.SingboxRouterHandler) {
 	s.singboxRouterHandler = h
+}
+
+// SetConnectionsMarkProvider wires the sb-router policy-mark source into the
+// connections service (атрибуция tproxy-потоков без ifw). Вызывается из
+// wiring до Start(): buildRouteHandlers читает поле при регистрации роутов.
+func (s *Server) SetConnectionsMarkProvider(fn func(ctx context.Context) (string, bool)) {
+	s.connectionsMarkProvider = fn
 }
 
 // SetSingboxFakeIPConfigHandler wires the fakeip-tun config CRUD handler so
