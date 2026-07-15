@@ -11,6 +11,7 @@
 		ConnectionsTotalsBar,
 		ConnectionsFilterPanel,
 		ConnectionsBreakdown,
+		ConnectionsGroupBar,
 	} from '$lib/components/connections';
 	let data = $state<ConnectionsResponse | null>(null);
 	let loading = $state(false);
@@ -26,6 +27,7 @@
 	let sortBy = $state<'' | 'src' | 'dst' | 'bytes'>('bytes');
 	let sortDir = $state<'asc' | 'desc'>('desc');
 	let selectedKey = $state<string | null>(null);
+	let group = $state<'none' | 'client' | 'host'>('client');
 	let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let progressTimer: ReturnType<typeof setInterval> | null = null;
 	let requestSeq = 0;
@@ -212,9 +214,16 @@
 		onState={(v) => setFilter({ fState: v })}
 	/>
 
+	<ConnectionsGroupBar
+		{group}
+		visible={data?.pagination.returned ?? 0}
+		total={data?.pagination.total ?? 0}
+		onChange={(g) => (group = g)}
+	/>
+
 	<ConnectionsTable
 		connections={data?.connections ?? []}
-		group="none"
+		{group}
 		pagination={data?.pagination ?? { total: 0, offset: 0, limit: 200, returned: 0 }}
 		{selectedKey}
 		{sortBy}
