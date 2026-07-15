@@ -55,6 +55,9 @@ func (a *app) setupSingbox() {
 	if err := singbox.MigrateDeviceProxyOutOfTunnels(singboxConfigDir); err != nil {
 		a.bootLog.Warn("deviceproxy-migration", "", err.Error())
 	}
+	if err := singbox.MigrateRuleSetURLsToFork(singboxConfigDir); err != nil {
+		a.bootLog.Warn("ruleset-fork-migration", "", err.Error())
+	}
 	a.sbOrch = singboxorch.New(singboxConfigDir, a.singboxOp.Process())
 	a.sbOrch.SetLogger(func(level, msg string) {
 		switch level {
