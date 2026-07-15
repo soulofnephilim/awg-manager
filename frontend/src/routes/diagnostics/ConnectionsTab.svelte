@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import type { ConnectionsResponse, ConnectionBucketAgg } from '$lib/types';
+	import type { ConnectionsResponse, ConnectionBucketAgg, ConntrackConnection } from '$lib/types';
 	import type { DropdownOption } from '$lib/components/ui';
 	import type { PanelBucket } from '$lib/components/connections/ConnectionsBreakdownPanel.svelte';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
+	import { connKey } from '$lib/utils/connectionsView';
 	import {
 		ConnectionsTable,
 		ConnectionsTotalsBar,
@@ -22,8 +23,9 @@
 	let fState = $state('all');
 	let search = $state('');
 	let offset = $state(0);
-	let sortBy = $state<'' | 'proto' | 'src' | 'dst' | 'iface' | 'state' | 'bytes'>('');
-	let sortDir = $state<'asc' | 'desc'>('asc');
+	let sortBy = $state<'' | 'src' | 'dst' | 'bytes'>('bytes');
+	let sortDir = $state<'asc' | 'desc'>('desc');
+	let selectedKey = $state<string | null>(null);
 	let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let progressTimer: ReturnType<typeof setInterval> | null = null;
 	let requestSeq = 0;
@@ -105,15 +107,46 @@
 		fetchData();
 	}
 
-	function handleSortChange(column: 'proto' | 'src' | 'dst' | 'iface' | 'state' | 'bytes') {
+	function handleSortChange(column: 'src' | 'dst' | 'bytes') {
 		if (sortBy === column) {
 			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
 		} else {
 			sortBy = column;
-			sortDir = 'asc';
+			sortDir = column === 'bytes' ? 'desc' : 'asc';
 		}
 		offset = 0;
 		fetchData();
+	}
+
+	const selected = $derived(data?.connections.find((c) => connKey(c) === selectedKey) ?? null);
+	$effect(() => {
+		if (selectedKey && data && !selected) selectedKey = null;
+	});
+
+	async function killConn(conn: ConntrackConnection): Promise<void> {
+		if (!data) return;
+		const key = connKey(conn);
+		const prev = data.connections;
+		const seqAtKill = requestSeq;
+		data = { ...data, connections: prev.filter((c) => connKey(c) !== key) };
+		if (selectedKey === key) selectedKey = null;
+		const ok = await api.killConnection({
+			src: conn.src,
+			dst: conn.dst,
+			srcPort: conn.srcPort,
+			dstPort: conn.dstPort,
+			protocol: conn.protocol,
+		});
+		if (ok) {
+			notifications.success('Соединение сброшено');
+		} else {
+			// Откат только если за время запроса не прошёл refresh —
+			// иначе затрём свежие данные устаревшим списком.
+			if (seqAtKill === requestSeq) {
+				data = { ...data, connections: prev };
+			}
+			notifications.error('Не удалось сбросить соединение');
+		}
 	}
 
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -181,11 +214,15 @@
 
 	<ConnectionsTable
 		connections={data?.connections ?? []}
+		group="none"
 		pagination={data?.pagination ?? { total: 0, offset: 0, limit: 200, returned: 0 }}
-		showSkeleton={loading && !data}
+		{selectedKey}
 		{sortBy}
 		{sortDir}
 		onSortChange={handleSortChange}
 		onPageChange={handlePageChange}
+		onSelect={(k) => (selectedKey = selectedKey === k ? null : k)}
+		onKill={killConn}
+		showSkeleton={loading && !data}
 	/>
 {/if}
