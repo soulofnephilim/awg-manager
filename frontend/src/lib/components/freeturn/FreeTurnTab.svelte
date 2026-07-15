@@ -18,6 +18,13 @@
 
 	let config: FreeTurnConfig | null = $state(null);
 	let status: FreeTurnStatus | null = $state(null);
+	// Снапшот сохранённого конфига — источник dirty-подсветки и «Отменить».
+	let savedConfig: FreeTurnConfig | null = $state(null);
+
+	let expanded: string | null = $state(null);
+	let importOpen = $state(false);
+	let genOpen = $state(false);
+	let logOpen = $state(false);
 
 	let importing = $state(false);
 	let importedWG: string | null = $state(null);
@@ -69,7 +76,9 @@
 
 	async function loadConfig() {
 		try {
-			config = normalizeConfig(await api.getFreeTurnConfig());
+			const norm = normalizeConfig(await api.getFreeTurnConfig());
+			savedConfig = structuredClone(norm);
+			config = norm;
 		} catch (e) {
 			notifications.error('Не удалось загрузить конфигурацию FreeTurn: ' + errText(e));
 		}
@@ -111,7 +120,12 @@
 		saving = true;
 		try {
 			const updated = await api.updateFreeTurnClientConfig(cfg);
-			if (config) config = { ...config, client: updated };
+			if (config) {
+				const norm = normalizeConfig({ ...$state.snapshot(config), client: updated });
+				if (savedConfig) savedConfig.client = structuredClone(norm.client);
+				else savedConfig = structuredClone(norm);
+				config.client = norm.client;
+			}
 			notifications.success('Настройки клиента сохранены');
 		} catch (e) {
 			notifications.error('Не удалось сохранить: ' + errText(e));
@@ -124,13 +138,26 @@
 		saving = true;
 		try {
 			const updated = await api.updateFreeTurnServerConfig(cfg);
-			if (config) config = { ...config, server: updated };
+			if (config) {
+				const norm = normalizeConfig({ ...$state.snapshot(config), server: updated });
+				if (savedConfig) savedConfig.server = structuredClone(norm.server);
+				else savedConfig = structuredClone(norm);
+				config.server = norm.server;
+			}
 			notifications.success('Настройки сервера сохранены');
 		} catch (e) {
 			notifications.error('Не удалось сохранить: ' + errText(e));
 		} finally {
 			saving = false;
 		}
+	}
+
+	function revertClient() {
+		if (config && savedConfig) config.client = $state.snapshot(savedConfig).client;
+	}
+
+	function revertServer() {
+		if (config && savedConfig) config.server = $state.snapshot(savedConfig).server;
 	}
 
 	async function toggleClient(on: boolean) {
@@ -250,13 +277,24 @@
 	}
 </script>
 
-<Tabs tabs={ftTabs} active={ftTab} onchange={(id) => (ftTab = id as FtTab)} urlParam="ft" defaultTab="client" />
+<Tabs
+	tabs={ftTabs}
+	active={ftTab}
+	onchange={(id) => {
+		ftTab = id as FtTab;
+		expanded = null;
+		logOpen = false;
+	}}
+	urlParam="ft"
+	defaultTab="client"
+/>
 
 {#if loading || !config}
 	<div class="ft-loading">Загрузка…</div>
 {:else if ftTab === 'client'}
 	<ClientPanel
 		client={config.client}
+		saved={savedConfig?.client ?? null}
 		status={status?.client}
 		{saving}
 		{routerHost}
@@ -265,15 +303,20 @@
 		installAvailable={status?.installAvailable ?? false}
 		installVersion={status?.installVersion}
 		installing={installing || (status?.installing ?? false)}
+		bind:expanded
+		bind:importOpen
+		bind:logOpen
 		onInstall={install}
 		onToggle={toggleClient}
 		onSave={() => saveClientConfig(config!.client)}
+		onRevert={revertClient}
 		onImport={applyImportLink}
 		onCopy={copy}
 	/>
 {:else}
 	<ServerPanel
 		server={config.server}
+		saved={savedConfig?.server ?? null}
 		status={status?.server}
 		{saving}
 		installAvailable={status?.installAvailable ?? false}
@@ -289,8 +332,12 @@
 		bind:genWG
 		bind:genClientId
 		bind:genName
+		bind:expanded
+		bind:genOpen
+		bind:logOpen
 		onToggle={toggleServer}
 		onSave={() => saveServerConfig(config!.server)}
+		onRevert={revertServer}
 		onGenerate={generateLink}
 		onCopy={copy}
 	/>
