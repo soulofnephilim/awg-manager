@@ -200,20 +200,40 @@ const api_ConfigSlotsResponse: v.GenericSchema = v.looseObject({
 	slots: v.optional(v.nullable(v.array(v.lazy(() => api_ConfigSlotInfo)))),
 });
 
+const api_ConnectionBucketDTO: v.GenericSchema = v.looseObject({
+	bytesIn: v.optional(v.nullable(v.number())),
+	bytesOut: v.optional(v.nullable(v.number())),
+	count: v.optional(v.nullable(v.number())),
+	key: v.optional(v.nullable(v.string())),
+	label: v.optional(v.nullable(v.string())),
+});
+
 const api_ConnectionProtocolsDTO: v.GenericSchema = v.looseObject({
 	icmp: v.optional(v.nullable(v.number())),
 	tcp: v.optional(v.nullable(v.number())),
 	udp: v.optional(v.nullable(v.number())),
 });
 
+const api_ConnectionRuleHitDTO: v.GenericSchema = v.looseObject({
+	fqdn: v.optional(v.nullable(v.string())),
+	listId: v.optional(v.nullable(v.string())),
+	listName: v.optional(v.nullable(v.string())),
+	pattern: v.optional(v.nullable(v.string())),
+});
+
 const api_ConnectionStatsDTO: v.GenericSchema = v.looseObject({
 	direct: v.optional(v.nullable(v.number())),
+	local: v.optional(v.nullable(v.number())),
 	protocols: v.optional(v.nullable(v.lazy(() => api_ConnectionProtocolsDTO))),
+	singbox: v.optional(v.nullable(v.number())),
 	total: v.optional(v.nullable(v.number())),
 	tunneled: v.optional(v.nullable(v.number())),
 });
 
 const api_ConnectionsData: v.GenericSchema = v.looseObject({
+	byClient: v.optional(v.nullable(v.array(v.lazy(() => api_ConnectionBucketDTO)))),
+	byDst: v.optional(v.nullable(v.array(v.lazy(() => api_ConnectionBucketDTO)))),
+	byTunnel: v.optional(v.nullable(v.array(v.lazy(() => api_ConnectionBucketDTO)))),
 	connections: v.optional(v.nullable(v.array(v.lazy(() => api_ConntrackConnectionDTO)))),
 	fetchedAt: v.optional(v.nullable(v.string())),
 	pagination: v.optional(v.nullable(v.lazy(() => api_ConnectionsPaginationDTO))),
@@ -246,6 +266,8 @@ const api_ConnectivityResultResponse: v.GenericSchema = v.looseObject({
 
 const api_ConntrackConnectionDTO: v.GenericSchema = v.looseObject({
 	bytes: v.optional(v.nullable(v.number())),
+	bytesIn: v.optional(v.nullable(v.number())),
+	bytesOut: v.optional(v.nullable(v.number())),
 	clientMac: v.optional(v.nullable(v.string())),
 	clientName: v.optional(v.nullable(v.string())),
 	dst: v.optional(v.nullable(v.string())),
@@ -253,9 +275,12 @@ const api_ConntrackConnectionDTO: v.GenericSchema = v.looseObject({
 	interface: v.optional(v.nullable(v.string())),
 	packets: v.optional(v.nullable(v.number())),
 	protocol: v.optional(v.nullable(v.string())),
+	routeClass: v.optional(v.nullable(v.string())),
+	rules: v.optional(v.nullable(v.array(v.lazy(() => api_ConnectionRuleHitDTO)))),
 	src: v.optional(v.nullable(v.string())),
 	srcPort: v.optional(v.nullable(v.number())),
 	state: v.optional(v.nullable(v.string())),
+	ttl: v.optional(v.nullable(v.number())),
 	tunnelId: v.optional(v.nullable(v.string())),
 	tunnelName: v.optional(v.nullable(v.string())),
 });

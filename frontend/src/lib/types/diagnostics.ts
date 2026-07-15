@@ -156,6 +156,10 @@ export interface ConntrackConnection {
 	state: string;
 	packets: number;
 	bytes: number;
+	bytesIn: number;
+	bytesOut: number;
+	ttl: number;
+	routeClass: 'tunnel' | 'singbox' | 'local' | 'direct';
 	interface: string;
 	tunnelId: string;
 	tunnelName: string;
@@ -168,7 +172,17 @@ export interface ConnectionStats {
 	total: number;
 	direct: number;
 	tunneled: number;
+	singbox: number;
+	local: number;
 	protocols: { tcp: number; udp: number; icmp: number };
+}
+
+export interface ConnectionBucketAgg {
+	key: string;
+	label?: string;
+	count: number;
+	bytesIn: number;
+	bytesOut: number;
 }
 
 export interface TunnelConnectionInfo {
@@ -187,6 +201,9 @@ export interface ConnectionsPagination {
 export interface ConnectionsResponse {
 	stats: ConnectionStats;
 	tunnels: Record<string, TunnelConnectionInfo>;
+	byTunnel: ConnectionBucketAgg[];
+	byClient: ConnectionBucketAgg[];
+	byDst: ConnectionBucketAgg[];
 	connections: ConntrackConnection[];
 	pagination: ConnectionsPagination;
 	fetchedAt: string;

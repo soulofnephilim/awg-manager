@@ -22,24 +22,48 @@ type ConnectionStatsDTO struct {
 	Total     int                    `json:"total" example:"42"`
 	Direct    int                    `json:"direct" example:"30"`
 	Tunneled  int                    `json:"tunneled" example:"12"`
+	Singbox   int                    `json:"singbox" example:"3"`
+	Local     int                    `json:"local" example:"5"`
 	Protocols ConnectionProtocolsDTO `json:"protocols"`
 }
 
 // ConntrackConnectionDTO mirrors frontend ConntrackConnection.
 type ConntrackConnectionDTO struct {
-	Protocol   string `json:"protocol" example:"tcp"`
-	Src        string `json:"src" example:"192.168.1.100"`
-	Dst        string `json:"dst" example:"8.8.8.8"`
-	SrcPort    int    `json:"srcPort" example:"54321"`
-	DstPort    int    `json:"dstPort" example:"443"`
-	State      string `json:"state" example:"ESTABLISHED"`
-	Packets    int    `json:"packets" example:"15"`
-	Bytes      int    `json:"bytes" example:"4096"`
-	Interface  string `json:"interface" example:"nwg0"`
-	TunnelId   string `json:"tunnelId" example:"tun_abc123"`
-	TunnelName string `json:"tunnelName" example:"My VPN"`
-	ClientMac  string `json:"clientMac" example:"aa:bb:cc:dd:ee:ff"`
-	ClientName string `json:"clientName" example:"My Phone"`
+	Protocol   string                 `json:"protocol" example:"tcp"`
+	Src        string                 `json:"src" example:"192.168.1.100"`
+	Dst        string                 `json:"dst" example:"8.8.8.8"`
+	SrcPort    int                    `json:"srcPort" example:"54321"`
+	DstPort    int                    `json:"dstPort" example:"443"`
+	State      string                 `json:"state" example:"ESTABLISHED"`
+	Packets    int                    `json:"packets" example:"15"`
+	Bytes      int                    `json:"bytes" example:"4096"`
+	BytesIn    int                    `json:"bytesIn" example:"3072"`
+	BytesOut   int                    `json:"bytesOut" example:"1024"`
+	TTL        int                    `json:"ttl" example:"1183"`
+	RouteClass string                 `json:"routeClass" example:"tunnel"`
+	Interface  string                 `json:"interface" example:"nwg0"`
+	TunnelId   string                 `json:"tunnelId" example:"tun_abc123"`
+	TunnelName string                 `json:"tunnelName" example:"My VPN"`
+	ClientMac  string                 `json:"clientMac" example:"aa:bb:cc:dd:ee:ff"`
+	ClientName string                 `json:"clientName" example:"My Phone"`
+	Rules      []ConnectionRuleHitDTO `json:"rules,omitempty"`
+}
+
+// ConnectionRuleHitDTO mirrors connections.RuleHit.
+type ConnectionRuleHitDTO struct {
+	ListID   string `json:"listId" example:"list_6"`
+	ListName string `json:"listName,omitempty" example:"YouTube"`
+	FQDN     string `json:"fqdn,omitempty" example:"m.youtube.com"`
+	Pattern  string `json:"pattern,omitempty" example:"youtube.com"`
+}
+
+// ConnectionBucketDTO mirrors connections.Bucket.
+type ConnectionBucketDTO struct {
+	Key      string `json:"key" example:"@direct"`
+	Label    string `json:"label,omitempty" example:"Напрямую"`
+	Count    int    `json:"count" example:"12"`
+	BytesIn  int    `json:"bytesIn" example:"4096"`
+	BytesOut int    `json:"bytesOut" example:"1024"`
 }
 
 // ConnectionsPaginationDTO mirrors frontend ConnectionsPagination.
@@ -60,8 +84,12 @@ type TunnelConnectionInfoDTO struct {
 // ConnectionsData mirrors frontend ConnectionsResponse.
 type ConnectionsData struct {
 	Stats ConnectionStatsDTO `json:"stats"`
-	// Tunnels: per-tunnel counts; key "" is direct traffic (same as query tunnel=direct / UI Direct chip).
+	// Tunnels: сводка по маршрутам; ключи — tunnelID и псевдо-классы
+	// "@direct" / "@singbox" / "@local".
 	Tunnels     map[string]TunnelConnectionInfoDTO `json:"tunnels"`
+	ByTunnel    []ConnectionBucketDTO              `json:"byTunnel"`
+	ByClient    []ConnectionBucketDTO              `json:"byClient"`
+	ByDst       []ConnectionBucketDTO              `json:"byDst"`
 	Connections []ConntrackConnectionDTO           `json:"connections"`
 	Pagination  ConnectionsPaginationDTO           `json:"pagination"`
 	FetchedAt   string                             `json:"fetchedAt" example:"2024-01-15T10:30:00Z"`
@@ -103,6 +131,7 @@ func (h *ConnectionsHandler) List(w http.ResponseWriter, r *http.Request) {
 	params := connections.ListParams{
 		Tunnel:   q.Get("tunnel"),
 		Protocol: q.Get("protocol"),
+		State:    q.Get("state"),
 		Search:   q.Get("search"),
 		SortBy:   q.Get("sortBy"),
 		SortDir:  q.Get("sortDir"),

@@ -145,6 +145,9 @@ func (s *Server) buildRouteHandlers() *routeHandlers {
 
 	// Connections viewer
 	h.connectionsService = connections.NewService(s.catalog, s.ndmsTransport, s.dnsRouteService, s.loggingService)
+	if s.connectionsMarkProvider != nil {
+		h.connectionsService.SetSingboxMarkProvider(s.connectionsMarkProvider)
+	}
 	h.connectionsHandler = api.NewConnectionsHandler(h.connectionsService)
 
 	h.signatureHandler = api.NewSignatureHandler()
