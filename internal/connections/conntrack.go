@@ -3,6 +3,7 @@ package connections
 import (
 	"bufio"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -11,7 +12,9 @@ import (
 // rawConn extends Connection with internal fields used during parsing.
 type rawConn struct {
 	Connection
-	ifw int // output interface index (from Keenetic conntrack extension)
+	ifw      int    // output interface index (Keenetic conntrack extension)
+	replyDst string // reply-tuple dst — при SNAT это локальный IP исходящего интерфейса
+	mark     uint32 // conntrack mark (connmark) — сигнал tproxy-политики sb-router
 }
 
 // conntrackPath is the default conntrack file. Overridable for testing.
@@ -28,7 +31,7 @@ func readConntrackFile() ([]rawConn, error) {
 }
 
 // parseConntrack reads all lines and returns parsed connections.
-// Skips loopback and IPv6 entries.
+// Skips loopback entries (IPv4 and IPv6).
 func parseConntrack(r io.Reader) []rawConn {
 	var result []rawConn
 	scanner := bufio.NewScanner(r)
@@ -41,7 +44,8 @@ func parseConntrack(r io.Reader) []rawConn {
 }
 
 // parseConntrackLine parses a single /proc/net/nf_conntrack line.
-// Returns (_, false) for entries that should be skipped (loopback, IPv6).
+// Accepts both ipv4 and ipv6 families. Returns (_, false) for entries
+// that should be skipped (loopback pairs).
 //
 // Zero-copy: walks the line once via splitField and takes field values
 // as substrings of the input. Avoids the strings.Fields allocation that
@@ -50,7 +54,7 @@ func parseConntrack(r io.Reader) []rawConn {
 func parseConntrackLine(line string) (rawConn, bool) {
 	// Field 0: "ipv4" / "ipv6".
 	f0, rest := splitField(line)
-	if f0 != "ipv4" {
+	if f0 != "ipv4" && f0 != "ipv6" {
 		return rawConn{}, false
 	}
 	// Field 1: L3 proto number — skip.
@@ -68,7 +72,7 @@ func parseConntrackLine(line string) (rawConn, bool) {
 	// occurrence of src/dst/sport/dport is taken (original direction);
 	// the two packets/bytes pairs (original + reply) are summed.
 	var packets1, packets2, bytes1, bytes2 int64
-	var packetsSeen, bytesSeen int
+	var packetsSeen, bytesSeen, bareNums int
 	var srcSeen, dstSeen, sportSeen, dportSeen bool
 
 	for {
@@ -79,9 +83,18 @@ func parseConntrackLine(line string) (rawConn, bool) {
 		}
 		idx := strings.IndexByte(f, '=')
 		if idx < 0 {
-			// Bare word. The only one we care about is the TCP state.
-			// Other bare words (L4 proto number, timeout, flags like
-			// [ASSURED]) fall through untouched.
+			// Bare word. Первые два числовых — номер протокола и timeout;
+			// далее для tcp — слово состояния. Остальные bare-слова
+			// ([ASSURED], флаги) игнорируются.
+			if bareNums < 2 {
+				if n, err := strconv.ParseInt(f, 10, 64); err == nil {
+					if bareNums == 1 {
+						conn.TTL = n
+					}
+					bareNums++
+					continue
+				}
+			}
 			if proto == "tcp" && conn.State == "" {
 				switch f {
 				case "ESTABLISHED", "SYN_SENT", "SYN_RECV", "FIN_WAIT",
@@ -103,6 +116,12 @@ func parseConntrackLine(line string) (rawConn, bool) {
 			if !dstSeen {
 				conn.Dst = val
 				dstSeen = true
+			} else if conn.replyDst == "" {
+				conn.replyDst = val
+			}
+		case "mark":
+			if n, err := strconv.ParseUint(val, 10, 32); err == nil {
+				conn.mark = uint32(n)
 			}
 		case "sport":
 			if !sportSeen {
@@ -136,9 +155,21 @@ func parseConntrackLine(line string) (rawConn, bool) {
 	}
 
 	conn.Packets = packets1 + packets2
+	conn.BytesOut = bytes1
+	conn.BytesIn = bytes2
 	conn.Bytes = bytes1 + bytes2
 
-	if conn.Src == "127.0.0.1" && conn.Dst == "127.0.0.1" {
+	// nf_conntrack печатает v6 развёрнуто (fe80:0000:...), а обе lookup-карты
+	// (object-group rules и локальные IP интерфейсов) — в сжатой RFC 5952
+	// форме. Нормализуем, иначе все v6-матчи молча промахиваются.
+	if f0 == "ipv6" {
+		conn.Src = canonIP(conn.Src)
+		conn.Dst = canonIP(conn.Dst)
+		conn.replyDst = canonIP(conn.replyDst)
+	}
+
+	if srcIP, dstIP := net.ParseIP(conn.Src), net.ParseIP(conn.Dst); srcIP != nil && dstIP != nil &&
+		srcIP.IsLoopback() && dstIP.IsLoopback() {
 		return rawConn{}, false
 	}
 	return conn, true
@@ -161,4 +192,16 @@ func splitField(s string) (token, rest string) {
 		end++
 	}
 	return s[start:end], s[end:]
+}
+
+// canonIP normalizes an IPv6 textual form to RFC 5952. IPv4 и мусор
+// возвращаются как есть (v4 не трогаем ради перфа горячего пути).
+func canonIP(s string) string {
+	if strings.IndexByte(s, ':') < 0 || s == "" {
+		return s
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return ip.String()
+	}
+	return s
 }

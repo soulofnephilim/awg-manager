@@ -10,6 +10,10 @@ type Connection struct {
 	State      string    `json:"state"`
 	Packets    int64     `json:"packets"`
 	Bytes      int64     `json:"bytes"`
+	BytesIn    int64     `json:"bytesIn"`
+	BytesOut   int64     `json:"bytesOut"`
+	TTL        int64     `json:"ttl"`
+	RouteClass string    `json:"routeClass"`
 	Interface  string    `json:"interface"`
 	TunnelID   string    `json:"tunnelId"`
 	TunnelName string    `json:"tunnelName"`
