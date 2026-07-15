@@ -7,6 +7,7 @@
 	import type { FreeTurnConfig, FreeTurnClientConfig, FreeTurnServerConfig, FreeTurnStatus } from '$lib/types';
 	import ClientPanel from './ClientPanel.svelte';
 	import ServerPanel from './ServerPanel.svelte';
+	import StatusStrip from './StatusStrip.svelte';
 
 	// Оркестратор вкладки FreeTurn на главной: владеет API-вызовами,
 	// конфигом и поллингом статуса; панели — чистый UI на props/callbacks.
@@ -18,6 +19,10 @@
 
 	let config: FreeTurnConfig | null = $state(null);
 	let status: FreeTurnStatus | null = $state(null);
+	// Снапшот сохранённого конфига — источник dirty-подсветки и «Отменить».
+	let savedConfig: FreeTurnConfig | null = $state(null);
+
+	let expanded: string | null = $state(null);
 
 	let importing = $state(false);
 	let importedWG: string | null = $state(null);
@@ -40,20 +45,11 @@
 		return e instanceof Error ? e.message : String(e ?? '');
 	}
 
-	const ftTabs = $derived.by(() => [
-		{
-			id: 'client',
-			label: 'Клиент',
-			badge: status?.client.running ? 'вкл' : undefined,
-			badgeTone: 'success' as const
-		},
-		{
-			id: 'server',
-			label: 'Сервер',
-			badge: status?.server.running ? 'вкл' : undefined,
-			badgeTone: 'success' as const
-		}
-	]);
+	// Бейджи «вкл» не нужны: состояние обоих процессов всегда видно в пульте сверху.
+	const ftTabs = [
+		{ id: 'client', label: 'Клиент' },
+		{ id: 'server', label: 'Сервер' }
+	];
 
 	onMount(async () => {
 		routerHost = window.location.hostname;
@@ -69,7 +65,9 @@
 
 	async function loadConfig() {
 		try {
-			config = normalizeConfig(await api.getFreeTurnConfig());
+			const norm = normalizeConfig(await api.getFreeTurnConfig());
+			savedConfig = structuredClone(norm);
+			config = norm;
 		} catch (e) {
 			notifications.error('Не удалось загрузить конфигурацию FreeTurn: ' + errText(e));
 		}
@@ -77,25 +75,30 @@
 
 	// Backend опускает пустые опциональные поля (Go omitempty) — они приходят
 	// undefined, а <Input bind:value> кидает props_invalid_value; приводим к "".
-	function normalizeConfig(cfg: FreeTurnConfig): FreeTurnConfig {
+	function normalizeClient(c: FreeTurnClientConfig): FreeTurnClientConfig {
 		return {
-			client: {
-				...cfg.client,
-				peer: cfg.client.peer ?? '',
-				links: cfg.client.links ?? '',
-				turnHost: cfg.client.turnHost ?? '',
-				obfKey: cfg.client.obfKey ?? '',
-				dnsServers: cfg.client.dnsServers ?? '',
-				clientId: cfg.client.clientId ?? '',
-				sub: cfg.client.sub ?? ''
-			},
-			server: {
-				...cfg.server,
-				connect: cfg.server.connect ?? '',
-				obfKey: cfg.server.obfKey ?? '',
-				clientsFile: cfg.server.clientsFile ?? ''
-			}
+			...c,
+			peer: c.peer ?? '',
+			links: c.links ?? '',
+			turnHost: c.turnHost ?? '',
+			obfKey: c.obfKey ?? '',
+			dnsServers: c.dnsServers ?? '',
+			clientId: c.clientId ?? '',
+			sub: c.sub ?? ''
 		};
+	}
+
+	function normalizeServer(s: FreeTurnServerConfig): FreeTurnServerConfig {
+		return {
+			...s,
+			connect: s.connect ?? '',
+			obfKey: s.obfKey ?? '',
+			clientsFile: s.clientsFile ?? ''
+		};
+	}
+
+	function normalizeConfig(cfg: FreeTurnConfig): FreeTurnConfig {
+		return { client: normalizeClient(cfg.client), server: normalizeServer(cfg.server) };
 	}
 
 	async function loadStatus() {
@@ -110,8 +113,16 @@
 	async function saveClientConfig(cfg: FreeTurnClientConfig) {
 		saving = true;
 		try {
-			const updated = await api.updateFreeTurnClientConfig(cfg);
-			if (config) config = { ...config, client: updated };
+			const sent = $state.snapshot(cfg);
+			const norm = normalizeClient(await api.updateFreeTurnClientConfig(cfg));
+			if (config && savedConfig) {
+				savedConfig.client = norm;
+				// Не затирать правки, сделанные пока PUT был в полёте:
+				// форму обновляем эхом сервера, только если она не менялась.
+				if (JSON.stringify($state.snapshot(config.client)) === JSON.stringify(sent)) {
+					config.client = structuredClone(norm);
+				}
+			}
 			notifications.success('Настройки клиента сохранены');
 		} catch (e) {
 			notifications.error('Не удалось сохранить: ' + errText(e));
@@ -123,14 +134,28 @@
 	async function saveServerConfig(cfg: FreeTurnServerConfig) {
 		saving = true;
 		try {
-			const updated = await api.updateFreeTurnServerConfig(cfg);
-			if (config) config = { ...config, server: updated };
+			const sent = $state.snapshot(cfg);
+			const norm = normalizeServer(await api.updateFreeTurnServerConfig(cfg));
+			if (config && savedConfig) {
+				savedConfig.server = norm;
+				if (JSON.stringify($state.snapshot(config.server)) === JSON.stringify(sent)) {
+					config.server = structuredClone(norm);
+				}
+			}
 			notifications.success('Настройки сервера сохранены');
 		} catch (e) {
 			notifications.error('Не удалось сохранить: ' + errText(e));
 		} finally {
 			saving = false;
 		}
+	}
+
+	function revertClient() {
+		if (config && savedConfig) config.client = $state.snapshot(savedConfig.client);
+	}
+
+	function revertServer() {
+		if (config && savedConfig) config.server = $state.snapshot(savedConfig.server);
 	}
 
 	async function toggleClient(on: boolean) {
@@ -250,13 +275,30 @@
 	}
 </script>
 
-<Tabs tabs={ftTabs} active={ftTab} onchange={(id) => (ftTab = id as FtTab)} urlParam="ft" defaultTab="client" />
+<StatusStrip
+	client={status?.client}
+	server={status?.server}
+	onToggleClient={toggleClient}
+	onToggleServer={toggleServer}
+/>
+
+<Tabs
+	tabs={ftTabs}
+	active={ftTab}
+	onchange={(id) => {
+		ftTab = id as FtTab;
+		expanded = null;
+	}}
+	urlParam="ft"
+	defaultTab="client"
+/>
 
 {#if loading || !config}
 	<div class="ft-loading">Загрузка…</div>
 {:else if ftTab === 'client'}
 	<ClientPanel
 		client={config.client}
+		saved={savedConfig?.client ?? null}
 		status={status?.client}
 		{saving}
 		{routerHost}
@@ -265,15 +307,17 @@
 		installAvailable={status?.installAvailable ?? false}
 		installVersion={status?.installVersion}
 		installing={installing || (status?.installing ?? false)}
+		bind:expanded
 		onInstall={install}
-		onToggle={toggleClient}
 		onSave={() => saveClientConfig(config!.client)}
+		onRevert={revertClient}
 		onImport={applyImportLink}
 		onCopy={copy}
 	/>
 {:else}
 	<ServerPanel
 		server={config.server}
+		saved={savedConfig?.server ?? null}
 		status={status?.server}
 		{saving}
 		installAvailable={status?.installAvailable ?? false}
@@ -289,8 +333,9 @@
 		bind:genWG
 		bind:genClientId
 		bind:genName
-		onToggle={toggleServer}
+		bind:expanded
 		onSave={() => saveServerConfig(config!.server)}
+		onRevert={revertServer}
 		onGenerate={generateLink}
 		onCopy={copy}
 	/>

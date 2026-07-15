@@ -1,11 +1,17 @@
 <script lang="ts">
-	import { Card, Input, Button, Dropdown, FormToggle } from '$lib/components/ui';
+	import { Input, Button, Dropdown, FormToggle } from '$lib/components/ui';
+	import { pluralize } from '$lib/utils/pluralize';
 	import type { FreeTurnClientConfig, FreeTurnProcessStatus } from '$lib/types';
-	import ProcessCard from './ProcessCard.svelte';
-	import ProcessStatsRow from './ProcessStatsRow.svelte';
+	import ProcessAlerts from './ProcessAlerts.svelte';
+	import SettingRows from './SettingRows.svelte';
+	import SettingRow from './SettingRow.svelte';
+	import { changedKeys } from './dirty';
+	import { modeOptions, transportOptions, obfOptions } from './options';
 
 	interface Props {
 		client: FreeTurnClientConfig;
+		/** Снапшот сохранённого конфига — для dirty-подсветки и счётчика. */
+		saved: FreeTurnClientConfig | null;
 		status?: FreeTurnProcessStatus;
 		saving: boolean;
 		routerHost: string;
@@ -14,15 +20,17 @@
 		installAvailable: boolean;
 		installVersion?: string;
 		installing: boolean;
+		expanded: string | null;
 		onInstall: () => void;
-		onToggle: (on: boolean) => void;
 		onSave: () => void;
+		onRevert: () => void;
 		onImport: (link: string) => void;
 		onCopy: (text: string) => void;
 	}
 
 	let {
 		client,
+		saved,
 		status,
 		saving,
 		routerHost,
@@ -31,64 +39,101 @@
 		installAvailable,
 		installVersion,
 		installing,
+		expanded = $bindable(),
 		onInstall,
-		onToggle,
 		onSave,
+		onRevert,
 		onImport,
 		onCopy
 	}: Props = $props();
 
 	let importLink = $state('');
 
-	const modeOptions = [
-		{ value: 'udp', label: 'udp' },
-		{ value: 'tcp', label: 'tcp' }
-	];
-	const transportOptions = [
-		{ value: 'tcp', label: 'tcp' },
-		{ value: 'udp', label: 'udp' }
-	];
-	const obfOptions = [
-		{ value: 'none', label: 'none' },
-		{ value: 'rtpopus', label: 'rtpopus' },
-		{ value: 'rtpopus2', label: 'rtpopus2' },
-		{ value: 'rtpopus3', label: 'rtpopus3' }
-	];
+	const dirtyKeys = $derived(changedKeys(client, saved));
+	const dirtyCount = $derived(dirtyKeys.length);
+
+	function changed(...keys: (keyof FreeTurnClientConfig)[]): boolean {
+		return keys.some((k) => dirtyKeys.includes(k));
+	}
+
+	const linksCount = $derived(
+		client.links ? client.links.split(',').filter((s) => s.trim()).length : 0
+	);
+
+	const turnSummary = $derived(
+		[
+			client.peer || '—',
+			client.provider || '—',
+			linksCount ? pluralize(linksCount, ['ссылка', 'ссылки', 'ссылок']) : 'без ссылок'
+		].join(' · ')
+	);
+
+	const tunnelSummary = $derived(
+		[
+			`${client.mode} / ${client.transport}`,
+			pluralize(client.streams, ['поток', 'потока', 'потоков']),
+			client.bond ? 'бондинг' : '',
+			client.listen || ''
+		]
+			.filter(Boolean)
+			.join(' · ')
+	);
+
+	const obfSummary = $derived(`${client.obfProfile}${client.obfKey ? ' · ключ задан' : ''}`);
+
+	const logLines = $derived(status?.log ? status.log.trim().split('\n').length : 0);
+
+	function toggleSection(id: string) {
+		expanded = expanded === id ? null : id;
+	}
 </script>
 
-<ProcessStatsRow {status} mode={client.mode} transport={client.transport} obfProfile={client.obfProfile} />
+<ProcessAlerts {status} {installAvailable} {installVersion} {installing} {onInstall} />
 
-<ProcessCard
-	title="FreeTurn клиент"
-	{status}
-	{saving}
-	{installAvailable}
-	{installVersion}
-	{installing}
-	{onInstall}
-	{onToggle}
-	{onSave}
->
-	<div class="ft-section-label" style="margin-top: 0">TURN-сервер</div>
-	<div class="ft-grid-2">
+<div class="ft-panel-accent">
+	<div class="section-label">Импорт по ссылке freeturn://</div>
+	<div class="ft-import-row">
+		<Input bind:value={importLink} placeholder="freeturn://..." />
+		<Button variant="primary" size="sm" loading={importing} onclick={() => onImport(importLink)}>
+			Применить
+		</Button>
+	</div>
+	<p class="ft-hint">
+		Заполнит поля ниже (сохранение — кнопкой «Сохранить») и, если в ссылке есть
+		WireGuard-конфиг, сразу создаст из него туннель во вкладке «AWG»
+	</p>
+	{#if importedWG}
+		<div class="section-label">WireGuard-конфиг из ссылки</div>
+		<textarea class="field-textarea ft-textarea" readonly value={importedWG}></textarea>
+		<Button variant="ghost" size="sm" onclick={() => onCopy(importedWG!)}>Скопировать конфиг</Button>
+	{/if}
+</div>
+
+<SettingRows>
+	<SettingRow
+		id="turn"
+		label="TURN-сервер и провайдер"
+		summary={turnSummary}
+		dirty={changed('peer', 'provider', 'links', 'streamsPerCred', 'manualCaptcha', 'clientId')}
+		expanded={expanded === 'turn'}
+		ontoggle={toggleSection}
+	>
 		<Input label="Адрес сервера (-peer)" bind:value={client.peer} placeholder="vinvanvlad.com:56000" />
 		<Input label="Провайдер (-provider)" bind:value={client.provider} placeholder="vk" />
-	</div>
-
-	<div class="ft-section-label">Провайдер VK</div>
-	<label class="ft-label" for="ft-c-links">Ссылки VK Calls, через запятую (-links)</label>
-	<textarea
-		id="ft-c-links"
-		class="ft-textarea"
-		style="min-height: 70px"
-		bind:value={client.links}
-		placeholder="https://vk.ru/call/join/...,https://vk.ru/call/join/..."
-	></textarea>
-	<p class="ft-hint">
-		Обязательны, если -provider = vk. Несколько ссылок дают несколько независимых пулов
-		TURN-кредов — больше суммарных потоков и меньше риск бана одного звонка
-	</p>
-	<div class="ft-grid-2">
+		<div class="ft-span">
+			<label class="ft-label" for="ft-c-links">Ссылки VK Calls, через запятую (-links)</label>
+			<textarea
+				id="ft-c-links"
+				class="field-textarea ft-textarea"
+				style="min-height: 70px"
+				bind:value={client.links}
+				placeholder="https://vk.ru/call/join/...,https://vk.ru/call/join/..."
+			></textarea>
+			<p class="ft-hint">
+				Обязательны, если -provider = vk. Несколько ссылок дают несколько независимых пулов
+				TURN-кредов — больше суммарных потоков и меньше риск бана одного звонка
+			</p>
+		</div>
 		<Input
 			label="Потоков на кред (-streams-per-cred)"
 			type="number"
@@ -98,47 +143,64 @@
 		<div class="ft-toggle-slot">
 			<FormToggle bind:checked={client.manualCaptcha} label="Ручная капча (-manual-captcha)" />
 		</div>
-	</div>
-	<Input
-		label="Client ID (-client-id)"
-		bind:value={client.clientId}
-		placeholder="оставьте пустым — сгенерируется и сохранится автоматически"
-	/>
-	<p class="ft-hint">
-		Заполняется автоматически из ссылки freeturn:// (поле «cid»), если она с ним пришла. Если
-		сервер использует allowlist (-clients-file), этот же ID должен быть добавлен там владельцем
-		сервера — иначе сервер отклонит подключение с «Unauthorized Client ID»
-	</p>
-	{#if client.manualCaptcha}
-		<p class="ft-hint">
-			Капча решается локальным HTTP-сервером самого freeturn-client на роутере
-			(127.0.0.1:8765) — снаружи он недоступен. Пробросьте порт с вашего ПК:
-			<code>ssh -N -L 8765:127.0.0.1:8765 root@{routerHost || '<IP роутера>'}</code>
-			и откройте <code>http://127.0.0.1:8765</code> в браузере (порт SSH может отличаться
-			от 22 — на Keenetic часто 222).
-		</p>
-	{/if}
-
-	<div class="ft-section-label">Туннелирование</div>
-	<div class="ft-grid-3">
+		{#if client.manualCaptcha}
+			<p class="ft-hint ft-span">
+				Капча решается локальным HTTP-сервером самого freeturn-client на роутере
+				(127.0.0.1:8765) — снаружи он недоступен. Пробросьте порт с вашего ПК:
+				<code>ssh -N -L 8765:127.0.0.1:8765 root@{routerHost || '<IP роутера>'}</code>
+				и откройте <code>http://127.0.0.1:8765</code> в браузере (порт SSH может отличаться
+				от 22 — на Keenetic часто 222).
+			</p>
+		{/if}
+		<div class="ft-span">
+			<Input
+				label="Client ID (-client-id)"
+				bind:value={client.clientId}
+				placeholder="оставьте пустым — сгенерируется и сохранится автоматически"
+			/>
+			<p class="ft-hint" style="margin-top: 0.375rem">
+				Заполняется автоматически из ссылки freeturn:// (поле «cid»), если она с ним пришла. Если
+				сервер использует allowlist (-clients-file), этот же ID должен быть добавлен там владельцем
+				сервера — иначе сервер отклонит подключение с «Unauthorized Client ID»
+			</p>
+		</div>
+	</SettingRow>
+	<SettingRow
+		id="tunnel"
+		label="Туннелирование"
+		summary={tunnelSummary}
+		dirty={changed('mode', 'transport', 'listen', 'streams', 'bond')}
+		expanded={expanded === 'tunnel'}
+		ontoggle={toggleSection}
+	>
 		<Dropdown label="Режим (-mode)" bind:value={client.mode} options={modeOptions} />
-		<Dropdown label="Транспорт до TURN (-transport)" bind:value={client.transport} options={transportOptions} />
+		<Dropdown
+			label="Транспорт до TURN (-transport)"
+			bind:value={client.transport}
+			options={transportOptions}
+		/>
 		<Input label="Локальный адрес (-listen)" bind:value={client.listen} placeholder="127.0.0.1:9000" />
-	</div>
-	<div class="ft-grid-2">
 		<Input
 			label="Потоков TURN (-n)"
 			type="number"
 			value={String(client.streams)}
 			onchange={(v) => (client.streams = Number(v) || 0)}
 		/>
-		<div class="ft-toggle-slot">
-			<FormToggle bind:checked={client.bond} label="Бондинг через все smux-сессии (-bond, только mode=tcp)" />
+		<div class="ft-toggle-slot ft-span">
+			<FormToggle
+				bind:checked={client.bond}
+				label="Бондинг через все smux-сессии (-bond, только mode=tcp)"
+			/>
 		</div>
-	</div>
-
-	<div class="ft-section-label">Обфускация</div>
-	<div class="ft-grid-2">
+	</SettingRow>
+	<SettingRow
+		id="obf"
+		label="Обфускация"
+		summary={obfSummary}
+		dirty={changed('obfProfile', 'obfKey')}
+		expanded={expanded === 'obf'}
+		ontoggle={toggleSection}
+	>
 		<Dropdown label="Профиль (-obf-profile)" bind:value={client.obfProfile} options={obfOptions} />
 		<Input
 			label="Ключ обфускации (-obf-key)"
@@ -146,52 +208,52 @@
 			bind:value={client.obfKey}
 			placeholder="64 hex-символа"
 		/>
-	</div>
-</ProcessCard>
+	</SettingRow>
+	<SettingRow
+		id="log"
+		label="Лог процесса"
+		summary={logLines ? pluralize(logLines, ['строка', 'строки', 'строк']) : 'пусто'}
+		expanded={expanded === 'log'}
+		ontoggle={toggleSection}
+	>
+		<pre class="ft-log-box ft-span">{status?.log || 'лог пуст'}</pre>
+	</SettingRow>
+</SettingRows>
 
-<!-- Импорт нужен один раз при настройке — компактно ПОД карточкой клиента,
-     чтобы при повторных визитах первым был статус/тумблер. -->
-<Card variant="nested" padding="sm">
-	<div class="ft-section-label" style="margin-top: 0">Импорт по ссылке freeturn://</div>
-	<div class="ft-import-row">
-		<Input bind:value={importLink} placeholder="freeturn://..." />
-		<Button variant="secondary" size="sm" loading={importing} onclick={() => onImport(importLink)}>
-			Применить
-		</Button>
-	</div>
-	<p class="ft-hint">
-		Заполнит адрес сервера, провайдера и обфускацию выше (сохранение — кнопкой «Сохранить») и,
-		если в ссылке есть WireGuard-конфиг, сразу создаст из него туннель во вкладке «AWG»
-	</p>
-	{#if importedWG}
-		<div class="ft-section-label">WireGuard-конфиг из ссылки</div>
-		<textarea class="ft-textarea" readonly value={importedWG}></textarea>
-		<Button variant="ghost" size="sm" onclick={() => onCopy(importedWG!)}>Скопировать конфиг</Button>
+<div class="ft-footer">
+	{#if dirtyCount > 0}
+		<span class="ft-dirty-note">
+			{pluralize(dirtyCount, [
+				'несохранённое изменение',
+				'несохранённых изменения',
+				'несохранённых изменений'
+			])} — применятся после перезапуска клиента
+		</span>
+		<Button variant="ghost" size="sm" onclick={onRevert}>Отменить</Button>
 	{/if}
-</Card>
+	<Button variant="primary" size="sm" loading={saving} onclick={onSave}>Сохранить</Button>
+</div>
 
 <style>
-	.ft-section-label {
-		font-size: 0.75rem;
-		font-weight: 600;
-		color: var(--color-text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-		margin: 1.25rem 0 0.625rem;
+	.ft-panel-accent {
+		padding: 0.875rem 1rem;
+		background: var(--color-bg-secondary);
+		border: 1px solid var(--color-accent-border);
+		border-radius: var(--radius);
+		margin-bottom: 0.875rem;
 	}
 
-	.ft-grid-2 {
+	.ft-import-row {
 		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 0.75rem;
-		margin-bottom: 0.75rem;
+		grid-template-columns: 1fr auto;
+		gap: 0.5rem;
+		align-items: center;
+		margin-bottom: 0.5rem;
 	}
 
-	.ft-grid-3 {
-		display: grid;
-		grid-template-columns: 1fr 1fr 1fr;
-		gap: 0.75rem;
-		margin-bottom: 0.75rem;
+	.ft-span {
+		grid-column: 1 / -1;
+		min-width: 0;
 	}
 
 	.ft-label {
@@ -210,35 +272,48 @@
 	.ft-hint {
 		font-size: 0.75rem;
 		color: var(--color-text-secondary);
-		margin: -0.5rem 0 0.75rem;
+		margin: 0;
 	}
 
+	/* Поверх глобального .field-textarea: mono + вертикальный resize. */
 	.ft-textarea {
-		width: 100%;
 		min-height: 100px;
+		font-family: var(--font-mono);
+		resize: vertical;
+		white-space: pre;
+		margin: 0.375rem 0;
+	}
+
+	.ft-log-box {
+		max-height: 160px;
+		overflow-y: auto;
 		padding: 0.5rem 0.625rem;
 		border-radius: var(--radius-sm);
 		border: 1px solid var(--color-border);
-		background: var(--color-bg-tertiary);
-		color: var(--color-text-primary);
-		font-family: monospace;
-		font-size: 0.8125rem;
-		resize: vertical;
-		white-space: pre;
-		margin-bottom: 0.75rem;
+		background: var(--color-bg-primary);
+		color: var(--color-text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		white-space: pre-wrap;
+		word-break: break-all;
+		margin: 0;
 	}
 
-	.ft-import-row {
-		display: grid;
-		grid-template-columns: 1fr auto;
-		gap: 0.5rem;
+	.ft-footer {
+		display: flex;
 		align-items: center;
-		margin-bottom: 0.5rem;
+		justify-content: flex-end;
+		flex-wrap: wrap;
+		gap: 0.625rem;
+	}
+
+	.ft-dirty-note {
+		font-size: 0.75rem;
+		color: var(--color-warning);
 	}
 
 	@media (max-width: 640px) {
-		.ft-grid-2,
-		.ft-grid-3 {
+		.ft-import-row {
 			grid-template-columns: 1fr;
 		}
 	}

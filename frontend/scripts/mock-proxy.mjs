@@ -52,16 +52,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PRESETS_PATH = resolve(__dirname, 'mock-data/presets-snapshot.json');
 const UNIFIED_PRESETS_PATH = resolve(__dirname, '../../internal/presets/defaults.json');
-let presetsCache = null;
 let unifiedPresetsCache = null;
-async function getPresets() {
-	if (!presetsCache) {
-		presetsCache = JSON.parse(await readFile(PRESETS_PATH, 'utf8'));
-	}
-	return presetsCache;
-}
 async function getUnifiedPresets() {
 	if (!unifiedPresetsCache) {
 		unifiedPresetsCache = JSON.parse(await readFile(UNIFIED_PRESETS_PATH, 'utf8'));
@@ -74,7 +66,7 @@ const UPSTREAM = process.env.UPSTREAM ?? 'http://127.0.0.1:8080';
 // вероятностные сбои) становится воспроизводимой — скриншот-сравнение
 // рефакторингов UI требует бит-в-бит одинаковых ответов между прогонами.
 const DETERMINISTIC = ['1', 'true'].includes(String(process.env.MOCK_DETERMINISTIC ?? ''));
-const rand = () => (DETERMINISTIC ? 0.5 : rand());
+const rand = () => (DETERMINISTIC ? 0.5 : Math.random());
 
 const PORT = Number(process.env.PORT ?? 8081);
 const VALID = new Set(['basic', 'advanced', 'expert']);
@@ -190,6 +182,7 @@ function resetRuntimeControls() {
 	bucketCleared.singbox = false;
 	mockManagedAscByServer = createInitialMockManagedAscByServer();
 	mockSystemAscByTunnel = createInitialMockSystemAscByTunnel();
+	mockFreeturn = createInitialMockFreeturn();
 	applyDefaultMockKeeneticProfile();
 }
 const MOCK_DOWNLOAD_OUTBOUNDS = [
@@ -483,39 +476,6 @@ const MOCK_SYSTEM_TUNNELS = [
 		},
 	},
 ];
-
-/** Merge tunnel summary for GET /connections mocks (Prism omits map entries). */
-function enrichConnectionsTunnels(body) {
-	if (!body || typeof body !== 'object' || !body.data || typeof body.data !== 'object') return body;
-	const data = body.data;
-	const stats = data.stats;
-	if (!stats || typeof stats !== 'object') return body;
-
-	const direct = Math.max(0, Number(stats.direct) || 0);
-	const tunneled = Math.max(0, Number(stats.tunneled) || 0);
-	const tunnels = {
-		'': {
-			name: 'Direct',
-			interface: '—',
-			count: direct,
-		},
-	};
-	const list = MOCK_AWG_TUNNELS;
-	const n = list.length;
-	let rem = tunneled;
-	for (let i = 0; i < n; i++) {
-		const t = list[i];
-		const share = i === n - 1 ? rem : Math.floor(tunneled / n);
-		if (i < n - 1) rem -= share;
-		tunnels[t.id] = {
-			name: t.name,
-			interface: t.interfaceName ?? '—',
-			count: share,
-		};
-	}
-	data.tunnels = tunnels;
-	return body;
-}
 
 const MOCK_CONNECTIONS_POOL = (() => {
 	const items = [];
@@ -1289,50 +1249,6 @@ function buildConnectivityMatrixEvent({ forced = false } = {}) {
 		cells,
 		updatedAt: nowIso,
 	};
-}
-
-function buildAwgTunnelMetaMap() {
-	const byId = new Map();
-	const byName = new Map();
-	const byIface = new Map();
-	for (const t of MOCK_AWG_TUNNELS) {
-		if (t.id) byId.set(String(t.id).toLowerCase(), t);
-		if (t.name) byName.set(String(t.name).toLowerCase(), t);
-		if (t.interfaceName) byIface.set(String(t.interfaceName).toLowerCase(), t);
-	}
-	return { byId, byName, byIface };
-}
-
-function enrichMonitoringMatrixAwgTunnels(tunnels) {
-	if (!Array.isArray(tunnels) || tunnels.length === 0) return;
-	const meta = buildAwgTunnelMetaMap();
-	let anyMatched = false;
-	for (let i = 0; i < tunnels.length; i++) {
-		const row = tunnels[i];
-		if (!row || typeof row !== 'object') continue;
-		const idKey = row.id ? String(row.id).toLowerCase() : '';
-		const nameKey = row.name ? String(row.name).toLowerCase() : '';
-		const ifaceKey = row.ifaceName ? String(row.ifaceName).toLowerCase() : '';
-		const match =
-			(idKey && meta.byId.get(idKey)) ||
-			(nameKey && meta.byName.get(nameKey)) ||
-			(ifaceKey && meta.byIface.get(ifaceKey));
-		if (!match) continue;
-		anyMatched = true;
-		row.source = 'awg';
-		row.backend = match.backend;
-		row.awgVersion = match.awgVersion;
-		row.defaultRoute = !!match.defaultRoute;
-		row.ifaceName = row.ifaceName || match.interfaceName || '';
-	}
-	// Prism mock often returns a single generic tunnel row; force a representative AWG row.
-	if (!anyMatched && tunnels[0] && typeof tunnels[0] === 'object') {
-		const first = tunnels[0];
-		first.source = 'awg';
-		first.backend = 'nativewg';
-		first.awgVersion = 'awg2.0';
-		first.defaultRoute = true;
-	}
 }
 
 const TRAFFIC_PERIOD_MS = {
@@ -3031,6 +2947,76 @@ function createInitialMockManagedAscByServer() {
 }
 
 let mockManagedAscByServer = createInitialMockManagedAscByServer();
+
+// ── FreeTurn — конфиг клиент/сервер + процессы. Prism отдаёт на freeturn-
+// эндпоинты пустые 200 (в swagger нет examples), поэтому мокаем здесь. ──────
+const MOCK_FREETURN_OBF_KEY = '64c1a9deadbeef77aa5510c3e2b4f6d8a1b2c3d4e5f60718293a4b5c6d7e8fe2';
+
+function createInitialMockFreeturn() {
+	return {
+		binaryPresent: true,
+		client: {
+			// Клиент «работает 2ч14м» на момент старта мока.
+			running: true,
+			pid: 12844,
+			startedAt: new Date(Date.now() - (2 * 60 + 14) * 60000).toISOString(),
+		},
+		server: { running: false, pid: 13207, startedAt: null },
+		config: {
+			client: {
+				enabled: true,
+				listen: '127.0.0.1:9000',
+				peer: 'vinvanvlad.com:56000',
+				provider: 'vk',
+				links: 'https://vk.ru/call/join/hFa2abc,https://vk.ru/call/join/x91kdef',
+				streams: 8,
+				transport: 'tcp',
+				mode: 'udp',
+				bond: false,
+				obfProfile: 'rtpopus2',
+				obfKey: MOCK_FREETURN_OBF_KEY,
+				streamsPerCred: 4,
+				browser: 'chrome',
+				manualCaptcha: false,
+				dnsMode: 'auto',
+				clientId: '',
+				debug: false,
+			},
+			server: {
+				enabled: false,
+				listen: '0.0.0.0:56000',
+				connect: '127.0.0.1:51820',
+				mode: 'udp',
+				obfProfile: 'rtpopus2',
+				obfKey: MOCK_FREETURN_OBF_KEY,
+				clientsFile: '',
+				debug: false,
+			},
+		},
+	};
+}
+
+let mockFreeturn = createInitialMockFreeturn();
+
+function mockFreeturnProcessStatus(kind) {
+	const proc = mockFreeturn[kind];
+	const cfg = mockFreeturn.config[kind];
+	const endpoint = kind === 'client' ? cfg.peer : cfg.listen;
+	return {
+		running: proc.running,
+		...(proc.running ? { pid: proc.pid, startedAt: proc.startedAt } : {}),
+		...(proc.running
+			? {
+					log:
+						'12:41:02 [info] turn pool ready: 8 streams\n' +
+						`12:41:03 [info] tunnel up ${endpoint}\n` +
+						'12:41:07 [info] keepalive ok · rtt 14ms',
+				}
+			: { log: '12:12:44 [info] process stopped' }),
+		binary: `/opt/bin/freeturn-${kind}`,
+		binaryPresent: mockFreeturn.binaryPresent,
+	};
+}
 
 const MOCK_KEENETIC_PROFILES = {
 	'5.0': {
@@ -6991,6 +6977,102 @@ const server = http.createServer(async (req, res) => {
 	}
 
 	// ── end fakeip config CRUD ─────────────────────────────────────────────────
+
+	// ── FreeTurn ───────────────────────────────────────────────────────────────
+
+	if (req.method === 'GET' && path === '/freeturn/config') {
+		sendData(res, mockFreeturn.config);
+		return;
+	}
+
+	if (
+		req.method === 'PUT' &&
+		(path === '/freeturn/client/config' || path === '/freeturn/server/config')
+	) {
+		const kind = path === '/freeturn/client/config' ? 'client' : 'server';
+		readRequestText(req).then((raw) => {
+			try {
+				mockFreeturn.config[kind] = { ...mockFreeturn.config[kind], ...JSON.parse(raw || '{}') };
+				sendData(res, mockFreeturn.config[kind]);
+			} catch (e) {
+				sendInvalidRequest(res, e);
+			}
+		});
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/freeturn/status') {
+		sendData(res, {
+			client: mockFreeturnProcessStatus('client'),
+			server: mockFreeturnProcessStatus('server'),
+			installAvailable: true,
+			installVersion: '1.8.0',
+			installing: false,
+		});
+		return;
+	}
+
+	{
+		const m = req.method === 'POST' && /^\/freeturn\/(client|server)\/(start|stop)$/.exec(path);
+		if (m) {
+			const [, kind, action] = m;
+			const proc = mockFreeturn[kind];
+			proc.running = action === 'start';
+			proc.startedAt = proc.running ? new Date().toISOString() : null;
+			sendData(res, { message: `freeturn ${kind}: ${action} (mock)` });
+			return;
+		}
+	}
+
+	if (req.method === 'POST' && path === '/freeturn/server/link') {
+		readRequestText(req).then((raw) => {
+			try {
+				const body = raw ? JSON.parse(raw) : {};
+				const srv = mockFreeturn.config.server;
+				const port = Number(srv.listen.split(':').pop()) || 56000;
+				const peer = `203.0.113.10:${port}`;
+				const payload = {
+					v: 1,
+					provider: body.provider || 'vk',
+					peer,
+					obf: srv.obfProfile,
+					...(srv.obfKey ? { key: srv.obfKey } : {}),
+					mtu: body.mtu || 1376,
+					...(body.clientId ? { cid: body.clientId } : {}),
+					...(body.name ? { name: body.name } : {}),
+					...(body.wg ? { wg: body.wg } : {}),
+				};
+				const link = 'freeturn://' + Buffer.from(JSON.stringify(payload)).toString('base64');
+				sendData(res, { link, peer, ...(body.clientId ? { clientId: body.clientId } : {}) });
+			} catch (e) {
+				sendInvalidRequest(res, e);
+			}
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/freeturn/link/decode') {
+		readRequestText(req).then((raw) => {
+			try {
+				const { link } = JSON.parse(raw || '{}');
+				const m = /^freeturn:\/\/(.+)$/.exec(String(link ?? '').trim());
+				if (!m) throw new Error('ожидается ссылка вида freeturn://…');
+				const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+				sendData(res, JSON.parse(Buffer.from(b64, 'base64').toString('utf8')));
+			} catch (e) {
+				sendInvalidRequest(res, e);
+			}
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/freeturn/install') {
+		mockFreeturn.binaryPresent = true;
+		sendData(res, { message: 'freeturn установлен (mock)' });
+		return;
+	}
+
+	// ── end FreeTurn ───────────────────────────────────────────────────────────
 
 	// Pass-through for everything else (including /events SSE).
 	const upstream = new URL(UPSTREAM);
