@@ -17,7 +17,7 @@
         "ruleSets": [
           {
             "tag": "geosite-anthropic",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/claude.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/claude.srs"
           }
         ],
         "action": "tunnel"
@@ -205,7 +205,7 @@
         "ruleSets": [
           {
             "tag": "geosite-copilot",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/copilot.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/copilot.srs"
           }
         ],
         "action": "tunnel"
@@ -233,7 +233,7 @@
         "ruleSets": [
           {
             "tag": "geosite-google-gemini",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/gemini.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/gemini.srs"
           }
         ],
         "action": "tunnel"
@@ -259,7 +259,7 @@
         "ruleSets": [
           {
             "tag": "geosite-grok",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/grok.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/grok.srs"
           }
         ],
         "action": "tunnel"
@@ -285,7 +285,7 @@
         "ruleSets": [
           {
             "tag": "geosite-openai",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/openai.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/openai.srs"
           }
         ],
         "action": "tunnel"
@@ -383,7 +383,7 @@
         "ruleSets": [
           {
             "tag": "geosite-rkn",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/rkn.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/rkn.srs"
           }
         ],
         "action": "tunnel"
@@ -519,13 +519,13 @@
     "origin": "",
     "engines": {
       "dns": {
-        "subscriptionUrl": "https://github.com/vernette/rulesets/raw/master/raw/unavailable-in-russia.txt"
+        "subscriptionUrl": "https://repo.hoaxisr.ru/rulesets/raw/unavailable-in-russia.txt"
       },
       "singbox": {
         "ruleSets": [
           {
             "tag": "geosite-unavailable-in-russia",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/unavailable-in-russia.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/unavailable-in-russia.srs"
           }
         ],
         "action": "tunnel"
@@ -1386,7 +1386,6 @@
       "dns": {
         "domains": [
           "a.market.xiaomi.com",
-          "account.xiaomi.com",
           "ad.intl.xiaomi.com",
           "ad.mi.com",
           "ad.xiaomi.com",
@@ -1396,7 +1395,6 @@
           "adv.sec.miui.com",
           "airstarfinance.net",
           "c.mi.com",
-          "cn-ha.mqtt.io.mi.com",
           "data.mistat.india.xiaomi.com",
           "data.mistat.intl.xiaomi.com",
           "data.mistat.rus.xiaomi.com",
@@ -1404,7 +1402,6 @@
           "duokan.com",
           "duokanbox.com",
           "global.market.xiaomi.com",
-          "ha.api.io.mi.com",
           "logupdate.avlyun.sec.miui.com",
           "mgslb.com",
           "mi-dun.com",
@@ -2073,7 +2070,7 @@
         "ruleSets": [
           {
             "tag": "geosite-linkedin",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/linkedin.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/linkedin.srs"
           }
         ],
         "action": "tunnel"
@@ -2571,7 +2568,7 @@
         "ruleSets": [
           {
             "tag": "geosite-nintendo",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/nintendo.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/nintendo.srs"
           }
         ],
         "action": "tunnel"
@@ -2778,7 +2775,7 @@
         "ruleSets": [
           {
             "tag": "geosite-roblox",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/roblox.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/roblox.srs"
           }
         ],
         "action": "tunnel"
@@ -3451,7 +3448,7 @@
         "ruleSets": [
           {
             "tag": "geosite-netflix",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/netflix.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/netflix.srs"
           }
         ],
         "action": "tunnel"
@@ -3852,7 +3849,7 @@
         "ruleSets": [
           {
             "tag": "geosite-discord",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/discord-full.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/discord-full.srs"
           }
         ],
         "action": "tunnel"
@@ -4384,7 +4381,7 @@
         "ruleSets": [
           {
             "tag": "geosite-instagram",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/instagram.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/instagram.srs"
           }
         ],
         "action": "tunnel"
@@ -4630,7 +4627,7 @@
         "ruleSets": [
           {
             "tag": "geosite-telegram",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/telegram.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/telegram.srs"
           }
         ],
         "action": "tunnel"
@@ -4689,7 +4686,7 @@
         "ruleSets": [
           {
             "tag": "geosite-tiktok",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/tiktok.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/tiktok.srs"
           }
         ],
         "action": "tunnel"
@@ -4737,7 +4734,7 @@
         "ruleSets": [
           {
             "tag": "geosite-whatsapp",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/whatsapp.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs"
           }
         ],
         "action": "tunnel"
@@ -4763,7 +4760,7 @@
         "ruleSets": [
           {
             "tag": "geosite-x",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/x.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/x.srs"
           }
         ],
         "action": "tunnel"
@@ -4792,7 +4789,7 @@
         "ruleSets": [
           {
             "tag": "geosite-youtube",
-            "url": "https://github.com/vernette/rulesets/raw/master/srs/youtube.srs"
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/youtube.srs"
           }
         ],
         "action": "tunnel"

@@ -5,7 +5,7 @@ import "testing"
 func TestPinnedFetchURL(t *testing.T) {
 	cases := map[string]string{
 		"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-youtube.srs": "https://raw.githubusercontent.com/SagerNet/sing-geosite/" + sagerNetPinSHA + "/geosite-youtube.srs",
-		"https://github.com/vernette/rulesets/raw/master/srs/youtube.srs":                      "https://github.com/vernette/rulesets/raw/" + vernettePinSHA + "/srs/youtube.srs",
+		"https://repo.hoaxisr.ru/rulesets/srs/youtube.srs":                                     "https://github.com/hoaxisr/rulesets/raw/" + vernettePinSHA + "/srs/youtube.srs",
 		"https://example.com/whatever.srs":                                                     "https://example.com/whatever.srs",
 	}
 	for in, want := range cases {

@@ -21,8 +21,8 @@ func pinnedFetchURL(url string) string {
 		"raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/",
 		"raw.githubusercontent.com/SagerNet/sing-geosite/"+sagerNetPinSHA+"/", 1)
 	url = strings.Replace(url,
-		"github.com/vernette/rulesets/raw/master/",
-		"github.com/vernette/rulesets/raw/"+vernettePinSHA+"/", 1)
+		"https://repo.hoaxisr.ru/rulesets/",
+		"https://github.com/hoaxisr/rulesets/raw/"+vernettePinSHA+"/", 1)
 	return url
 }
 
