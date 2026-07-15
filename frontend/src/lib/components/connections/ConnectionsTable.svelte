@@ -85,7 +85,7 @@
 			<span class="proto-badge proto-{normProto(conn.protocol)}">{conn.protocol.toUpperCase()}</span>
 		</span>
 		<span class="cell c-src">
-			<span class="primary">{conn.clientName || conn.src}<span class="muted">:{conn.srcPort}</span></span>
+			<span class="primary">{conn.clientName || conn.src}{#if conn.srcPort > 0}<span class="muted">:{conn.srcPort}</span>{/if}</span>
 			{#if conn.clientName}<span class="secondary mono">{conn.src}</span>{/if}
 		</span>
 		<span class="cell c-dst">

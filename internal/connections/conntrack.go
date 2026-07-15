@@ -68,9 +68,10 @@ func parseConntrackLine(line string) (rawConn, bool) {
 	var conn rawConn
 	conn.Protocol = proto
 
-	// Key=value pairs + an optional bare TCP state word. Only the FIRST
-	// occurrence of src/dst/sport/dport is taken (original direction);
-	// the two packets/bytes pairs (original + reply) are summed.
+	// Key=value pairs + two bare numeric words (protonum, timeout→TTL) +
+	// optional TCP state word (tcp only). Only FIRST occurrence of src/sport/dport
+	// is taken (original direction); dst appears twice (first = original, second = replyDst).
+	// The two packets/bytes pairs (original + reply) are summed.
 	var packets1, packets2, bytes1, bytes2 int64
 	var packetsSeen, bytesSeen, bareNums int
 	var srcSeen, dstSeen, sportSeen, dportSeen bool

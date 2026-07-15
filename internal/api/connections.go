@@ -214,7 +214,7 @@ func (h *ConnectionsHandler) Kill(w http.ResponseWriter, r *http.Request) {
 
 	if err := connections.Kill(p); err != nil {
 		response.ErrorWithStatus(w, http.StatusInternalServerError,
-			"Failed to kill connection", "CONNTRACK_KILL_FAILED")
+			"Failed to kill connection: "+err.Error(), "CONNTRACK_KILL_FAILED")
 		return
 	}
 	response.Success(w, ConnectionKillData{OK: true})
