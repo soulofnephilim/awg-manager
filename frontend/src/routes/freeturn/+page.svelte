@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
+	import { copyToClipboard as copyText } from '$lib/utils/clipboard';
 	import { PageContainer, PageHeader } from '$lib/components/layout';
 	import { Card, Tabs, Toggle, Input, Button, StatusDot, Stat } from '$lib/components/ui';
 	import type {
@@ -151,11 +152,12 @@
 		}
 	}
 
+	// Через $lib/utils/clipboard: у navigator.clipboard нет fallback'а на
+	// plain HTTP (роутер без TLS), утилита падает обратно на execCommand.
 	async function copyToClipboard(text: string) {
-		try {
-			await navigator.clipboard.writeText(text);
+		if (await copyText(text)) {
 			notifications.success('Скопировано в буфер');
-		} catch {
+		} else {
 			notifications.error('Не удалось скопировать');
 		}
 	}
@@ -502,6 +504,11 @@
 				bind:value={genWG}
 				placeholder="Вставьте сюда конфиг WireGuard-клиента, если хотите передать его вместе со ссылкой..."
 			></textarea>
+			<p class="ft-hint">
+				Внимание: конфиг (включая приватный ключ WireGuard) вкладывается в ссылку в открытом
+				виде (base64, без шифрования) — передавайте её только доверенному получателю по
+				защищённому каналу
+			</p>
 
 			<div class="ft-footer">
 				<Button variant="primary" size="sm" loading={generating} onclick={generateLink}>
