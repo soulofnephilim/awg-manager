@@ -109,7 +109,7 @@
 		сервер использует allowlist (-clients-file), этот же ID должен быть добавлен там владельцем
 		сервера — иначе сервер отклонит подключение с «Unauthorized Client ID»
 	</p>
-{#if client.manualCaptcha}
+	{#if client.manualCaptcha}
 		<p class="ft-hint">
 			Капча решается локальным HTTP-сервером самого freeturn-client на роутере
 			(127.0.0.1:8765) — снаружи он недоступен. Пробросьте порт с вашего ПК:

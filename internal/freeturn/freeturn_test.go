@@ -3,7 +3,9 @@ package freeturn
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -299,5 +301,76 @@ func TestEmbeddedBinaries_CoverAllArches(t *testing.T) {
 				t.Errorf("%s/%s: bad spec %+v", arch, name, sp)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// link.go — официальный формат (#530): base64url + поля uri.md, и обратная
+// совместимость со старым неофициальным форматом (StdEncoding без padding).
+// ---------------------------------------------------------------------------
+
+func TestLink_Roundtrip_UpstreamFields(t *testing.T) {
+	p := LinkPayload{
+		V: 1, Provider: "vk", Peer: "1.2.3.4:56000",
+		Transport: "tcp", Mode: "udp", Bond: true,
+		Obf: "rtpopus2", Key: "aabb",
+		N: 4, StreamsPerCred: 2, ClientID: "deadbeefcafe",
+		Listen: "127.0.0.1:9000", DNSMode: "doh", DNSServers: "1.1.1.1",
+		ManualCaptcha: true, Name: "гость",
+	}
+	link, err := EncodeLink(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeLink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, p) {
+		t.Fatalf("roundtrip mismatch:\n got %+v\nwant %+v", got, p)
+	}
+}
+
+// Ссылка настоящего клиента/приложения: base64url без padding
+// (Go base64.RawURLEncoding, docs/uri.md) — в т.ч. с символами '-'/'_',
+// которых нет в стандартном алфавите.
+func TestDecodeLink_UpstreamBase64URL(t *testing.T) {
+	// Подбираем name, при котором url-safe кодирование содержит '-'/'_' —
+	// иначе тест не отличит алфавиты. Кириллица (байты ≥0xC0) даёт их быстро.
+	var p LinkPayload
+	var body string
+	for i := 0; i < 64; i++ {
+		p = LinkPayload{V: 1, Peer: "h:56000", ClientID: "cid1", Name: "я" + strings.Repeat("~", i)}
+		raw, _ := json.Marshal(p)
+		body = base64.RawURLEncoding.EncodeToString(raw)
+		if strings.ContainsAny(body, "-_") {
+			break
+		}
+		body = ""
+	}
+	if body == "" {
+		t.Fatal("could not construct a url-safe sample")
+	}
+	got, err := DecodeLink(LinkScheme + body)
+	if err != nil {
+		t.Fatalf("DecodeLink: %v", err)
+	}
+	if got.ClientID != "cid1" || got.Name != p.Name {
+		t.Fatalf("got %+v want %+v", got, p)
+	}
+}
+
+// Старый неофициальный формат (entware-installer / awg-manager до #530):
+// стандартный алфавит, padding срезан — обязан читаться и дальше.
+func TestDecodeLink_LegacyStdEncoding(t *testing.T) {
+	p := LinkPayload{V: 1, Provider: "vk", Peer: "h:56000", Obf: "rtpopus", Key: "aa", MTU: 1376, WG: "[Interface]\n"}
+	raw, _ := json.Marshal(p)
+	legacy := strings.TrimRight(base64.StdEncoding.EncodeToString(raw), "=")
+	got, err := DecodeLink(LinkScheme + legacy)
+	if err != nil {
+		t.Fatalf("DecodeLink(legacy): %v", err)
+	}
+	if !reflect.DeepEqual(got, p) {
+		t.Fatalf("legacy mismatch:\n got %+v\nwant %+v", got, p)
 	}
 }
