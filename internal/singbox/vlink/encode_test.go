@@ -2,6 +2,7 @@ package vlink
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,38 @@ func TestEncodeOutbound_MieruSimple_MatchesSampleShape(t *testing.T) {
 	if !strings.Contains(encoded, "profile=default") {
 		t.Fatalf("missing profile: %q", encoded)
 	}
+}
+
+func TestEncodeOutbound_MieruMultiPort_RoundTrip(t *testing.T) {
+	// issue #516: экспортированная ссылка с доп. портами должна импортироваться обратно
+	parsed := ParseBatch([]string{mieruSimpleSample})
+	if len(parsed.Errors) != 0 {
+		t.Fatalf("errors: %+v", parsed.Errors)
+	}
+	encoded, err := EncodeOutbound(parsed.Outbounds[0].Outbound, parsed.Outbounds[0].Label)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q["port"]) != len(q["protocol"]) {
+		t.Fatalf("port/protocol pairs mismatch: %q", encoded)
+	}
+	reparsed := ParseBatch([]string{encoded})
+	if len(reparsed.Errors) != 0 {
+		t.Fatalf("reparse errors: %+v", reparsed.Errors)
+	}
+	out := decodeOutbound(t, reparsed.Outbounds[0])
+	if out["server_port"] != float64(6666) {
+		t.Fatalf("server_port=%v want 6666", out["server_port"])
+	}
+	assertStringSlice(t, out["server_ports"], []string{"9998-9999"})
 }
 
 func assertEncodeRoundTrip(t *testing.T, want, got map[string]any) {
