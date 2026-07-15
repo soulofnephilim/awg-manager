@@ -9,17 +9,34 @@ import (
 )
 
 // recordingOpkgTunProvisioner embeds fakeOpkgTunProvisioner (default no-op
-// methods) and overrides DeleteOpkgTun to record the names it was called with
-// and optionally return an injected error — the reap test only exercises Delete.
+// methods) and overrides DeleteOpkgTun/ClearAddress to record the names they
+// were called with; Delete optionally returns an injected error.
 type recordingOpkgTunProvisioner struct {
 	fakeOpkgTunProvisioner
 	deleted []string
+	cleared []string
 	delErr  error
 }
 
 func (r *recordingOpkgTunProvisioner) DeleteOpkgTun(_ context.Context, name string) error {
 	r.deleted = append(r.deleted, name)
 	return r.delErr
+}
+
+func (r *recordingOpkgTunProvisioner) ClearAddress(_ context.Context, name string) error {
+	r.cleared = append(r.cleared, name)
+	return nil
+}
+
+// fakeOpkgTunScanner returns a fixed set of NDMS OpkgTun IDs (or an error)
+// for the description-scan fallback tests.
+type fakeOpkgTunScanner struct {
+	ids []string
+	err error
+}
+
+func (f *fakeOpkgTunScanner) ListOpkgTunsByDescription(context.Context, string) ([]string, error) {
+	return f.ids, f.err
 }
 
 // newReapSettingsStore seeds a store with the given RoutingMode and, when
@@ -194,5 +211,77 @@ func TestReapOrphaned_NilOpkgKeepsPersist(t *testing.T) {
 	}
 	if got := loadFakeIP(t, store); got == nil {
 		t.Error("persist must be retained with nil OpkgTun, got nil")
+	}
+}
+
+// === Description-scan fallback (persist-less orphans) ===
+
+// A persist-less orphan (crash mid-Enable, failed disable delete after the
+// mandatory persist clear) is found by description and removed with its
+// addresses cleared first.
+func TestReapOrphaned_ScanRemovesPersistlessOrphan(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false)
+	opkg := &recordingOpkgTunProvisioner{}
+	scan := &fakeOpkgTunScanner{ids: []string{"OpkgTun1"}}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scan})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun1" {
+		t.Errorf("deleted = %v, want [OpkgTun1]", opkg.deleted)
+	}
+	if len(opkg.cleared) != 1 || opkg.cleared[0] != "OpkgTun1" {
+		t.Errorf("cleared = %v, want [OpkgTun1] (address must be cleared before delete)", opkg.cleared)
+	}
+}
+
+// The currently-persisted iface is excluded from the scan: in fakeip-tun mode
+// the active Enable/Reconcile own it, foreign orphans still go.
+func TestReapOrphaned_ScanSkipsOwnedIface(t *testing.T) {
+	store := newReapSettingsStore(t, "fakeip-tun", 2, true)
+	opkg := &recordingOpkgTunProvisioner{}
+	scan := &fakeOpkgTunScanner{ids: []string{"OpkgTun2", "OpkgTun0"}}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scan})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun0" {
+		t.Errorf("deleted = %v, want [OpkgTun0] (owned OpkgTun2 must be skipped)", opkg.deleted)
+	}
+	if got := loadFakeIP(t, store); got == nil || got.Index != 2 {
+		t.Errorf("persist must be unchanged, got %+v", got)
+	}
+}
+
+// A failed scan delete still had the address cleared (the loop-defusing part)
+// and must not fail the reap: the scan is best-effort, next boot retries.
+func TestReapOrphaned_ScanDeleteFailureStillClearsAddress(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false)
+	opkg := &recordingOpkgTunProvisioner{delErr: errors.New("ndms down")}
+	scan := &fakeOpkgTunScanner{ids: []string{"OpkgTun1"}}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scan})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("scan delete failure must not fail the reap: %v", err)
+	}
+	if len(opkg.cleared) != 1 || opkg.cleared[0] != "OpkgTun1" {
+		t.Errorf("cleared = %v, want [OpkgTun1]", opkg.cleared)
+	}
+}
+
+// A scanner error is logged and skipped — the persist-based reap still runs.
+func TestReapOrphaned_ScanErrorFallsBackToPersistReap(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 3, true)
+	opkg := &recordingOpkgTunProvisioner{}
+	scan := &fakeOpkgTunScanner{err: errors.New("rci down")}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scan})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun3" {
+		t.Errorf("deleted = %v, want [OpkgTun3] via persist-based reap", opkg.deleted)
 	}
 }

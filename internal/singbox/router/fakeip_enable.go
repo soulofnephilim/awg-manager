@@ -167,6 +167,15 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		if e := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); e != nil {
 			s.appLog.Warn("fakeip-rollback", iface, "iface down: "+e.Error())
 		}
+		// Clear addresses BEFORE delete: if the delete fails, a leftover
+		// configured `ip address` on a kernel-less OpkgTun sends ndm's nginx
+		// into an endless reload loop that stalls all RCI (see fakeip_disable).
+		if e := s.deps.OpkgTun.ClearAddress(ctx, ndmsName); e != nil {
+			s.appLog.Warn("fakeip-rollback", iface, "clear address: "+e.Error())
+		}
+		if e := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); e != nil {
+			s.appLog.Warn("fakeip-rollback", iface, "clear ipv6 address: "+e.Error())
+		}
 		if e := s.deps.OpkgTun.DeleteOpkgTun(ctx, ndmsName); e != nil {
 			s.appLog.Warn("fakeip-rollback", iface, "delete opkgtun: "+e.Error())
 		}

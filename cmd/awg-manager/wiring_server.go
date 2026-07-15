@@ -318,6 +318,7 @@ func (a *app) setupRouter() {
 			store: a.ndmsQueries.Interfaces,
 			log:   logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSingboxRouter),
 		},
+		OpkgTunScan: &routerOpkgTunScanAdapter{store: a.ndmsQueries.Interfaces},
 		FakeIPTun: func() router.FakeIPTunParams {
 			p := router.DefaultFakeIPTunParams()
 			p.CachePath = singbox.DefaultCacheDBPath()

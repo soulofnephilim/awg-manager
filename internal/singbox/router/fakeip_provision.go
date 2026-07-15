@@ -28,11 +28,21 @@ type OpkgTunProvisioner interface {
 	SetIPGlobal(ctx context.Context, name string) error
 	DeleteOpkgTun(ctx context.Context, name string) error
 	SetAddress(ctx context.Context, name, address, mask string) error
+	ClearAddress(ctx context.Context, name string) error
 	SetIPv6Address(ctx context.Context, name, address string) error
 	ClearIPv6Address(ctx context.Context, name string) error
 	SetMTU(ctx context.Context, name string, mtu int) error
 	InterfaceUp(ctx context.Context, name string) error
 	InterfaceDown(ctx context.Context, name string) error
+}
+
+// OpkgTunScanner lists NDMS OpkgTun interface IDs carrying the given
+// description. Used by the startup reap to find persist-less fakeip orphans:
+// a configured `ip address` on an OpkgTun whose kernel device is absent sends
+// ndm's nginx into an endless reload loop (bind() fails → config regen →
+// reload → …), stalling ALL RCI for seconds — so such orphans must not survive.
+type OpkgTunScanner interface {
+	ListOpkgTunsByDescription(ctx context.Context, description string) ([]string, error)
 }
 
 // StaticRouteProvider manages NDMS auto static routes for the fakeip pool + reject route.

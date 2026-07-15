@@ -73,6 +73,10 @@ func (r *recOpkgTun) SetIPv6Address(_ context.Context, name, addr string) error 
 	r.log.add("SetIPv6Address:" + name + ":" + addr)
 	return r.maybeFail("SetIPv6Address")
 }
+func (r *recOpkgTun) ClearAddress(_ context.Context, name string) error {
+	r.log.add("ClearAddress:" + name)
+	return nil
+}
 func (r *recOpkgTun) ClearIPv6Address(_ context.Context, name string) error {
 	r.log.add("ClearIPv6Address:" + name)
 	return nil
@@ -1146,6 +1150,34 @@ func TestDisableFakeIPTun_Ordering(t *testing.T) {
 	if last := h.log.calls[len(h.log.calls)-1]; last != rmKillSwitch {
 		t.Errorf("last call = %q, want kill-switch removal LAST", last)
 	}
+}
+
+// The configured addresses are cleared between down and delete on teardown:
+// a failed delete must not leave an `ip address` behind on a kernel-less
+// OpkgTun — ndm's nginx binds on CONFIGURED addresses and loops forever on a
+// missing one, stalling all RCI (stand-verified 2026-07-15).
+func TestDisableFakeIPTun_ClearsAddressesBeforeDelete(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+	provisionForDisable(t, h)
+
+	const ndmsName = "OpkgTun0"
+	if err := h.svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable(fakeip-tun): %v", err)
+	}
+
+	mustOrder := func(a, b string) {
+		ia, ib := h.log.idxOf(a), h.log.idxOf(b)
+		if ia < 0 || ib < 0 {
+			t.Fatalf("missing call %q or %q in %v", a, b, h.log.calls)
+		}
+		if ia >= ib {
+			t.Errorf("expected %q (#%d) before %q (#%d): %v", a, ia, b, ib, h.log.calls)
+		}
+	}
+	mustOrder("InterfaceDown:"+ndmsName, "ClearAddress:"+ndmsName)
+	mustOrder("ClearAddress:"+ndmsName, "Delete:"+ndmsName)
+	mustOrder("ClearIPv6Address:"+ndmsName, "Delete:"+ndmsName)
 }
 
 // The reject removal must be scheduled via the seam, not run inline: before the

@@ -120,9 +120,11 @@ func fakeIPNDMSName(index int) string {
 // STARTUP-ONLY (wired once in cmd/awg-manager) — it must NOT run on every
 // Reconcile, or a live mode-switch (fakeip→tproxy) would tear the iface down
 // bluntly, bypassing the safe drain in Disable(fakeip-tun). Idempotent and
-// best-effort: reaps strictly by persisted state (Index). A description-based
-// scan to catch OpkgTuns whose persist was lost is a deferred fallback (v1
-// reaps by persist only).
+// best-effort: reaps by persisted state (Index), plus a description-based scan
+// (reapFakeIPOrphansByDescription) that catches OpkgTuns whose persist was
+// lost — a persist-less orphan with a configured `ip address` sends ndm's
+// nginx into an endless reload loop that stalls all RCI (stand-verified
+// 2026-07-15), so it must not survive a boot.
 //
 // It ALSO sweeps a stale v4 drain reject route for the configured pool in
 // non-fakeip mode — the startup safety net for a disable drain interrupted by a
@@ -131,15 +133,22 @@ func fakeIPNDMSName(index int) string {
 //
 // INVARIANT (relied on by this reap): Enable(fakeip-tun) MUST persist the index
 // via SetFakeIPState BEFORE CreateOpkgTun (and roll back its own partial work on
-// failure), so persisted state is a reliable superset of live ifaces — otherwise
-// a crash mid-Enable leaves a persist-less orphan this reap cannot see (the
-// description-scan fallback is deferred).
+// failure), so persisted state is a reliable superset of live ifaces. A crash
+// mid-Enable that still slips a persist-less orphan through is caught by the
+// description-scan fallback.
 func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
 	settings, err := s.deps.Settings.Load()
 	if err != nil {
 		return err
 	}
 	sr, _ := NormalizeSingboxRouterSettings(settings.SingboxRouter)
+
+	// Description-scan fallback: remove persist-less fakeip orphans in EVERY
+	// mode (the currently-persisted iface is excluded inside — in fakeip-tun
+	// mode the active Enable/Reconcile own it, in other modes the persist-based
+	// reap below handles it with its persist-clearing semantics). Best-effort.
+	s.reapFakeIPOrphansByDescription(ctx, settings)
+
 	if sr.RoutingMode == "fakeip-tun" {
 		return nil // active mode owns the iface; Enable/Reconcile manage it
 	}
@@ -189,6 +198,16 @@ func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
 		// A future boot with a real provisioner reaps it.
 		return nil
 	}
+	// Clear the configured addresses BEFORE the delete: if the delete fails,
+	// a leftover `ip address` on a kernel-less OpkgTun sends ndm's nginx into
+	// an endless reload loop that stalls all RCI until the next boot's retry
+	// (see fakeip_disable). Best-effort — the delete below removes them anyway.
+	if err := s.deps.OpkgTun.ClearAddress(ctx, ndmsName); err != nil {
+		s.appLog.Warn("fakeip-reap", ndmsName, "clear address: "+err.Error())
+	}
+	if err := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); err != nil {
+		s.appLog.Warn("fakeip-reap", ndmsName, "clear ipv6 address: "+err.Error())
+	}
 	if err := s.deps.OpkgTun.DeleteOpkgTun(ctx, ndmsName); err != nil {
 		// Keep the persist on failure: returning without clearing it lets the
 		// next boot retry the reap rather than leaking the orphan forever.
@@ -198,6 +217,47 @@ func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
 	// Clear persist ONLY after a confirmed delete success (NDMS returns nil even
 	// when the iface was already gone, i.e. idempotent), so the index frees.
 	return s.deps.Settings.SetFakeIPState(nil)
+}
+
+// reapFakeIPOrphansByDescription removes NDMS OpkgTun interfaces stamped with
+// the fakeip description that no persist tracks (crash mid-Enable rollback,
+// failed disable delete after the mandatory persist clear, downgrade). The
+// currently-persisted iface is excluded — its owner is either the active
+// fakeip mode or the persist-based reap. Entirely best-effort: a failed delete
+// still had its addresses cleared, which alone defuses the ndm nginx-reload
+// loop; the next boot's scan retries the delete.
+func (s *ServiceImpl) reapFakeIPOrphansByDescription(ctx context.Context, settings *storage.Settings) {
+	if s.deps.OpkgTunScan == nil || s.deps.OpkgTun == nil {
+		return
+	}
+	owned := ""
+	if st := settings.FakeIP; st != nil && st.Provisioned {
+		owned = fakeIPNDMSName(st.Index)
+	}
+	ids, err := s.deps.OpkgTunScan.ListOpkgTunsByDescription(ctx, fakeIPTunDescription)
+	if err != nil {
+		s.appLog.Warn("fakeip-reap", "", "scan opkgtuns by description: "+err.Error())
+		return
+	}
+	for _, id := range ids {
+		if id == owned {
+			continue
+		}
+		if err := s.deps.OpkgTun.InterfaceDown(ctx, id); err != nil {
+			s.appLog.Warn("fakeip-reap", id, "iface down: "+err.Error())
+		}
+		if err := s.deps.OpkgTun.ClearAddress(ctx, id); err != nil {
+			s.appLog.Warn("fakeip-reap", id, "clear address: "+err.Error())
+		}
+		if err := s.deps.OpkgTun.ClearIPv6Address(ctx, id); err != nil {
+			s.appLog.Warn("fakeip-reap", id, "clear ipv6 address: "+err.Error())
+		}
+		if err := s.deps.OpkgTun.DeleteOpkgTun(ctx, id); err != nil {
+			s.appLog.Warn("fakeip-reap", id, "delete opkgtun: "+err.Error())
+			continue
+		}
+		s.appLog.Info("fakeip-reap", id, "removed persist-less orphaned fakeip OpkgTun")
+	}
 }
 
 // fakeIPReadyInputs derives the inputs the fakeip-tun readiness probes need

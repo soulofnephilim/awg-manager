@@ -245,6 +245,28 @@ func (a *routerOpkgTunIndexAdapter) LiveOpkgTunIndices(ctx context.Context) (map
 	return router.UnionOpkgTunIndices(sysNums, names), nil
 }
 
+var _ router.OpkgTunScanner = (*routerOpkgTunScanAdapter)(nil)
+
+// routerOpkgTunScanAdapter lists NDMS OpkgTun interface IDs stamped with the
+// given description — the startup reap's persist-less fakeip-orphan fallback.
+type routerOpkgTunScanAdapter struct {
+	store *ndmsquery.InterfaceStore
+}
+
+func (a *routerOpkgTunScanAdapter) ListOpkgTunsByDescription(ctx context.Context, description string) ([]string, error) {
+	all, err := a.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, i := range all {
+		if strings.HasPrefix(i.ID, "OpkgTun") && i.Description == description {
+			ids = append(ids, i.ID)
+		}
+	}
+	return ids, nil
+}
+
 // ListBindable returns router interfaces a user can bind a direct outbound to:
 // egress-capable (security-level "public"), minus our own auto-managed
 // interfaces — except KeenOS-native proxies (kernel t2sN whose NDMS ProxyN is

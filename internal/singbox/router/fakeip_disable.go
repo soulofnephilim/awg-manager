@@ -184,11 +184,25 @@ func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Se
 		s.notifyRoutingSlotsChanged()
 	}
 
-	// (4b) Delete the iface (down then delete) — NDMS name. With the pool route
-	// renewed to reject (step 2), deleting the iface fail-closes the pool: the
-	// reject flag now drops any client still on a fakeip address. Best-effort.
+	// (4b) Delete the iface (down, clear addresses, then delete) — NDMS name.
+	// With the pool route renewed to reject (step 2), deleting the iface
+	// fail-closes the pool: the reject flag now drops any client still on a
+	// fakeip address. Best-effort.
+	//
+	// The address clears are deliberately SEPARATE from the delete: ndm's http
+	// manager binds nginx on every CONFIGURED interface address (admin-down does
+	// not help), so if the delete below fails, a leftover `ip address` on a
+	// kernel-less OpkgTun sends ndm into an endless nginx-reload loop that
+	// stalls ALL RCI for seconds (stand-verified 2026-07-15). Clearing the
+	// addresses first keeps a failed delete harmless.
 	if err := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); err != nil {
 		s.appLog.Warn("fakeip-disable", iface, "iface down: "+err.Error())
+	}
+	if err := s.deps.OpkgTun.ClearAddress(ctx, ndmsName); err != nil {
+		s.appLog.Warn("fakeip-disable", iface, "clear address: "+err.Error())
+	}
+	if err := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); err != nil {
+		s.appLog.Warn("fakeip-disable", iface, "clear ipv6 address: "+err.Error())
 	}
 	if err := s.deps.OpkgTun.DeleteOpkgTun(ctx, ndmsName); err != nil {
 		s.appLog.Warn("fakeip-disable", iface, "delete opkgtun: "+err.Error())

@@ -113,6 +113,24 @@ func (c *InterfaceCommands) SetAddress(ctx context.Context, name, address, mask 
 		c.queries.RunningConfig.InvalidateAll)
 }
 
+// ClearAddress removes the configured IPv4 address from the interface.
+// Idempotent: NDMS accepts no:true when no address is set.
+func (c *InterfaceCommands) ClearAddress(ctx context.Context, name string) error {
+	payload := map[string]any{
+		"interface": map[string]any{
+			name: map[string]any{
+				"ip": map[string]any{
+					"address": map[string]any{"no": true},
+				},
+			},
+		},
+	}
+	return postMutation(ctx, c.poster, c.save, payload, "clear address "+name,
+		func() { c.queries.Interfaces.Invalidate(name) },
+		c.queries.Routes.InvalidateAll,
+		c.queries.RunningConfig.InvalidateAll)
+}
+
 // SetIPv6Address sets a single IPv6 address on the interface, clearing
 // any existing IPv6 assignments in the same call.
 func (c *InterfaceCommands) SetIPv6Address(ctx context.Context, name, address string) error {
