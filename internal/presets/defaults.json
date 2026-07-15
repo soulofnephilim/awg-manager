@@ -513,7 +513,7 @@
   },
   {
     "id": "unavailable-in-russia",
-    "name": "Недоступно из РФ (vernette/rulesets)",
+    "name": "Недоступно из РФ (hoaxisr/rulesets)",
     "iconSlug": "lucide-globe-lock",
     "category": "block",
     "origin": "",

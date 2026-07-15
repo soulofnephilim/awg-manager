@@ -169,3 +169,48 @@ func slicesHas(ss []string, v string) bool {
 	}
 	return false
 }
+
+// Load-уровневый тест: миграции C2/C3 не только правят кэш, но и ПЕРСИСТЯТСЯ
+// на диск (ветка forkMigrated/discordMigrated → writeLocked).
+func TestStoreLoadPersistsForkAndDiscordMigrations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dns-routes.json")
+
+	raw := []byte(`{
+  "lists": [
+    {
+      "id": "list_1",
+      "name": "Discord",
+      "domains": ["discord.com", "discordapp.com"],
+      "manualDomains": ["discord.com", "discordapp.com"],
+      "subnets": ["162.158.0.0/15"],
+      "subscriptions": [
+        {"url": "https://github.com/vernette/rulesets/raw/master/raw/unavailable-in-russia.txt"}
+      ],
+      "routes": []
+    }
+  ]
+}`)
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStore(dir).Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(onDisk)
+	if !strings.Contains(s, "https://repo.hoaxisr.ru/rulesets/raw/unavailable-in-russia.txt") {
+		t.Error("C2 не персистнута: URL зеркала нет на диске")
+	}
+	if strings.Contains(s, "vernette") {
+		t.Error("C2 не персистнута: vernette остался на диске")
+	}
+	if !strings.Contains(s, "104.29.0.0/16") {
+		t.Error("C3 не персистнута: CIDR нет на диске")
+	}
+}

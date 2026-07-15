@@ -79,14 +79,17 @@ func migrateRuleSetSubscriptionURLs(data *StoreData) bool {
 	if data == nil {
 		return false
 	}
-	const old = "github.com/vernette/rulesets/raw/master/"
-	const next = "repo.hoaxisr.ru/rulesets/"
+	// Якорь на начало URL: proxy-обёрнутый пользовательский workaround
+	// ("https://ghproxy.com/https://github.com/vernette/...") не трогаем —
+	// замена сделала бы его нерабочим гибридом.
+	const old = "https://github.com/vernette/rulesets/raw/master/"
+	const next = "https://repo.hoaxisr.ru/rulesets/"
 	changed := false
 	for i := range data.Lists {
 		subs := data.Lists[i].Subscriptions
 		for j := range subs {
-			if u := strings.Replace(subs[j].URL, old, next, 1); u != subs[j].URL {
-				subs[j].URL = u
+			if rest, ok := strings.CutPrefix(subs[j].URL, old); ok {
+				subs[j].URL = next + rest
 				changed = true
 			}
 		}
@@ -118,10 +121,13 @@ func migrateDiscordDNSSubnet(data *StoreData) bool {
 	changed := false
 	for i := range data.Lists {
 		list := &data.Lists[i]
+		// isHydraRoute-гард в текущем порядке Load недостижим (dropLegacyHRRows
+		// уже удалил HR-строки) — оставлен defensive на случай изменения порядка
+		// миграций или прямого вызова.
 		if isHydraRoute(list.Backend) || !hasDiscordSignature(list) {
 			continue
 		}
-		if !slices.Contains(list.Subnets, discordNewCIDR) {
+		if !slices.Contains(list.Subnets, discordNewCIDR) && len(list.Subnets) < MaxSubnetsPerList {
 			list.Subnets = append(list.Subnets, discordNewCIDR)
 			changed = true
 		}
@@ -130,7 +136,12 @@ func migrateDiscordDNSSubnet(data *StoreData) bool {
 			changed = true
 		}
 		if list.ManualText != nil && !strings.Contains(*list.ManualText, discordNewCIDR) {
-			updated := strings.TrimRight(*list.ManualText, "\n") + "\n" + discordNewCIDR
+			updated := strings.TrimRight(*list.ManualText, "\n")
+			if updated == "" {
+				updated = discordNewCIDR
+			} else {
+				updated += "\n" + discordNewCIDR
+			}
 			list.ManualText = &updated
 			changed = true
 		}

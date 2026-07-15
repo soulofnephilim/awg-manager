@@ -160,7 +160,7 @@ func runCleanup(dataDir string) {
 	if err := singbox.MigrateDeviceProxyOutOfTunnels(cleanupSingboxConfigDir); err != nil {
 		bootLog.Warn("deviceproxy-migration", "", err.Error())
 	}
-	if err := singbox.MigrateRuleSetURLsToFork(cleanupSingboxConfigDir); err != nil {
+	if _, err := singbox.MigrateRuleSetURLsToFork(cleanupSingboxConfigDir); err != nil {
 		bootLog.Warn("ruleset-fork-migration", "", err.Error())
 	}
 	cleanupSbOrch := singboxorch.New(cleanupSingboxConfigDir, singboxOp.Process())

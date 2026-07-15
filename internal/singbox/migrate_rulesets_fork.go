@@ -18,11 +18,19 @@ import (
 // at least), so we sweep ALL *.json across active, disabled/ and pending/
 // rather than naming files.
 //
-// Byte-level replace (not a config round-trip): the prefix appears only inside
-// string values, so substitution is safe and preserves any fields the structs
-// do not model; files without the prefix are left byte-for-byte untouched.
-// Idempotent — after the swap no vernette prefix remains.
-func MigrateRuleSetURLsToFork(configDir string) error {
+// Byte-level replace (not a config round-trip): the pattern is anchored on the
+// JSON string-opening quote, so ONLY values that START with the vernette URL
+// are rewritten — a user's proxy-wrapped workaround URL (e.g.
+// "https://ghproxy.com/https://github.com/vernette/...") is left untouched
+// (замена сделала бы его нерабочим гибридом). Preserves any fields the structs
+// do not model; files without the pattern are left byte-for-byte untouched.
+// Idempotent — after the swap no anchored vernette prefix remains.
+//
+// Returns changed=true when at least one file was rewritten — caller reloads a
+// surviving sing-box so it re-fetches from the mirror without waiting for an
+// unrelated reload.
+func MigrateRuleSetURLsToFork(configDir string) (bool, error) {
+	changed := false
 	for _, pat := range []string{
 		filepath.Join(configDir, "*.json"),
 		filepath.Join(configDir, "disabled", "*.json"),
@@ -30,30 +38,35 @@ func MigrateRuleSetURLsToFork(configDir string) error {
 	} {
 		matches, err := filepath.Glob(pat)
 		if err != nil {
-			return fmt.Errorf("glob %s: %w", pat, err)
+			return changed, fmt.Errorf("glob %s: %w", pat, err)
 		}
 		for _, p := range matches {
-			if err := rewriteRuleSetForkURLs(p); err != nil {
-				return err
+			fileChanged, err := rewriteRuleSetForkURLs(p)
+			if err != nil {
+				return changed, err
 			}
+			changed = changed || fileChanged
 		}
 	}
-	return nil
+	return changed, nil
 }
 
-func rewriteRuleSetForkURLs(path string) error {
+func rewriteRuleSetForkURLs(path string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("read %s: %w", path, err)
+		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 	replaced := bytes.ReplaceAll(data,
-		[]byte("github.com/vernette/rulesets/raw/master/"),
-		[]byte("repo.hoaxisr.ru/rulesets/"))
+		[]byte(`"https://github.com/vernette/rulesets/raw/master/`),
+		[]byte(`"https://repo.hoaxisr.ru/rulesets/`))
 	if bytes.Equal(replaced, data) {
-		return nil
+		return false, nil
 	}
-	return storage.AtomicWrite(path, replaced)
+	if err := storage.AtomicWrite(path, replaced); err != nil {
+		return false, err
+	}
+	return true, nil
 }
