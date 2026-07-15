@@ -1,10 +1,16 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import type { ConnectionsResponse } from '$lib/types';
+	import type { ConnectionsResponse, ConnectionBucketAgg } from '$lib/types';
 	import type { DropdownOption } from '$lib/components/ui';
+	import type { PanelBucket } from '$lib/components/connections/ConnectionsBreakdownPanel.svelte';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
-	import { ConnectionsTable, ConnectionsTotalsBar, ConnectionsFilterPanel } from '$lib/components/connections';
+	import {
+		ConnectionsTable,
+		ConnectionsTotalsBar,
+		ConnectionsFilterPanel,
+		ConnectionsBreakdown,
+	} from '$lib/components/connections';
 	let data = $state<ConnectionsResponse | null>(null);
 	let loading = $state(false);
 	const AUTO_REFRESH_MS = 30_000;
@@ -76,6 +82,29 @@
 		fetchData();
 	}
 
+	function toPanelBuckets(list: ConnectionBucketAgg[] | undefined): PanelBucket[] {
+		const src = list ?? [];
+		const total = src.reduce((s, b) => s + b.count, 0) || 1;
+		return src.map((b) => ({ ...b, pct: Math.round((b.count / total) * 100) }));
+	}
+	const byTunnelBuckets = $derived(toPanelBuckets(data?.byTunnel));
+	const byDstBuckets = $derived(toPanelBuckets(data?.byDst));
+	const byClientBuckets = $derived(toPanelBuckets(data?.byClient));
+
+	// клик по ведру туннелей ↔ значение серверного фильтра
+	const activeTunnelKey = $derived(
+		fTunnel === 'direct' ? '@direct' : fTunnel === 'singbox' ? '@singbox' : fTunnel === 'local' ? '@local' : fTunnel === 'all' ? '' : fTunnel,
+	);
+	function toggleTunnelBucket(key: string): void {
+		const val = key === '@direct' ? 'direct' : key === '@singbox' ? 'singbox' : key === '@local' ? 'local' : key;
+		setFilter({ fTunnel: fTunnel === val ? 'all' : val });
+	}
+	function toggleSearchBucket(key: string): void {
+		search = search === key ? '' : key;
+		offset = 0;
+		fetchData();
+	}
+
 	function handleSortChange(column: 'proto' | 'src' | 'dst' | 'iface' | 'state' | 'bytes') {
 		if (sortBy === column) {
 			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
@@ -126,6 +155,16 @@
 		{loading}
 		progress={refreshProgress}
 		onRefresh={fetchData}
+	/>
+
+	<ConnectionsBreakdown
+		byTunnel={byTunnelBuckets}
+		byDst={byDstBuckets}
+		byClient={byClientBuckets}
+		{activeTunnelKey}
+		activeSearch={search}
+		onTunnelToggle={toggleTunnelBucket}
+		onSearchToggle={toggleSearchBucket}
 	/>
 
 	<ConnectionsFilterPanel
