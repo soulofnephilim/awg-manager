@@ -86,25 +86,30 @@
 
 	// Backend опускает пустые опциональные поля (Go omitempty) — они приходят
 	// undefined, а <Input bind:value> кидает props_invalid_value; приводим к "".
-	function normalizeConfig(cfg: FreeTurnConfig): FreeTurnConfig {
+	function normalizeClient(c: FreeTurnClientConfig): FreeTurnClientConfig {
 		return {
-			client: {
-				...cfg.client,
-				peer: cfg.client.peer ?? '',
-				links: cfg.client.links ?? '',
-				turnHost: cfg.client.turnHost ?? '',
-				obfKey: cfg.client.obfKey ?? '',
-				dnsServers: cfg.client.dnsServers ?? '',
-				clientId: cfg.client.clientId ?? '',
-				sub: cfg.client.sub ?? ''
-			},
-			server: {
-				...cfg.server,
-				connect: cfg.server.connect ?? '',
-				obfKey: cfg.server.obfKey ?? '',
-				clientsFile: cfg.server.clientsFile ?? ''
-			}
+			...c,
+			peer: c.peer ?? '',
+			links: c.links ?? '',
+			turnHost: c.turnHost ?? '',
+			obfKey: c.obfKey ?? '',
+			dnsServers: c.dnsServers ?? '',
+			clientId: c.clientId ?? '',
+			sub: c.sub ?? ''
 		};
+	}
+
+	function normalizeServer(s: FreeTurnServerConfig): FreeTurnServerConfig {
+		return {
+			...s,
+			connect: s.connect ?? '',
+			obfKey: s.obfKey ?? '',
+			clientsFile: s.clientsFile ?? ''
+		};
+	}
+
+	function normalizeConfig(cfg: FreeTurnConfig): FreeTurnConfig {
+		return { client: normalizeClient(cfg.client), server: normalizeServer(cfg.server) };
 	}
 
 	async function loadStatus() {
@@ -119,12 +124,15 @@
 	async function saveClientConfig(cfg: FreeTurnClientConfig) {
 		saving = true;
 		try {
-			const updated = await api.updateFreeTurnClientConfig(cfg);
-			if (config) {
-				const norm = normalizeConfig({ ...$state.snapshot(config), client: updated });
-				if (savedConfig) savedConfig.client = structuredClone(norm.client);
-				else savedConfig = structuredClone(norm);
-				config.client = norm.client;
+			const sent = $state.snapshot(cfg);
+			const norm = normalizeClient(await api.updateFreeTurnClientConfig(cfg));
+			if (config && savedConfig) {
+				savedConfig.client = norm;
+				// Не затирать правки, сделанные пока PUT был в полёте:
+				// форму обновляем эхом сервера, только если она не менялась.
+				if (JSON.stringify($state.snapshot(config.client)) === JSON.stringify(sent)) {
+					config.client = structuredClone(norm);
+				}
 			}
 			notifications.success('Настройки клиента сохранены');
 		} catch (e) {
@@ -137,12 +145,13 @@
 	async function saveServerConfig(cfg: FreeTurnServerConfig) {
 		saving = true;
 		try {
-			const updated = await api.updateFreeTurnServerConfig(cfg);
-			if (config) {
-				const norm = normalizeConfig({ ...$state.snapshot(config), server: updated });
-				if (savedConfig) savedConfig.server = structuredClone(norm.server);
-				else savedConfig = structuredClone(norm);
-				config.server = norm.server;
+			const sent = $state.snapshot(cfg);
+			const norm = normalizeServer(await api.updateFreeTurnServerConfig(cfg));
+			if (config && savedConfig) {
+				savedConfig.server = norm;
+				if (JSON.stringify($state.snapshot(config.server)) === JSON.stringify(sent)) {
+					config.server = structuredClone(norm);
+				}
 			}
 			notifications.success('Настройки сервера сохранены');
 		} catch (e) {
@@ -153,11 +162,11 @@
 	}
 
 	function revertClient() {
-		if (config && savedConfig) config.client = $state.snapshot(savedConfig).client;
+		if (config && savedConfig) config.client = $state.snapshot(savedConfig.client);
 	}
 
 	function revertServer() {
-		if (config && savedConfig) config.server = $state.snapshot(savedConfig).server;
+		if (config && savedConfig) config.server = $state.snapshot(savedConfig.server);
 	}
 
 	async function toggleClient(on: boolean) {

@@ -55,6 +55,7 @@
 			checked={!!status?.running}
 			onchange={onToggle}
 			disabled={status ? !status.binaryPresent : false}
+			controlled
 			label=""
 			ariaLabel="{title}: запустить или остановить"
 		/>
@@ -81,6 +82,7 @@
 {/if}
 
 {#if !status?.running && status?.lastError}
+	<div class="section-label">Ошибка последнего запуска</div>
 	<pre class="ft-log-box ft-error-box">{status.lastError}</pre>
 {/if}
 

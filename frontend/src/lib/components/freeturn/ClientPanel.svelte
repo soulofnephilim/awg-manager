@@ -1,11 +1,14 @@
 <script lang="ts">
 	import { Input, Button, Dropdown, FormToggle } from '$lib/components/ui';
+	import { pluralize } from '$lib/utils/pluralize';
 	import type { FreeTurnClientConfig, FreeTurnProcessStatus } from '$lib/types';
 	import ProcessHero from './ProcessHero.svelte';
 	import UnsavedBar from './UnsavedBar.svelte';
 	import SettingRows from './SettingRows.svelte';
 	import SettingRow from './SettingRow.svelte';
 	import { formatUptime } from './uptime';
+	import { changedKeys } from './dirty';
+	import { modeOptions, transportOptions, obfOptions } from './options';
 
 	interface Props {
 		client: FreeTurnClientConfig;
@@ -54,44 +57,19 @@
 
 	let importLink = $state('');
 
-	const modeOptions = [
-		{ value: 'udp', label: 'udp' },
-		{ value: 'tcp', label: 'tcp' }
-	];
-	const transportOptions = [
-		{ value: 'tcp', label: 'tcp' },
-		{ value: 'udp', label: 'udp' }
-	];
-	const obfOptions = [
-		{ value: 'none', label: 'none' },
-		{ value: 'rtpopus', label: 'rtpopus' },
-		{ value: 'rtpopus2', label: 'rtpopus2' },
-		{ value: 'rtpopus3', label: 'rtpopus3' }
-	];
+	const dirtyKeys = $derived(changedKeys(client, saved));
+	const dirtyCount = $derived(dirtyKeys.length);
 
 	function changed(...keys: (keyof FreeTurnClientConfig)[]): boolean {
-		return saved != null && keys.some((k) => client[k] !== saved[k]);
+		return keys.some((k) => dirtyKeys.includes(k));
 	}
-
-	const dirtyCount = $derived(
-		saved
-			? (Object.keys(client) as (keyof FreeTurnClientConfig)[]).filter(
-					(k) => client[k] !== saved[k]
-				).length
-			: 0
-	);
 
 	const linksCount = $derived(
 		client.links ? client.links.split(',').filter((s) => s.trim()).length : 0
 	);
 
 	function linksSummary(n: number): string {
-		if (!n) return '—';
-		const mod10 = n % 10;
-		const mod100 = n % 100;
-		if (mod10 === 1 && mod100 !== 11) return `${n} ссылка`;
-		if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} ссылки`;
-		return `${n} ссылок`;
+		return n ? pluralize(n, ['ссылка', 'ссылки', 'ссылок']) : '—';
 	}
 
 	const metaParts = $derived(
@@ -125,7 +103,7 @@
 
 {#if importOpen}
 	<div class="ft-panel-accent">
-		<div class="ft-section-label">Импорт по ссылке freeturn://</div>
+		<div class="section-label">Импорт по ссылке freeturn://</div>
 		<div class="ft-import-row">
 			<Input bind:value={importLink} placeholder="freeturn://..." />
 			<Button variant="primary" size="sm" loading={importing} onclick={() => onImport(importLink)}>
@@ -138,8 +116,8 @@
 			WireGuard-конфиг, сразу создаст из него туннель во вкладке «AWG»
 		</p>
 		{#if importedWG}
-			<div class="ft-section-label">WireGuard-конфиг из ссылки</div>
-			<textarea class="ft-textarea" readonly value={importedWG}></textarea>
+			<div class="section-label">WireGuard-конфиг из ссылки</div>
+			<textarea class="field-textarea ft-textarea" readonly value={importedWG}></textarea>
 			<Button variant="ghost" size="sm" onclick={() => onCopy(importedWG!)}>Скопировать конфиг</Button>
 		{/if}
 	</div>
@@ -186,7 +164,7 @@
 			<label class="ft-label" for="ft-c-links">Ссылки VK Calls, через запятую (-links)</label>
 			<textarea
 				id="ft-c-links"
-				class="ft-textarea"
+				class="field-textarea ft-textarea"
 				style="min-height: 70px"
 				bind:value={client.links}
 				placeholder="https://vk.ru/call/join/...,https://vk.ru/call/join/..."
@@ -286,7 +264,11 @@
 		id="clientId"
 		label="Client ID"
 		flag="-client-id"
-		summary={client.clientId ? client.clientId.slice(0, 12) + '…' : 'авто'}
+		summary={client.clientId
+			? client.clientId.length > 12
+				? client.clientId.slice(0, 12) + '…'
+				: client.clientId
+			: 'авто'}
 		dirty={changed('clientId')}
 		expanded={expanded === 'clientId'}
 		ontoggle={toggleRow}
@@ -307,15 +289,6 @@
 </SettingRows>
 
 <style>
-	.ft-section-label {
-		font-size: 0.6875rem;
-		font-weight: 600;
-		color: var(--color-text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		margin: 0 0 0.5rem;
-	}
-
 	.ft-panel-accent {
 		padding: 0.875rem 1rem;
 		background: var(--color-bg-secondary);
@@ -356,20 +329,13 @@
 		margin: 0;
 	}
 
+	/* Поверх глобального .field-textarea: mono + вертикальный resize. */
 	.ft-textarea {
-		width: 100%;
-		box-sizing: border-box;
 		min-height: 100px;
-		padding: 0.5rem 0.625rem;
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--color-border);
-		background: var(--color-bg-tertiary);
-		color: var(--color-text-primary);
 		font-family: var(--font-mono);
-		font-size: 0.8125rem;
 		resize: vertical;
 		white-space: pre;
-		margin-bottom: 0.375rem;
+		margin: 0.375rem 0;
 	}
 
 	@media (max-width: 640px) {

@@ -6,6 +6,8 @@
 	import SettingRows from './SettingRows.svelte';
 	import SettingRow from './SettingRow.svelte';
 	import { formatUptime } from './uptime';
+	import { changedKeys } from './dirty';
+	import { modeOptions, obfOptions } from './options';
 
 	interface Props {
 		server: FreeTurnServerConfig;
@@ -64,8 +66,10 @@
 		onCopy
 	}: Props = $props();
 
-	// Доп. поля генератора (Client ID + WireGuard-конфиг) свёрнуты по умолчанию.
-	let genMore = $state(false);
+	// Доп. поля генератора (Client ID + WireGuard-конфиг) свёрнуты по умолчанию,
+	// но раскрыты сразу, если в них уже есть данные — они попадают в ссылку,
+	// и пользователь должен их видеть.
+	let genMore = $state(genClientId.trim() !== '' || genWG.trim() !== '');
 
 	function randomClientId() {
 		const bytes = new Uint8Array(16);
@@ -73,28 +77,12 @@
 		genClientId = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 	}
 
-	const modeOptions = [
-		{ value: 'udp', label: 'udp' },
-		{ value: 'tcp', label: 'tcp' }
-	];
-	const obfOptions = [
-		{ value: 'none', label: 'none' },
-		{ value: 'rtpopus', label: 'rtpopus' },
-		{ value: 'rtpopus2', label: 'rtpopus2' },
-		{ value: 'rtpopus3', label: 'rtpopus3' }
-	];
+	const dirtyKeys = $derived(changedKeys(server, saved));
+	const dirtyCount = $derived(dirtyKeys.length);
 
 	function changed(...keys: (keyof FreeTurnServerConfig)[]): boolean {
-		return saved != null && keys.some((k) => server[k] !== saved[k]);
+		return keys.some((k) => dirtyKeys.includes(k));
 	}
-
-	const dirtyCount = $derived(
-		saved
-			? (Object.keys(server) as (keyof FreeTurnServerConfig)[]).filter(
-					(k) => server[k] !== saved[k]
-				).length
-			: 0
-	);
 
 	const metaParts = $derived(
 		[
@@ -208,14 +196,14 @@
 
 {#if genOpen}
 	<div class="ft-panel-accent">
-		<div class="ft-section-label">Ссылка для клиента</div>
+		<div class="section-label">Ссылка для клиента</div>
 		<div class="ft-gen-row">
-			<Input bind:value={genProvider} placeholder="провайдер" />
+			<Input label="Провайдер" bind:value={genProvider} placeholder="vk" />
 			<Input
+				label="MTU"
 				type="number"
 				value={String(genMTU)}
 				onchange={(v) => (genMTU = Number(v) || 1376)}
-				placeholder="MTU"
 			/>
 			<Button
 				variant="primary"
@@ -230,6 +218,13 @@
 			Соберёт freeturn:// ссылку из обфускации/ключа сервера выше и внешнего IP роутера —
 			передавайте её только доверенному получателю
 		</p>
+		{#if server.clientsFile}
+			<p class="ft-hint">
+				У сервера включён allowlist (-clients-file): без Client ID в ссылке (раздел ниже)
+				сервер отклонит подключение получателя. Ссылка сама ничего не регистрирует —
+				добавьте ID на сервере отдельно
+			</p>
+		{/if}
 
 		<button type="button" class="ft-gen-more" onclick={() => (genMore = !genMore)}>
 			{genMore ? '−' : '+'} Client ID и WireGuard-конфиг
@@ -242,14 +237,8 @@
 			<div class="ft-gen-idrow">
 				<Button variant="ghost" size="sm" onclick={randomClientId}>Сгенерировать ID</Button>
 			</div>
-			{#if server.clientsFile}
-				<p class="ft-hint">
-					У сервера включён allowlist (-clients-file). Ссылка передаст этот Client ID клиенту, но
-					сама его никуда не регистрирует — добавьте его на сервере отдельно
-				</p>
-			{/if}
 			<textarea
-				class="ft-textarea"
+				class="field-textarea ft-textarea"
 				bind:value={genWG}
 				placeholder="Вставьте сюда конфиг WireGuard-клиента, если хотите передать его вместе со ссылкой..."
 			></textarea>
@@ -261,7 +250,7 @@
 
 		{#if generatedLink}
 			<div class="ft-result">
-				<div class="ft-section-label">Готовая ссылка ({generatedPeer})</div>
+				<div class="section-label">Готовая ссылка ({generatedPeer})</div>
 				<div class="ft-link-box">{generatedLink}</div>
 				<Button variant="ghost" size="sm" onclick={() => onCopy(generatedLink)}>
 					Скопировать в буфер
@@ -281,28 +270,19 @@
 {/if}
 
 <style>
-	.ft-section-label {
-		font-size: 0.6875rem;
-		font-weight: 600;
-		color: var(--color-text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		margin: 0 0 0.5rem;
-	}
-
 	.ft-panel-accent {
 		padding: 0.875rem 1rem;
 		background: var(--color-bg-secondary);
 		border: 1px solid var(--color-accent-border);
 		border-radius: var(--radius);
-		margin-bottom: 0.875rem;
+		margin-bottom: 0.625rem;
 	}
 
 	.ft-gen-row {
 		display: grid;
 		grid-template-columns: 1fr 100px auto;
 		gap: 0.5rem;
-		align-items: center;
+		align-items: end;
 		margin-bottom: 0.5rem;
 	}
 
@@ -347,17 +327,10 @@
 		margin: 0;
 	}
 
+	/* Поверх глобального .field-textarea: mono + вертикальный resize. */
 	.ft-textarea {
-		width: 100%;
-		box-sizing: border-box;
 		min-height: 100px;
-		padding: 0.5rem 0.625rem;
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--color-border);
-		background: var(--color-bg-tertiary);
-		color: var(--color-text-primary);
 		font-family: var(--font-mono);
-		font-size: 0.8125rem;
 		resize: vertical;
 		white-space: pre;
 		margin: 0.375rem 0;
