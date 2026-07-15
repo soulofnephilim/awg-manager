@@ -27,6 +27,8 @@ type ConnectionStats struct {
 	Total     int           `json:"total"`
 	Direct    int           `json:"direct"`
 	Tunneled  int           `json:"tunneled"`
+	Singbox   int           `json:"singbox"`
+	Local     int           `json:"local"`
 	Protocols ProtocolStats `json:"protocols"`
 }
 
@@ -48,6 +50,7 @@ type TunnelConnectionInfo struct {
 type ListParams struct {
 	Tunnel   string // "all", "direct", or tunnel ID
 	Protocol string // "all", "tcp", "udp", "icmp"
+	State    string // "all"/"" = любое; иначе точное значение (ESTABLISHED, ...)
 	Search   string // substring match on src, dst, clientName
 	Offset   int
 	Limit    int    // default 50, max 500
