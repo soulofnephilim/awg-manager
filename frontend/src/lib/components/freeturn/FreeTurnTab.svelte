@@ -26,9 +26,12 @@
 	let genProvider = $state('vk');
 	let genMTU = $state(1376);
 	let genWG = $state('');
+	let genClientId = $state('');
+	let genName = $state('');
 	let generating = $state(false);
 	let generatedLink = $state('');
 	let generatedPeer = $state('');
+	let generatedClientId = $state('');
 
 	let statusPoll: ReturnType<typeof setInterval> | undefined;
 	let routerHost = $state('');
@@ -195,11 +198,21 @@
 					config.client.obfProfile = payload.obf as typeof config.client.obfProfile;
 				}
 				config.client.obfKey = payload.key ?? config.client.obfKey;
+				if (payload.n && payload.n > 0) config.client.streams = payload.n;
+				if (payload.spc && payload.spc > 0) config.client.streamsPerCred = payload.spc;
+				if (payload.cid) config.client.clientId = payload.cid;
+				if (payload.transport) config.client.transport = payload.transport as typeof config.client.transport;
+				if (payload.mode) config.client.mode = payload.mode as typeof config.client.mode;
+				if (typeof payload.bond === 'boolean') config.client.bond = payload.bond;
+				if (typeof payload.mcap === 'boolean') config.client.manualCaptcha = payload.mcap;
 			}
 			const wg = payload.wg?.trim() ? payload.wg : null;
 			importedWG = wg;
 
 			let msg = 'Ссылка распознана, поля заполнены — не забудьте сохранить';
+			if (payload.cid) {
+				msg += `. В ссылке был Client ID — если у сервера включён allowlist (-clients-file), владелец сервера должен добавить именно этот ID туда`;
+			}
 			if (wg) {
 				try {
 					const tunnel = await api.importConfig(wg, `FreeTurn ${payload.peer}`.slice(0, 60));
@@ -216,16 +229,19 @@
 		}
 	}
 
-	async function generateLink(provider: string, mtu: number, wg: string) {
+	async function generateLink(provider: string, mtu: number, wg: string, clientId: string, name: string) {
 		generating = true;
 		try {
 			const result = await api.generateFreeTurnLink({
 				provider,
 				mtu,
-				wg: wg.trim() || undefined
+				wg: wg.trim() || undefined,
+				clientId: clientId.trim() || undefined,
+				name: name.trim() || undefined
 			});
 			generatedLink = result.link;
 			generatedPeer = result.peer;
+			generatedClientId = result.clientId ?? '';
 		} catch (e) {
 			notifications.error('Не удалось сгенерировать ссылку: ' + errText(e));
 		} finally {
@@ -267,9 +283,12 @@
 		{generating}
 		{generatedLink}
 		{generatedPeer}
+		{generatedClientId}
 		bind:genProvider
 		bind:genMTU
 		bind:genWG
+		bind:genClientId
+		bind:genName
 		onToggle={toggleServer}
 		onSave={() => saveServerConfig(config!.server)}
 		onGenerate={generateLink}

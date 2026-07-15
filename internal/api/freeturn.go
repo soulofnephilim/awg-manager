@@ -179,22 +179,31 @@ func (h *FreeTurnHandler) StopServer(w http.ResponseWriter, r *http.Request) {
 
 // GenerateLinkRequest is the body for POST /api/freeturn/server/link.
 // All fields are optional: Peer overrides auto-detected external IP +
-// server listen port, Provider/MTU fall back to sensible defaults, and WG
+// server listen port, Provider/MTU fall back to sensible defaults, WG
 // lets the admin bundle a WireGuard client config into the link (same as
-// pasting one into the original web generator's textarea).
+// pasting one into the original web generator's textarea), and
+// ClientID/Name/N/StreamsPerCred are forwarded into the upstream `cid`/
+// `name`/`n`/`spc` fields (docs/uri.md) — if the server has -clients-file
+// allowlisting enabled, the admin still has to register ClientID there
+// themselves (this endpoint doesn't touch clients.json).
 type GenerateLinkRequest struct {
-	Peer     string `json:"peer,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	MTU      int    `json:"mtu,omitempty"`
-	WG       string `json:"wg,omitempty"`
+	Peer           string `json:"peer,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	MTU            int    `json:"mtu,omitempty"`
+	WG             string `json:"wg,omitempty"`
+	ClientID       string `json:"clientId,omitempty"`
+	Name           string `json:"name,omitempty"`
+	N              int    `json:"n,omitempty"`
+	StreamsPerCred int    `json:"streamsPerCred,omitempty"`
 }
 
 // GenerateLinkResponse is the envelope for POST /api/freeturn/server/link.
 type GenerateLinkResponse struct {
 	Success bool   `json:"success" example:"true"`
 	Data    struct {
-		Link string `json:"link"`
-		Peer string `json:"peer"`
+		Link     string `json:"link"`
+		Peer     string `json:"peer"`
+		ClientID string `json:"clientId"`
 	} `json:"data"`
 }
 
@@ -272,20 +281,24 @@ func (h *FreeTurnHandler) GenerateLink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	link, err := freeturn.EncodeLink(freeturn.LinkPayload{
-		V:        1,
-		Provider: provider,
-		Peer:     peer,
-		Obf:      cfg.Server.ObfProfile,
-		Key:      cfg.Server.ObfKey,
-		MTU:      mtu,
-		WG:       req.WG,
+		V:              1,
+		Provider:       provider,
+		Peer:           peer,
+		Obf:            cfg.Server.ObfProfile,
+		Key:            cfg.Server.ObfKey,
+		MTU:            mtu,
+		WG:             req.WG,
+		ClientID:       strings.TrimSpace(req.ClientID),
+		Name:           strings.TrimSpace(req.Name),
+		N:              req.N,
+		StreamsPerCred: req.StreamsPerCred,
 	})
 	if err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
 
-	response.Success(w, map[string]string{"link": link, "peer": peer})
+	response.Success(w, map[string]string{"link": link, "peer": peer, "clientId": req.ClientID})
 }
 
 // DecodeLinkRequest is the body for POST /api/freeturn/link/decode.

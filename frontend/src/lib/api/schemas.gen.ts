@@ -453,6 +453,7 @@ const api_FreeTurnStatusResponse: v.GenericSchema = v.looseObject({
 
 const api_GenerateLinkResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.looseObject({
+	clientId: v.optional(v.nullable(v.string())),
 	link: v.optional(v.nullable(v.string())),
 	peer: v.optional(v.nullable(v.string())),
 }))),
@@ -2223,11 +2224,22 @@ const freeturn_Config: v.GenericSchema = v.looseObject({
 });
 
 const freeturn_LinkPayload: v.GenericSchema = v.looseObject({
+	bond: v.optional(v.nullable(v.boolean())),
+	cid: v.optional(v.nullable(v.string())),
+	dns: v.optional(v.nullable(v.string())),
+	dnss: v.optional(v.nullable(v.string())),
 	key: v.optional(v.nullable(v.string())),
+	listen: v.optional(v.nullable(v.string())),
+	mcap: v.optional(v.nullable(v.boolean())),
+	mode: v.optional(v.nullable(v.string())),
 	mtu: v.optional(v.nullable(v.number())),
+	n: v.optional(v.nullable(v.number())),
+	name: v.optional(v.nullable(v.string())),
 	obf: v.optional(v.nullable(v.string())),
 	peer: v.optional(v.nullable(v.string())),
 	provider: v.optional(v.nullable(v.string())),
+	spc: v.optional(v.nullable(v.number())),
+	transport: v.optional(v.nullable(v.string())),
 	v: v.optional(v.nullable(v.number())),
 	wg: v.optional(v.nullable(v.string())),
 });

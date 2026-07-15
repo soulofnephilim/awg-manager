@@ -15,12 +15,15 @@
 		generating: boolean;
 		generatedLink: string;
 		generatedPeer: string;
+		generatedClientId: string;
 		genProvider: string;
 		genMTU: number;
 		genWG: string;
+		genClientId: string;
+		genName: string;
 		onToggle: (on: boolean) => void;
 		onSave: () => void;
-		onGenerate: (provider: string, mtu: number, wg: string) => void;
+		onGenerate: (provider: string, mtu: number, wg: string, clientId: string, name: string) => void;
 		onCopy: (text: string) => void;
 	}
 
@@ -35,14 +38,23 @@
 		generating,
 		generatedLink,
 		generatedPeer,
+		generatedClientId,
 		genProvider = $bindable(),
 		genMTU = $bindable(),
 		genWG = $bindable(),
+		genClientId = $bindable(),
+		genName = $bindable(),
 		onToggle,
 		onSave,
 		onGenerate,
 		onCopy
 	}: Props = $props();
+
+	function randomClientId() {
+		const bytes = new Uint8Array(16);
+		crypto.getRandomValues(bytes);
+		genClientId = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+	}
 
 	const modeOptions = [
 		{ value: 'udp', label: 'udp' },
@@ -108,6 +120,22 @@
 		<Input label="Провайдер" bind:value={genProvider} placeholder="vk" />
 		<Input label="MTU" type="number" value={String(genMTU)} onchange={(v) => (genMTU = Number(v) || 1376)} />
 	</div>
+
+	<div class="ft-section-label">Client ID для этой ссылки (опционально)</div>
+	<div class="ft-grid-2">
+		<Input bind:value={genClientId} placeholder="оставьте пустым, если allowlist не используется" />
+		<Input bind:value={genName} placeholder="комментарий (например, имя получателя)" />
+	</div>
+	<div class="ft-footer" style="margin-bottom: 0.75rem">
+		<Button variant="ghost" size="sm" onclick={randomClientId}>Сгенерировать ID</Button>
+	</div>
+	{#if server.clientsFile}
+		<p class="ft-hint">
+			У сервера включён allowlist (-clients-file). Ссылка передаст этот Client ID клиенту, но
+			сама его никуда не регистрирует — добавьте его на сервере отдельно
+		</p>
+	{/if}
+
 	<div class="ft-section-label">WireGuard-конфиг клиента (опционально)</div>
 	<textarea
 		class="ft-textarea"
@@ -120,7 +148,12 @@
 	</p>
 
 	<div class="ft-footer">
-		<Button variant="primary" size="sm" loading={generating} onclick={() => onGenerate(genProvider, genMTU, genWG)}>
+		<Button
+			variant="primary"
+			size="sm"
+			loading={generating}
+			onclick={() => onGenerate(genProvider, genMTU, genWG, genClientId, genName)}
+		>
 			Сгенерировать ссылку
 		</Button>
 	</div>
@@ -130,6 +163,15 @@
 			<div class="ft-section-label" style="margin-top: 0">Готовая ссылка ({generatedPeer})</div>
 			<div class="ft-link-box">{generatedLink}</div>
 			<Button variant="ghost" size="sm" onclick={() => onCopy(generatedLink)}>Скопировать в буфер</Button>
+			{#if generatedClientId && server.clientsFile}
+				<p class="ft-hint" style="margin-top: 0.625rem">
+					У сервера включён allowlist — прежде чем отдавать эту ссылку, зарегистрируйте
+					Client ID <code>{generatedClientId}</code> в <code>{server.clientsFile}</code> по SSH:
+					бинарь сервера умеет <code>clients add {generatedClientId} "{genName || 'client'}"</code>
+					(укажите путь к файлу через переменную окружения <code>CLIENTS_FILE</code>, если бинарь
+					запускается не из той же директории)
+				</p>
+			{/if}
 		</div>
 	{/if}
 </Card>

@@ -65,17 +65,32 @@ export interface FreeTurnStatus {
 	installing: boolean;
 }
 
-// Share-link payload: freeturn://base64(JSON), the same format produced by
-// the original freeturn-entware-installer web generator. Bundles the
-// server's connection params (+ optionally a WireGuard client config) so
-// the receiving side can auto-fill its form instead of retyping peer/obf/key.
+// Share-link payload: freeturn://base64(JSON). Two flavors exist and both
+// decode into this same shape — the upstream free-turn-proxy format (see
+// samosvalishe/free-turn-proxy docs/uri.md: v/provider/peer/transport/mode/
+// bond/obf/key/n/spc/cid/listen/dns/dnss/mcap/name) and the informal
+// freeturn-entware-installer one (v/provider/peer/obf/key/mtu/wg). `cid` is
+// a Client ID the link's creator generated and must separately allowlist in
+// their own server's clients.json (if -clients-file auth is on) — importing
+// a link does NOT do that registration for you.
 export interface FreeTurnLinkPayload {
 	v: number;
-	provider: string;
-	peer: string;
-	obf: string;
-	key: string;
-	mtu: number;
+	provider?: string;
+	peer?: string;
+	transport?: string;
+	mode?: string;
+	bond?: boolean;
+	obf?: string;
+	key?: string;
+	n?: number;
+	spc?: number;
+	cid?: string;
+	listen?: string;
+	dns?: string;
+	dnss?: string;
+	mcap?: boolean;
+	name?: string;
+	mtu?: number;
 	wg?: string;
 }
 
@@ -84,11 +99,16 @@ export interface FreeTurnGenerateLinkRequest {
 	provider?: string;
 	mtu?: number;
 	wg?: string;
+	clientId?: string;
+	name?: string;
+	n?: number;
+	streamsPerCred?: number;
 }
 
 export interface FreeTurnGenerateLinkResult {
 	link: string;
 	peer: string;
+	clientId?: string;
 }
 
 // #endregion
