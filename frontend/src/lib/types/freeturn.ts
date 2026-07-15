@@ -57,6 +57,12 @@ export interface FreeTurnProcessStatus {
 export interface FreeTurnStatus {
 	client: FreeTurnProcessStatus;
 	server: FreeTurnProcessStatus;
+	/** Для этой архитектуры есть закреплённая сборка — доступна установка в один клик */
+	installAvailable: boolean;
+	/** Версия freeturn, которую поставит установка */
+	installVersion?: string;
+	/** Установка сейчас идёт */
+	installing: boolean;
 }
 
 // Share-link payload: freeturn://base64(JSON), the same format produced by

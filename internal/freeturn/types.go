@@ -120,4 +120,11 @@ type ProcessStatus struct {
 type Status struct {
 	Client ProcessStatus `json:"client"`
 	Server ProcessStatus `json:"server"`
+	// InstallAvailable: для этой архитектуры есть закреплённая сборка и
+	// загрузчик — панель может предложить установку в один клик.
+	InstallAvailable bool `json:"installAvailable"`
+	// InstallVersion — версия freeturn, которую поставит установка.
+	InstallVersion string `json:"installVersion,omitempty"`
+	// Installing — установка сейчас идёт (кнопка блокируется).
+	Installing bool `json:"installing"`
 }

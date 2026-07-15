@@ -68,5 +68,10 @@ export class FreeturnClient extends SubscriptionsClient {
 		});
 	}
 
+	/** Скачивает и активирует закреплённые бинари freeturn (client+server). */
+	async installFreeTurn(): Promise<void> {
+		await this.request<{ message: string }>('/freeturn/install', { method: 'POST' });
+	}
+
 	// #endregion
 }

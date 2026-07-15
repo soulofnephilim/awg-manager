@@ -3,6 +3,9 @@ package freeturn
 import (
 	"errors"
 	"strconv"
+	"sync"
+
+	"github.com/hoaxisr/awg-manager/internal/logging"
 )
 
 // Service is the public facade consumed by the API layer (one instance per
@@ -16,6 +19,20 @@ type Service struct {
 
 	clientProc *process
 	serverProc *process
+
+	// One-click install (install.go): pinned specs for this arch + shared
+	// downloader; nil = install unavailable (UI keeps the manual hint).
+	installSpecs *ArchSpecs
+	downloader   Downloader
+	installMu    sync.Mutex
+	installing   bool
+
+	appLog *logging.ScopedLogger
+}
+
+// SetLogger wires the UI-visible journal (nil-safe scoped logger).
+func (s *Service) SetLogger(appLogger logging.AppLogger) {
+	s.appLog = logging.NewScopedLogger(appLogger, logging.GroupRouting, "freeturn")
 }
 
 // NewService wires up config storage and the two process managers.
@@ -59,9 +76,13 @@ func (s *Service) UpdateServerConfig(cfg ServerConfig) error {
 }
 
 func (s *Service) Status() Status {
+	version, available := s.InstallInfo()
 	return Status{
-		Client: s.clientProc.Status(),
-		Server: s.serverProc.Status(),
+		Client:           s.clientProc.Status(),
+		Server:           s.serverProc.Status(),
+		InstallAvailable: available,
+		InstallVersion:   version,
+		Installing:       s.Installing(),
 	}
 }
 

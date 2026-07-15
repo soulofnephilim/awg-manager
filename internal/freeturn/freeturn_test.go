@@ -1,7 +1,12 @@
 package freeturn
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -191,5 +196,108 @@ func TestBinaryPresent(t *testing.T) {
 	}
 	if binaryPresent(t.TempDir()) {
 		t.Error("directory must not count as binary")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// install.go
+// ---------------------------------------------------------------------------
+
+type fakeDownloader struct {
+	payload map[string][]byte // url → содержимое
+}
+
+func (f *fakeDownloader) DownloadFile(_ context.Context, url, destPath string, _ int64) error {
+	body, ok := f.payload[url]
+	if !ok {
+		return os.ErrNotExist
+	}
+	return os.WriteFile(destPath, body, 0o644)
+}
+
+func sha256Hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+func newInstallService(t *testing.T, dl Downloader, specs ArchSpecs) *Service {
+	t.Helper()
+	dir := t.TempDir()
+	s := NewService(dir, dir, filepath.Join(dir, "freeturn-client"), filepath.Join(dir, "freeturn-server"))
+	s.SetInstallSpecs(specs)
+	s.SetDownloader(dl)
+	return s
+}
+
+func TestInstallBinaries_HappyPath(t *testing.T) {
+	clientBody, serverBody := []byte("client-bin"), []byte("server-bin")
+	specs := ArchSpecs{
+		Client: BinarySpec{Version: "1.8.0", URL: "https://x/client", SHA256: sha256Hex(clientBody), Size: int64(len(clientBody))},
+		Server: BinarySpec{Version: "1.8.0", URL: "https://x/server", SHA256: sha256Hex(serverBody), Size: int64(len(serverBody))},
+	}
+	dl := &fakeDownloader{payload: map[string][]byte{"https://x/client": clientBody, "https://x/server": serverBody}}
+	s := newInstallService(t, dl, specs)
+
+	if err := s.InstallBinaries(context.Background()); err != nil {
+		t.Fatalf("InstallBinaries: %v", err)
+	}
+	for _, p := range []string{s.clientBin, s.serverBin} {
+		if !binaryPresent(p) {
+			t.Errorf("%s must be installed and executable", p)
+		}
+	}
+	st := s.Status()
+	if !st.InstallAvailable || st.InstallVersion != "1.8.0" || st.Installing {
+		t.Errorf("status: %+v", st)
+	}
+	if !st.Client.BinaryPresent || !st.Server.BinaryPresent {
+		t.Errorf("binaryPresent must flip after install: %+v", st)
+	}
+}
+
+func TestInstallBinaries_SHA256Mismatch(t *testing.T) {
+	body := []byte("client-bin")
+	specs := ArchSpecs{
+		Client: BinarySpec{Version: "1.8.0", URL: "https://x/client", SHA256: strings.Repeat("0", 64), Size: int64(len(body))},
+		Server: BinarySpec{Version: "1.8.0", URL: "https://x/server", SHA256: strings.Repeat("0", 64), Size: 1},
+	}
+	dl := &fakeDownloader{payload: map[string][]byte{"https://x/client": body}}
+	s := newInstallService(t, dl, specs)
+
+	err := s.InstallBinaries(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "контрольная сумма") {
+		t.Fatalf("want sha mismatch error, got %v", err)
+	}
+	if binaryPresent(s.clientBin) {
+		t.Error("tampered binary must NOT be activated")
+	}
+	if _, statErr := os.Stat(s.clientBin + ".tmp"); statErr == nil {
+		t.Error("tmp must be cleaned up")
+	}
+}
+
+func TestInstallBinaries_Unavailable(t *testing.T) {
+	dir := t.TempDir()
+	s := NewService(dir, dir, filepath.Join(dir, "c"), filepath.Join(dir, "s"))
+	if err := s.InstallBinaries(context.Background()); err == nil {
+		t.Fatal("want error when specs/downloader not wired")
+	}
+	if _, ok := s.InstallInfo(); ok {
+		t.Fatal("InstallInfo must report unavailable")
+	}
+}
+
+func TestEmbeddedBinaries_CoverAllArches(t *testing.T) {
+	for _, arch := range []string{"aarch64-3.10", "mipsel-3.4", "mips-3.4"} {
+		specs, ok := EmbeddedBinaries[arch]
+		if !ok {
+			t.Fatalf("%s: no specs", arch)
+		}
+		for name, sp := range map[string]BinarySpec{"client": specs.Client, "server": specs.Server} {
+			if sp.Version != PinnedVersion || len(sp.SHA256) != 64 || sp.Size <= 0 ||
+				!strings.HasPrefix(sp.URL, "https://github.com/samosvalishe/free-turn-proxy/releases/download/v"+PinnedVersion+"/") {
+				t.Errorf("%s/%s: bad spec %+v", arch, name, sp)
+			}
+		}
 	}
 }

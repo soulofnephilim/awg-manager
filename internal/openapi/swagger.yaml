@@ -6176,6 +6176,17 @@ definitions:
     properties:
       client:
         $ref: '#/definitions/freeturn.ProcessStatus'
+      installAvailable:
+        description: |-
+          InstallAvailable: для этой архитектуры есть закреплённая сборка и
+          загрузчик — панель может предложить установку в один клик.
+        type: boolean
+      installVersion:
+        description: InstallVersion — версия freeturn, которую поставит установка.
+        type: string
+      installing:
+        description: Installing — установка сейчас идёт (кнопка блокируется).
+        type: boolean
       server:
         $ref: '#/definitions/freeturn.ProcessStatus'
     type: object
@@ -7726,6 +7737,20 @@ paths:
           schema:
             $ref: '#/definitions/api.FreeTurnConfigResponse'
       summary: Get FreeTurn client+server configuration
+  /freeturn/install:
+    post:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.APIEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Download and activate the pinned freeturn client+server binaries
+      tags:
+      - freeturn
   /freeturn/link/decode:
     post:
       responses:

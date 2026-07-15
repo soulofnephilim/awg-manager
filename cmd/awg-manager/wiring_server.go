@@ -16,6 +16,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/diagnostics"
 	"github.com/hoaxisr/awg-manager/internal/dnscheck"
 	"github.com/hoaxisr/awg-manager/internal/downloader"
+	"github.com/hoaxisr/awg-manager/internal/freeturn"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/monitoring"
@@ -235,6 +236,14 @@ func (a *app) setupDeviceProxy() {
 	a.dnsRefreshScheduler.Start()
 	a.geoRefreshScheduler.Start()
 	a.updaterService.SetDownloader(sharedDownloadSvc)
+	// FreeTurn one-click install: закреплённые в билде спеки по арху +
+	// общий загрузчик. Нет спеков для арха → кнопка недоступна, панель
+	// оставляет подсказку о ручной установке.
+	a.freeturnService.SetLogger(a.loggingService)
+	if specs, ok := freeturn.EmbeddedBinaries[detectArch()]; ok {
+		a.freeturnService.SetInstallSpecs(specs)
+		a.freeturnService.SetDownloader(&freeturnDownloaderAdapter{svc: sharedDownloadSvc})
+	}
 	if a.singboxInstaller != nil {
 		a.singboxInstaller.SetDownloader(&installerDownloaderAdapter{svc: sharedDownloadSvc})
 		// Auto-migration goroutine: when legacy sing-box-naive opkg

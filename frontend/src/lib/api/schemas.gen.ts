@@ -2255,6 +2255,9 @@ const freeturn_ServerConfig: v.GenericSchema = v.looseObject({
 
 const freeturn_Status: v.GenericSchema = v.looseObject({
 	client: v.optional(v.nullable(v.lazy(() => freeturn_ProcessStatus))),
+	installAvailable: v.optional(v.nullable(v.boolean())),
+	installVersion: v.optional(v.nullable(v.string())),
+	installing: v.optional(v.nullable(v.boolean())),
 	server: v.optional(v.nullable(v.lazy(() => freeturn_ProcessStatus))),
 });
 
@@ -2491,6 +2494,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /dns-routes/set-enabled": v.lazy(() => api_APIEnvelope),
 	"POST /dns-routes/update": v.lazy(() => api_DnsRouteResponse),
 	"POST /external-tunnels/adopt": v.lazy(() => api_APIEnvelope),
+	"POST /freeturn/install": v.lazy(() => api_APIEnvelope),
 	"POST /freeturn/link/decode": v.lazy(() => api_DecodeLinkResponse),
 	"POST /freeturn/server/link": v.lazy(() => api_GenerateLinkResponse),
 	"POST /hook/ndms": v.lazy(() => api_APIEnvelope),

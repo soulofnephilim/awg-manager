@@ -375,6 +375,7 @@ func (s *Server) registerSettingsRoutes(mux *http.ServeMux, h *routeHandlers) {
 	mux.HandleFunc("/api/freeturn/server/stop", h.guarded(h.freeturnHandler.StopServer))
 	mux.HandleFunc("/api/freeturn/server/link", h.guarded(h.freeturnHandler.GenerateLink))
 	mux.HandleFunc("/api/freeturn/link/decode", h.guarded(h.freeturnHandler.DecodeLink))
+	mux.HandleFunc("/api/freeturn/install", h.guarded(h.freeturnHandler.Install))
 
 }
 

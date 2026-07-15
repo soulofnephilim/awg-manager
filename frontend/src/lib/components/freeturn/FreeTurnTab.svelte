@@ -21,6 +21,7 @@
 
 	let importing = $state(false);
 	let importedWG: string | null = $state(null);
+	let installing = $state(false);
 
 	let genProvider = $state('vk');
 	let genMTU = $state(1376);
@@ -161,6 +162,19 @@
 		}
 	}
 
+	async function install() {
+		installing = true;
+		try {
+			await api.installFreeTurn();
+			notifications.success('freeturn установлен (клиент + сервер)');
+		} catch (e) {
+			notifications.error('Не удалось установить freeturn: ' + errText(e));
+		} finally {
+			installing = false;
+			await loadStatus();
+		}
+	}
+
 	async function copy(text: string) {
 		if (await copyText(text)) {
 			notifications.success('Скопировано в буфер');
@@ -232,6 +246,10 @@
 		{routerHost}
 		{importing}
 		{importedWG}
+		installAvailable={status?.installAvailable ?? false}
+		installVersion={status?.installVersion}
+		installing={installing || (status?.installing ?? false)}
+		onInstall={install}
 		onToggle={toggleClient}
 		onSave={() => saveClientConfig(config!.client)}
 		onImport={applyImportLink}
@@ -242,6 +260,10 @@
 		server={config.server}
 		status={status?.server}
 		{saving}
+		installAvailable={status?.installAvailable ?? false}
+		installVersion={status?.installVersion}
+		installing={installing || (status?.installing ?? false)}
+		onInstall={install}
 		{generating}
 		{generatedLink}
 		{generatedPeer}

@@ -11,6 +11,10 @@
 		routerHost: string;
 		importing: boolean;
 		importedWG: string | null;
+		installAvailable: boolean;
+		installVersion?: string;
+		installing: boolean;
+		onInstall: () => void;
 		onToggle: (on: boolean) => void;
 		onSave: () => void;
 		onImport: (link: string) => void;
@@ -24,6 +28,10 @@
 		routerHost,
 		importing,
 		importedWG,
+		installAvailable,
+		installVersion,
+		installing,
+		onInstall,
 		onToggle,
 		onSave,
 		onImport,
@@ -50,7 +58,17 @@
 
 <ProcessStatsRow {status} mode={client.mode} transport={client.transport} obfProfile={client.obfProfile} />
 
-<ProcessCard title="FreeTurn клиент" {status} {saving} {onToggle} {onSave}>
+<ProcessCard
+	title="FreeTurn клиент"
+	{status}
+	{saving}
+	{installAvailable}
+	{installVersion}
+	{installing}
+	{onInstall}
+	{onToggle}
+	{onSave}
+>
 	<div class="ft-section-label" style="margin-top: 0">TURN-сервер</div>
 	<div class="ft-grid-2">
 		<Input label="Адрес сервера (-peer)" bind:value={client.peer} placeholder="vinvanvlad.com:56000" />

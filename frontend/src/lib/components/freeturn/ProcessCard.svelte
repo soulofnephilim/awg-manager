@@ -8,12 +8,28 @@
 		title: string;
 		status?: FreeTurnProcessStatus;
 		saving: boolean;
+		/** Установка в один клик: пин для этой архитектуры есть в билде */
+		installAvailable: boolean;
+		installVersion?: string;
+		installing: boolean;
+		onInstall: () => void;
 		onToggle: (on: boolean) => void;
 		onSave: () => void;
 		children: Snippet;
 	}
 
-	let { title, status, saving, onToggle, onSave, children }: Props = $props();
+	let {
+		title,
+		status,
+		saving,
+		installAvailable,
+		installVersion,
+		installing,
+		onInstall,
+		onToggle,
+		onSave,
+		children
+	}: Props = $props();
 </script>
 
 <Card>
@@ -37,10 +53,20 @@
 
 	{#if status && !status.binaryPresent}
 		<div class="ft-binary-warn">
-			Бинарь <code>{status.binary}</code> не найден — awg-manager не поставляет freeturn.
-			Установите его из
-			<a href="https://github.com/samosvalishe/free-turn-proxy" target="_blank" rel="noopener">free-turn-proxy</a>
-			и обновите страницу.
+			<span>
+				Бинарь <code>{status.binary}</code> не найден — awg-manager не поставляет freeturn
+				в своём пакете.
+				{#if !installAvailable}
+					Установите его вручную из
+					<a href="https://github.com/samosvalishe/free-turn-proxy" target="_blank" rel="noopener">free-turn-proxy</a>
+					и обновите страницу.
+				{/if}
+			</span>
+			{#if installAvailable}
+				<Button variant="secondary" size="sm" loading={installing} onclick={onInstall}>
+					Установить v{installVersion} (клиент + сервер)
+				</Button>
+			{/if}
 		</div>
 	{/if}
 
@@ -89,6 +115,11 @@
 	}
 
 	.ft-binary-warn {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 0.625rem;
 		padding: 0.625rem 0.75rem;
 		border-radius: var(--radius-sm);
 		border: 1px solid var(--color-warning);

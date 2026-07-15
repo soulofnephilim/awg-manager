@@ -8,6 +8,10 @@
 		server: FreeTurnServerConfig;
 		status?: FreeTurnProcessStatus;
 		saving: boolean;
+		installAvailable: boolean;
+		installVersion?: string;
+		installing: boolean;
+		onInstall: () => void;
 		generating: boolean;
 		generatedLink: string;
 		generatedPeer: string;
@@ -24,6 +28,10 @@
 		server,
 		status,
 		saving,
+		installAvailable,
+		installVersion,
+		installing,
+		onInstall,
 		generating,
 		generatedLink,
 		generatedPeer,
@@ -50,7 +58,17 @@
 
 <ProcessStatsRow {status} mode={server.mode} obfProfile={server.obfProfile} />
 
-<ProcessCard title="FreeTurn сервер" {status} {saving} {onToggle} {onSave}>
+<ProcessCard
+	title="FreeTurn сервер"
+	{status}
+	{saving}
+	{installAvailable}
+	{installVersion}
+	{installing}
+	{onInstall}
+	{onToggle}
+	{onSave}
+>
 	<div class="ft-section-label" style="margin-top: 0">Приём подключений</div>
 	<div class="ft-grid-2">
 		<Input label="Слушать (-listen)" bind:value={server.listen} placeholder="0.0.0.0:56000" />

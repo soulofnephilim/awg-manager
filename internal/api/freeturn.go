@@ -26,6 +26,7 @@ type FreeTurnService interface {
 	StopClient() error
 	StartServer() error
 	StopServer() error
+	InstallBinaries(ctx context.Context) error
 }
 
 // FreeTurnHandler exposes FreeTurnService over HTTP.
@@ -322,4 +323,26 @@ func (h *FreeTurnHandler) DecodeLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, payload)
+}
+
+// Install handles POST /api/freeturn/install: скачивает и активирует
+// закреплённые для этой архитектуры бинари client+server (SHA256 из билда).
+// Синхронный — ассеты небольшие (6-17 МБ); фронт блокирует кнопку по
+// status.installing.
+//
+//	@Summary	Download and activate the pinned freeturn client+server binaries
+//	@Tags		freeturn
+//	@Success	200	{object}	APIEnvelope
+//	@Failure	500	{object}	APIErrorEnvelope
+//	@Router		/freeturn/install [post]
+func (h *FreeTurnHandler) Install(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.ErrorWithStatus(w, http.StatusMethodNotAllowed, "Method not allowed", "METHOD_NOT_ALLOWED")
+		return
+	}
+	if err := h.svc.InstallBinaries(r.Context()); err != nil {
+		response.Error(w, err.Error(), "FREETURN_INSTALL_FAILED")
+		return
+	}
+	response.Success(w, map[string]string{"message": "freeturn installed"})
 }
