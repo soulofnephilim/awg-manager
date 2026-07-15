@@ -12,19 +12,22 @@ import "time"
 type ClientConfig struct {
 	Enabled bool `json:"enabled"`
 
-	Listen    string `json:"listen"`         // -listen, local addr WG/Xray connects to (default 127.0.0.1:9000)
-	Peer      string `json:"peer"`           // -peer, required: VPS server addr host:port
-	Provider  string `json:"provider"`       // -provider, default "vk"
-	Link      string `json:"link,omitempty"` // -link, required when provider=vk
-	Streams   int    `json:"streams"`        // -n, parallel TURN streams (default 10)
-	Transport string `json:"transport"`      // -transport, tcp|udp (transport to TURN relay)
-	Mode      string `json:"mode"`           // -mode, udp|tcp (tunnel mode)
-	Bond      bool   `json:"bond"`           // -bond, only meaningful with mode=tcp
+	Listen    string `json:"listen"`          // -listen, local addr WG/Xray connects to (default 127.0.0.1:9000)
+	Peer      string `json:"peer"`            // -peer, required: VPS server addr host:port
+	Provider  string `json:"provider"`        // -provider, default "vk"
+	Links     string `json:"links,omitempty"` // -links, comma-separated VK Calls URLs; required when provider=vk
+	// (-link, singular, is upstream's deprecated one-link alias — we always
+	// emit -links so multiple call links, i.e. multiple credential pools,
+	// work: see internal/config/config.go in samosvalishe/free-turn-proxy.)
+	Streams   int    `json:"streams"`   // -n, parallel TURN streams *per link* (default 10)
+	Transport string `json:"transport"` // -transport, tcp|udp (transport to TURN relay)
+	Mode      string `json:"mode"`      // -mode, udp|tcp (tunnel mode)
+	Bond      bool   `json:"bond"`      // -bond, only meaningful with mode=tcp
 
 	TurnHost string `json:"turnHost,omitempty"` // -turn, override TURN server IP
 	TurnPort int    `json:"turnPort,omitempty"` // -port, override TURN server port
 
-	ObfProfile string `json:"obfProfile"`       // -obf-profile, none|rtpopus|rtpopus2
+	ObfProfile string `json:"obfProfile"`       // -obf-profile, none|rtpopus|rtpopus2|rtpopus3 (internal/config/config.go ObfProfile enum; upstream docs/flags.md lags behind)
 	ObfKey     string `json:"obfKey,omitempty"` // -obf-key, 64 hex chars, required if obfProfile != none
 
 	StreamsPerCred int    `json:"streamsPerCred"` // -streams-per-cred, provider=vk only
@@ -62,7 +65,7 @@ type ServerConfig struct {
 	Listen      string `json:"listen"`                // -listen, default 0.0.0.0:56000
 	Connect     string `json:"connect"`               // -connect, required: local backend host:port
 	Mode        string `json:"mode"`                  // -mode, udp|tcp
-	ObfProfile  string `json:"obfProfile"`            // -obf-profile, none|rtpopus|rtpopus2
+	ObfProfile  string `json:"obfProfile"`            // -obf-profile, none|rtpopus|rtpopus2|rtpopus3
 	ObfKey      string `json:"obfKey,omitempty"`      // -obf-key
 	ClientsFile string `json:"clientsFile,omitempty"` // -clients-file, enables Client-ID allowlist auth
 	Debug       bool   `json:"debug"`
@@ -100,6 +103,11 @@ type ProcessStatus struct {
 	// populated when the process is not currently running and the last
 	// run ended in a failure (e.g. missing -peer, captcha required, etc).
 	LastError string `json:"lastError,omitempty"`
+	// Log is the tail of combined stdout+stderr from the current (or most
+	// recent) run — e.g. TURN allocation / VK-auth progress, handshake
+	// confirmations — so the panel can show whether the tunnel actually
+	// connected instead of just "running".
+	Log string `json:"log,omitempty"`
 }
 
 // Status is the combined client+server status returned to the API/frontend.

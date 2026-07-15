@@ -76,8 +76,8 @@ func (s *Service) StartClient() error {
 	if cfg.Client.Peer == "" {
 		return errors.New("укажите адрес сервера (-peer)")
 	}
-	if cfg.Client.Provider == "vk" && cfg.Client.Link == "" {
-		return errors.New("укажите ссылку VK Calls (-link) — обязательна для provider=vk")
+	if cfg.Client.Provider == "vk" && cfg.Client.Links == "" {
+		return errors.New("укажите ссылку(-и) VK Calls (-links) — обязательны для provider=vk")
 	}
 	return s.clientProc.Start(buildClientArgs(cfg.Client))
 }
@@ -128,7 +128,7 @@ func buildClientArgs(c ClientConfig) []string {
 	str("-listen", c.Listen)
 	str("-peer", c.Peer)
 	str("-provider", c.Provider)
-	str("-link", c.Link)
+	str("-links", c.Links)
 	if c.Streams > 0 {
 		args = append(args, "-n", strconv.Itoa(c.Streams))
 	}

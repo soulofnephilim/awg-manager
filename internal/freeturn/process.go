@@ -36,9 +36,10 @@ type process struct {
 	binary  string
 	pidPath string
 
-	mu        sync.Mutex
-	startedAt *time.Time
-	lastErr   string
+	mu            sync.Mutex
+	startedAt     *time.Time
+	lastErr       string
+	stopRequested bool // set by Stop() so the exit-watcher goroutine knows this death was expected
 
 	logTail *ringBuffer
 
@@ -84,7 +85,10 @@ func (p *process) Start(args []string) error {
 		return fmt.Errorf("freeturn %s: stderr pipe: %w", p.name, err)
 	}
 
-	p.logTail = newRingBuffer(80)
+	p.logTail.Reset()
+	p.mu.Lock()
+	p.stopRequested = false
+	p.mu.Unlock()
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("freeturn %s: start: %w", p.name, err)
@@ -108,7 +112,7 @@ func (p *process) Start(args []string) error {
 	case waitErr := <-errCh:
 		// Died before grace period — this is a startup failure.
 		p.cleanupPidIfOurs(myPid)
-		msg := strings.TrimSpace(p.logTail.String())
+		msg := strings.TrimSpace(p.logTail.LastLines(30))
 		if msg == "" && waitErr != nil {
 			msg = waitErr.Error()
 		}
@@ -127,11 +131,27 @@ func (p *process) Start(args []string) error {
 		go func() {
 			waitErr := <-errCh
 			p.cleanupPidIfOurs(myPid)
-			tail := strings.TrimSpace(p.logTail.String())
-			if tail == "" && waitErr != nil {
-				tail = waitErr.Error()
+
+			p.mu.Lock()
+			stopped := p.stopRequested
+			p.stopRequested = false
+			p.mu.Unlock()
+
+			if stopped {
+				// We asked for this (Stop()) — not an error, don't dump the
+				// accumulated connect/disconnect log as "last error".
+				p.setLastErr("")
+			} else {
+				// Unexpected exit. Only the last few lines, not the whole
+				// buffer — after a long run that buffer is mostly benign
+				// per-stream connect/disconnect noise, not the actual cause.
+				tail := strings.TrimSpace(p.logTail.LastLines(10))
+				if tail == "" && waitErr != nil {
+					tail = waitErr.Error()
+				}
+				p.setLastErr(tail)
 			}
-			p.setLastErr(tail)
+
 			p.mu.Lock()
 			p.startedAt = nil
 			p.mu.Unlock()
@@ -146,6 +166,9 @@ func (p *process) Stop() error {
 	if err != nil {
 		return nil
 	}
+	p.mu.Lock()
+	p.stopRequested = true
+	p.mu.Unlock()
 	_ = terminate(pid) // SIGTERM on Linux, Process.Kill elsewhere
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -182,7 +205,7 @@ func (p *process) Status() ProcessStatus {
 	running, pid := p.IsRunning()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	st := ProcessStatus{Running: running, LastError: p.lastErr}
+	st := ProcessStatus{Running: running, LastError: p.lastErr, Log: p.logTail.String()}
 	if running {
 		st.PID = pid
 		st.StartedAt = p.startedAt

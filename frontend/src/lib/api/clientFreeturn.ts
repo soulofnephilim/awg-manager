@@ -1,6 +1,9 @@
 import type {
 	FreeTurnClientConfig,
 	FreeTurnConfig,
+	FreeTurnGenerateLinkRequest,
+	FreeTurnGenerateLinkResult,
+	FreeTurnLinkPayload,
 	FreeTurnServerConfig,
 	FreeTurnStatus
 } from '$lib/types';
@@ -47,6 +50,22 @@ export class FreeturnClient extends SubscriptionsClient {
 
 	async stopFreeTurnServer(): Promise<{ message: string }> {
 		return this.request('/freeturn/server/stop', { method: 'POST' });
+	}
+
+	async generateFreeTurnLink(
+		req: FreeTurnGenerateLinkRequest = {}
+	): Promise<FreeTurnGenerateLinkResult> {
+		return this.request<FreeTurnGenerateLinkResult>('/freeturn/server/link', {
+			method: 'POST',
+			body: JSON.stringify(req)
+		});
+	}
+
+	async decodeFreeTurnLink(link: string): Promise<FreeTurnLinkPayload> {
+		return this.request<FreeTurnLinkPayload>('/freeturn/link/decode', {
+			method: 'POST',
+			body: JSON.stringify({ link })
+		});
 	}
 
 	// #endregion

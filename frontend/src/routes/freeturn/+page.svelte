@@ -20,9 +20,26 @@
 	let config: FreeTurnConfig | null = $state(null);
 	let status: FreeTurnStatus | null = $state(null);
 
+	// Client-side: paste a freeturn:// link to auto-fill peer/provider/obf
+	// instead of retyping them by hand.
+	let importLink = $state('');
+	let importing = $state(false);
+	let importedWG: string | null = $state(null);
+
+	// Server-side: bundle this server's obf/key + external IP (+ optional
+	// WireGuard client config) into a freeturn:// link to hand out.
+	let genProvider = $state('vk');
+	let genMTU = $state(1376);
+	let genWG = $state('');
+	let generating = $state(false);
+	let generatedLink = $state('');
+	let generatedPeer = $state('');
+
 	let statusPoll: ReturnType<typeof setInterval> | undefined;
+	let routerHost = $state('');
 
 	onMount(async () => {
+		routerHost = window.location.hostname;
 		await Promise.all([loadConfig(), loadStatus()]);
 		loading = false;
 		// Poll status every 3s while the page is open — same cadence the
@@ -51,7 +68,7 @@
 			client: {
 				...cfg.client,
 				peer: cfg.client.peer ?? '',
-				link: cfg.client.link ?? '',
+				links: cfg.client.links ?? '',
 				turnHost: cfg.client.turnHost ?? '',
 				obfKey: cfg.client.obfKey ?? '',
 				dnsServers: cfg.client.dnsServers ?? '',
@@ -134,6 +151,65 @@
 		}
 	}
 
+	async function copyToClipboard(text: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			notifications.success('Скопировано в буфер');
+		} catch {
+			notifications.error('Не удалось скопировать');
+		}
+	}
+
+	async function applyImportLink() {
+		if (!importLink.trim()) return;
+		importing = true;
+		try {
+			const payload = await api.decodeFreeTurnLink(importLink.trim());
+			if (config) {
+				config.client.peer = payload.peer ?? config.client.peer;
+				config.client.provider = payload.provider || config.client.provider;
+				if (payload.obf) {
+					config.client.obfProfile = payload.obf as typeof config.client.obfProfile;
+				}
+				config.client.obfKey = payload.key ?? config.client.obfKey;
+			}
+			const wg = payload.wg?.trim() ? payload.wg : null;
+			importedWG = wg;
+
+			let msg = 'Ссылка распознана, поля заполнены — не забудьте сохранить';
+			if (wg) {
+				try {
+					const tunnel = await api.importConfig(wg, `FreeTurn ${payload.peer}`.slice(0, 60));
+					msg += `. Создан туннель «${tunnel.name}»`;
+				} catch (e: any) {
+					notifications.error('Поля заполнены, но не удалось создать туннель из конфига: ' + (e.message || ''));
+				}
+			}
+			notifications.success(msg);
+		} catch (e: any) {
+			notifications.error('Не удалось разобрать ссылку: ' + (e.message || ''));
+		} finally {
+			importing = false;
+		}
+	}
+
+	async function generateLink() {
+		generating = true;
+		try {
+			const result = await api.generateFreeTurnLink({
+				provider: genProvider,
+				mtu: genMTU,
+				wg: genWG.trim() || undefined
+			});
+			generatedLink = result.link;
+			generatedPeer = result.peer;
+		} catch (e: any) {
+			notifications.error('Не удалось сгенерировать ссылку: ' + (e.message || ''));
+		} finally {
+			generating = false;
+		}
+	}
+
 	function formatUptime(startedAt?: string): string {
 		if (!startedAt) return '';
 		const ms = Date.now() - new Date(startedAt).getTime();
@@ -165,6 +241,24 @@
 		<div class="ft-loading">Загрузка…</div>
 	{:else if activeTab === 'client'}
 		{@const clientStatus = status?.client}
+		<Card variant="nested" padding="sm">
+			<div class="ft-section-label" style="margin-top: 0">Импорт по ссылке</div>
+			<Input label="Ссылка freeturn://" bind:value={importLink} placeholder="freeturn://..." />
+			<p class="ft-hint">
+				Заполнит адрес сервера, провайдера и обфускацию ниже (сохранение — кнопкой «Сохранить») и,
+				если в ссылке есть WireGuard-конфиг, сразу создаст из него туннель во вкладке «Туннели»
+			</p>
+			<div class="ft-footer">
+				<Button variant="secondary" size="sm" loading={importing} onclick={applyImportLink}>
+					Применить
+				</Button>
+			</div>
+			{#if importedWG}
+				<div class="ft-section-label">WireGuard-конфиг из ссылки</div>
+				<textarea class="ft-wg-box" readonly value={importedWG}></textarea>
+				<Button variant="ghost" size="sm" onclick={() => copyToClipboard(importedWG!)}>Скопировать конфиг</Button>
+			{/if}
+		</Card>
 		<Card>
 			{#snippet header()}
 				<div class="ft-card-header">
@@ -173,8 +267,6 @@
 						<span>FreeTurn клиент</span>
 						{#if clientStatus?.running}
 							<span class="ft-uptime">запущен · {formatUptime(clientStatus.startedAt)}</span>
-						{:else if clientStatus?.lastError}
-							<span class="ft-error-hint">{clientStatus.lastError}</span>
 						{/if}
 					</div>
 					<Toggle
@@ -185,17 +277,56 @@
 				</div>
 			{/snippet}
 
+			{#if !clientStatus?.running && clientStatus?.lastError}
+				<div class="ft-section-label" style="margin-top: 0">Ошибка последнего запуска</div>
+				<pre class="ft-log-box ft-error-box">{clientStatus.lastError}</pre>
+			{/if}
+
+			{#if clientStatus?.log}
+				<div class="ft-section-label" style="margin-top: 0">Лог</div>
+				<pre class="ft-log-box">{clientStatus.log}</pre>
+			{/if}
+
 			<div class="ft-section-label">TURN-сервер</div>
 			<div class="ft-grid-2">
 				<Input label="Адрес сервера (-peer)" bind:value={config.client.peer} placeholder="vinvanvlad.com:56000" />
 				<Input label="Провайдер (-provider)" bind:value={config.client.provider} placeholder="vk" />
 			</div>
-			<Input
-				label="Ссылка VK Calls (-link)"
-				bind:value={config.client.link}
-				placeholder="https://vk.ru/call/join/..."
-			/>
-			<p class="ft-hint">Обязательна, если -provider = vk</p>
+
+			<div class="ft-section-label">Провайдер VK</div>
+			<label class="ft-label" for="ft-c-links">Ссылки VK Calls, через запятую (-links)</label>
+			<textarea
+				id="ft-c-links"
+				class="ft-wg-box"
+				style="min-height: 70px"
+				bind:value={config.client.links}
+				placeholder="https://vk.ru/call/join/...,https://vk.ru/call/join/..."
+			></textarea>
+			<p class="ft-hint">
+				Обязательны, если -provider = vk. Несколько ссылок дают несколько независимых пулов
+				TURN-кредов — больше суммарных потоков и меньше риск бана одного звонка
+			</p>
+			<div class="ft-grid-2">
+				<Input
+					label="Потоков на кред (-streams-per-cred)"
+					type="number"
+					value={String(config.client.streamsPerCred)}
+					onchange={(v) => (config!.client.streamsPerCred = Number(v) || 0)}
+				/>
+				<div class="ft-checkbox-row">
+					<input id="ft-c-captcha" type="checkbox" bind:checked={config.client.manualCaptcha} />
+					<label for="ft-c-captcha">Ручная капча (-manual-captcha)</label>
+				</div>
+			</div>
+			{#if config.client.manualCaptcha}
+				<p class="ft-hint">
+					Капча решается локальным HTTP-сервером самого freeturn-client на роутере
+					(127.0.0.1:8765) — снаружи он недоступен. Пробросьте порт с вашего ПК:
+					<code>ssh -N -L 8765:127.0.0.1:8765 root@{routerHost || '<IP роутера>'}</code>
+					и откройте <code>http://127.0.0.1:8765</code> в браузере (порт SSH может отличаться
+					от 22 — на Keenetic часто 222).
+				</p>
+			{/if}
 
 			<div class="ft-section-label">Туннелирование</div>
 			<div class="ft-grid-3">
@@ -240,6 +371,7 @@
 						<option value="none">none</option>
 						<option value="rtpopus">rtpopus</option>
 						<option value="rtpopus2">rtpopus2</option>
+						<option value="rtpopus3">rtpopus3</option>
 					</select>
 				</div>
 				<Input
@@ -278,13 +410,21 @@
 						<span>FreeTurn сервер</span>
 						{#if serverStatus?.running}
 							<span class="ft-uptime">запущен · {formatUptime(serverStatus.startedAt)}</span>
-						{:else if serverStatus?.lastError}
-							<span class="ft-error-hint">{serverStatus.lastError}</span>
 						{/if}
 					</div>
 					<Toggle checked={!!serverStatus?.running} onchange={toggleServer} label="" />
 				</div>
 			{/snippet}
+
+			{#if !serverStatus?.running && serverStatus?.lastError}
+				<div class="ft-section-label" style="margin-top: 0">Ошибка последнего запуска</div>
+				<pre class="ft-log-box ft-error-box">{serverStatus.lastError}</pre>
+			{/if}
+
+			{#if serverStatus?.log}
+				<div class="ft-section-label" style="margin-top: 0">Лог</div>
+				<pre class="ft-log-box">{serverStatus.log}</pre>
+			{/if}
 
 			<div class="ft-section-label">Приём подключений</div>
 			<div class="ft-grid-2">
@@ -314,6 +454,7 @@
 						<option value="none">none</option>
 						<option value="rtpopus">rtpopus</option>
 						<option value="rtpopus2">rtpopus2</option>
+						<option value="rtpopus3">rtpopus3</option>
 					</select>
 				</div>
 				<Input
@@ -336,6 +477,47 @@
 					</Button>
 				</div>
 			{/snippet}
+		</Card>
+
+		<Card>
+			{#snippet header()}
+				<div class="ft-card-title">Ссылка для клиента</div>
+			{/snippet}
+			<p class="ft-hint" style="margin-top: 0">
+				Соберёт freeturn:// ссылку из обфускации/ключа сервера выше и внешнего IP роутера —
+				вставьте её в клиентскую панель или в приложение
+			</p>
+			<div class="ft-grid-2">
+				<Input label="Провайдер" bind:value={genProvider} placeholder="vk" />
+				<Input
+					label="MTU"
+					type="number"
+					value={String(genMTU)}
+					onchange={(v) => (genMTU = Number(v) || 1376)}
+				/>
+			</div>
+			<div class="ft-section-label">WireGuard-конфиг клиента (опционально)</div>
+			<textarea
+				class="ft-wg-box"
+				bind:value={genWG}
+				placeholder="Вставьте сюда конфиг WireGuard-клиента, если хотите передать его вместе со ссылкой..."
+			></textarea>
+
+			<div class="ft-footer">
+				<Button variant="primary" size="sm" loading={generating} onclick={generateLink}>
+					Сгенерировать ссылку
+				</Button>
+			</div>
+
+			{#if generatedLink}
+				<div class="ft-result">
+					<div class="ft-section-label" style="margin-top: 0">Готовая ссылка ({generatedPeer})</div>
+					<div class="ft-link-box">{generatedLink}</div>
+					<Button variant="ghost" size="sm" onclick={() => copyToClipboard(generatedLink)}>
+						Скопировать в буфер
+					</Button>
+				</div>
+			{/if}
 		</Card>
 	{/if}
 </PageContainer>
@@ -362,15 +544,15 @@
 		flex-wrap: wrap;
 	}
 
-	.ft-uptime,
-	.ft-error-hint {
+	.ft-uptime {
 		font-size: 0.75rem;
 		color: var(--color-text-secondary);
 		font-weight: 400;
 	}
 
-	.ft-error-hint {
+	.ft-error-box {
 		color: var(--color-error);
+		border-color: var(--color-error);
 	}
 
 	.ft-section-label {
@@ -440,6 +622,52 @@
 	.ft-stats {
 		display: flex;
 		gap: 0.5rem;
+	}
+
+	.ft-log-box {
+		width: 100%;
+		max-height: 160px;
+		overflow-y: auto;
+		padding: 0.5rem 0.625rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-tertiary);
+		color: var(--color-text-secondary);
+		font-family: monospace;
+		font-size: 0.75rem;
+		white-space: pre-wrap;
+		word-break: break-all;
+		margin: 0;
+	}
+
+	.ft-wg-box {
+		width: 100%;
+		min-height: 100px;
+		padding: 0.5rem 0.625rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-tertiary);
+		color: var(--color-text-primary);
+		font-family: monospace;
+		font-size: 0.8125rem;
+		resize: vertical;
+		white-space: pre;
+		margin-bottom: 0.75rem;
+	}
+
+	.ft-result {
+		margin-top: 1rem;
+		padding: 0.875rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-tertiary);
+	}
+
+	.ft-link-box {
+		font-family: monospace;
+		font-size: 0.8125rem;
+		word-break: break-all;
+		margin-bottom: 0.625rem;
 	}
 
 	@media (max-width: 640px) {
