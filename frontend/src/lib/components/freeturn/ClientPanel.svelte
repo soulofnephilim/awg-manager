@@ -99,7 +99,17 @@
 			<FormToggle bind:checked={client.manualCaptcha} label="Ручная капча (-manual-captcha)" />
 		</div>
 	</div>
-	{#if client.manualCaptcha}
+	<Input
+		label="Client ID (-client-id)"
+		bind:value={client.clientId}
+		placeholder="оставьте пустым — сгенерируется и сохранится автоматически"
+	/>
+	<p class="ft-hint">
+		Заполняется автоматически из ссылки freeturn:// (поле «cid»), если она с ним пришла. Если
+		сервер использует allowlist (-clients-file), этот же ID должен быть добавлен там владельцем
+		сервера — иначе сервер отклонит подключение с «Unauthorized Client ID»
+	</p>
+{#if client.manualCaptcha}
 		<p class="ft-hint">
 			Капча решается локальным HTTP-сервером самого freeturn-client на роутере
 			(127.0.0.1:8765) — снаружи он недоступен. Пробросьте порт с вашего ПК:

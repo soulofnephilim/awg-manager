@@ -1301,6 +1301,8 @@ definitions:
     properties:
       data:
         properties:
+          clientId:
+            type: string
           link:
             type: string
           peer:
@@ -6101,19 +6103,47 @@ definitions:
     type: object
   freeturn.LinkPayload:
     properties:
+      bond:
+        type: boolean
+      cid:
+        description: -client-id — owner must allowlist this in clients.json
+        type: string
+      dns:
+        type: string
+      dnss:
+        type: string
       key:
         type: string
+      listen:
+        type: string
+      mcap:
+        type: boolean
+      mode:
+        type: string
       mtu:
+        description: 'awg-manager extensions, not part of the upstream spec:'
         type: integer
+      "n":
+        description: -n, parallel TURN streams
+        type: integer
+      name:
+        description: comment for the owner's own clients.json entry
+        type: string
       obf:
         type: string
       peer:
         type: string
       provider:
         type: string
+      spc:
+        description: -streams-per-cred
+        type: integer
+      transport:
+        type: string
       v:
         type: integer
       wg:
+        description: optional bundled WireGuard client config
         type: string
     type: object
   freeturn.ProcessStatus:
