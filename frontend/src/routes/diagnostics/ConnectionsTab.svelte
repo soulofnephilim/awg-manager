@@ -12,6 +12,7 @@
 		ConnectionsFilterPanel,
 		ConnectionsBreakdown,
 		ConnectionsGroupBar,
+		ConnectionDetailsPanel,
 	} from '$lib/components/connections';
 	let data = $state<ConnectionsResponse | null>(null);
 	let loading = $state(false);
@@ -221,17 +222,48 @@
 		onChange={(g) => (group = g)}
 	/>
 
-	<ConnectionsTable
-		connections={data?.connections ?? []}
-		{group}
-		pagination={data?.pagination ?? { total: 0, offset: 0, limit: 200, returned: 0 }}
-		{selectedKey}
-		{sortBy}
-		{sortDir}
-		onSortChange={handleSortChange}
-		onPageChange={handlePageChange}
-		onSelect={(k) => (selectedKey = selectedKey === k ? null : k)}
-		onKill={killConn}
-		showSkeleton={loading && !data}
-	/>
+	<div class="content-grid" class:with-details={!!selected}>
+		<div class="table-col">
+			<ConnectionsTable
+				connections={data?.connections ?? []}
+				{group}
+				pagination={data?.pagination ?? { total: 0, offset: 0, limit: 200, returned: 0 }}
+				{selectedKey}
+				{sortBy}
+				{sortDir}
+				onSortChange={handleSortChange}
+				onPageChange={handlePageChange}
+				onSelect={(k) => (selectedKey = selectedKey === k ? null : k)}
+				onKill={killConn}
+				showSkeleton={loading && !data}
+			/>
+		</div>
+		{#if selected}
+			<ConnectionDetailsPanel
+				conn={selected}
+				onClose={() => (selectedKey = null)}
+				onKill={() => selected && killConn(selected)}
+				onFilterClient={() => {
+					if (!selected) return;
+					search = selected.clientName || selected.src;
+					selectedKey = null;
+					offset = 0;
+					fetchData();
+				}}
+			/>
+		{/if}
+	</div>
 {/if}
+
+<style>
+	.content-grid { display: block; }
+	.table-col { min-width: 0; }
+	@media (min-width: 1100px) {
+		.content-grid.with-details {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) 320px;
+			gap: 12px;
+			align-items: start;
+		}
+	}
+</style>
