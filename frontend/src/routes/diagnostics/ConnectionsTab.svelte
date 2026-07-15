@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { RefreshCw } from 'lucide-svelte';
 	import type { ConnectionsResponse } from '$lib/types';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
-	import { ConnectionsStats, ConnectionsTable } from '$lib/components/connections';
+	import { ConnectionsTable, ConnectionsTotalsBar } from '$lib/components/connections';
 	let data = $state<ConnectionsResponse | null>(null);
 	let loading = $state(false);
 	const AUTO_REFRESH_MS = 30_000;
@@ -25,6 +24,8 @@
 		const elapsed = Math.max(0, nowTs - lastFetchedAtTs);
 		return Math.min(1, elapsed / AUTO_REFRESH_MS);
 	});
+	const totalOut = $derived((data?.byTunnel ?? []).reduce((s, b) => s + b.bytesOut, 0));
+	const totalIn = $derived((data?.byTunnel ?? []).reduce((s, b) => s + b.bytesIn, 0));
 
 	async function fetchData() {
 		const seq = ++requestSeq;
@@ -115,7 +116,15 @@
 </script>
 
 {#if data || loading}
-	<ConnectionsStats stats={data?.stats ?? null} showSkeleton={loading && !data} />
+	<ConnectionsTotalsBar
+		stats={data?.stats ?? null}
+		bytesOut={totalOut}
+		bytesIn={totalIn}
+		fetchedAt={data?.fetchedAt ?? ''}
+		{loading}
+		progress={refreshProgress}
+		onRefresh={fetchData}
+	/>
 
 	<!-- Filter row 1: tunnel chips -->
 	{#if data && Object.keys(data.tunnels).length > 0}
@@ -170,29 +179,6 @@
 			value={search}
 			oninput={(e) => handleSearchInput(e.currentTarget.value)}
 		/>
-		<div class="row-tail">
-			<span class="counter">
-				<span class="live-dot" class:live-dot-loading={loading}></span>
-				{#if loading && !data}
-					<span class="counter-skel-line" aria-hidden="true">
-						<span class="counter-skel-seg counter-skel-time"></span>
-					</span>
-				{:else if data?.fetchedAt}
-					{new Date(data.fetchedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-				{/if}
-			</span>
-			<button
-				type="button"
-				class="refresh-btn timer-enabled"
-				onclick={fetchData}
-				disabled={loading}
-				aria-label="Обновить соединения"
-				title="Обновить"
-				style={`--refresh-progress:${refreshProgress * 360}deg;`}
-			>
-				<RefreshCw size={15} aria-hidden="true" style="position:relative;z-index:1" />
-			</button>
-		</div>
 	</div>
 
 	<ConnectionsTable
@@ -228,76 +214,6 @@
 		flex: 1;
 		min-width: 180px;
 		max-width: 280px;
-	}
-
-	.row-tail {
-		margin-left: auto;
-		display: inline-flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.refresh-btn {
-		position: relative;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		border-radius: 6px;
-		border: 1px solid var(--color-border);
-		background: transparent;
-		color: var(--color-text-muted);
-		cursor: pointer;
-		transition: all var(--t-fast) ease;
-	}
-
-	.refresh-btn.timer-enabled::before {
-		content: '';
-		position: absolute;
-		inset: -1px;
-		border-radius: inherit;
-		padding: 1px;
-		background: conic-gradient(var(--color-accent) var(--refresh-progress), transparent 0deg);
-		-webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-		mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-		-webkit-mask-composite: xor;
-		mask-composite: exclude;
-		pointer-events: none;
-		opacity: 0.95;
-	}
-
-	.refresh-btn:hover:not(:disabled) {
-		color: var(--color-accent);
-		background: var(--color-bg-hover);
-	}
-
-	.refresh-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.counter {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.375rem;
-		font-family: var(--font-mono);
-		font-size: 11px;
-		color: var(--color-text-muted);
-	}
-
-	.live-dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		background: var(--color-success);
-		box-shadow: 0 0 0 3px var(--color-success-tint);
-		transition: background 0.2s ease;
-	}
-
-	.live-dot-loading {
-		background: var(--color-warning, var(--color-accent));
-		animation: pulse 1s ease-in-out infinite;
 	}
 
 	@keyframes pulse {
@@ -357,30 +273,7 @@
 		vertical-align: middle;
 	}
 
-	.counter-skel-line {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.375rem;
-	}
-
-	.counter-skel-seg {
-		display: inline-block;
-		height: 10px;
-		border-radius: 4px;
-		background: var(--color-border);
-		animation: pulse 1s ease-in-out infinite;
-	}
-
-	.counter-skel-time {
-		width: 4.5rem;
-	}
-
 	@media (max-width: 640px) {
 		.search-input { max-width: 100%; }
-		.row-tail {
-			margin-left: 0;
-			width: 100%;
-			justify-content: flex-end;
-		}
 	}
 </style>

@@ -1,2 +1,3 @@
 export { default as ConnectionsStats } from './ConnectionsStats.svelte';
 export { default as ConnectionsTable } from './ConnectionsTable.svelte';
+export { default as ConnectionsTotalsBar } from './ConnectionsTotalsBar.svelte';
