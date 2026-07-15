@@ -8,7 +8,7 @@
 #   ./decompile-ruleset.sh <url-or-local.srs> [output.json]
 #
 # Examples:
-#   ./decompile-ruleset.sh 'https://github.com/vernette/rulesets/raw/master/srs/telegram.srs'
+#   ./decompile-ruleset.sh 'https://github.com/hoaxisr/rulesets/raw/master/srs/telegram.srs'
 #   ./decompile-ruleset.sh 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-meta.srs' /tmp/meta.json
 #   ./decompile-ruleset.sh ./geosite-youtube.srs
 

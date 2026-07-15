@@ -9,7 +9,7 @@ const sagerNetSiteRoot = "https://raw.githubusercontent.com/SagerNet/sing-geosit
 // deterministic. Bump intentionally, then re-run the generator + commit.
 const (
 	sagerNetPinSHA = "4fe72acfd29178e56c9d4699a12062097a16f755" // pinned 2026-06-02 (SagerNet/sing-geosite rule-set)
-	vernettePinSHA = "1e1fd57f2ff0533f09ca95da895ee2ea367e2720" // pinned 2026-06-02 (vernette/rulesets master)
+	vernettePinSHA = "bf5dc6dbe23b3a855d5b4b7fde7dce971bf068ee" // pinned 2026-07-15 (hoaxisr/rulesets master, коммит Action'а)
 )
 
 // pinnedFetchURL rewrites a moving-branch .srs URL to its pinned-commit form,
@@ -21,8 +21,8 @@ func pinnedFetchURL(url string) string {
 		"raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/",
 		"raw.githubusercontent.com/SagerNet/sing-geosite/"+sagerNetPinSHA+"/", 1)
 	url = strings.Replace(url,
-		"github.com/vernette/rulesets/raw/master/",
-		"github.com/vernette/rulesets/raw/"+vernettePinSHA+"/", 1)
+		"https://repo.hoaxisr.ru/rulesets/",
+		"https://github.com/hoaxisr/rulesets/raw/"+vernettePinSHA+"/", 1)
 	return url
 }
 

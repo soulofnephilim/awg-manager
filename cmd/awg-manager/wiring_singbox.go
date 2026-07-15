@@ -55,6 +55,10 @@ func (a *app) setupSingbox() {
 	if err := singbox.MigrateDeviceProxyOutOfTunnels(singboxConfigDir); err != nil {
 		a.bootLog.Warn("deviceproxy-migration", "", err.Error())
 	}
+	ruleSetURLsMigrated, err := singbox.MigrateRuleSetURLsToFork(singboxConfigDir)
+	if err != nil {
+		a.bootLog.Warn("ruleset-fork-migration", "", err.Error())
+	}
 	a.sbOrch = singboxorch.New(singboxConfigDir, a.singboxOp.Process())
 	a.sbOrch.SetLogger(func(level, msg string) {
 		switch level {
@@ -86,6 +90,18 @@ func (a *app) setupSingbox() {
 	}
 	if err := a.sbOrch.Bootstrap(); err != nil {
 		a.bootLog.Error("singbox-orchestrator", "bootstrap", err.Error())
+	}
+	// Миграция URL rule-set'ов переписала файлы мимо оркестратора: переживший
+	// рестарт awgm sing-box иначе держит старые (заблокированные) URL в памяти
+	// до случайного reload по другому поводу. Холодный старт (процесс не
+	// запущен) прочитает новые файлы сам — reload не нужен.
+	if ruleSetURLsMigrated {
+		if running, _ := a.singboxOp.IsRunning(); running {
+			a.bootLog.Info("ruleset-fork-migration", "", "rule-set URL мигрированы — перечитываем конфиг живого sing-box")
+			if err := a.sbOrch.ReloadNow(); err != nil {
+				a.bootLog.Warn("ruleset-fork-migration", "reload", err.Error())
+			}
+		}
 	}
 	// Legacy download-proxy slot (35-download-proxy.json) is no longer used
 	// by the downloader, but disable it on boot in case a previous awgm

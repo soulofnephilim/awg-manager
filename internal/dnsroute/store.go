@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -54,9 +55,11 @@ func (s *Store) Load() (*StoreData, error) {
 	migrateLegacyExcludes(&data)
 	migrateRawEditorText(&data)
 	dropped := dropLegacyHRRows(&data)
+	forkMigrated := migrateRuleSetSubscriptionURLs(&data)
+	discordMigrated := migrateDiscordDNSSubnet(&data)
 
 	s.data = &data
-	if dropped > 0 {
+	if dropped > 0 || forkMigrated || discordMigrated {
 		// Persist the cleanup so the file itself is cleaned, not just the
 		// in-memory cache. Best-effort: on write error the cache is already
 		// clean and the next Save() rewrites disk — failing startup over
@@ -66,6 +69,111 @@ func (s *Store) Load() (*StoreData, error) {
 		_ = s.writeLocked(&data)
 	}
 	return s.data, nil
+}
+
+// migrateRuleSetSubscriptionURLs rewrites snapshotted vernette subscription
+// URLs to the repo.hoaxisr.ru mirror (raw.githubusercontent.com заблокирован
+// у части провайдеров — awgm#534). Returns true if any URL changed (caller
+// persists). Idempotent — after the swap no vernette prefix remains.
+func migrateRuleSetSubscriptionURLs(data *StoreData) bool {
+	if data == nil {
+		return false
+	}
+	// Якорь на начало URL: proxy-обёрнутый пользовательский workaround
+	// ("https://ghproxy.com/https://github.com/vernette/...") не трогаем —
+	// замена сделала бы его нерабочим гибридом.
+	const old = "https://github.com/vernette/rulesets/raw/master/"
+	const next = "https://repo.hoaxisr.ru/rulesets/"
+	changed := false
+	for i := range data.Lists {
+		subs := data.Lists[i].Subscriptions
+		for j := range subs {
+			if rest, ok := strings.CutPrefix(subs[j].URL, old); ok {
+				subs[j].URL = next + rest
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// discordDNSSignature — домены, однозначно метящие применённый из пресета
+// Discord DNS-список. Совпадение ВСЕХ → это Discord.
+var discordDNSSignature = []string{"discord.com", "discordapp.com"}
+
+// ponytail: одноразовый data-specific хардкод. CIDR продублирован в трёх местах
+// (форк .srs, defaults.json после регена, эта константа) — расходятся
+// независимо. Это закрывает разрыв propagation для уже-применённых DNS-списков
+// Discord; следующая правка данных потребует своей такой миграции. Upgrade-path:
+// добавить provenance (presetId) в DomainList и общий reconcile catalog→applied,
+// тогда эти разовые миграции не нужны.
+const discordNewCIDR = "104.29.0.0/16"
+
+// migrateDiscordDNSSubnet дописывает новый CIDR Discord в применённые DNS-списки,
+// которые его ещё не содержат. Матч по доменной сигнатуре (provenance к пресету
+// нет). Additive: ничего не удаляет. Обновляет Subnets (активно сразу) и
+// ManualDomains/ManualText (переживёт ре-сейв редактора). Возвращает true, если
+// что-то изменено (caller персистит). Идемпотентно.
+func migrateDiscordDNSSubnet(data *StoreData) bool {
+	if data == nil {
+		return false
+	}
+	changed := false
+	for i := range data.Lists {
+		list := &data.Lists[i]
+		// isHydraRoute-гард в текущем порядке Load недостижим (dropLegacyHRRows
+		// уже удалил HR-строки) — оставлен defensive на случай изменения порядка
+		// миграций или прямого вызова.
+		if isHydraRoute(list.Backend) || !hasDiscordSignature(list) {
+			continue
+		}
+		if !slices.Contains(list.Subnets, discordNewCIDR) && len(list.Subnets) < MaxSubnetsPerList {
+			list.Subnets = append(list.Subnets, discordNewCIDR)
+			changed = true
+		}
+		if !slices.Contains(list.ManualDomains, discordNewCIDR) {
+			list.ManualDomains = append(list.ManualDomains, discordNewCIDR)
+			changed = true
+		}
+		if list.ManualText != nil && !strings.Contains(*list.ManualText, discordNewCIDR) {
+			updated := strings.TrimRight(*list.ManualText, "\n")
+			if updated == "" {
+				updated = discordNewCIDR
+			} else {
+				updated += "\n" + discordNewCIDR
+			}
+			list.ManualText = &updated
+			changed = true
+		}
+	}
+	return changed
+}
+
+// hasDiscordSignature: домены списка (Domains ∪ ManualDomains ∪ строки ManualText)
+// содержат все сигнатурные домены Discord.
+func hasDiscordSignature(list *DomainList) bool {
+	have := make(map[string]bool, len(list.Domains)+len(list.ManualDomains))
+	for _, d := range list.Domains {
+		have[d] = true
+	}
+	for _, d := range list.ManualDomains {
+		have[d] = true
+	}
+	if list.ManualText != nil {
+		for _, line := range strings.Split(*list.ManualText, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			have[line] = true
+		}
+	}
+	for _, sig := range discordDNSSignature {
+		if !have[sig] {
+			return false
+		}
+	}
+	return true
 }
 
 // migrateLegacyExcludes splits any CIDR-shaped entries out of Excludes
