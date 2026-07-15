@@ -489,7 +489,7 @@ const MOCK_CONNECTIONS_POOL = (() => {
 		const tunnelId = tunnel?.id ?? '';
 		const tunnelName =
 			tunnel?.name ?? (routeClass === 'singbox' ? 'sing-box' : routeClass === 'local' ? 'Локально' : 'Direct');
-		const iface = routeClass === 'local' ? '' : (tunnel?.interfaceName ?? 'eth3');
+		const iface = (routeClass === 'local' || routeClass === 'singbox') ? '' : (tunnel?.interfaceName ?? 'eth3');
 		const proto = protos[i % protos.length];
 		const srcHost = directNames[i % directNames.length];
 		const srcA = 192;
@@ -510,7 +510,7 @@ const MOCK_CONNECTIONS_POOL = (() => {
 			bytes: (100 + i * 337) + (200 + i * 774),
 			bytesOut: 100 + i * 337,
 			bytesIn: 200 + i * 774,
-			ttl: 30 + ((i * 37) % 1170),
+			ttl: i % 13 === 0 ? 0 : 30 + ((i * 37) % 1170),
 			routeClass,
 			interface: iface,
 			tunnelId,
@@ -518,7 +518,11 @@ const MOCK_CONNECTIONS_POOL = (() => {
 			clientMac: `AA:BB:CC:DD:EE:${String((10 + i) % 99).padStart(2, '0')}`,
 			clientName: srcHost,
 			rules: tunneled
-				? [{ listId: `list-${(i % 4) + 1}`, listName: ['YouTube', 'Discord', 'OpenAI', 'GitHub'][i % 4] }]
+				? [{
+					listId: `list-${(i % 4) + 1}`,
+					listName: ['YouTube', 'Discord', 'OpenAI', 'GitHub'][i % 4],
+					...(i % 3 !== 0 && { fqdn: ['m.youtube.com', 'gateway.discord.gg', 'api.openai.com', 'github.com'][i % 4] })
+				}]
 				: [],
 		});
 	}
