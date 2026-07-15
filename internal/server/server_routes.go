@@ -585,7 +585,13 @@ func (s *Server) registerDiagnosticsRoutes(mux *http.ServeMux, h *routeHandlers)
 	}
 
 	// Connections viewer (protected)
-	mux.HandleFunc("/api/connections", h.guarded(h.connectionsHandler.List))
+	mux.HandleFunc("/api/connections", h.guarded(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			h.connectionsHandler.Kill(w, r)
+			return
+		}
+		h.connectionsHandler.List(w, r)
+	}))
 
 	// NDMS save-coordinator status (protected) — polled by the header
 	// save indicator. SaveCoordinator emits a resource:invalidated hint

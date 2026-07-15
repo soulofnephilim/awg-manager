@@ -208,6 +208,15 @@ const api_ConnectionBucketDTO: v.GenericSchema = v.looseObject({
 	label: v.optional(v.nullable(v.string())),
 });
 
+const api_ConnectionKillData: v.GenericSchema = v.looseObject({
+	ok: v.optional(v.nullable(v.boolean())),
+});
+
+const api_ConnectionKillEnvelope: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_ConnectionKillData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
 const api_ConnectionProtocolsDTO: v.GenericSchema = v.looseObject({
 	icmp: v.optional(v.nullable(v.number())),
 	tcp: v.optional(v.nullable(v.number())),
@@ -2347,6 +2356,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"DELETE /access-policies/assign": v.lazy(() => api_OkResponse),
 	"DELETE /access-policies/delete": v.lazy(() => api_OkResponse),
 	"DELETE /access-policies/permit": v.lazy(() => api_OkResponse),
+	"DELETE /connections": v.lazy(() => api_ConnectionKillEnvelope),
 	"DELETE /hydraroute/geo-files/delete": v.lazy(() => api_OkResponse),
 	"DELETE /managed-servers/{id}": v.lazy(() => api_ServersAllResponse),
 	"DELETE /managed-servers/{id}/peers/{pubkey}": v.lazy(() => api_ServersAllResponse),

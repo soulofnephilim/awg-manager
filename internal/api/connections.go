@@ -1,8 +1,10 @@
 package api
 
 import (
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/connections"
 	"github.com/hoaxisr/awg-manager/internal/response"
@@ -161,4 +163,59 @@ func (h *ConnectionsHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.Success(w, resp)
+}
+
+// ConnectionKillData is the payload for DELETE /connections.
+type ConnectionKillData struct {
+	OK bool `json:"ok" example:"true"`
+}
+
+// ConnectionKillEnvelope is the envelope for DELETE /connections.
+type ConnectionKillEnvelope struct {
+	Success bool               `json:"success" example:"true"`
+	Data    ConnectionKillData `json:"data"`
+}
+
+// Kill deletes one conntrack entry by its 5-tuple.
+//
+//	@Summary		Kill connection
+//	@Tags			connections
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			src		query	string	true	"source IP"
+//	@Param			dst		query	string	true	"destination IP"
+//	@Param			srcPort	query	int		true	"source port"
+//	@Param			dstPort	query	int		true	"destination port"
+//	@Param			protocol	query	string	true	"tcp | udp"
+//	@Success		200	{object}	ConnectionKillEnvelope
+//	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		500	{object}	APIErrorEnvelope
+//	@Router			/connections [delete]
+func (h *ConnectionsHandler) Kill(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	p := connections.KillParams{
+		Src:      q.Get("src"),
+		Dst:      q.Get("dst"),
+		Protocol: strings.ToLower(q.Get("protocol")),
+	}
+	srcPort, err1 := strconv.Atoi(q.Get("srcPort"))
+	dstPort, err2 := strconv.Atoi(q.Get("dstPort"))
+	if err1 != nil || err2 != nil ||
+		srcPort < 0 || srcPort > 65535 || dstPort < 0 || dstPort > 65535 ||
+		net.ParseIP(p.Src) == nil || net.ParseIP(p.Dst) == nil {
+		response.BadRequest(w, "invalid kill parameters")
+		return
+	}
+	if p.Protocol != "tcp" && p.Protocol != "udp" {
+		response.BadRequest(w, "protocol must be tcp or udp")
+		return
+	}
+	p.SrcPort, p.DstPort = srcPort, dstPort
+
+	if err := connections.Kill(p); err != nil {
+		response.ErrorWithStatus(w, http.StatusInternalServerError,
+			"Failed to kill connection", "CONNTRACK_KILL_FAILED")
+		return
+	}
+	response.Success(w, ConnectionKillData{OK: true})
 }

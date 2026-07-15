@@ -456,6 +456,29 @@ export class SystemClient extends TunnelsClient {
 		return this.request<ConnectionsResponse>(`/connections${qs ? '?' + qs : ''}`);
 	}
 
+	/** Сброс conntrack-записи. true = удалено (или уже истекло), false = ошибка. */
+	async killConnection(c: {
+		src: string;
+		dst: string;
+		srcPort: number;
+		dstPort: number;
+		protocol: string;
+	}): Promise<boolean> {
+		const sp = new URLSearchParams({
+			src: c.src,
+			dst: c.dst,
+			srcPort: String(c.srcPort),
+			dstPort: String(c.dstPort),
+			protocol: c.protocol,
+		});
+		try {
+			await this.request(`/connections?${sp}`, { method: 'DELETE' });
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	// #endregion
 
 

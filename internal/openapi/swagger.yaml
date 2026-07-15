@@ -535,6 +535,20 @@ definitions:
         example: Напрямую
         type: string
     type: object
+  api.ConnectionKillData:
+    properties:
+      ok:
+        example: true
+        type: boolean
+    type: object
+  api.ConnectionKillEnvelope:
+    properties:
+      data:
+        $ref: '#/definitions/api.ConnectionKillData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.ConnectionProtocolsDTO:
     properties:
       icmp:
@@ -7061,6 +7075,53 @@ paths:
       tags:
       - client-routes
   /connections:
+    delete:
+      parameters:
+      - description: source IP
+        in: query
+        name: src
+        required: true
+        type: string
+      - description: destination IP
+        in: query
+        name: dst
+        required: true
+        type: string
+      - description: source port
+        in: query
+        name: srcPort
+        required: true
+        type: integer
+      - description: destination port
+        in: query
+        name: dstPort
+        required: true
+        type: integer
+      - description: tcp | udp
+        in: query
+        name: protocol
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ConnectionKillEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Kill connection
+      tags:
+      - connections
     get:
       produces:
       - application/json
