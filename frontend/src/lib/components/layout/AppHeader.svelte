@@ -23,7 +23,10 @@
 			href: '/',
 			label: 'ТУННЕЛИ',
 			matches: (p) =>
-				p === '/' || p.startsWith('/tunnels') || p.startsWith('/system-tunnels'),
+				p === '/' ||
+				p.startsWith('/tunnels') ||
+				p.startsWith('/system-tunnels') ||
+				p.startsWith('/freeturn'),
 		},
 		{
 			section: 'servers',
@@ -48,12 +51,6 @@
 			href: '/settings',
 			label: 'НАСТРОЙКИ',
 			matches: (p) => p.startsWith('/settings'),
-		},
-		{
-			section: 'freeturn',
-			href: '/freeturn',
-			label: 'FREETURN',
-			matches: (p) => p.startsWith('/freeturn'),
 		},
 	];
 
