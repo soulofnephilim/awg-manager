@@ -80,9 +80,6 @@ func (a *app) setupNDMS() {
 	a.ndmsTransportClient = ndmstransport.New(ndmsSem)
 	a.ndmsTransportClient.SetAppLogger(a.loggingService)
 	a.deferOnExit(a.ndmsTransportClient.Close) // graceful batcher shutdown — финальный flush pending'а
-	// ВРЕМЕННЫЙ perf-dumper: раз в минуту печатает RCI counters в app-log.
-	// Удалить после анализа perf-сессии 2026-05-23.
-	a.ndmsTransportClient.StartPerfDumper(context.Background(), time.Minute)
 
 	a.ndmsQueries = ndmsquery.NewQueries(ndmsquery.Deps{
 		Getter: a.ndmsTransportClient,
