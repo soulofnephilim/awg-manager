@@ -34,6 +34,7 @@
 	import { subscriptionsStore } from '$lib/stores/subscriptions';
 	import SubscriptionsTabSection from '$lib/components/subscriptions/SubscriptionsTabSection.svelte';
 	import SingboxTunnelsTabSection from '$lib/components/singbox/SingboxTunnelsTabSection.svelte';
+	import { FreeTurnTab } from '$lib/components/freeturn';
 	import AwgTunnelsTabSection from '$lib/components/tunnels/AwgTunnelsTabSection.svelte';
 	import DashboardFlatSection from '$lib/components/tunnels/DashboardFlatSection.svelte';
 	import TunnelPageModals from '$lib/components/tunnels/TunnelPageModals.svelte';
@@ -109,7 +110,7 @@
 		type SubscriptionSortKey,
 	} from '$lib/stores/tunnelTableSort';
 
-	type TunnelTab = 'awg' | 'singbox' | 'subscriptions';
+	type TunnelTab = 'awg' | 'singbox' | 'subscriptions' | 'freeturn';
 	type AwgTunnelViewMode = 'cards' | 'compact' | 'list';
 	type TunnelSurfaceLayout = SingboxLayoutMode | 'cards';
 
@@ -652,7 +653,10 @@
 			isSectionVisible($usageLevel, 'singboxTunnels')
 				? { id: 'subscriptions', label: 'Sing-box подписки', badge: subscriptionsList.length }
 				: null,
-		].filter((t): t is { id: string; label: string; badge: number } => t !== null),
+			isSectionVisible($usageLevel, 'freeturn')
+				? { id: 'freeturn', label: 'FreeTurn' }
+				: null,
+		].filter((t): t is { id: string; label: string; badge?: number } => t !== null),
 	);
 
 	// Auto-switch off sing-box tab if it becomes hidden (basic mode).
@@ -1295,6 +1299,9 @@
 				dashboardSingboxVisible &&
 				(subscriptionsInitialLoading || subscriptionsFetchFailed)),
 	);
+	// FreeTurn — настройки/статус, не туннельные карточки: в dashboard-режиме
+	// (плоские карточки, табов нет) вкладка недоступна — как и «подписки».
+	let showFreeturnBlock = $derived(!dashboardOn && activeTab === 'freeturn');
 
 	// Единый класс сетки для сплошного и тегового карточных видов — классы
 	// плотности не могут разъехаться между двумя разметками.
@@ -1597,6 +1604,10 @@
 				{openWizard}
 				{requestSubscriptionDelete}
 			/>
+		{/if}
+
+		{#if showFreeturnBlock}
+			<FreeTurnTab />
 		{/if}
 	{/if}
 </PageContainer>

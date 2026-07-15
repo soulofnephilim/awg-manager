@@ -32,6 +32,7 @@ type routeHandlers struct {
 	importHandler       *api.ImportHandler
 	wanHandler          *api.WANHandler
 	pingCheckHandler    *api.PingCheckHandler
+	freeturnHandler     *api.FreeTurnHandler
 	loggingHandler      *api.LoggingHandler
 	externalHandler     *api.ExternalTunnelsHandler
 	updateHandler       *api.UpdateHandler
@@ -150,6 +151,8 @@ func (s *Server) buildRouteHandlers() *routeHandlers {
 	h.terminalHandler = api.NewTerminalHandler(s.terminalManager, s.loggingService)
 
 	h.eventsHandler = api.NewEventsHandler(s.bus, s.instanceID)
+
+	h.freeturnHandler = api.NewFreeTurnHandler(s.freeturnService)
 
 	// Auth middleware helper
 	h.guarded = s.authMiddleware.RequireAuthFunc
@@ -360,6 +363,19 @@ func (s *Server) registerSettingsRoutes(mux *http.ServeMux, h *routeHandlers) {
 		}
 	}))
 	mux.HandleFunc("/api/tunnels/pingcheck/remove", h.guarded(h.pingCheckHandler.RemoveTunnelPingCheck))
+
+	// FreeTurn (protected)
+	mux.HandleFunc("/api/freeturn/config", h.guarded(h.freeturnHandler.GetConfig))
+	mux.HandleFunc("/api/freeturn/client/config", h.guarded(h.freeturnHandler.UpdateClientConfig))
+	mux.HandleFunc("/api/freeturn/server/config", h.guarded(h.freeturnHandler.UpdateServerConfig))
+	mux.HandleFunc("/api/freeturn/status", h.guarded(h.freeturnHandler.GetStatus))
+	mux.HandleFunc("/api/freeturn/client/start", h.guarded(h.freeturnHandler.StartClient))
+	mux.HandleFunc("/api/freeturn/client/stop", h.guarded(h.freeturnHandler.StopClient))
+	mux.HandleFunc("/api/freeturn/server/start", h.guarded(h.freeturnHandler.StartServer))
+	mux.HandleFunc("/api/freeturn/server/stop", h.guarded(h.freeturnHandler.StopServer))
+	mux.HandleFunc("/api/freeturn/server/link", h.guarded(h.freeturnHandler.GenerateLink))
+	mux.HandleFunc("/api/freeturn/link/decode", h.guarded(h.freeturnHandler.DecodeLink))
+	mux.HandleFunc("/api/freeturn/install", h.guarded(h.freeturnHandler.Install))
 
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/deviceproxy"
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
 	"github.com/hoaxisr/awg-manager/internal/events"
+	"github.com/hoaxisr/awg-manager/internal/freeturn"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
@@ -118,6 +119,7 @@ type app struct {
 	testService         *testing.Service
 	pingCheckService    *pingcheck.Service
 	pingCheckFacade     *pingcheck.Facade
+	freeturnService     *freeturn.Service
 	monitoringService   *monitoring.Service
 	keeneticClient      *auth.KeeneticClient
 	sessionStore        *auth.SessionStore
