@@ -7,6 +7,7 @@
 	import type { FreeTurnConfig, FreeTurnClientConfig, FreeTurnServerConfig, FreeTurnStatus } from '$lib/types';
 	import ClientPanel from './ClientPanel.svelte';
 	import ServerPanel from './ServerPanel.svelte';
+	import StatusStrip from './StatusStrip.svelte';
 
 	// Оркестратор вкладки FreeTurn на главной: владеет API-вызовами,
 	// конфигом и поллингом статуса; панели — чистый UI на props/callbacks.
@@ -22,9 +23,6 @@
 	let savedConfig: FreeTurnConfig | null = $state(null);
 
 	let expanded: string | null = $state(null);
-	let importOpen = $state(false);
-	let genOpen = $state(false);
-	let logOpen = $state(false);
 
 	let importing = $state(false);
 	let importedWG: string | null = $state(null);
@@ -47,20 +45,11 @@
 		return e instanceof Error ? e.message : String(e ?? '');
 	}
 
-	const ftTabs = $derived.by(() => [
-		{
-			id: 'client',
-			label: 'Клиент',
-			badge: status?.client.running ? 'вкл' : undefined,
-			badgeTone: 'success' as const
-		},
-		{
-			id: 'server',
-			label: 'Сервер',
-			badge: status?.server.running ? 'вкл' : undefined,
-			badgeTone: 'success' as const
-		}
-	]);
+	// Бейджи «вкл» не нужны: состояние обоих процессов всегда видно в пульте сверху.
+	const ftTabs = [
+		{ id: 'client', label: 'Клиент' },
+		{ id: 'server', label: 'Сервер' }
+	];
 
 	onMount(async () => {
 		routerHost = window.location.hostname;
@@ -286,13 +275,19 @@
 	}
 </script>
 
+<StatusStrip
+	client={status?.client}
+	server={status?.server}
+	onToggleClient={toggleClient}
+	onToggleServer={toggleServer}
+/>
+
 <Tabs
 	tabs={ftTabs}
 	active={ftTab}
 	onchange={(id) => {
 		ftTab = id as FtTab;
 		expanded = null;
-		logOpen = false;
 	}}
 	urlParam="ft"
 	defaultTab="client"
@@ -313,10 +308,7 @@
 		installVersion={status?.installVersion}
 		installing={installing || (status?.installing ?? false)}
 		bind:expanded
-		bind:importOpen
-		bind:logOpen
 		onInstall={install}
-		onToggle={toggleClient}
 		onSave={() => saveClientConfig(config!.client)}
 		onRevert={revertClient}
 		onImport={applyImportLink}
@@ -342,9 +334,6 @@
 		bind:genClientId
 		bind:genName
 		bind:expanded
-		bind:genOpen
-		bind:logOpen
-		onToggle={toggleServer}
 		onSave={() => saveServerConfig(config!.server)}
 		onRevert={revertServer}
 		onGenerate={generateLink}

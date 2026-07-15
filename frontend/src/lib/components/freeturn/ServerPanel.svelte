@@ -1,11 +1,10 @@
 <script lang="ts">
 	import { Input, Button, Dropdown } from '$lib/components/ui';
+	import { pluralize } from '$lib/utils/pluralize';
 	import type { FreeTurnServerConfig, FreeTurnProcessStatus } from '$lib/types';
-	import ProcessHero from './ProcessHero.svelte';
-	import UnsavedBar from './UnsavedBar.svelte';
+	import ProcessAlerts from './ProcessAlerts.svelte';
 	import SettingRows from './SettingRows.svelte';
 	import SettingRow from './SettingRow.svelte';
-	import { formatUptime } from './uptime';
 	import { changedKeys } from './dirty';
 	import { modeOptions, obfOptions } from './options';
 
@@ -28,10 +27,7 @@
 		genClientId: string;
 		genName: string;
 		expanded: string | null;
-		genOpen: boolean;
-		logOpen: boolean;
 		onInstall: () => void;
-		onToggle: (on: boolean) => void;
 		onSave: () => void;
 		onRevert: () => void;
 		onGenerate: (provider: string, mtu: number, wg: string, clientId: string, name: string) => void;
@@ -56,10 +52,7 @@
 		genClientId = $bindable(),
 		genName = $bindable(),
 		expanded = $bindable(),
-		genOpen = $bindable(),
-		logOpen = $bindable(),
 		onInstall,
-		onToggle,
 		onSave,
 		onRevert,
 		onGenerate,
@@ -84,72 +77,117 @@
 		return keys.some((k) => dirtyKeys.includes(k));
 	}
 
-	const metaParts = $derived(
+	const listenSummary = $derived(`${server.listen || '—'} · ${server.mode}`);
+
+	const forwardSummary = $derived(
 		[
-			formatUptime(status?.startedAt),
-			status?.pid ? `PID ${status.pid}` : '',
-			server.mode,
-			server.obfProfile
-		].filter(Boolean)
+			server.connect || '—',
+			server.obfProfile,
+			`allowlist ${server.clientsFile ? 'вкл' : 'выкл'}`
+		].join(' · ')
 	);
 
-	function toggleRow(id: string) {
+	const logLines = $derived(status?.log ? status.log.trim().split('\n').length : 0);
+
+	function toggleSection(id: string) {
 		expanded = expanded === id ? null : id;
 	}
 </script>
 
-<ProcessHero
-	title="Сервер"
-	{status}
-	{metaParts}
-	actionLabel="Ссылка для клиента"
-	{logOpen}
-	{installAvailable}
-	{installVersion}
-	{installing}
-	{onInstall}
-	onAction={() => (genOpen = !genOpen)}
-	{onToggle}
-	onToggleLog={() => (logOpen = !logOpen)}
-/>
+<ProcessAlerts {status} {installAvailable} {installVersion} {installing} {onInstall} />
 
-{#if dirtyCount > 0}
-	<UnsavedBar count={dirtyCount} target="сервера" {saving} {onSave} {onRevert} />
-{/if}
+<div class="ft-panel-accent">
+	<div class="section-label">Ссылка для клиента</div>
+	<div class="ft-gen-row">
+		<Input label="Провайдер" bind:value={genProvider} placeholder="vk" />
+		<Input
+			label="MTU"
+			type="number"
+			value={String(genMTU)}
+			onchange={(v) => (genMTU = Number(v) || 1376)}
+		/>
+		<Button
+			variant="primary"
+			size="sm"
+			loading={generating}
+			onclick={() => onGenerate(genProvider, genMTU, genWG, genClientId, genName)}
+		>
+			Сгенерировать
+		</Button>
+	</div>
+	<p class="ft-hint">
+		Соберёт freeturn:// ссылку из обфускации/ключа сервера ниже и внешнего IP роутера —
+		передавайте её только доверенному получателю
+	</p>
+	{#if server.clientsFile}
+		<p class="ft-hint">
+			У сервера включён allowlist (-clients-file): без Client ID в ссылке (раздел ниже)
+			сервер отклонит подключение получателя. Ссылка сама ничего не регистрирует —
+			добавьте ID на сервере отдельно
+		</p>
+	{/if}
+
+	<button type="button" class="ft-gen-more" onclick={() => (genMore = !genMore)}>
+		{genMore ? '−' : '+'} Client ID и WireGuard-конфиг
+	</button>
+	{#if genMore}
+		<div class="ft-gen-grid">
+			<Input bind:value={genClientId} placeholder="Client ID — пусто, если allowlist не используется" />
+			<Input bind:value={genName} placeholder="комментарий (например, имя получателя)" />
+		</div>
+		<div class="ft-gen-idrow">
+			<Button variant="ghost" size="sm" onclick={randomClientId}>Сгенерировать ID</Button>
+		</div>
+		<textarea
+			class="field-textarea ft-textarea"
+			bind:value={genWG}
+			placeholder="Вставьте сюда конфиг WireGuard-клиента, если хотите передать его вместе со ссылкой..."
+		></textarea>
+		<p class="ft-hint">
+			Внимание: конфиг (включая приватный ключ WireGuard) вкладывается в ссылку в открытом виде
+			(base64, без шифрования) — передавайте её только доверенному получателю по защищённому каналу
+		</p>
+	{/if}
+
+	{#if generatedLink}
+		<div class="ft-result">
+			<div class="section-label">Готовая ссылка ({generatedPeer})</div>
+			<div class="ft-link-box">{generatedLink}</div>
+			<Button variant="ghost" size="sm" onclick={() => onCopy(generatedLink)}>
+				Скопировать в буфер
+			</Button>
+			{#if generatedClientId && server.clientsFile}
+				<p class="ft-hint" style="margin-top: 0.625rem">
+					У сервера включён allowlist — прежде чем отдавать эту ссылку, зарегистрируйте
+					Client ID <code>{generatedClientId}</code> в <code>{server.clientsFile}</code> по SSH:
+					бинарь сервера умеет <code>clients add {generatedClientId} "{genName || 'client'}"</code>
+					(укажите путь к файлу через переменную окружения <code>CLIENTS_FILE</code>, если бинарь
+					запускается не из той же директории)
+				</p>
+			{/if}
+		</div>
+	{/if}
+</div>
 
 <SettingRows>
 	<SettingRow
 		id="listen"
-		group="Приём подключений"
-		label="Слушать"
-		flag="-listen"
-		summary={server.listen || '—'}
-		dirty={changed('listen')}
+		label="Приём подключений"
+		summary={listenSummary}
+		dirty={changed('listen', 'mode')}
 		expanded={expanded === 'listen'}
-		ontoggle={toggleRow}
+		ontoggle={toggleSection}
 	>
 		<Input label="Слушать (-listen)" bind:value={server.listen} placeholder="0.0.0.0:56000" />
-	</SettingRow>
-	<SettingRow
-		id="smode"
-		label="Режим"
-		flag="-mode"
-		summary={server.mode}
-		dirty={changed('mode')}
-		expanded={expanded === 'smode'}
-		ontoggle={toggleRow}
-	>
 		<Dropdown label="Режим (-mode)" bind:value={server.mode} options={modeOptions} />
 	</SettingRow>
 	<SettingRow
-		id="connect"
-		group="Форвардинг и доступ"
-		label="Backend-адрес"
-		flag="-connect"
-		summary={server.connect || '—'}
-		dirty={changed('connect')}
-		expanded={expanded === 'connect'}
-		ontoggle={toggleRow}
+		id="forward"
+		label="Форвардинг и доступ"
+		summary={forwardSummary}
+		dirty={changed('connect', 'obfProfile', 'obfKey', 'clientsFile')}
+		expanded={expanded === 'forward'}
+		ontoggle={toggleSection}
 	>
 		<div class="ft-span">
 			<Input label="Backend-адрес (-connect)" bind:value={server.connect} placeholder="127.0.0.1:51820" />
@@ -157,16 +195,6 @@
 				WireGuard — обычно 127.0.0.1:51820, Xray — 127.0.0.1:443
 			</p>
 		</div>
-	</SettingRow>
-	<SettingRow
-		id="sobf"
-		label="Обфускация"
-		flag="-obf-profile / -obf-key"
-		summary={`${server.obfProfile}${server.obfKey ? ' · ключ задан' : ''}`}
-		dirty={changed('obfProfile', 'obfKey')}
-		expanded={expanded === 'sobf'}
-		ontoggle={toggleRow}
-	>
 		<Dropdown label="Профиль (-obf-profile)" bind:value={server.obfProfile} options={obfOptions} />
 		<Input
 			label="Ключ обфускации (-obf-key)"
@@ -174,16 +202,6 @@
 			bind:value={server.obfKey}
 			placeholder="64 hex-символа"
 		/>
-	</SettingRow>
-	<SettingRow
-		id="clientsFile"
-		label="Allowlist клиентов"
-		flag="-clients-file"
-		summary={server.clientsFile ? 'вкл' : 'выкл'}
-		dirty={changed('clientsFile')}
-		expanded={expanded === 'clientsFile'}
-		ontoggle={toggleRow}
-	>
 		<div class="ft-span">
 			<Input
 				label="Файл allowlist клиентов (-clients-file)"
@@ -192,82 +210,30 @@
 			/>
 		</div>
 	</SettingRow>
+	<SettingRow
+		id="log"
+		label="Лог процесса"
+		summary={logLines ? pluralize(logLines, ['строка', 'строки', 'строк']) : 'пусто'}
+		expanded={expanded === 'log'}
+		ontoggle={toggleSection}
+	>
+		<pre class="ft-log-box ft-span">{status?.log || 'лог пуст'}</pre>
+	</SettingRow>
 </SettingRows>
 
-{#if genOpen}
-	<div class="ft-panel-accent">
-		<div class="section-label">Ссылка для клиента</div>
-		<div class="ft-gen-row">
-			<Input label="Провайдер" bind:value={genProvider} placeholder="vk" />
-			<Input
-				label="MTU"
-				type="number"
-				value={String(genMTU)}
-				onchange={(v) => (genMTU = Number(v) || 1376)}
-			/>
-			<Button
-				variant="primary"
-				size="sm"
-				loading={generating}
-				onclick={() => onGenerate(genProvider, genMTU, genWG, genClientId, genName)}
-			>
-				Сгенерировать
-			</Button>
-		</div>
-		<p class="ft-hint">
-			Соберёт freeturn:// ссылку из обфускации/ключа сервера выше и внешнего IP роутера —
-			передавайте её только доверенному получателю
-		</p>
-		{#if server.clientsFile}
-			<p class="ft-hint">
-				У сервера включён allowlist (-clients-file): без Client ID в ссылке (раздел ниже)
-				сервер отклонит подключение получателя. Ссылка сама ничего не регистрирует —
-				добавьте ID на сервере отдельно
-			</p>
-		{/if}
-
-		<button type="button" class="ft-gen-more" onclick={() => (genMore = !genMore)}>
-			{genMore ? '−' : '+'} Client ID и WireGuard-конфиг
-		</button>
-		{#if genMore}
-			<div class="ft-gen-grid">
-				<Input bind:value={genClientId} placeholder="Client ID — пусто, если allowlist не используется" />
-				<Input bind:value={genName} placeholder="комментарий (например, имя получателя)" />
-			</div>
-			<div class="ft-gen-idrow">
-				<Button variant="ghost" size="sm" onclick={randomClientId}>Сгенерировать ID</Button>
-			</div>
-			<textarea
-				class="field-textarea ft-textarea"
-				bind:value={genWG}
-				placeholder="Вставьте сюда конфиг WireGuard-клиента, если хотите передать его вместе со ссылкой..."
-			></textarea>
-			<p class="ft-hint">
-				Внимание: конфиг (включая приватный ключ WireGuard) вкладывается в ссылку в открытом виде
-				(base64, без шифрования) — передавайте её только доверенному получателю по защищённому каналу
-			</p>
-		{/if}
-
-		{#if generatedLink}
-			<div class="ft-result">
-				<div class="section-label">Готовая ссылка ({generatedPeer})</div>
-				<div class="ft-link-box">{generatedLink}</div>
-				<Button variant="ghost" size="sm" onclick={() => onCopy(generatedLink)}>
-					Скопировать в буфер
-				</Button>
-				{#if generatedClientId && server.clientsFile}
-					<p class="ft-hint" style="margin-top: 0.625rem">
-						У сервера включён allowlist — прежде чем отдавать эту ссылку, зарегистрируйте
-						Client ID <code>{generatedClientId}</code> в <code>{server.clientsFile}</code> по SSH:
-						бинарь сервера умеет <code>clients add {generatedClientId} "{genName || 'client'}"</code>
-						(укажите путь к файлу через переменную окружения <code>CLIENTS_FILE</code>, если бинарь
-						запускается не из той же директории)
-					</p>
-				{/if}
-			</div>
-		{/if}
-	</div>
-{/if}
+<div class="ft-footer">
+	{#if dirtyCount > 0}
+		<span class="ft-dirty-note">
+			{pluralize(dirtyCount, [
+				'несохранённое изменение',
+				'несохранённых изменения',
+				'несохранённых изменений'
+			])} — применятся после перезапуска сервера
+		</span>
+		<Button variant="ghost" size="sm" onclick={onRevert}>Отменить</Button>
+	{/if}
+	<Button variant="primary" size="sm" loading={saving} onclick={onSave}>Сохранить</Button>
+</div>
 
 <style>
 	.ft-panel-accent {
@@ -275,7 +241,7 @@
 		background: var(--color-bg-secondary);
 		border: 1px solid var(--color-accent-border);
 		border-radius: var(--radius);
-		margin-bottom: 0.625rem;
+		margin-bottom: 0.875rem;
 	}
 
 	.ft-gen-row {
@@ -336,6 +302,21 @@
 		margin: 0.375rem 0;
 	}
 
+	.ft-log-box {
+		max-height: 160px;
+		overflow-y: auto;
+		padding: 0.5rem 0.625rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-primary);
+		color: var(--color-text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		white-space: pre-wrap;
+		word-break: break-all;
+		margin: 0;
+	}
+
 	.ft-result {
 		margin-top: 0.875rem;
 		padding: 0.875rem;
@@ -349,6 +330,19 @@
 		font-size: 0.8125rem;
 		word-break: break-all;
 		margin-bottom: 0.625rem;
+	}
+
+	.ft-footer {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		flex-wrap: wrap;
+		gap: 0.625rem;
+	}
+
+	.ft-dirty-note {
+		font-size: 0.75rem;
+		color: var(--color-warning);
 	}
 
 	@media (max-width: 640px) {

@@ -2,11 +2,9 @@
 	import { Input, Button, Dropdown, FormToggle } from '$lib/components/ui';
 	import { pluralize } from '$lib/utils/pluralize';
 	import type { FreeTurnClientConfig, FreeTurnProcessStatus } from '$lib/types';
-	import ProcessHero from './ProcessHero.svelte';
-	import UnsavedBar from './UnsavedBar.svelte';
+	import ProcessAlerts from './ProcessAlerts.svelte';
 	import SettingRows from './SettingRows.svelte';
 	import SettingRow from './SettingRow.svelte';
-	import { formatUptime } from './uptime';
 	import { changedKeys } from './dirty';
 	import { modeOptions, transportOptions, obfOptions } from './options';
 
@@ -23,10 +21,7 @@
 		installVersion?: string;
 		installing: boolean;
 		expanded: string | null;
-		importOpen: boolean;
-		logOpen: boolean;
 		onInstall: () => void;
-		onToggle: (on: boolean) => void;
 		onSave: () => void;
 		onRevert: () => void;
 		onImport: (link: string) => void;
@@ -45,10 +40,7 @@
 		installVersion,
 		installing,
 		expanded = $bindable(),
-		importOpen = $bindable(),
-		logOpen = $bindable(),
 		onInstall,
-		onToggle,
 		onSave,
 		onRevert,
 		onImport,
@@ -68,98 +60,66 @@
 		client.links ? client.links.split(',').filter((s) => s.trim()).length : 0
 	);
 
-	function linksSummary(n: number): string {
-		return n ? pluralize(n, ['ссылка', 'ссылки', 'ссылок']) : '—';
-	}
-
-	const metaParts = $derived(
+	const turnSummary = $derived(
 		[
-			formatUptime(status?.startedAt),
-			status?.pid ? `PID ${status.pid}` : '',
-			`${client.mode} / ${client.transport}`,
-			client.obfProfile
-		].filter(Boolean)
+			client.peer || '—',
+			client.provider || '—',
+			linksCount ? pluralize(linksCount, ['ссылка', 'ссылки', 'ссылок']) : 'без ссылок'
+		].join(' · ')
 	);
 
-	function toggleRow(id: string) {
+	const tunnelSummary = $derived(
+		[
+			`${client.mode} / ${client.transport}`,
+			pluralize(client.streams, ['поток', 'потока', 'потоков']),
+			client.bond ? 'бондинг' : '',
+			client.listen || ''
+		]
+			.filter(Boolean)
+			.join(' · ')
+	);
+
+	const obfSummary = $derived(`${client.obfProfile}${client.obfKey ? ' · ключ задан' : ''}`);
+
+	const logLines = $derived(status?.log ? status.log.trim().split('\n').length : 0);
+
+	function toggleSection(id: string) {
 		expanded = expanded === id ? null : id;
 	}
 </script>
 
-<ProcessHero
-	title="Клиент"
-	{status}
-	{metaParts}
-	actionLabel="Импорт ссылки"
-	{logOpen}
-	{installAvailable}
-	{installVersion}
-	{installing}
-	{onInstall}
-	onAction={() => (importOpen = !importOpen)}
-	{onToggle}
-	onToggleLog={() => (logOpen = !logOpen)}
-/>
+<ProcessAlerts {status} {installAvailable} {installVersion} {installing} {onInstall} />
 
-{#if importOpen}
-	<div class="ft-panel-accent">
-		<div class="section-label">Импорт по ссылке freeturn://</div>
-		<div class="ft-import-row">
-			<Input bind:value={importLink} placeholder="freeturn://..." />
-			<Button variant="primary" size="sm" loading={importing} onclick={() => onImport(importLink)}>
-				Применить
-			</Button>
-			<Button variant="ghost" size="sm" onclick={() => (importOpen = false)}>Закрыть</Button>
-		</div>
-		<p class="ft-hint">
-			Заполнит поля ниже (сохранение — кнопкой «Сохранить») и, если в ссылке есть
-			WireGuard-конфиг, сразу создаст из него туннель во вкладке «AWG»
-		</p>
-		{#if importedWG}
-			<div class="section-label">WireGuard-конфиг из ссылки</div>
-			<textarea class="field-textarea ft-textarea" readonly value={importedWG}></textarea>
-			<Button variant="ghost" size="sm" onclick={() => onCopy(importedWG!)}>Скопировать конфиг</Button>
-		{/if}
+<div class="ft-panel-accent">
+	<div class="section-label">Импорт по ссылке freeturn://</div>
+	<div class="ft-import-row">
+		<Input bind:value={importLink} placeholder="freeturn://..." />
+		<Button variant="primary" size="sm" loading={importing} onclick={() => onImport(importLink)}>
+			Применить
+		</Button>
 	</div>
-{/if}
-
-{#if dirtyCount > 0}
-	<UnsavedBar count={dirtyCount} target="клиента" {saving} {onSave} {onRevert} />
-{/if}
+	<p class="ft-hint">
+		Заполнит поля ниже (сохранение — кнопкой «Сохранить») и, если в ссылке есть
+		WireGuard-конфиг, сразу создаст из него туннель во вкладке «AWG»
+	</p>
+	{#if importedWG}
+		<div class="section-label">WireGuard-конфиг из ссылки</div>
+		<textarea class="field-textarea ft-textarea" readonly value={importedWG}></textarea>
+		<Button variant="ghost" size="sm" onclick={() => onCopy(importedWG!)}>Скопировать конфиг</Button>
+	{/if}
+</div>
 
 <SettingRows>
 	<SettingRow
-		id="peer"
-		group="Подключение"
-		label="Адрес сервера"
-		flag="-peer"
-		summary={client.peer || '—'}
-		dirty={changed('peer')}
-		expanded={expanded === 'peer'}
-		ontoggle={toggleRow}
+		id="turn"
+		label="TURN-сервер и провайдер"
+		summary={turnSummary}
+		dirty={changed('peer', 'provider', 'links', 'streamsPerCred', 'manualCaptcha', 'clientId')}
+		expanded={expanded === 'turn'}
+		ontoggle={toggleSection}
 	>
 		<Input label="Адрес сервера (-peer)" bind:value={client.peer} placeholder="vinvanvlad.com:56000" />
-	</SettingRow>
-	<SettingRow
-		id="provider"
-		label="Провайдер"
-		flag="-provider"
-		summary={client.provider || '—'}
-		dirty={changed('provider')}
-		expanded={expanded === 'provider'}
-		ontoggle={toggleRow}
-	>
 		<Input label="Провайдер (-provider)" bind:value={client.provider} placeholder="vk" />
-	</SettingRow>
-	<SettingRow
-		id="links"
-		label="Ссылки VK Calls"
-		flag="-links"
-		summary={linksSummary(linksCount)}
-		dirty={changed('links')}
-		expanded={expanded === 'links'}
-		ontoggle={toggleRow}
-	>
 		<div class="ft-span">
 			<label class="ft-label" for="ft-c-links">Ссылки VK Calls, через запятую (-links)</label>
 			<textarea
@@ -174,16 +134,6 @@
 				TURN-кредов — больше суммарных потоков и меньше риск бана одного звонка
 			</p>
 		</div>
-	</SettingRow>
-	<SettingRow
-		id="vk"
-		label="VK: капча и креды"
-		flag="-streams-per-cred / -manual-captcha"
-		summary={`${client.streamsPerCred} на кред · капча ${client.manualCaptcha ? 'вручную' : 'авто'}`}
-		dirty={changed('streamsPerCred', 'manualCaptcha')}
-		expanded={expanded === 'vk'}
-		ontoggle={toggleRow}
-	>
 		<Input
 			label="Потоков на кред (-streams-per-cred)"
 			type="number"
@@ -202,77 +152,6 @@
 				от 22 — на Keenetic часто 222).
 			</p>
 		{/if}
-	</SettingRow>
-	<SettingRow
-		id="modeTransport"
-		group="Туннель и обфускация"
-		label="Режим и транспорт"
-		flag="-mode / -transport"
-		summary={`${client.mode} / ${client.transport}`}
-		dirty={changed('mode', 'transport', 'listen')}
-		expanded={expanded === 'modeTransport'}
-		ontoggle={toggleRow}
-	>
-		<Dropdown label="Режим (-mode)" bind:value={client.mode} options={modeOptions} />
-		<Dropdown
-			label="Транспорт до TURN (-transport)"
-			bind:value={client.transport}
-			options={transportOptions}
-		/>
-		<Input label="Локальный адрес (-listen)" bind:value={client.listen} placeholder="127.0.0.1:9000" />
-	</SettingRow>
-	<SettingRow
-		id="streams"
-		label="Потоки"
-		flag="-n"
-		summary={`${client.streams}${client.bond ? ' · бондинг' : ''}`}
-		dirty={changed('streams', 'bond')}
-		expanded={expanded === 'streams'}
-		ontoggle={toggleRow}
-	>
-		<Input
-			label="Потоков TURN (-n)"
-			type="number"
-			value={String(client.streams)}
-			onchange={(v) => (client.streams = Number(v) || 0)}
-		/>
-		<div class="ft-toggle-slot">
-			<FormToggle
-				bind:checked={client.bond}
-				label="Бондинг через все smux-сессии (-bond, только mode=tcp)"
-			/>
-		</div>
-	</SettingRow>
-	<SettingRow
-		id="obf"
-		label="Обфускация"
-		flag="-obf-profile / -obf-key"
-		summary={`${client.obfProfile}${client.obfKey ? ' · ключ задан' : ''}`}
-		dirty={changed('obfProfile', 'obfKey')}
-		expanded={expanded === 'obf'}
-		ontoggle={toggleRow}
-	>
-		<Dropdown label="Профиль (-obf-profile)" bind:value={client.obfProfile} options={obfOptions} />
-		<Input
-			label="Ключ обфускации (-obf-key)"
-			type="password"
-			bind:value={client.obfKey}
-			placeholder="64 hex-символа"
-		/>
-	</SettingRow>
-	<SettingRow
-		id="clientId"
-		label="Client ID"
-		flag="-client-id"
-		summary={client.clientId
-			? client.clientId.length > 12
-				? client.clientId.slice(0, 12) + '…'
-				: client.clientId
-			: 'авто'}
-		dirty={changed('clientId')}
-		expanded={expanded === 'clientId'}
-		ontoggle={toggleRow}
-	>
 		<div class="ft-span">
 			<Input
 				label="Client ID (-client-id)"
@@ -286,7 +165,74 @@
 			</p>
 		</div>
 	</SettingRow>
+	<SettingRow
+		id="tunnel"
+		label="Туннелирование"
+		summary={tunnelSummary}
+		dirty={changed('mode', 'transport', 'listen', 'streams', 'bond')}
+		expanded={expanded === 'tunnel'}
+		ontoggle={toggleSection}
+	>
+		<Dropdown label="Режим (-mode)" bind:value={client.mode} options={modeOptions} />
+		<Dropdown
+			label="Транспорт до TURN (-transport)"
+			bind:value={client.transport}
+			options={transportOptions}
+		/>
+		<Input label="Локальный адрес (-listen)" bind:value={client.listen} placeholder="127.0.0.1:9000" />
+		<Input
+			label="Потоков TURN (-n)"
+			type="number"
+			value={String(client.streams)}
+			onchange={(v) => (client.streams = Number(v) || 0)}
+		/>
+		<div class="ft-toggle-slot ft-span">
+			<FormToggle
+				bind:checked={client.bond}
+				label="Бондинг через все smux-сессии (-bond, только mode=tcp)"
+			/>
+		</div>
+	</SettingRow>
+	<SettingRow
+		id="obf"
+		label="Обфускация"
+		summary={obfSummary}
+		dirty={changed('obfProfile', 'obfKey')}
+		expanded={expanded === 'obf'}
+		ontoggle={toggleSection}
+	>
+		<Dropdown label="Профиль (-obf-profile)" bind:value={client.obfProfile} options={obfOptions} />
+		<Input
+			label="Ключ обфускации (-obf-key)"
+			type="password"
+			bind:value={client.obfKey}
+			placeholder="64 hex-символа"
+		/>
+	</SettingRow>
+	<SettingRow
+		id="log"
+		label="Лог процесса"
+		summary={logLines ? pluralize(logLines, ['строка', 'строки', 'строк']) : 'пусто'}
+		expanded={expanded === 'log'}
+		ontoggle={toggleSection}
+	>
+		<pre class="ft-log-box ft-span">{status?.log || 'лог пуст'}</pre>
+	</SettingRow>
 </SettingRows>
+
+<div class="ft-footer">
+	{#if dirtyCount > 0}
+		<span class="ft-dirty-note">
+			{pluralize(dirtyCount, [
+				'несохранённое изменение',
+				'несохранённых изменения',
+				'несохранённых изменений'
+			])} — применятся после перезапуска клиента
+		</span>
+		<Button variant="ghost" size="sm" onclick={onRevert}>Отменить</Button>
+	{/if}
+	<Button variant="primary" size="sm" loading={saving} onclick={onSave}>Сохранить</Button>
+</div>
 
 <style>
 	.ft-panel-accent {
@@ -294,12 +240,12 @@
 		background: var(--color-bg-secondary);
 		border: 1px solid var(--color-accent-border);
 		border-radius: var(--radius);
-		margin-bottom: 0.625rem;
+		margin-bottom: 0.875rem;
 	}
 
 	.ft-import-row {
 		display: grid;
-		grid-template-columns: 1fr auto auto;
+		grid-template-columns: 1fr auto;
 		gap: 0.5rem;
 		align-items: center;
 		margin-bottom: 0.5rem;
@@ -336,6 +282,34 @@
 		resize: vertical;
 		white-space: pre;
 		margin: 0.375rem 0;
+	}
+
+	.ft-log-box {
+		max-height: 160px;
+		overflow-y: auto;
+		padding: 0.5rem 0.625rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-primary);
+		color: var(--color-text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		white-space: pre-wrap;
+		word-break: break-all;
+		margin: 0;
+	}
+
+	.ft-footer {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		flex-wrap: wrap;
+		gap: 0.625rem;
+	}
+
+	.ft-dirty-note {
+		font-size: 0.75rem;
+		color: var(--color-warning);
 	}
 
 	@media (max-width: 640px) {
