@@ -394,6 +394,12 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 			return ErrPolicyNotConfigured
 		}
 		mark, err = s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName)
+		if err != nil && !errors.Is(err, query.ErrPolicyMarkNotFound) {
+			// Транзиентная ошибка чтения (RCI недоступен) — не «политика
+			// отсутствует»: наверх уходит настоящая причина, а не ложный
+			// ErrPolicyMissing (ревью #523).
+			return fmt.Errorf("policy %q mark: %w", sr.PolicyName, err)
+		}
 		if err != nil || mark == "" {
 			return fmt.Errorf("policy %q: %w", sr.PolicyName, ErrPolicyMissing)
 		}

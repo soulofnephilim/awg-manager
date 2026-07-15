@@ -201,6 +201,13 @@ type PolicyInfo struct {
 
 // AccessPolicyProvider is the narrow contract Service needs from
 // internal/accesspolicy. Adapter in cmd/awg-manager wires it.
+//
+// Контракт GetPolicyMark: «политика удалена / метки нет» обязана
+// сигнализироваться ошибкой, для которой errors.Is(err,
+// query.ErrPolicyMarkNotFound) == true — на этом sentinel'е держится
+// fail-safe disable в reconcileInstalled (issue #523). Любая другая
+// ошибка трактуется как транзиентная (RCI недоступен) и движок НЕ
+// выключает. Реализация без sentinel'а молча отключит fail-safe.
 type AccessPolicyProvider interface {
 	GetPolicyMark(ctx context.Context, policyName string) (string, error)
 	AssignDevice(ctx context.Context, mac, policyName string) error

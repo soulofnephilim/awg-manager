@@ -28,15 +28,24 @@ import (
 //     the pool routes idempotently. Never re-allocates an index or re-creates the
 //     iface, and never hard-fails the reconcile on a single drifted step.
 func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.SingboxRouterSettings) error {
-	if !sr.Enabled {
-		return s.Disable(ctx)
-	}
-
 	settings, err := s.deps.Settings.Load()
 	if err != nil {
 		return err
 	}
 	st := settings.FakeIP
+
+	if !sr.Enabled {
+		// Teardown нужен только когда что-то реально поднято. Безусловный
+		// Disable здесь писал ложное «выключение движка» в журнал на каждом
+		// boot-reconcile при выключенном fakeip (ревью #523) — журнал терял
+		// диагностическую ценность, ради которой запись добавлялась.
+		provisioned := st != nil && st.Provisioned
+		slotActive := s.deps.Orch != nil && s.routerSlotEnabled()
+		if !provisioned && !slotActive {
+			return nil
+		}
+		return s.Disable(ctx)
+	}
 
 	// LiveOpkgTunIndices probes which opkgtun ifaces actually exist on the box.
 	// Capture the error (Fix B4): a TRANSIENT probe failure (NDMS glitch mid-reload)
