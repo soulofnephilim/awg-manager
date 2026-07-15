@@ -1116,9 +1116,18 @@ func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 	// installed=true, считал engineDown и вечно ждал watchdog, которому
 	// нечего чинить — процесс жив, просто в конфиге нет tproxy-in. Лечится
 	// полным Enable: перепромоут слота + переустановка iptables.
+	//
+	// Гейт на живой процесс: при мёртвом sing-box Enable потратил бы до 60с
+	// на waitForSingbox и отложил бы fail-closed blackhole — вместо этого
+	// идём в reconcileInstalled (DROP сразу), watchdog оживляет процесс, и
+	// следующий тик при живом движке перепромоутит слот.
+	engineUp := true
+	if s.deps.Singbox != nil {
+		engineUp, _ = s.deps.Singbox.IsRunning()
+	}
 	routerSlotParked := s.deps.Orch != nil && !s.routerSlotEnabled()
 	switch {
-	case sr.Enabled && (!installedComplete || routerSlotParked):
+	case sr.Enabled && (!installedComplete || (routerSlotParked && engineUp)):
 		// Drift-heal, NOT user-initiated: must honour a prior master-Stop, so
 		// do not clear the sticky intent (clearManualStop=false).
 		return s.enableLocked(ctx, false)
@@ -1131,16 +1140,25 @@ func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 }
 
 // routerSlotEnabled reports whether 20-router.json currently lives in
-// config.d/ (true) or is parked under disabled/ (false). Caller guarantees
-// deps.Orch != nil. Unregistered slot reads as parked — Reconcile then routes
-// to Enable, whose SetEnabled surfaces the real error.
+// config.d/ AND the file exists (Present) — «включён» флаг при отсутствующем
+// файле даёт тот же тупик (в конфиге нет tproxy-in), а enableLocked его
+// лечит, переписав файл. Caller guarantees deps.Orch != nil. Unregistered
+// slot reads as parked — Reconcile then routes to Enable, whose SetEnabled
+// surfaces the real error.
 func (s *ServiceImpl) routerSlotEnabled() bool {
+	st, ok := s.slotSnapshot(orchestrator.SlotRouter)
+	return ok && st.Enabled && st.Present
+}
+
+// slotSnapshot returns the orchestrator state of one slot. Caller guarantees
+// deps.Orch != nil.
+func (s *ServiceImpl) slotSnapshot(slot orchestrator.Slot) (orchestrator.SlotState, bool) {
 	for _, st := range s.deps.Orch.Snapshot() {
-		if st.Slot == orchestrator.SlotRouter {
-			return st.Enabled
+		if st.Slot == slot {
+			return st, true
 		}
 	}
-	return false
+	return orchestrator.SlotState{}, false
 }
 
 // reconcileInstalled handles the "Enabled && installed" branch:

@@ -423,3 +423,52 @@ func TestReconcileInstalled_PolicyMarkNotFound_DisablesAndLogs(t *testing.T) {
 		t.Fatalf("fail-safe disable must log the reason, got %v", rec.entries)
 	}
 }
+
+// Defensive-ветка: провайдер вернул ("", nil) — трактуется как «политики
+// нет»: fail-safe disable + причина в журнале (ревью #523, непокрытая ветка).
+func TestReconcileInstalled_EmptyMarkNilError_Disables(t *testing.T) {
+	sb := newTestSingbox(t)
+	sb.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := newReconcileInstalledService(t, sb)
+	store := newTestSettingsStore(t, reconcileInstalledSettings)
+	svc.deps.Settings = store
+	svc.deps.Policies = &fakeAccessPolicyProvider{mark: ""}
+	rec := &recordingAppLogger{}
+	svc.appLog = logging.NewScopedLogger(rec, logging.GroupRouting, logging.SubSingboxRouter)
+
+	if err := svc.reconcileInstalled(context.Background(), reconcileInstalledSettings); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	settings, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("settings.Load: %v", loadErr)
+	}
+	if settings.SingboxRouter.Enabled {
+		t.Fatal("empty mark with nil error must persist enabled=false (fail-safe disable)")
+	}
+}
+
+// Каждый teardown оставляет запись в журнале (ревью #523: «тумблер сам
+// выключился» должен быть восстановим по журналу).
+func TestDisable_WritesJournalEntry(t *testing.T) {
+	svc := newTestService(t, Deps{
+		Settings: newTestSettingsStore(t, reconcileInstalledSettings),
+		IPTables: newStubIPTables(func(_ context.Context, _ string) error { return nil }),
+		Singbox:  &fakeSingbox{dir: t.TempDir()},
+	})
+	rec := &recordingAppLogger{}
+	svc.appLog = logging.NewScopedLogger(rec, logging.GroupRouting, logging.SubSingboxRouter)
+
+	if err := svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	found := false
+	for _, e := range rec.entries {
+		if strings.Contains(e, "выключение движка маршрутизации") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Disable must log the teardown, got %v", rec.entries)
+	}
+}
