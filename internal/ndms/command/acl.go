@@ -70,9 +70,12 @@ func (c *InterfaceCommands) ACLAutoDelete(ctx context.Context, acl string) error
 }
 
 // IsACLDuplicate распознаёт NDMS-отказ на повторный идентичный permit —
-// безвредный случай для идемпотентного re-assert.
+// безвредный случай для идемпотентного re-assert. Матчится ПОЛНАЯ фраза
+// NDMS («a duplicate was found for the rule being set», stand-verified),
+// а не слово «duplicate» — чтобы смешанный ответ с реальной ошибкой,
+// случайно содержащей это слово, не был проглочен (ревью).
 func IsACLDuplicate(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "duplicate")
+	return err != nil && strings.Contains(err.Error(), "a duplicate was found")
 }
 
 // SetPermitAllACL создаёт permit-all access-list `_WEBADMIN_<name>` (конвенция

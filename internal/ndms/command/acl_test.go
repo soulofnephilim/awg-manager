@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // aclBodyPoster отдаёт заранее заданные тела ответов по очереди (пустая
@@ -35,7 +36,10 @@ func nestedACLError(msg string) json.RawMessage {
 
 func newACLTestCommands(bodies ...json.RawMessage) (*InterfaceCommands, *aclBodyPoster) {
 	poster := &aclBodyPoster{bodies: bodies}
-	return NewInterfaceCommands(poster, nil, testQueries(), nil), poster
+	// Настоящий SaveCoordinator (Request не nil-safe — nil-wiring должен
+	// падать громко); часовой debounce — save в тестах не летит.
+	sc := NewSaveCoordinator(poster, nil, time.Hour, time.Hour, 0, nil)
+	return NewInterfaceCommands(poster, sc, testQueries(), nil), poster
 }
 
 func TestACLPrimitives_ParseForms(t *testing.T) {
@@ -102,6 +106,28 @@ func TestSetPermitAllACL_SequenceAndDuplicateTolerance(t *testing.T) {
 		if poster.parses[i] != w {
 			t.Errorf("parse[%d]: got %q, want %q", i, poster.parses[i], w)
 		}
+	}
+}
+
+// НЕ-duplicate провал permit — жёсткая ошибка SetPermitAllACL: guard
+// толерирует только дубль, реальная ошибка не должна проглатываться (ревью).
+func TestSetPermitAllACL_RealPermitErrorFails(t *testing.T) {
+	cmds, poster := newACLTestCommands(nestedACLError("argument parse error."))
+	err := cmds.SetPermitAllACL(context.Background(), "OpkgTun0")
+	if err == nil || !strings.Contains(err.Error(), "argument parse error") {
+		t.Fatalf("real permit error must surface, got %v", err)
+	}
+	if len(poster.parses) != 1 {
+		t.Errorf("must stop after failed permit (no bind/auto-delete), got %v", poster.parses)
+	}
+}
+
+// Смешанный ответ (реальная ошибка + слово «duplicate» в другом смысле) не
+// должен классифицироваться как безвредный дубль.
+func TestIsACLDuplicate_ExactPhraseOnly(t *testing.T) {
+	cmds, _ := newACLTestCommands(nestedACLError("duplicate interface index; argument parse error."))
+	if err := cmds.SetPermitAllACL(context.Background(), "OpkgTun0"); err == nil {
+		t.Fatal("error mentioning 'duplicate' without the NDMS duplicate-rule phrase must surface")
 	}
 }
 

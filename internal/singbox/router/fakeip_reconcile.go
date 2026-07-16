@@ -102,15 +102,22 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		}
 	}
 
-	// One-shot ассерт permit-ACL после старта демона: покрывает апгрейд
+	// One-shot (до первого УСПЕХА) ассерт permit-ACL: покрывает апгрейд
 	// awg-manager поверх уже включённого fakeip (ACL появился в этой версии)
-	// и ручное удаление списка. Идемпотентно (дубль permit NDMS отклоняет без
-	// дублирования), 3 POST'а один раз за жизнь процесса — дальше NDMS-конфиг
-	// durable, per-tick probe не нужен. Флаг под transitionMu (Reconcile).
-	if !s.fakeipACLAsserted && s.deps.OpkgTun != nil {
-		s.fakeipACLAsserted = true
+	// и удаление списка до старта демона. Идемпотентно (дубль permit NDMS
+	// отклоняет без дублирования); флаг взводится только ПОСЛЕ успеха —
+	// провал (медленный RCI на буте) ретраится следующим тиком (ревью).
+	// Гейт probeErr == nil: живость интерфейса подтверждена — иначе permit
+	// создал бы список, bind упал бы, и осиротевший unreferenced-список
+	// (auto-delete не взведён) навсегда сохранился бы в конфиг. Флаг под
+	// transitionMu (Reconcile). Галку _WEBADMIN_, снятую пользователем в
+	// веб-морде при живом процессе, НЕ переустанавливаем намеренно — она
+	// видна в UI как правило firewall, и её снятие — решение пользователя.
+	if !s.fakeipACLAsserted && s.deps.OpkgTun != nil && probeErr == nil {
 		if nerr := s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); nerr != nil {
 			s.appLog.Warn("fakeip-reconcile", iface, "permit acl: "+nerr.Error())
+		} else {
+			s.fakeipACLAsserted = true
 		}
 	}
 

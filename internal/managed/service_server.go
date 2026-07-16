@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms/command"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -668,7 +669,10 @@ func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface, addr, mask str
 		s.log.Debug("remove ACL before rebuild", "error", err, "iface", iface)
 	}
 	for i, r := range plan {
-		if err := aclCmd.ACLPermitIP(ctx, acl, r.srcSub, r.srcMask, r.dstSub, r.dstMask); err != nil {
+		// Дубль толерируем (как SetPermitAllACL): best-effort remove выше мог
+		// транзиентно не удалить старый идентичный список — состояние роутера
+		// уже совпадает с планом, падать не за что (ревью).
+		if err := aclCmd.ACLPermitIP(ctx, acl, r.srcSub, r.srcMask, r.dstSub, r.dstMask); err != nil && !command.IsACLDuplicate(err) {
 			return fmt.Errorf("permit %s: %w", segments[i], err)
 		}
 	}

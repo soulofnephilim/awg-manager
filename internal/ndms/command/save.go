@@ -127,12 +127,8 @@ func (s *SaveCoordinator) SetRetryPolicy(delay time.Duration, maxRetries int) {
 	s.mu.Unlock()
 }
 
-// Request schedules a debounced Save. Non-blocking. Nil-safe: tests build
-// Commands without a coordinator.
+// Request schedules a debounced Save. Non-blocking.
 func (s *SaveCoordinator) Request() {
-	if s == nil {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

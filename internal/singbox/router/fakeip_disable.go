@@ -282,10 +282,11 @@ func (s *ServiceImpl) scheduleFakeIPDrain(poolNet4, poolMask4, ndmsName string) 
 func (s *ServiceImpl) teardownOpkgTun(ctx context.Context, ndmsName, scope string) error {
 	// Снять permit-all ACL (unbind + no access-list) ДО down/delete: при
 	// успешном delete auto-delete каскадит ACL и сам, но при провале delete
-	// интерфейс не должен остаться с висящей привязкой. Best-effort —
-	// «not found» на давно снятом ACL нормален для reap-путей.
+	// интерфейс не должен остаться с висящей привязкой. Debug, не Warn:
+	// «not found» на давно снятом ACL — норма для reap-ретраев (каждый тик
+	// до успеха delete) и сирот от версий без ACL (ревью).
 	if err := s.deps.OpkgTun.RemovePermitAllACL(ctx, ndmsName); err != nil {
-		s.appLog.Warn(scope, ndmsName, "remove permit acl: "+err.Error())
+		s.appLog.Debug(scope, ndmsName, "remove permit acl: "+err.Error())
 	}
 	if err := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); err != nil {
 		s.appLog.Warn(scope, ndmsName, "iface down: "+err.Error())

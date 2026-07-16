@@ -1670,3 +1670,34 @@ func TestReconcileFakeIPTun_PermitACL_AssertedOnce(t *testing.T) {
 		t.Errorf("permit ACL asserted %d times over 3 ticks, want exactly 1", got)
 	}
 }
+
+// Провал permit-ACL ассерта НЕ съедает one-shot: флаг взводится только после
+// успеха, следующий тик ретраит (ревью: медленный RCI на буте).
+func TestReconcileFakeIPTun_PermitACL_RetriedAfterFailure(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	stubFakeIPPoolRoutePresent(t, func(string, netip.Prefix) bool { return true })
+	failing := &recOpkgTun{log: h.log, failAt: "SetPermitACL"}
+	h.svc.deps.OpkgTun = failing
+	h.log.calls = nil
+
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick1: %v", err)
+	}
+	failing.failAt = "" // RCI ожил
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick2: %v", err)
+	}
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick3: %v", err)
+	}
+	// tick1 — провал, tick2 — успешный ретрай, tick3 — уже не зовёт.
+	if got := countCalls(h.log, "SetPermitACL:OpkgTun0"); got != 2 {
+		t.Errorf("SetPermitACL called %d times, want 2 (fail, retry-success, then stop)", got)
+	}
+}
