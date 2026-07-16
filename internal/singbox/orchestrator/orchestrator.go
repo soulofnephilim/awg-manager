@@ -32,6 +32,13 @@ type Orchestrator struct {
 	configDir string
 	proc      ProcessController
 
+	// appliedPath is where Reload persists the applied-state breadcrumb
+	// ({hash, hasTun} of the config last applied to sing-box). Captured
+	// from the package-level appliedStatePath seam at construction and
+	// immutable afterwards, so Reload (including late debounce-timer
+	// fires) never races a test redirecting the seam.
+	appliedPath string
+
 	mu      sync.Mutex
 	slots   map[Slot]SlotMeta
 	enabled map[Slot]bool
@@ -130,12 +137,22 @@ func (o *Orchestrator) log(level, msg string) {
 // /opt/etc/sing-box/config.d). It does NOT touch disk — call Bootstrap
 // after construction to scan/migrate existing files.
 func New(configDir string, proc ProcessController) *Orchestrator {
-	return &Orchestrator{
-		configDir: configDir,
-		proc:      proc,
-		slots:     make(map[Slot]SlotMeta),
-		enabled:   make(map[Slot]bool),
+	o := &Orchestrator{
+		configDir:   configDir,
+		proc:        proc,
+		appliedPath: appliedStatePath,
+		slots:       make(map[Slot]SlotMeta),
+		enabled:     make(map[Slot]bool),
 	}
+	// Seed prevHasTun from the last applied state so a daemon restart
+	// doesn't start from the in-memory zero value (false) and mistake an
+	// already-running tun config for a toggle — the skip gate in Reload
+	// is the primary defense, this seed covers the fallback path where
+	// the skip does not fire for some other reason (e.g. hash mismatch).
+	if st, ok := loadAppliedState(o.appliedPath); ok {
+		o.prevHasTun = st.HasTun
+	}
+	return o
 }
 
 // ConfigDir returns the absolute path the orchestrator is rooted at —

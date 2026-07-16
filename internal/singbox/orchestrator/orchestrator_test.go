@@ -16,6 +16,20 @@ func newTestOrch(t *testing.T) (*Orchestrator, string) {
 	return o, dir
 }
 
+// newFakeOrch constructs an Orchestrator wired to a fakeProc, first
+// redirecting the package-level applied-state seam (appliedStatePath) to
+// a file scoped to this test's t.TempDir(). Without this, every
+// fp-backed Reload test would share ONE /var/run/awg-manager/singbox-
+// applied.json for the whole test binary run: besides writing outside
+// the sandbox, several tests enable identical slot content, so one
+// test's persisted hash could satisfy another's skip gate and suppress
+// the Start/Reload/Stop call the test asserts on.
+func newFakeOrch(t *testing.T, dir string, fp *fakeProc) *Orchestrator {
+	t.Helper()
+	appliedStatePath = filepath.Join(t.TempDir(), "singbox-applied.json")
+	return New(dir, fp)
+}
+
 func TestRegisterAndBootstrap(t *testing.T) {
 	o, dir := newTestOrch(t)
 	if err := o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true}); err != nil {
@@ -231,7 +245,7 @@ func TestReloadDoesNotStartForAlwaysOnCatalogSlot(t *testing.T) {
 	// these slots are enabled by virtue of being AlwaysOn.
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{
 		Slot:       SlotTunnels,
@@ -266,7 +280,7 @@ func TestReloadStartsWhenAlwaysOnSlotHasContent(t *testing.T) {
 	// be brought up — even if no other consumer slot is enabled.
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{
 		Slot:       SlotTunnels,
@@ -294,7 +308,7 @@ func TestReloadStartsWhenAlwaysOnSlotHasContent(t *testing.T) {
 func TestReloadStartsWhenSlotEnabled(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -320,7 +334,7 @@ func TestReloadStartsWhenSlotEnabled(t *testing.T) {
 func TestReloadStopsWhenAllDisabled(t *testing.T) {
 	fp := &fakeProc{running: true} // pretend already running
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -338,7 +352,7 @@ func TestReloadStopsWhenAllDisabled(t *testing.T) {
 func TestReloadSighupsWhenAlreadyRunning(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -360,7 +374,7 @@ func TestReloadSighupsWhenAlreadyRunning(t *testing.T) {
 func TestReloadSkippedOnValidationError(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -385,7 +399,7 @@ func TestReloadSkippedOnValidationError(t *testing.T) {
 func TestDebouncerCoalescesMultipleSaves(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -448,7 +462,7 @@ func TestReloadStartsForBothAlwaysOnContentAndConsumerSlot(t *testing.T) {
 	// path should shadow the other.
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{
 		Slot:       SlotTunnels,
 		Filename:   "10-tunnels.json",
@@ -629,7 +643,7 @@ func TestBootstrap_LeavesPendingFileIntact(t *testing.T) {
 func TestReloadColdStartSuppressedByShouldRun(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -662,7 +676,7 @@ func TestReloadColdStartSuppressedByShouldRun(t *testing.T) {
 func TestReloadColdStartProceedsWhenShouldRunTrue(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -694,7 +708,7 @@ func TestReloadColdStartProceedsWhenShouldRunTrue(t *testing.T) {
 func TestReloadShouldRunOnlyGatesColdStart(t *testing.T) {
 	fp := &fakeProc{running: true} // already alive
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -746,7 +760,7 @@ func equalStrs(a, b []string) bool {
 func TestReload_RestartsWhenTunAdded(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -778,7 +792,7 @@ func TestReload_RestartsWhenTunAdded(t *testing.T) {
 func TestReload_SighupWhenTunStillPresent(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -808,7 +822,7 @@ func TestReload_SighupWhenTunStillPresent(t *testing.T) {
 func TestReload_RestartsWhenTunRemoved(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -839,7 +853,7 @@ func TestReload_RestartsWhenTunRemoved(t *testing.T) {
 func TestReload_SighupWhenNoTunEither(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
