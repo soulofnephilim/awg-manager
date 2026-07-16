@@ -1587,6 +1587,46 @@ func TestNormalizeSingboxRouterSettings_PreservesFakeIPFields(t *testing.T) {
 	}
 }
 
+func TestFakeIPOverlayReapplyNeeded(t *testing.T) {
+	on := storage.SingboxRouterSettings{
+		Enabled:          true,
+		RoutingMode:      "fakeip-tun",
+		FakeIPRealServer: "1.1.1.1",
+		FakeIPStack:      "gvisor",
+		UDPTimeout:       "5m",
+	}
+	cases := []struct {
+		name string
+		mut  func(prev, cur *storage.SingboxRouterSettings)
+		want bool
+	}{
+		{"no change", func(prev, cur *storage.SingboxRouterSettings) {}, false},
+		{"real-server changed", func(prev, cur *storage.SingboxRouterSettings) { cur.FakeIPRealServer = "9.9.9.9" }, true},
+		{"stack changed", func(prev, cur *storage.SingboxRouterSettings) { cur.FakeIPStack = "system" }, true},
+		{"udp-timeout changed", func(prev, cur *storage.SingboxRouterSettings) { cur.UDPTimeout = "10m" }, true},
+		// Пулы/MTU намеренно НЕ триггерят (применяются при disable/enable).
+		{"pool changed", func(prev, cur *storage.SingboxRouterSettings) { cur.FakeIPPool4 = "10.64.0.0/12" }, false},
+		{"mtu changed", func(prev, cur *storage.SingboxRouterSettings) { cur.FakeIPMTU = 9000 }, false},
+		{"disabled", func(prev, cur *storage.SingboxRouterSettings) {
+			cur.FakeIPRealServer = "9.9.9.9"
+			cur.Enabled = false
+		}, false},
+		{"tproxy mode", func(prev, cur *storage.SingboxRouterSettings) {
+			cur.FakeIPRealServer = "9.9.9.9"
+			cur.RoutingMode = "tproxy"
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev, cur := on, on
+			tc.mut(&prev, &cur)
+			if got := fakeIPOverlayReapplyNeeded(prev, cur); got != tc.want {
+				t.Errorf("fakeIPOverlayReapplyNeeded = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateSingboxRouterSettings_FakeIPFields(t *testing.T) {
 	base := storage.SingboxRouterSettings{WANAutoDetect: true}
 	cases := []struct {

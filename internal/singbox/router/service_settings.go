@@ -56,11 +56,41 @@ func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRout
 	// save — otherwise every PUT would re-deal ports positionally and RST
 	// untouched classes' flows.
 	normalized.QoSClasses = reassociateQoSSlots(normalized.QoSClasses, settings.SingboxRouter.QoSClasses)
+	prev := settings.SingboxRouter
 	settings.SingboxRouter = normalized
 	if err := s.deps.Settings.Save(settings); err != nil {
 		return err
 	}
+	// Оverlay-поля fakeip (real-server, стек, UDP-таймаут) живут внутри
+	// 21-fakeip.json — Reconcile их не перегенерирует (drift-heal чинит
+	// слоты/маршруты, не содержимое overlay). Без reapply изменение
+	// применялось бы только при следующем выключении/включении режима
+	// (стенд-находка 2026-07-16). Пере-прогоняем overlay изолированным
+	// CRUD-пайплайном (no-op мутатор): persist слота взводит reload.
+	if err := s.reapplyFakeIPOverlayIfNeeded(ctx, prev, normalized); err != nil {
+		return err
+	}
 	return s.Reconcile(ctx)
+}
+
+// reapplyFakeIPOverlayIfNeeded перегенерирует fakeip-overlay при изменении
+// его конфиг-полей на ВКЛЮЧЁННОМ fakeip-tun. Только чисто-конфиговые поля:
+// пулы/MTU намеренно не триггерят (они требуют ре-провижининга маршрутов и
+// NDMS-интерфейса — применяются, как и раньше, при выключении/включении).
+func (s *ServiceImpl) reapplyFakeIPOverlayIfNeeded(ctx context.Context, prev, cur storage.SingboxRouterSettings) error {
+	if !fakeIPOverlayReapplyNeeded(prev, cur) {
+		return nil
+	}
+	return s.fakeipWithConfig(ctx, "settings", func(*RouterConfig) error { return nil })
+}
+
+func fakeIPOverlayReapplyNeeded(prev, cur storage.SingboxRouterSettings) bool {
+	if cur.RoutingMode != "fakeip-tun" || !cur.Enabled {
+		return false
+	}
+	return prev.FakeIPRealServer != cur.FakeIPRealServer ||
+		prev.FakeIPStack != cur.FakeIPStack ||
+		prev.UDPTimeout != cur.UDPTimeout
 }
 
 // validateQoSClassOutbounds rejects ENABLED QoS classes whose Outbound does
