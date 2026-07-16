@@ -21,3 +21,4 @@ export { default as ManagedServerDriftBanner } from './ManagedServerDriftBanner.
 export { default as ServerAccessPolicyDropdown } from './ServerAccessPolicyDropdown.svelte';
 export { default as ServerEndpointSetting } from './ServerEndpointSetting.svelte';
 export { default as ServerSettingsPanel } from './ServerSettingsPanel.svelte';
+export { default as ServersPageSkeleton } from './ServersPageSkeleton.svelte';

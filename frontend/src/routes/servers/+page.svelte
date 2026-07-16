@@ -7,7 +7,7 @@
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { PageContainer, PageHeader } from '$lib/components/layout';
-	import { LoadingSpinner, EmptyState } from '$lib/components/layout';
+	import { EmptyState } from '$lib/components/layout';
 	import { StoreStatusBadge, Button } from '$lib/components/ui';
 	import type { ManagedServer, ManagedServerStats } from '$lib/types';
 	import {
@@ -17,12 +17,14 @@
 		ServerRail,
 		ManagedServerBackupToolbar,
 		ManagedServerDriftBanner,
+		ServersPageSkeleton,
 		type RailItem,
 	} from '$lib/components/servers';
 	import { dedupBy } from '$lib/utils/dedupBy';
 	import { createIngressMutationLock } from '$lib/utils/ingressMutation';
 	import { countActiveManagedPeers, countActiveSystemPeers } from '$lib/utils/serverPeerActivity';
 	import { systemServerIsUp } from '$lib/utils/systemServerState';
+	import { serversSkeletonCount, clampSkeletonCount } from '$lib/stores/skeletonCounts';
 
 	const withIngressLock = createIngressMutationLock();
 
@@ -206,6 +208,13 @@
 		}
 	});
 
+	// Память формы скелетона: фактическое число пунктов рейла прошлого визита.
+	$effect(() => {
+		if (railItems.length > 0) {
+			serversSkeletonCount.set(clampSkeletonCount(railItems.length, 2));
+		}
+	});
+
 	let activeItem = $derived(railItems.find((i) => i.id === activeId));
 
 	let activeManaged = $derived.by<ManagedServer | null>(() => {
@@ -265,9 +274,7 @@
 	<ManagedServerDriftBanner />
 
 	{#if loading}
-		<div class="flex justify-center py-8">
-			<LoadingSpinner size="md" />
-		</div>
+		<ServersPageSkeleton count={$serversSkeletonCount} />
 	{:else if snap.status === 'error' && !snap.data}
 		<EmptyState
 			title="Ошибка загрузки"
