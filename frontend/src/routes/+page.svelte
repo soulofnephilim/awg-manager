@@ -13,9 +13,11 @@
 		TunnelMetaText,
 		TunnelToolbarViewRow,
 		DefaultRouteBadge,
+		TunnelCardSkeleton,
 	} from '$lib/components/tunnels';
 	import { TunnelListActions } from '$lib/components/ui';
-	import { PageContainer, PageHeader, LoadingSpinner, EmptyState, WelcomeBanner } from '$lib/components/layout';
+	import { PageContainer, PageHeader, EmptyState, WelcomeBanner } from '$lib/components/layout';
+	import { tunnelsSkeletonCount, clampSkeletonCount } from '$lib/stores/skeletonCounts';
 	import {
 		TrafficSparkline,
 		Badge,
@@ -696,6 +698,13 @@
 	$effect(() => {
 		if (!awgViewModeReady) return;
 		localStorage.setItem(AWG_TUNNEL_VIEW_STORAGE_KEY, awgViewMode);
+	});
+
+	// Память формы скелетона: фактическое число AWG-карточек прошлого визита.
+	$effect(() => {
+		if (awgList.length > 0) {
+			tunnelsSkeletonCount.set(clampSkeletonCount(awgList.length, 3));
+		}
 	});
 
 	$effect(() => {
@@ -1507,8 +1516,33 @@
 	<PageHeader title="Туннели" />
 	<WelcomeBanner />
 	{#if loading}
-		<div class="py-12">
-			<LoadingSpinner size="lg" message="Загрузка туннелей..." />
+		<div aria-hidden="true">
+			{#if !dashboardOn}
+				<!-- полоса на месте Tabs -->
+				<div class="skeleton" style="height: 2rem; width: 260px; margin-bottom: 14px;"></div>
+			{/if}
+			{#if !dashboardOn && awgViewMode === 'list' && !isAwgMobile}
+				<!-- desktop-таблица: строки-полоски (mobile list рендерится карточками — ветка ниже) -->
+				<div class="skel-table">
+					{#each Array.from({ length: $tunnelsSkeletonCount }) as _, i (i)}
+						<div class="skel-row">
+							{#each ['28%', '18%', '14%', '12%', '10%'] as w, ci (ci)}
+								<span class="skeleton" style="height: 0.75rem; width: {w}"></span>
+							{/each}
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<div
+					class="tunnel-grid"
+					class:tunnel-grid--cards={!dashboardOn && awgViewMode === 'cards'}
+					class:tunnel-grid--compact={dashboardOn || awgViewMode === 'compact'}
+				>
+					{#each Array.from({ length: $tunnelsSkeletonCount }) as _, i (i)}
+						<TunnelCardSkeleton compact={dashboardOn || awgViewMode === 'compact'} />
+					{/each}
+				</div>
+			{/if}
 		</div>
 	{:else if tunnelSnap.status === 'error' && !tunnelSnap.data}
 		<EmptyState
@@ -1779,5 +1813,17 @@
 		background: var(--color-accent);
 		color: #fff;
 		border-color: var(--color-accent);
+	}
+
+	.skel-table {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 8px 4px;
+	}
+	.skel-row {
+		display: flex;
+		gap: 16px;
+		align-items: center;
 	}
 </style>
