@@ -46,6 +46,10 @@ type Service struct {
 	markCached  uint32
 	markOK      bool
 	markFetched time.Time
+
+	rulesMu      sync.Mutex
+	rulesCached  map[string][]RuleHit
+	rulesFetched time.Time
 }
 
 // NewService creates a new connections service.
@@ -386,11 +390,29 @@ func (s *Service) resolveClientNames(ctx context.Context) map[string]string {
 	return result
 }
 
+// ipRulesTTL bounds how often the NDMS object-group runtime is re-fetched.
+// The /show/object-group/fqdn response is large (сотни KB) и стоит ndm ~1s
+// на сериализацию; перечитывание на каждый List доминировало в CPU-профиле
+// (стенд 2026-07-16: ~40% под опросом страницы соединений). Атрибуция
+// меняется только когда DNS-правила резолвят новые IP — лёгкая несвежесть
+// бейджей незаметна.
+const ipRulesTTL = 30 * time.Second
+
 // fetchIPRules queries the NDMS object-group runtime cache and returns
-// a map from destination IP to matched DNS-route rule hits. Best-effort:
-// any error returns an empty map without surfacing the error to the caller —
-// the connections list still works without rule attribution.
+// a map from destination IP to matched DNS-route rule hits, served from a
+// TTL cache (mirrors singboxMark: мьютекс держится на время фетча — второй
+// конкурентный List ждёт и получает кэш, а не дублирует 730KB-запрос;
+// ошибка negative-кэшируется на тот же TTL). Best-effort: любая ошибка
+// даёт пустую карту — список соединений работает без атрибуции правил.
+// Возвращаемая карта разделяется между вызовами — НЕ мутировать.
 func (s *Service) fetchIPRules(ctx context.Context) map[string][]RuleHit {
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
+	if time.Since(s.rulesFetched) < ipRulesTTL {
+		return s.rulesCached
+	}
+	s.rulesFetched = time.Now()
+	s.rulesCached = nil
 	var groups []runtimeGroup
 	err := s.ndms.GetStream(ctx, "/show/object-group/fqdn", func(r io.Reader) error {
 		var parseErr error
@@ -401,7 +423,8 @@ func (s *Service) fetchIPRules(ctx context.Context) map[string][]RuleHit {
 		s.appLog.Warn("fetch-rules", "ndms.object-group/fqdn", err.Error())
 		return nil
 	}
-	return buildIPRuleMap(ctx, groups, s.lister)
+	s.rulesCached = buildIPRuleMap(ctx, groups, s.lister)
+	return s.rulesCached
 }
 
 // computeStats calculates aggregate statistics and per-tunnel counts.

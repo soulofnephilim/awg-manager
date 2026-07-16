@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,6 +80,13 @@ func (e *BatchError) Error() string {
 // Returns the message if the body indicates an application error,
 // "" otherwise. NDMS shape: {"status":"error","message":"…"}.
 func ExtractError(body []byte) string {
+	// Fast path: тело без поля "status" конвертом ошибки быть не может —
+	// байтовый скан вместо полного Unmarshal больших success-ответов
+	// (interface/object-group списки в сотни KB давали ~8% idle-CPU
+	// в профиле, стенд 2026-07-16). Семантика не меняется.
+	if !bytes.Contains(body, []byte(`"status"`)) {
+		return ""
+	}
 	var envelope struct {
 		Status  string `json:"status"`
 		Message string `json:"message"`
