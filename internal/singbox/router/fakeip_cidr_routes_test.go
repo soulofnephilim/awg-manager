@@ -37,6 +37,21 @@ func TestLoopSafeProxyRule_AllMatchersCovered(t *testing.T) {
 		t.Fatalf("base pure proxy ip_cidr rule must be loop-safe, got false")
 	}
 
+	// Пустой action = route в семантике sing-box (API-путь может не прислать
+	// поле): правило исполняется движком и ОБЯЗАНО получать CIDR-маршруты —
+	// иначе IP из набора идут мимо туннеля молча (находка #534-расследования).
+	noAction := base
+	noAction.Action = ""
+	if !loopSafeProxyRule(noAction) {
+		t.Fatalf("empty action means route in sing-box — rule must be loop-safe")
+	}
+	// Не-route действия (reject и т.п.) маршрутов не получают.
+	rejectRule := base
+	rejectRule.Action = "reject"
+	if loopSafeProxyRule(rejectRule) {
+		t.Fatalf("non-route action must not be loop-safe")
+	}
+
 	rt := reflect.TypeOf(Rule{})
 	for i := 0; i < rt.NumField(); i++ {
 		field := rt.Field(i)
