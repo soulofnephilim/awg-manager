@@ -102,6 +102,18 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		}
 	}
 
+	// One-shot ассерт permit-ACL после старта демона: покрывает апгрейд
+	// awg-manager поверх уже включённого fakeip (ACL появился в этой версии)
+	// и ручное удаление списка. Идемпотентно (дубль permit NDMS отклоняет без
+	// дублирования), 3 POST'а один раз за жизнь процесса — дальше NDMS-конфиг
+	// durable, per-tick probe не нужен. Флаг под transitionMu (Reconcile).
+	if !s.fakeipACLAsserted && s.deps.OpkgTun != nil {
+		s.fakeipACLAsserted = true
+		if nerr := s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); nerr != nil {
+			s.appLog.Warn("fakeip-reconcile", iface, "permit acl: "+nerr.Error())
+		}
+	}
+
 	// Re-add the pool routes ONLY on real drift (Fix B1): probe the v4 pool route
 	// with the same fakeIPPoolRoutePresent seam GetStatus uses; an AddStaticRoute
 	// fires only when the route is ABSENT. In steady state the route is present, so

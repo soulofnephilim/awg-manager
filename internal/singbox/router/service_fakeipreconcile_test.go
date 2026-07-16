@@ -343,10 +343,16 @@ func TestReconcileFakeIPTun_NoMutationWhenNoDrift(t *testing.T) {
 	// drift-reconcile sees no route drift.
 	stubFakeIPPoolRoutePresent(t, func(string, netip.Prefix) bool { return true })
 
-	h.log.calls = nil // observe only the reconcile tick from here.
-
 	all, _ := h.store.Load()
 	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+
+	// ПЕРВЫЙ тик после старта процесса одноразово ассертит permit-ACL
+	// (upgrade-путь) — это единственная допустимая мутация, и только раз.
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("reconcileFakeIPTun (first tick): %v", err)
+	}
+
+	h.log.calls = nil // steady state — со ВТОРОГО тика.
 	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
 		t.Fatalf("reconcileFakeIPTun: %v", err)
 	}

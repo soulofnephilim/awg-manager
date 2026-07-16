@@ -401,6 +401,12 @@ type ServiceImpl struct {
 	// After Install succeeds the flag is set to true until Disable resets it.
 	netfilterStateKnown bool
 
+	// fakeipACLAsserted — one-shot флаг drift-heal'а: permit-ACL fakeip-tun
+	// переассертится один раз за жизнь процесса (апгрейд поверх включённого
+	// fakeip / ручное удаление списка). Доступ только из Reconcile
+	// (сериализован transitionMu).
+	fakeipACLAsserted bool
+
 	// blackholeActive tracks whether the fail-closed DROP chain is currently
 	// engaged (installed by reconcileInstalled while sing-box is dead and the
 	// PREROUTING interception jumps were wiped). It is removed the moment the

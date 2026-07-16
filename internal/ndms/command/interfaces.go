@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 )
@@ -161,6 +162,61 @@ func (c *InterfaceCommands) ClearIPv6Address(ctx context.Context, name string) e
 	return postMutation(ctx, c.poster, c.save, payload, "clear ipv6 address "+name,
 		func() { c.queries.Interfaces.Invalidate(name) },
 		c.queries.RunningConfig.InvalidateAll)
+}
+
+// SetPermitAllACL creates a permit-all access-list named `_WEBADMIN_<name>`
+// (the web-admin convention — the Keenetic UI renders/manages it as the
+// interface access toggle), binds it `in` to the interface and enables
+// auto-delete so NDMS cascades the ACL away when the interface is removed.
+// Stand-verified order (2026-07-16): the permit rule creates the list, the
+// bind must precede auto-delete («cannot enable auto-deletion for
+// unreferenced lists»). Idempotent: a repeated permit is rejected by NDMS as
+// «a duplicate was found» without duplicating the rule — tolerated here.
+func (c *InterfaceCommands) SetPermitAllACL(ctx context.Context, name string) error {
+	acl := "_WEBADMIN_" + name
+	if err := postMutation(ctx, c.poster, c.save,
+		map[string]any{"parse": fmt.Sprintf("access-list %s permit ip 0.0.0.0 0.0.0.0 0.0.0.0 0.0.0.0", acl)},
+		"acl permit "+acl,
+		c.queries.RunningConfig.InvalidateAll,
+	); err != nil && !strings.Contains(err.Error(), "duplicate") {
+		return err
+	}
+	if err := postMutation(ctx, c.poster, c.save,
+		map[string]any{"parse": fmt.Sprintf("interface %s ip access-group %s in", name, acl)},
+		"acl bind "+acl,
+		func() { c.queries.Interfaces.Invalidate(name) },
+		c.queries.RunningConfig.InvalidateAll,
+	); err != nil {
+		return err
+	}
+	return postMutation(ctx, c.poster, c.save,
+		map[string]any{"parse": fmt.Sprintf("access-list %s auto-delete", acl)},
+		"acl auto-delete "+acl,
+		c.queries.RunningConfig.InvalidateAll,
+	)
+}
+
+// RemovePermitAllACL unbinds and removes the `_WEBADMIN_<name>` permit-all
+// access-list. Best-effort/idempotent by design: the interface may already be
+// gone and auto-delete may have cascaded the ACL — both errors are returned
+// for the caller to log, never fatal to a teardown.
+func (c *InterfaceCommands) RemovePermitAllACL(ctx context.Context, name string) error {
+	acl := "_WEBADMIN_" + name
+	unbindErr := postMutation(ctx, c.poster, c.save,
+		map[string]any{"parse": fmt.Sprintf("no interface %s ip access-group %s in", name, acl)},
+		"acl unbind "+acl,
+		func() { c.queries.Interfaces.Invalidate(name) },
+		c.queries.RunningConfig.InvalidateAll,
+	)
+	removeErr := postMutation(ctx, c.poster, c.save,
+		map[string]any{"parse": "no access-list " + acl},
+		"acl remove "+acl,
+		c.queries.RunningConfig.InvalidateAll,
+	)
+	if unbindErr != nil {
+		return unbindErr
+	}
+	return removeErr
 }
 
 // SetMTU sets the interface MTU and auto-adjusts TCP MSS.
