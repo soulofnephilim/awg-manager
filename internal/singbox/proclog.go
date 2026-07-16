@@ -30,6 +30,13 @@ const procLogTailPoll = 500 * time.Millisecond
 // are flushed as one line instead of losing them.
 const maxPendingLine = 64 * 1024
 
+// procLogMaxBytes — потолок размера log-файла живого процесса. tail сам
+// усекает файл при переполнении (self-ротация): писатель держит fd с
+// O_APPEND, после truncate ядро продолжит запись с offset 0. Без этого
+// долгоживущий adopted/спавненный sing-box на debug-уровне за месяцы
+// аптайма съел бы tmpfs (124M на роутере). Var — seam для тестов.
+var procLogMaxBytes = int64(4 * 1024 * 1024)
+
 // openProcLog открывает файл лога; truncate=true — новый спавн начинает
 // лог своего поколения с нуля.
 func openProcLog(path string, truncate bool) (*os.File, error) {
@@ -90,6 +97,17 @@ func tailFile(ctx context.Context, path string, fromEnd bool, onLine func(string
 			return
 		}
 		if fi.Size() == offset {
+			// Self-ротация: файл полностью потреблён и превысил потолок —
+			// усекаем САМИ и продолжаем то же поколение с offset 0 (писатель
+			// держит fd с O_APPEND — ядро продолжит запись с нуля). Момент
+			// «догнали» гарантирует ноль потерянных байт; pending (частичная
+			// строка, уже вычитанная из файла) доклеится из нового начала.
+			// В отличие от чужого truncate выше — тот означает новый спавн.
+			if offset > procLogMaxBytes {
+				if err := os.Truncate(path, 0); err == nil {
+					offset = 0
+				}
+			}
 			continue
 		}
 		f, err := os.Open(path)
