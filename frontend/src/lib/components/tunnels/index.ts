@@ -5,6 +5,7 @@ export { default as AWGAdvancedParams } from './AWGAdvancedParams.svelte';
 export { default as ConnectivitySettingsModal } from './ConnectivitySettingsModal.svelte';
 export { default as DefaultRouteBadge } from './DefaultRouteBadge.svelte';
 export { default as TunnelCard } from './TunnelCard.svelte';
+export { default as TunnelCardSkeleton } from './TunnelCardSkeleton.svelte';
 export { default as TunnelDelaySparkBars } from './TunnelDelaySparkBars.svelte';
 export { default as TunnelListEndpointLine } from './TunnelListEndpointLine.svelte';
 export { default as TunnelListTrafficCell } from './TunnelListTrafficCell.svelte';
