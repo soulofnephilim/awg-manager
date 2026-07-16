@@ -258,13 +258,22 @@ func (p *Process) startLocked() (spawned bool, err error) {
 			// мгновенном stop→start (FIX-C).
 			deliberate := gen.deliberate.Load()
 			p.cleanupPidIfOurs(myPid)
+			// Capture the tail RIGHT NOW, before the delayed cancel
+			// below: cmd.Wait already returned, so this generation's
+			// writes are fully visible on disk. A successor startLocked
+			// (tun-restart/watchdog) can truncate err.log within the
+			// sleep that follows — a delayed read here would see the NEW
+			// generation's startup lines instead of ours: phantom
+			// lastError overwriting the new gen's setLastError(""), and
+			// the OOM heuristic (stderrTail=="" && exitedBySIGKILL)
+			// defeated. Mirrors the immediate-exit branch above.
+			tail := strings.TrimSpace(readLogTail(errPath, stderrBufferSize))
+			safeTail := sanitizeSingboxLogText(tail)
+			p.setLastStderr(safeTail)
 			// Give the tail goroutines one poll cycle to catch the
 			// process's last lines before cancelling them.
 			time.Sleep(2 * procLogTailPoll)
 			tailCancel()
-			tail := strings.TrimSpace(readLogTail(errPath, stderrBufferSize))
-			safeTail := sanitizeSingboxLogText(tail)
-			p.setLastStderr(safeTail)
 			if p.OnExit != nil {
 				p.OnExit(waitErr, safeTail, deliberate)
 			}

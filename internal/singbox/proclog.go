@@ -24,6 +24,12 @@ var (
 
 const procLogTailPoll = 500 * time.Millisecond
 
+// maxPendingLine caps the partial-line buffer in tailFile. A pathological
+// newline-free stream must not grow it unbounded (the old bufio.Scanner
+// this replaced capped tokens at 64KB); on overflow the accumulated bytes
+// are flushed as one line instead of losing them.
+const maxPendingLine = 64 * 1024
+
 // openProcLog открывает файл лога; truncate=true — новый спавн начинает
 // лог своего поколения с нуля.
 func openProcLog(path string, truncate bool) (*os.File, error) {
@@ -39,15 +45,24 @@ func openProcLog(path string, truncate bool) (*os.File, error) {
 
 // tailFile поллит файл с offset'а и отдаёт ЦЕЛЫЕ строки в onLine.
 // fromEnd=true стартует с конца (адопция: не реиграть старые строки в
-// app-log), false — с нуля (свежий спавн). Переживает отсутствие файла
-// (ждёт появления) и truncate (offset > размера файла → перечитывает с
-// нуля). Завершается по ctx.
+// app-log), false — с нуля (свежий спавн). До первой позиции (offset<0)
+// переживает отсутствие файла (ждёт появления). Завершается по ctx, а
+// также САМ (return) при truncate или исчезновении файла ПОСЛЕ того как
+// позиция уже выбрана — это конец жизни данного поколения: truncate/
+// удаление файла под уже запозиционированным tail'ом означает, что его
+// место занял (или скоро займёт) новый спавн, а не что этот же файл
+// "уменьшился" сам по себе. Раньше truncate трактовался как "перечитать с
+// нуля" — если новый Start усекал файл в узком окне между смертью старого
+// поколения и cancel() его tail'а, старый tail реиграл строки НОВОГО
+// поколения с байта 0 и они долетали до onLine дважды (I1).
 //
 // Инвариант: offset наращивается на КАЖДЫЙ прочитанный байт (включая
 // незавершённый хвост без '\n' — он остаётся в pending и учитывается уже
 // как потреблённый из файла), а onLine зовётся только когда накопленный
 // pending заканчивается полной строкой. Это даёт корректное поведение и
 // для строки, доехавшей до диска двумя кусками через границу poll'ов.
+// pending также капается на maxPendingLine (I2) — pathological поток без
+// '\n' не должен расти неограниченно.
 func tailFile(ctx context.Context, path string, fromEnd bool, onLine func(string)) {
 	var offset int64 = -1 // -1 = позиция ещё не выбрана
 	var pending []byte
@@ -59,9 +74,10 @@ func tailFile(ctx context.Context, path string, fromEnd bool, onLine func(string
 		}
 		fi, err := os.Stat(path)
 		if err != nil {
-			offset = -1
-			pending = pending[:0]
-			continue
+			if offset >= 0 {
+				return // уже запозиционированы — файл исчез, поколение окончено
+			}
+			continue // позиция ещё не выбрана — ждём появления файла
 		}
 		if offset < 0 {
 			if fromEnd {
@@ -69,11 +85,9 @@ func tailFile(ctx context.Context, path string, fromEnd bool, onLine func(string
 			} else {
 				offset = 0
 			}
-			pending = pending[:0]
 		}
-		if fi.Size() < offset { // truncate под нами
-			offset = 0
-			pending = pending[:0]
+		if fi.Size() < offset { // truncate под нами — чужая (новая) генерация
+			return
 		}
 		if fi.Size() == offset {
 			continue
@@ -94,7 +108,15 @@ func tailFile(ctx context.Context, path string, fromEnd bool, onLine func(string
 				pending = append(pending, chunk...)
 			}
 			if readErr != nil {
-				break // EOF — незавершённая строка остаётся в pending до следующего poll'а
+				// EOF — незавершённая строка остаётся в pending до
+				// следующего poll'а, если не превысила cap; иначе
+				// сбрасываем накопленное в onLine одной строкой, чтобы не
+				// расти неограниченно (I2).
+				if len(pending) > maxPendingLine {
+					onLine(string(pending))
+					pending = pending[:0]
+				}
+				break
 			}
 			line := string(pending[:len(pending)-1]) // без '\n'
 			pending = pending[:0]

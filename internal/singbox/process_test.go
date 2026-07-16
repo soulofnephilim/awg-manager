@@ -336,6 +336,75 @@ func TestProcess_ReloadRespawnsWhenPidNotOurs(t *testing.T) {
 	_ = p.Stop()
 }
 
+// C1: the post-grace OnExit monitor must capture the dying generation's
+// stderr tail BEFORE the delayed 2*procLogTailPoll sleep, not after — once
+// cmd.Wait returns, the child's writes are fully visible on disk, and a
+// successor startLocked (tun-restart/watchdog) can truncate err.log inside
+// that sleep window. The old (buggy) ordering read the tail only after the
+// sleep, so it would see the SUCCESSOR's freshly-written startup lines
+// instead of the dying generation's own content.
+//
+// This test starts a process whose child sleeps past startupGracePeriod,
+// writes a marker to stderr and exits — driving Start into the post-grace
+// async monitor branch. A watcher goroutine detects the pidfile removal
+// (cleanupPidIfOurs, which the fixed code runs immediately before the tail
+// capture) and — as fast as possible — truncates err.log and writes a
+// DIFFERENT marker, simulating a successor generation's fresh spawn inside
+// the 1s grace-sleep window. OnExit's stderrTail must still carry the OLD
+// generation's marker.
+func TestProcess_OnExitTailNotStolenBySuccessor(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	p := NewProcess("sing-box", "/dev/null", pidPath)
+	p.logDir = dir
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		// Sleeps past the 500ms grace period, then dies with a
+		// recognisable stderr marker — drives the post-grace branch.
+		return exec.Command("/bin/sh", "-c", "sleep 0.7; echo OLD-GEN-MARKER >&2; exit 1"), nil
+	}
+
+	done := make(chan struct{})
+	var stderrTail string
+	p.OnExit = func(_ error, tail string, _ bool) {
+		stderrTail = tail
+		close(done)
+	}
+
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	errPath := filepath.Join(dir, procErrLogName)
+	// Race the fix: as soon as the pidfile is gone (cleanupPidIfOurs ran,
+	// meaning cmd.Wait already returned), immediately truncate err.log and
+	// write a successor's marker — exactly what a tun-restart/watchdog
+	// Start does. With the fix, the tail is already captured by the time
+	// this goroutine can react; with the bug, the delayed read after the
+	// sleep would pick this up instead.
+	go func() {
+		for {
+			if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+		_ = os.WriteFile(errPath, []byte("NEW-GEN-MARKER\n"), 0644)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnExit did not fire in time")
+	}
+
+	if !strings.Contains(stderrTail, "OLD-GEN-MARKER") {
+		t.Errorf("stderrTail = %q, want it to contain OLD-GEN-MARKER (own generation's dying output)", stderrTail)
+	}
+	if strings.Contains(stderrTail, "NEW-GEN-MARKER") {
+		t.Errorf("stderrTail = %q, must NOT contain NEW-GEN-MARKER (successor's content leaked into the dead generation)", stderrTail)
+	}
+}
+
 // FIX-C (#456): у каждого запуска СВОЯ генерация deliberate-флага.
 // Мгновенный stop→start раньше стирал флаг предшественника (общий
 // atomic.Bool очищался следующим startLocked до того, как exit-монитор

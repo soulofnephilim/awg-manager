@@ -125,6 +125,101 @@ func TestTailFile_PartialLineAcrossPolls(t *testing.T) {
 	}
 }
 
+// I1: truncate (или исчезновение файла) ПОСЛЕ того как tail уже
+// запозиционировался должно завершать горутину, а не сбрасывать offset на
+// 0 и реиграть содержимое с нуля. Старое поведение реиграло строки НОВОГО
+// поколения (которое усекло файл под нами), доставляя их в onLine дважды —
+// здесь мы стартуем tail, ждём позиционирования, усекаем и дописываем файл
+// "строками нового поколения" и убеждаемся, что onLine ничего больше не
+// получает (горутина завершилась, а не переиграла новые байты с offset 0).
+func TestTailFile_TruncateEndsGeneration(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "err.log")
+	if err := os.WriteFile(p, []byte("gen1-line\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var got []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go tailFile(ctx, p, false, func(line string) {
+		mu.Lock()
+		got = append(got, line)
+		mu.Unlock()
+	})
+	// Дать tail'у прочитать gen1-line и запозиционироваться за него (offset>0).
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	if len(got) != 1 || got[0] != "gen1-line" {
+		mu.Unlock()
+		t.Fatalf("precondition: got = %v, want [gen1-line]", got)
+	}
+	mu.Unlock()
+
+	// Имитируем следующий Start: truncate + запись строк нового поколения
+	// (ровно то, что делает openProcLog(path, truncate=true)).
+	if err := os.WriteFile(p, []byte("gen2-line\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Старый tail не должен доставить ни одной новой строки — он завершился
+	// на truncate. Ждём достаточно долго, чтобы поймать регрессию (реиграл
+	// бы gen2-line почти сразу же на следующем poll'е).
+	time.Sleep(1500 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("tail lines after truncate = %v, want just [gen1-line] (tail must end on truncate, not replay the new generation)", got)
+	}
+}
+
+// I2: pending-буфер капается на maxPendingLine — pathological поток без
+// '\n' не растёт неограниченно, а сбрасывается в onLine одной строкой.
+func TestTailFile_PendingCapFlushes(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "nolinebreak.log")
+	big := strings.Repeat("x", maxPendingLine+1000) // без '\n'
+	if err := os.WriteFile(p, []byte(big), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var got []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go tailFile(ctx, p, false, func(line string) {
+		mu.Lock()
+		got = append(got, line)
+		mu.Unlock()
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("onLine called %d times, want exactly 1 (overflow flush)", len(got))
+	}
+	if len(got[0]) != len(big) {
+		t.Fatalf("flushed line length = %d, want %d (content must not be lost)", len(got[0]), len(big))
+	}
+}
+
 // readLogTail: возвращает последние maxBytes (целыми строками не обязан).
 func TestReadLogTail(t *testing.T) {
 	dir := t.TempDir()
