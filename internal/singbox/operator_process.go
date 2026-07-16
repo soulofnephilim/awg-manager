@@ -90,19 +90,24 @@ func stderrLineIndicatesSingBoxFatal(line string) bool {
 }
 
 // handleStderrLine is invoked by Process for every line sing-box writes
-// to stderr while running. Forwards each line to the slog (which the app
-// log handler attaches to and persists in the in-memory log buffer
-// surfaced at /diagnostics?tab=logs). FATAL/ERROR lines are also stored
-// as lastError so the UI shows them when sing-box subsequently dies.
+// to stderr while running. slog (o.log) идёт в stderr самого демона (в UI
+// НЕ попадает — slog.Default() не бриджится в app-log); чтобы FATAL/ERROR
+// были видны в /diagnostics?tab=logs и ДО подъёма Clash API (стартап-краш
+// LogForwarder не застаёт), warn+ строки дублируются в processLogger
+// (app-журнал, singbox/process). INFO-поток туда намеренно не идёт — его
+// несёт LogForwarder в singbox-бакет, дублировать шумно. FATAL/ERROR также
+// сохраняются в lastError, чтобы UI объяснил последующую смерть процесса.
 func (o *Operator) handleStderrLine(line string) {
 	safeLine := sanitizeSingboxLogText(line)
 	upper := strings.ToUpper(line)
 	switch {
 	case stderrLineIndicatesSingBoxFatal(line):
 		o.log.Error("singbox stderr", "line", safeLine)
+		o.processLogger.Error("stderr", "", safeLine)
 		o.setLastError(safeLine)
 	case strings.Contains(upper, "ERROR"):
 		o.log.Warn("singbox stderr", "line", safeLine)
+		o.processLogger.Warn("stderr", "", safeLine)
 	default:
 		o.log.Info("singbox stderr", "line", safeLine)
 	}
