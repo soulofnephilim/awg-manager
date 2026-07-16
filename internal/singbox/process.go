@@ -86,6 +86,20 @@ type Process struct {
 	// монитор успевал его прочитать, и наш же рестарт считался падением).
 	curGen *processGen
 
+	// tailCancel/tailDone track the CURRENT generation's tail goroutines
+	// (see startTails). startLocked joins the PREVIOUS generation's tails
+	// — cancel then <-tailDone — before truncating the log files for a new
+	// spawn, so no old tail goroutine can ever be alive (mid-poll or about
+	// to start one) when the truncate happens. This closes I1 (cross-
+	// generation misdelivery) structurally: tailFile's own truncate
+	// detection is a size-only heuristic (fi.Size() < offset) and misses a
+	// same-size-or-larger replace landing within one poll window (≤500ms —
+	// e.g. a quiet log at offset 0 replaying the entire next generation).
+	// Only ever written by startLocked (guarded by startMu); no other
+	// goroutine touches these fields.
+	tailCancel context.CancelFunc
+	tailDone   chan struct{}
+
 	// For tests
 	startCmd      func(bin string, args ...string) (*exec.Cmd, error)
 	signalFn      func(pid int, sig syscall.Signal) error
@@ -171,6 +185,24 @@ func (p *Process) startLocked() (spawned bool, err error) {
 	}
 	if err := os.MkdirAll(filepath.Dir(p.pidPath), 0755); err != nil {
 		return false, err
+	}
+	// Join the previous generation's tail goroutines BEFORE
+	// openProcLog(truncate) below truncates the log files (see the
+	// tailCancel/tailDone field comment for why this must be a join, not
+	// just a cancel). tailFile selects on ctx.Done() in its poll loop, so
+	// the join completes in at most one poll cycle — in practice near-
+	// instant, since cancellation preempts the poll timer.
+	//
+	// Tradeoff: the exit-monitor's delayed drain (sleep 2*procLogTailPoll
+	// then cancel, below) still runs for the normal death path, giving a
+	// dying generation's tail goroutines one extra poll cycle to deliver
+	// its last lines. This join overrides that on a rapid restart —
+	// losing at most the dead generation's final drain cycle — in
+	// exchange for correct attribution (no bytes of the new generation
+	// can ever reach the old generation's tail).
+	if p.tailCancel != nil {
+		p.tailCancel()
+		<-p.tailDone
 	}
 	cmd, err := p.startCmd(p.binary, "run", "-C", p.configPath)
 	if err != nil {
@@ -291,21 +323,41 @@ func (p *Process) effectiveLogDir() string {
 	return procLogDir
 }
 
-// startTails запускает tail-горутины логов текущего поколения и
-// возвращает cancel. fromEnd=true — адопция (не реиграть историю).
+// startTails запускает tail-горутины логов текущего поколения, кладёт
+// cancel/done в p.tailCancel/p.tailDone (см. комментарий у полей — join
+// следующим startLocked) и возвращает cancel для локального использования
+// вызывающим (delayed drain на нормальном пути смерти процесса).
+// fromEnd=true — адопция (не реиграть историю). done закрывается только
+// когда ОБЕ tail-горутины вернулись (WaitGroup), так что join в
+// startLocked не может проскочить, пока одна из них ещё дочитывает файл.
 func (p *Process) startTails(fromEnd bool) context.CancelFunc {
 	logDir := p.effectiveLogDir()
 	ctx, cancel := context.WithCancel(context.Background())
-	go tailFile(ctx, filepath.Join(logDir, procOutLogName), fromEnd, func(l string) {
-		if p.OnStdoutLine != nil {
-			p.OnStdoutLine(l)
-		}
-	})
-	go tailFile(ctx, filepath.Join(logDir, procErrLogName), fromEnd, func(l string) {
-		if p.OnStderrLine != nil {
-			p.OnStderrLine(l)
-		}
-	})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		tailFile(ctx, filepath.Join(logDir, procOutLogName), fromEnd, func(l string) {
+			if p.OnStdoutLine != nil {
+				p.OnStdoutLine(l)
+			}
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		tailFile(ctx, filepath.Join(logDir, procErrLogName), fromEnd, func(l string) {
+			if p.OnStderrLine != nil {
+				p.OnStderrLine(l)
+			}
+		})
+	}()
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	p.tailCancel = cancel
+	p.tailDone = done
 	return cancel
 }
 

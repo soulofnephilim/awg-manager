@@ -456,3 +456,70 @@ func TestProcess_RapidStopStartKeepsDeliberateFlag(t *testing.T) {
 		t.Fatalf("%d deliberate stops misclassified as crashes, want 0", got)
 	}
 }
+
+// I1 round 2: a rapid Stop→Start must never let the DEAD generation's tail
+// goroutine deliver bytes belonging to the NEW generation. tailFile's own
+// truncate detection is a size-only heuristic (fi.Size() < offset) and
+// misses a same-size-or-larger replace landing within one poll window —
+// worst case, a quiet log sits at offset 0 and would replay the entire next
+// generation's output. Here gen1 writes NOTHING to stdout (offset stays 0,
+// the worst case), so without the startLocked join a successor's marker
+// would be delivered twice: once by the dead gen1 tail replaying from
+// offset 0, once by gen2's own fresh tail. With the join, gen1's tail is
+// cancelled and joined before gen2's log truncate, so it can never observe
+// gen2's bytes — the marker must be delivered exactly once.
+func TestProcess_RapidRestartNoCrossGenerationDelivery(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	p := NewProcess("/bin/sh", "/dev/null", pidPath)
+	p.logDir = dir
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	p.OnStdoutLine = func(line string) {
+		mu.Lock()
+		counts[line]++
+		mu.Unlock()
+	}
+
+	// gen1: silent on stdout — its tail stays positioned at offset 0.
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		return exec.Command("/bin/sh", "-c", "sleep 30"), nil
+	}
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start gen1: %v", err)
+	}
+	// Give gen1's tail goroutines a moment to position past startup.
+	time.Sleep(50 * time.Millisecond)
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("stop gen1: %v", err)
+	}
+
+	// gen2: writes a marker immediately — exactly the "successor catches up
+	// within one poll" scenario from the reviewer's report.
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		return exec.Command("/bin/sh", "-c", "echo gen2-marker; sleep 30"), nil
+	}
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start gen2: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := counts["gen2-marker"]
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = p.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if counts["gen2-marker"] != 1 {
+		t.Errorf("gen2-marker delivered %d times, want exactly 1 (cross-generation misdelivery through the dead generation's tail)", counts["gen2-marker"])
+	}
+}
