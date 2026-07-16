@@ -485,9 +485,11 @@ const MOCK_CONNECTIONS_POOL = (() => {
 	for (let i = 0; i < 42; i++) {
 		const tunneled = i < 12;
 		const tunnel = tunneled ? getConnectionTunnel(i) : null;
+		const routeClass = tunneled ? 'tunnel' : i % 7 === 0 ? 'singbox' : i % 11 === 0 ? 'local' : 'direct';
 		const tunnelId = tunnel?.id ?? '';
-		const tunnelName = tunnel?.name ?? 'Direct';
-		const iface = tunnel?.interfaceName ?? 'eth3';
+		const tunnelName =
+			tunnel?.name ?? (routeClass === 'singbox' ? 'sing-box' : routeClass === 'local' ? 'Локально' : 'Direct');
+		const iface = (routeClass === 'local' || routeClass === 'singbox') ? '' : (tunnel?.interfaceName ?? 'eth3');
 		const proto = protos[i % protos.length];
 		const srcHost = directNames[i % directNames.length];
 		const srcA = 192;
@@ -505,15 +507,54 @@ const MOCK_CONNECTIONS_POOL = (() => {
 			dstPort,
 			state: states[i % states.length],
 			packets: 30 + i * 2,
-			bytes: 300 + i * 1111,
+			bytes: (100 + i * 337) + (200 + i * 774),
+			bytesOut: 100 + i * 337,
+			bytesIn: 200 + i * 774,
+			ttl: i % 13 === 0 ? 0 : 30 + ((i * 37) % 1170),
+			routeClass,
 			interface: iface,
 			tunnelId,
 			tunnelName,
 			clientMac: `AA:BB:CC:DD:EE:${String((10 + i) % 99).padStart(2, '0')}`,
 			clientName: srcHost,
 			rules: tunneled
-				? [{ listId: `list-${(i % 4) + 1}`, listName: ['YouTube', 'Discord', 'OpenAI', 'GitHub'][i % 4] }]
+				? [{
+					listId: `list-${(i % 4) + 1}`,
+					listName: ['YouTube', 'Discord', 'OpenAI', 'GitHub'][i % 4],
+					...(i % 3 !== 0 && { fqdn: ['m.youtube.com', 'gateway.discord.gg', 'api.openai.com', 'github.com'][i % 4] })
+				}]
 				: [],
+		});
+	}
+	const v6Tunnel = getConnectionTunnel(0);
+	const v6Specs = [
+		{ protocol: 'tcp', dstPort: 443, routeClass: 'direct' },
+		{ protocol: 'udp', dstPort: 443, routeClass: 'direct' },
+		{ protocol: 'tcp', dstPort: 80, routeClass: 'tunnel' },
+		{ protocol: 'udp', dstPort: 53, routeClass: 'tunnel' },
+	];
+	for (let j = 0; j < v6Specs.length; j++) {
+		const spec = v6Specs[j];
+		const tunneled = spec.routeClass === 'tunnel';
+		items.push({
+			protocol: spec.protocol,
+			src: 'fd00::10',
+			dst: '2606:4700::1111',
+			srcPort: 50000 + j * 13,
+			dstPort: spec.dstPort,
+			state: states[j % states.length],
+			packets: 20 + j * 3,
+			bytes: (150 + j * 421) + (250 + j * 683),
+			bytesOut: 150 + j * 421,
+			bytesIn: 250 + j * 683,
+			ttl: 60 + j * 45,
+			routeClass: spec.routeClass,
+			interface: tunneled ? (v6Tunnel?.interfaceName ?? 'eth3') : 'eth3',
+			tunnelId: tunneled ? (v6Tunnel?.id ?? '') : '',
+			tunnelName: tunneled ? (v6Tunnel?.name ?? 'Direct') : 'Direct',
+			clientMac: `AA:BB:CC:DD:FF:${String(10 + j).padStart(2, '0')}`,
+			clientName: directNames[j % directNames.length],
+			rules: [],
 		});
 	}
 	return items;
@@ -535,9 +576,32 @@ function sortConnections(items, sortBy, sortDir) {
 	});
 }
 
+function buildConnectionBuckets(pool, keyFn) {
+	const map = new Map();
+	for (const c of pool) {
+		const [key, label] = keyFn(c);
+		if (!key) continue;
+		const b = map.get(key) ?? { key, label, count: 0, bytesIn: 0, bytesOut: 0 };
+		b.count += 1;
+		b.bytesIn += c.bytesIn;
+		b.bytesOut += c.bytesOut;
+		map.set(key, b);
+	}
+	const sorted = [...map.values()].sort((a, b) => b.count - a.count);
+	if (sorted.length <= 10) return sorted;
+	const other = { key: '@other', label: 'Прочее', count: 0, bytesIn: 0, bytesOut: 0 };
+	for (const b of sorted.slice(10)) {
+		other.count += b.count;
+		other.bytesIn += b.bytesIn;
+		other.bytesOut += b.bytesOut;
+	}
+	return [...sorted.slice(0, 10), other];
+}
+
 function buildMockConnectionsResponse(url) {
 	const tunnel = (url.searchParams.get('tunnel') || 'all').toLowerCase();
 	const protocol = (url.searchParams.get('protocol') || 'all').toLowerCase();
+	const fstate = (url.searchParams.get('state') || 'all').toUpperCase();
 	const search = (url.searchParams.get('search') || '').trim().toLowerCase();
 	const offset = Math.max(0, Number(url.searchParams.get('offset') || 0) || 0);
 	const limit = Math.max(1, Number(url.searchParams.get('limit') || 50) || 50);
@@ -545,8 +609,11 @@ function buildMockConnectionsResponse(url) {
 	const sortDir = (url.searchParams.get('sortDir') || 'asc').toLowerCase();
 
 	let filtered = MOCK_CONNECTIONS_POOL.filter((c) => {
-		if (tunnel === 'direct' && c.tunnelId !== '') return false;
-		if (tunnel !== 'all' && tunnel !== 'direct' && c.tunnelId !== tunnel) return false;
+		if (tunnel === 'direct' && c.routeClass !== 'direct') return false;
+		else if (tunnel === 'singbox' && c.routeClass !== 'singbox') return false;
+		else if (tunnel === 'local' && c.routeClass !== 'local') return false;
+		else if (!['all', 'direct', 'singbox', 'local'].includes(tunnel) && c.tunnelId !== tunnel) return false;
+		if (fstate !== 'ALL' && c.state !== fstate) return false;
 		if (protocol !== 'all' && c.protocol !== protocol) return false;
 		if (search) {
 			const hay = `${c.src} ${c.dst} ${c.srcPort} ${c.dstPort} ${c.clientName} ${c.state} ${c.interface} ${c.tunnelName}`.toLowerCase();
@@ -561,8 +628,10 @@ function buildMockConnectionsResponse(url) {
 
 	const stats = {
 		total: MOCK_CONNECTIONS_POOL.length,
-		direct: MOCK_CONNECTIONS_POOL.filter((c) => !c.tunnelId).length,
-		tunneled: MOCK_CONNECTIONS_POOL.filter((c) => !!c.tunnelId).length,
+		direct: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'direct').length,
+		tunneled: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'tunnel').length,
+		singbox: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'singbox').length,
+		local: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'local').length,
 		protocols: {
 			tcp: MOCK_CONNECTIONS_POOL.filter((c) => c.protocol === 'tcp').length,
 			udp: MOCK_CONNECTIONS_POOL.filter((c) => c.protocol === 'udp').length,
@@ -577,6 +646,17 @@ function buildMockConnectionsResponse(url) {
 		data: {
 			stats,
 			tunnels,
+			byTunnel: buildConnectionBuckets(MOCK_CONNECTIONS_POOL, (c) =>
+				c.routeClass === 'tunnel'
+					? [c.tunnelId, c.tunnelName]
+					: c.routeClass === 'singbox'
+						? ['@singbox', 'sing-box']
+						: c.routeClass === 'local'
+							? ['@local', 'Локально']
+							: ['@direct', 'Напрямую'],
+			),
+			byClient: buildConnectionBuckets(MOCK_CONNECTIONS_POOL, (c) => [c.clientName || c.src, c.clientName || '']),
+			byDst: buildConnectionBuckets(MOCK_CONNECTIONS_POOL, (c) => [c.dst, c.rules?.[0]?.fqdn ?? '']),
 			connections: page,
 			pagination: { total: totalFiltered, offset, limit, returned: page.length },
 			fetchedAt: new Date().toISOString(),
@@ -3555,9 +3635,10 @@ function buildDownloadOutbounds() {
 }
 
 function buildConnectionsTunnelSummary(stats) {
-	const directCount = Math.max(0, Number(stats?.direct) || 0);
 	const tunnels = {
-		'': { name: 'Direct', interface: 'eth3', count: directCount },
+		'@direct': { name: 'Direct', interface: 'eth3', count: Math.max(0, Number(stats?.direct) || 0) },
+		'@singbox': { name: 'sing-box', interface: '', count: Math.max(0, Number(stats?.singbox) || 0) },
+		'@local': { name: 'Локально', interface: '', count: Math.max(0, Number(stats?.local) || 0) },
 	};
 
 	for (const tunnel of MOCK_AWG_TUNNELS) {
@@ -4288,6 +4369,21 @@ const server = http.createServer(async (req, res) => {
 			await wait(delayMs);
 		}
 		send(res, 200, buildMockConnectionsResponse(url));
+		return;
+	}
+
+	if (req.method === 'DELETE' && path === '/connections') {
+		const q = url.searchParams;
+		const idx = MOCK_CONNECTIONS_POOL.findIndex(
+			(c) =>
+				c.src === q.get('src') &&
+				c.dst === q.get('dst') &&
+				String(c.srcPort) === q.get('srcPort') &&
+				String(c.dstPort) === q.get('dstPort') &&
+				c.protocol === (q.get('protocol') || '').toLowerCase(),
+		);
+		if (idx >= 0) MOCK_CONNECTIONS_POOL.splice(idx, 1);
+		send(res, 200, { success: true, data: { ok: true } });
 		return;
 	}
 

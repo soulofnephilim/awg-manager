@@ -65,7 +65,7 @@
   import DNSRuleEditModal from '$lib/components/routing/singboxRouter/DNSRuleEditModal.svelte';
   import { DNSRewritesList } from '$lib/components/routing/singboxRouter';
   import { ConfirmModal, Dropdown, Button, type DropdownOption } from '$lib/components/ui';
-  import { LayoutGrid } from 'lucide-svelte';
+  import { LayoutGrid, Library } from 'lucide-svelte';
   import { browser } from '$app/environment';
 
   // Store subscriptions
@@ -771,6 +771,9 @@
               onclick={() => (geositeCatalogOpen = true)}
               title="Все geosite-наборы из репозитория SagerNet/sing-geosite"
             >
+              {#snippet iconBefore()}
+                <Library size={14} aria-hidden="true" />
+              {/snippet}
               SagerNet
             </Button>
             <Button variant="primary" size="sm" onclick={() => (rsAddOpen = true)}>+ Набор</Button>

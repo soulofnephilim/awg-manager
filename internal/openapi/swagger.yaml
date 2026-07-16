@@ -517,6 +517,38 @@ definitions:
           $ref: '#/definitions/api.ConfigSlotInfo'
         type: array
     type: object
+  api.ConnectionBucketDTO:
+    properties:
+      bytesIn:
+        example: 4096
+        type: integer
+      bytesOut:
+        example: 1024
+        type: integer
+      count:
+        example: 12
+        type: integer
+      key:
+        example: '@direct'
+        type: string
+      label:
+        example: Напрямую
+        type: string
+    type: object
+  api.ConnectionKillData:
+    properties:
+      ok:
+        example: true
+        type: boolean
+    type: object
+  api.ConnectionKillEnvelope:
+    properties:
+      data:
+        $ref: '#/definitions/api.ConnectionKillData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.ConnectionProtocolsDTO:
     properties:
       icmp:
@@ -529,13 +561,34 @@ definitions:
         example: 12
         type: integer
     type: object
+  api.ConnectionRuleHitDTO:
+    properties:
+      fqdn:
+        example: m.youtube.com
+        type: string
+      listId:
+        example: list_6
+        type: string
+      listName:
+        example: YouTube
+        type: string
+      pattern:
+        example: youtube.com
+        type: string
+    type: object
   api.ConnectionStatsDTO:
     properties:
       direct:
         example: 30
         type: integer
+      local:
+        example: 5
+        type: integer
       protocols:
         $ref: '#/definitions/api.ConnectionProtocolsDTO'
+      singbox:
+        example: 3
+        type: integer
       total:
         example: 42
         type: integer
@@ -545,6 +598,18 @@ definitions:
     type: object
   api.ConnectionsData:
     properties:
+      byClient:
+        items:
+          $ref: '#/definitions/api.ConnectionBucketDTO'
+        type: array
+      byDst:
+        items:
+          $ref: '#/definitions/api.ConnectionBucketDTO'
+        type: array
+      byTunnel:
+        items:
+          $ref: '#/definitions/api.ConnectionBucketDTO'
+        type: array
       connections:
         items:
           $ref: '#/definitions/api.ConntrackConnectionDTO'
@@ -559,8 +624,9 @@ definitions:
       tunnels:
         additionalProperties:
           $ref: '#/definitions/api.TunnelConnectionInfoDTO'
-        description: 'Tunnels: per-tunnel counts; key "" is direct traffic (same as
-          query tunnel=direct / UI Direct chip).'
+        description: |-
+          Tunnels: сводка по маршрутам; ключи — tunnelID и псевдо-классы
+          "@direct" / "@singbox" / "@local".
         type: object
     type: object
   api.ConnectionsPaginationDTO:
@@ -611,6 +677,12 @@ definitions:
       bytes:
         example: 4096
         type: integer
+      bytesIn:
+        example: 3072
+        type: integer
+      bytesOut:
+        example: 1024
+        type: integer
       clientMac:
         example: aa:bb:cc:dd:ee:ff
         type: string
@@ -632,6 +704,13 @@ definitions:
       protocol:
         example: tcp
         type: string
+      routeClass:
+        example: tunnel
+        type: string
+      rules:
+        items:
+          $ref: '#/definitions/api.ConnectionRuleHitDTO'
+        type: array
       src:
         example: 192.168.1.100
         type: string
@@ -641,6 +720,9 @@ definitions:
       state:
         example: ESTABLISHED
         type: string
+      ttl:
+        example: 1183
+        type: integer
       tunnelId:
         example: tun_abc123
         type: string
@@ -6993,6 +7075,53 @@ paths:
       tags:
       - client-routes
   /connections:
+    delete:
+      parameters:
+      - description: source IP
+        in: query
+        name: src
+        required: true
+        type: string
+      - description: destination IP
+        in: query
+        name: dst
+        required: true
+        type: string
+      - description: source port
+        in: query
+        name: srcPort
+        required: true
+        type: integer
+      - description: destination port
+        in: query
+        name: dstPort
+        required: true
+        type: integer
+      - description: tcp | udp
+        in: query
+        name: protocol
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ConnectionKillEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Kill connection
+      tags:
+      - connections
     get:
       produces:
       - application/json

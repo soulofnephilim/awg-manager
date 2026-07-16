@@ -436,6 +436,7 @@ export class SystemClient extends TunnelsClient {
 	async getConnections(params: {
 		tunnel?: string;
 		protocol?: string;
+		state?: string;
 		search?: string;
 		offset?: number;
 		limit?: number;
@@ -445,6 +446,7 @@ export class SystemClient extends TunnelsClient {
 		const sp = new URLSearchParams();
 		if (params.tunnel && params.tunnel !== 'all') sp.set('tunnel', params.tunnel);
 		if (params.protocol && params.protocol !== 'all') sp.set('protocol', params.protocol);
+		if (params.state && params.state !== 'all') sp.set('state', params.state);
 		if (params.search) sp.set('search', params.search);
 		if (params.offset) sp.set('offset', String(params.offset));
 		if (params.limit) sp.set('limit', String(params.limit));
@@ -452,6 +454,29 @@ export class SystemClient extends TunnelsClient {
 		if (params.sortDir) sp.set('sortDir', params.sortDir);
 		const qs = sp.toString();
 		return this.request<ConnectionsResponse>(`/connections${qs ? '?' + qs : ''}`);
+	}
+
+	/** Сброс conntrack-записи. true = удалено (или уже истекло), false = ошибка. */
+	async killConnection(c: {
+		src: string;
+		dst: string;
+		srcPort: number;
+		dstPort: number;
+		protocol: string;
+	}): Promise<boolean> {
+		const sp = new URLSearchParams({
+			src: c.src,
+			dst: c.dst,
+			srcPort: String(c.srcPort),
+			dstPort: String(c.dstPort),
+			protocol: c.protocol,
+		});
+		try {
+			await this.request(`/connections?${sp}`, { method: 'DELETE' });
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	// #endregion

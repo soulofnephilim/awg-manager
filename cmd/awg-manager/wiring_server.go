@@ -443,6 +443,15 @@ func (a *app) setupRouter() {
 	singboxRouterHandler := api.NewSingboxRouterHandler(routerSvc, a.loggingService)
 	singboxRouterHandler.SetOutboundRefCheckers(a.deviceProxySvc, routerSvc)
 	a.srv.SetSingboxRouterHandler(singboxRouterHandler)
+	// Атрибуция tproxy-потоков на странице соединений: connmark == PolicyMark
+	// активной sb-router-политики. Кэшируется внутри connections.Service (60s).
+	a.srv.SetConnectionsMarkProvider(func(ctx context.Context) (string, bool) {
+		st, err := routerSvc.GetStatus(ctx)
+		if err != nil || !st.Active || st.PolicyMark == "" {
+			return "", false
+		}
+		return st.PolicyMark, true
+	})
 	a.srv.SetSingboxFakeIPConfigHandler(api.NewSingboxFakeIPConfigHandler(routerSvc, a.loggingService))
 	a.srv.SetAWGOutboundsHandler(api.NewAWGOutboundsHandler(a.awgoutboundsSvc))
 	a.srv.SetSingboxConfigHandler(api.NewSingboxConfigHandler(a.sbOrch.ConfigDir))

@@ -315,3 +315,39 @@ func TestBuildIPRuleMap_NonAWGGroupSkipped(t *testing.T) {
 		t.Errorf("non-AWG group should be ignored, got %d entries", len(m))
 	}
 }
+
+func TestBuildIPRuleMap_DuplicateListDeduped(t *testing.T) {
+	// Один IP резолвится и под конкретным FQDN, и под parent-записью того же
+	// списка, плюс встречается во второй странице (_p2) того же списка.
+	// UI должен получить ОДИН badge, не три.
+	// parent-self запись идёт ПЕРВОЙ — специфичный m.youtube.com должен её вытеснить,
+	// т.к. rules[0].fqdn в новом UI — отображаемое имя назначения и ключ группировки.
+	groups := []runtimeGroup{
+		{
+			Name: "youtube_p1",
+			Entries: []runtimeEntry{
+				{FQDN: "youtube.com", Parent: "youtube.com", IPs: []string{"142.251.1.100"}},
+				{FQDN: "m.youtube.com", Parent: "youtube.com", IPs: []string{"142.251.1.100"}},
+			},
+		},
+		{
+			Name: "youtube_p2",
+			Entries: []runtimeEntry{
+				{FQDN: "yt3.ggpht.com", Parent: "ggpht.com", IPs: []string{"142.251.1.100"}},
+			},
+		},
+	}
+	lister := &fakeLister{lists: []dnsroute.DomainList{
+		{ID: "list_6", Name: "YouTube"},
+	}}
+
+	m := buildIPRuleMap(context.Background(), groups, lister)
+
+	hits := m["142.251.1.100"]
+	if len(hits) != 1 {
+		t.Fatalf("hits = %d, want 1 (dedup by ListID)", len(hits))
+	}
+	if hits[0].FQDN != "m.youtube.com" {
+		t.Errorf("FQDN = %q, want m.youtube.com (специфичный хит вытесняет parent-self)", hits[0].FQDN)
+	}
+}
