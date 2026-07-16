@@ -121,7 +121,7 @@ func (s *ServiceImpl) computeIssues(cfg *RouterConfig) []Issue {
 
 func (s *ServiceImpl) computeRuleOutboundIssues(r Rule, index int, outboundTags map[string]struct{}) []Issue {
 	var issues []Issue
-	if r.Action == "route" && r.Outbound != "" && !isKnownOutboundRef(r.Outbound, outboundTags) {
+	if r.ActionIsRoute() && r.Outbound != "" && !isKnownOutboundRef(r.Outbound, outboundTags) {
 		issues = append(issues, Issue{
 			Severity:  "warning",
 			Kind:      "orphan-rule",
