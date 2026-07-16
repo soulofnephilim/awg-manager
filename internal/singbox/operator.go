@@ -287,6 +287,9 @@ func NewOperator(d OperatorDeps) *Operator {
 	op.proc.OnStderrLine = op.handleStderrLine
 	op.proc.OnStdoutLine = op.handleStdoutLine
 	op.proc.OnExit = op.handleExit
+	if adopted, pid := op.proc.AttachIfRunning(); adopted {
+		op.log.Info("reconnected to running sing-box", "pid", pid)
+	}
 	// A tun inbound cannot survive SIGHUP — every reload path (scheduler
 	// rule-set refresh, tunnel ApplyConfig, orchestrator) routes through
 	// proc.Reload, which consults this to restart instead. o.orch is wired

@@ -523,3 +523,126 @@ func TestProcess_RapidRestartNoCrossGenerationDelivery(t *testing.T) {
 		t.Errorf("gen2-marker delivered %d times, want exactly 1 (cross-generation misdelivery through the dead generation's tail)", counts["gen2-marker"])
 	}
 }
+
+// AttachIfRunning: живой identity-процесс усыновляется (tail fromEnd),
+// повторный вызов не плодит второй комплект tail'ов (уже attached).
+func TestProcess_AttachIfRunning(t *testing.T) {
+	dir := t.TempDir()
+	p := NewProcess("/bin/true", filepath.Join(dir, "cfg"), filepath.Join(dir, "sing-box.pid"))
+	p.logDir = dir
+	// Эмулируем «живой процесс»: pid-файл с нашим pid + identity-стаб.
+	if err := os.WriteFile(filepath.Join(dir, "sing-box.pid"), []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p.matchBinaryFn = func(pid int) bool { return pid == os.Getpid() }
+	var mu sync.Mutex
+	var lines []string
+	p.OnStderrLine = func(l string) { mu.Lock(); lines = append(lines, l); mu.Unlock() }
+	// В err-логе уже есть история — не должна реиграться (fromEnd).
+	if err := os.WriteFile(filepath.Join(dir, procErrLogName), []byte("history\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, pid := p.AttachIfRunning()
+	if !adopted || pid != os.Getpid() {
+		t.Fatalf("AttachIfRunning = (%v,%d), want (true,%d)", adopted, pid, os.Getpid())
+	}
+	if a2, _ := p.AttachIfRunning(); a2 {
+		t.Fatal("second AttachIfRunning must be no-op false (already attached)")
+	}
+	time.Sleep(700 * time.Millisecond)
+	f, err := os.OpenFile(filepath.Join(dir, procErrLogName), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("live-line\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(lines)
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 1 || lines[0] != "live-line" {
+		t.Fatalf("adopted tail lines = %v, want exactly [live-line]", lines)
+	}
+}
+
+// AttachIfRunning path variant of I1: an adopted generation's tail
+// positions at offset 0 on a quiet, already-existing (empty) log — the
+// same worst case TestProcess_RapidRestartNoCrossGenerationDelivery
+// exercises for a spawned gen1. A subsequent StartSpawned (the adopted
+// process turns out to be dead — matchBinaryFn flips false) must join
+// the adopted tail before truncating the log for its own fresh spawn, or
+// the dead adopted tail would replay the new generation's entire output
+// from offset 0 — delivering it twice.
+func TestProcess_AttachThenStartSpawnedJoinsAdoptedTails(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	p := NewProcess("/bin/sh", "/dev/null", pidPath)
+	p.logDir = dir
+
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Out-log already exists (empty) so the adopted tail positions at
+	// offset 0 (fromEnd of an empty file) on its very first poll.
+	if err := os.WriteFile(filepath.Join(dir, procOutLogName), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	live := true
+	p.matchBinaryFn = func(pid int) bool { return live && pid == os.Getpid() }
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	p.OnStdoutLine = func(line string) {
+		mu.Lock()
+		counts[line]++
+		mu.Unlock()
+	}
+
+	adopted, pid := p.AttachIfRunning()
+	if !adopted || pid != os.Getpid() {
+		t.Fatalf("AttachIfRunning = (%v,%d), want (true,%d)", adopted, pid, os.Getpid())
+	}
+	// Let the adopted tail position past its first poll cycle.
+	time.Sleep(600 * time.Millisecond)
+
+	// The adopted process turns out to be dead — StartSpawned must join
+	// its tail and spawn fresh rather than no-op'ing.
+	live = false
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		return exec.Command("/bin/sh", "-c", "echo gen2-marker; sleep 30"), nil
+	}
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start gen2: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := counts["gen2-marker"]
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = p.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if counts["gen2-marker"] != 1 {
+		t.Errorf("gen2-marker delivered %d times, want exactly 1 (adopted tail not joined before spawn truncate)", counts["gen2-marker"])
+	}
+}

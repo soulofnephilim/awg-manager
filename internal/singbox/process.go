@@ -95,10 +95,19 @@ type Process struct {
 	// detection is a size-only heuristic (fi.Size() < offset) and misses a
 	// same-size-or-larger replace landing within one poll window (≤500ms —
 	// e.g. a quiet log at offset 0 replaying the entire next generation).
-	// Only ever written by startLocked (guarded by startMu); no other
-	// goroutine touches these fields.
+	// Only ever written by startLocked/AttachIfRunning (both guarded by
+	// startMu); no other goroutine touches these fields.
 	tailCancel context.CancelFunc
 	tailDone   chan struct{}
+
+	// attached is true when the CURRENT generation's tails were raised by
+	// AttachIfRunning (adopting a live sing-box from a previous awgm
+	// instance) rather than by startLocked spawning a child. Guarded by
+	// startMu. Reset to false by startLocked (the adopted process is being
+	// superseded by a fresh spawn) and by stopLocked (the adopted process
+	// was signalled and its death is confirmed/assumed) — either way the
+	// next Start spawns a real child instead of no-op'ing.
+	attached bool
 
 	// For tests
 	startCmd      func(bin string, args ...string) (*exec.Cmd, error)
@@ -204,6 +213,9 @@ func (p *Process) startLocked() (spawned bool, err error) {
 		p.tailCancel()
 		<-p.tailDone
 	}
+	// Whatever generation held tailCancel/tailDone above (adopted or
+	// spawned) is being superseded by this fresh spawn.
+	p.attached = false
 	cmd, err := p.startCmd(p.binary, "run", "-C", p.configPath)
 	if err != nil {
 		return false, err
@@ -312,6 +324,38 @@ func (p *Process) startLocked() (spawned bool, err error) {
 		}()
 		return true, nil
 	}
+}
+
+// AttachIfRunning adopts a live sing-box left running by a previous awgm
+// instance (e.g. after an in-place update/restart of the daemon itself):
+// if the pid file names a live, identity-matched process, it raises this
+// generation's tail goroutines with fromEnd=true (so the pre-adoption
+// history already on disk is not replayed into the app log) and returns
+// (true, pid). A no-op process — already attached, or a generation already
+// spawned/attached (tailCancel != nil) — returns (false, 0), so a repeat
+// call or a call after StartSpawned never raises a second tail set.
+//
+// The adopted process is NOT under our direct control the way a spawned
+// child is: there is no cmd.Wait, so OnExit never fires for it and no
+// exit-code/deliberate flag is ever known. Its death is observed
+// indirectly — the next watchdog IsRunning tick sees the pid gone — and
+// only the tail of its err-log (not a captured stderr buffer) is
+// available for diagnostics. Lifecycle control (skip/SIGHUP/stop) works
+// by pid exactly as for a spawned process (orchestrator, Stop, Reload all
+// go through readPID/signal, which do not care who forked the pid).
+func (p *Process) AttachIfRunning() (bool, int) {
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+	if p.attached || p.tailCancel != nil {
+		return false, 0
+	}
+	running, pid := p.IsRunning()
+	if !running {
+		return false, 0
+	}
+	p.startTails(true)
+	p.attached = true
+	return true, pid
 }
 
 // effectiveLogDir returns p.logDir, falling back to the procLogDir
@@ -443,6 +487,11 @@ func (p *Process) stopLocked() error {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	// Whether this pid was ours (spawned) or adopted, it is gone (or we
+	// gave up waiting after SIGKILL) — the next Start must spawn a real
+	// child rather than treating a stale attached=true as "already
+	// running". No-op for a spawned process (already false).
+	p.attached = false
 	_ = os.Remove(p.pidPath)
 	return nil
 }
