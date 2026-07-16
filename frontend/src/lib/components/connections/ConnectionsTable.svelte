@@ -171,7 +171,7 @@
 		{#each [0, 1, 2] as i (i)}
 			<div class="row row-skel" aria-hidden="true">
 				{#each ['40%', '60%', '70%', '50%', '55%', '45%', '0'] as w, ci (ci)}
-					<span class="cell"><span class="cell-skel" style:width={w}></span></span>
+					<span class="cell"><span class="skeleton cell-skel" style:width={w}></span></span>
 				{/each}
 			</div>
 		{/each}
@@ -305,17 +305,12 @@
 	}
 	.row-skel { cursor: default; }
 	.row-skel:hover { background: transparent; }
+	/* Фон/анимация — общий .skeleton (app.css); локально только размеры:
+	   бар — inline-элемент внутри .cell, block из .skeleton его схлопнул бы. */
 	.cell-skel {
 		display: inline-block;
 		height: 0.6875rem;
 		max-width: 100%;
-		border-radius: 4px;
-		background: var(--color-border);
-		animation: skel-pulse 1.1s ease-in-out infinite;
-	}
-	@keyframes skel-pulse {
-		0%, 100% { opacity: 0.38; }
-		50% { opacity: 0.72; }
 	}
 	.empty {
 		padding: 16px;

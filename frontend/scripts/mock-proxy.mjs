@@ -61,6 +61,10 @@ async function getUnifiedPresets() {
 	return unifiedPresetsCache;
 }
 
+// MOCK_DELAY_MS=1500 — искусственная задержка каждого ответа /api/*:
+// для визуальной проверки skeleton-состояний холодной загрузки.
+const MOCK_DELAY_MS = Number(process.env.MOCK_DELAY_MS || 0);
+
 const UPSTREAM = process.env.UPSTREAM ?? 'http://127.0.0.1:8080';
 // MOCK_DETERMINISTIC=1: вся "живость" (jitter трафика, delay-пробы,
 // вероятностные сбои) становится воспроизводимой — скриншот-сравнение
@@ -3955,6 +3959,7 @@ PersistentKeepalive = 25
 }
 
 const server = http.createServer(async (req, res) => {
+	if (MOCK_DELAY_MS > 0) await new Promise((r) => setTimeout(r, MOCK_DELAY_MS));
 	const url = new URL(req.url, `http://${req.headers.host}`);
 	const path = url.pathname;
 
