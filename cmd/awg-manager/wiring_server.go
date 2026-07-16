@@ -318,7 +318,7 @@ func (a *app) setupRouter() {
 			store: a.ndmsQueries.Interfaces,
 			log:   logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSingboxRouter),
 		},
-		OpkgTunScan: &routerOpkgTunScanAdapter{store: a.ndmsQueries.Interfaces},
+		OpkgTunScan: opkgTunScanner(a.ndmsQueries.Interfaces),
 		FakeIPTun: func() router.FakeIPTunParams {
 			p := router.DefaultFakeIPTunParams()
 			p.CachePath = singbox.DefaultCacheDBPath()
@@ -418,16 +418,12 @@ func (a *app) setupRouter() {
 	a.deferOnExit(deviceProxyUnsub)
 	routerStartupLog := logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSingboxRouter)
 	go func() {
-		// Startup-only: reap a fakeip OpkgTun orphaned by a crash/incomplete
-		// teardown before Reconcile runs (NOT on every Reconcile — that would
-		// blunt-delete the iface on a live fakeip→tproxy switch).
-		if err := routerSvc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
-			routerStartupLog.Warn("fakeip-reap", "startup", err.Error())
-		}
 		// Startup-only: reap rule-set artifacts (rule-sets/inline, rule-sets/dat)
 		// orphaned by deletes/renames on older AWGM versions that never cleaned
 		// them up (issue #448). Steady-state GC runs after each ApplyStaging.
 		routerSvc.GCRuleSetArtifacts()
+		// Reconcile сам реапает fakeip-сирот (ReapOrphanedFakeIPTun) на каждом
+		// тике, включая этот стартовый — отдельный вызов не нужен.
 		if err := routerSvc.Reconcile(context.Background()); err != nil {
 			routerStartupLog.Error("reconcile", "startup", err.Error())
 		}

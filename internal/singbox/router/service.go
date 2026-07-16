@@ -331,10 +331,11 @@ type Deps struct {
 	// for the fakeip index allocator. Optional — nil in tests; wired in
 	// cmd/awg-manager via the union adapter. Consumed by Slice 1D Enable.
 	OpkgTunIndices OpkgTunIndexLister
-	// OpkgTunScan lists NDMS OpkgTun IDs by description for the startup
-	// reap's persist-less orphan fallback. Optional — nil skips the scan;
-	// wired in cmd/awg-manager over the interface query store.
-	OpkgTunScan OpkgTunScanner
+	// OpkgTunScan lists NDMS OpkgTun IDs carrying the given description —
+	// the reap's persist-less orphan fallback (see teardownOpkgTun for why
+	// such orphans are dangerous). Optional — nil skips the scan; wired in
+	// cmd/awg-manager over the interface query store.
+	OpkgTunScan func(ctx context.Context, description string) ([]string, error)
 	// FakeIPTun holds the static fakeip-tun provisioning knobs (pool
 	// ranges, tun addrs, MTU, DHCP pool). Zero-value in tests; defaults
 	// wired in cmd/awg-manager. Consumed by Slice 1D Enable.

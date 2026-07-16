@@ -184,29 +184,12 @@ func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Se
 		s.notifyRoutingSlotsChanged()
 	}
 
-	// (4b) Delete the iface (down, clear addresses, then delete) — NDMS name.
-	// With the pool route renewed to reject (step 2), deleting the iface
-	// fail-closes the pool: the reject flag now drops any client still on a
-	// fakeip address. Best-effort.
-	//
-	// The address clears are deliberately SEPARATE from the delete: ndm's http
-	// manager binds nginx on every CONFIGURED interface address (admin-down does
-	// not help), so if the delete below fails, a leftover `ip address` on a
-	// kernel-less OpkgTun sends ndm into an endless nginx-reload loop that
-	// stalls ALL RCI for seconds (stand-verified 2026-07-15). Clearing the
-	// addresses first keeps a failed delete harmless.
-	if err := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); err != nil {
-		s.appLog.Warn("fakeip-disable", iface, "iface down: "+err.Error())
-	}
-	if err := s.deps.OpkgTun.ClearAddress(ctx, ndmsName); err != nil {
-		s.appLog.Warn("fakeip-disable", iface, "clear address: "+err.Error())
-	}
-	if err := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); err != nil {
-		s.appLog.Warn("fakeip-disable", iface, "clear ipv6 address: "+err.Error())
-	}
-	if err := s.deps.OpkgTun.DeleteOpkgTun(ctx, ndmsName); err != nil {
-		s.appLog.Warn("fakeip-disable", iface, "delete opkgtun: "+err.Error())
-	}
+	// (4b) Tear the iface down (down → delete; on delete failure — clear the
+	// configured addresses, see teardownOpkgTun) — NDMS name. With the pool
+	// route renewed to reject (step 2), deleting the iface fail-closes the
+	// pool: the reject flag now drops any client still on a fakeip address.
+	// Best-effort: a failed delete is retried by the periodic reap scan.
+	_ = s.teardownOpkgTun(ctx, ndmsName, "fakeip-disable")
 
 	// (4c) Orphan-netdev cleanup: NDMS DeleteOpkgTun normally tears the
 	// kernel device down too, but a half-removed teardown can leave a DOWN orphan
@@ -284,4 +267,32 @@ func (s *ServiceImpl) scheduleFakeIPDrain(poolNet4, poolMask4, ndmsName string) 
 			s.appLog.Warn("fakeip-disable", ndmsName, "remove drain reject route: "+err.Error())
 		}
 	})
+}
+
+// teardownOpkgTun best-effort сносит NDMS OpkgTun: down → delete; при провале
+// delete снимает сконфигурированные v4/v6 адреса. Единственное место, где живёт
+// инвариант: интерфейс с настроенным `ip address`, но без kernel-адреса вгоняет
+// ndm в бесконечный nginx-reload цикл (bind fail → регенерация конфига →
+// reload → …), подвешивающий весь RCI на секунды (stand-verified 2026-07-15) —
+// поэтому провал delete ОБЯЗАН оставлять интерфейс без адресов. Clear'ы идут
+// ПОСЛЕ провала delete: на happy-path они были бы лишними RCI-вызовами, а на
+// уже исчезнувшем интерфейсе delete идемпотентно успешен и clear'ы (с их
+// create-on-reference риском в NDMS) не выполняются вовсе. Возвращает ошибку
+// delete; down и clear'ы — warn-and-continue.
+func (s *ServiceImpl) teardownOpkgTun(ctx context.Context, ndmsName, scope string) error {
+	if err := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); err != nil {
+		s.appLog.Warn(scope, ndmsName, "iface down: "+err.Error())
+	}
+	err := s.deps.OpkgTun.DeleteOpkgTun(ctx, ndmsName)
+	if err == nil {
+		return nil
+	}
+	s.appLog.Warn(scope, ndmsName, "delete opkgtun: "+err.Error())
+	if e := s.deps.OpkgTun.ClearAddress(ctx, ndmsName); e != nil {
+		s.appLog.Warn(scope, ndmsName, "clear address: "+e.Error())
+	}
+	if e := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); e != nil {
+		s.appLog.Warn(scope, ndmsName, "clear ipv6 address: "+e.Error())
+	}
+	return err
 }

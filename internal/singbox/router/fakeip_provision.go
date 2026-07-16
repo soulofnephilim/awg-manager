@@ -36,15 +36,6 @@ type OpkgTunProvisioner interface {
 	InterfaceDown(ctx context.Context, name string) error
 }
 
-// OpkgTunScanner lists NDMS OpkgTun interface IDs carrying the given
-// description. Used by the startup reap to find persist-less fakeip orphans:
-// a configured `ip address` on an OpkgTun whose kernel device is absent sends
-// ndm's nginx into an endless reload loop (bind() fails → config regen →
-// reload → …), stalling ALL RCI for seconds — so such orphans must not survive.
-type OpkgTunScanner interface {
-	ListOpkgTunsByDescription(ctx context.Context, description string) ([]string, error)
-}
-
 // StaticRouteProvider manages NDMS auto static routes for the fakeip pool + reject route.
 type StaticRouteProvider interface {
 	AddStaticRoute(ctx context.Context, route StaticRouteSpec) error

@@ -84,10 +84,10 @@ func (c *InterfaceCommands) SetIPGlobal(ctx context.Context, name string) error 
 		c.queries.RunningConfig.InvalidateAll)
 }
 
-// SetAddress sets the IPv4 address on the interface. Composite: clears
-// any existing address first (best-effort), then sets the new one.
-func (c *InterfaceCommands) SetAddress(ctx context.Context, name, address, mask string) error {
-	clearPayload := map[string]any{
+// clearAddressPayload is the RCI form that removes the configured IPv4
+// address; shared by SetAddress (inline best-effort clear) and ClearAddress.
+func clearAddressPayload(name string) map[string]any {
+	return map[string]any{
 		"interface": map[string]any{
 			name: map[string]any{
 				"ip": map[string]any{
@@ -96,7 +96,12 @@ func (c *InterfaceCommands) SetAddress(ctx context.Context, name, address, mask 
 			},
 		},
 	}
-	_, _ = c.poster.Post(ctx, clearPayload)
+}
+
+// SetAddress sets the IPv4 address on the interface. Composite: clears
+// any existing address first (best-effort), then sets the new one.
+func (c *InterfaceCommands) SetAddress(ctx context.Context, name, address, mask string) error {
+	_, _ = c.poster.Post(ctx, clearAddressPayload(name))
 
 	setPayload := map[string]any{
 		"interface": map[string]any{
@@ -116,16 +121,7 @@ func (c *InterfaceCommands) SetAddress(ctx context.Context, name, address, mask 
 // ClearAddress removes the configured IPv4 address from the interface.
 // Idempotent: NDMS accepts no:true when no address is set.
 func (c *InterfaceCommands) ClearAddress(ctx context.Context, name string) error {
-	payload := map[string]any{
-		"interface": map[string]any{
-			name: map[string]any{
-				"ip": map[string]any{
-					"address": map[string]any{"no": true},
-				},
-			},
-		},
-	}
-	return postMutation(ctx, c.poster, c.save, payload, "clear address "+name,
+	return postMutation(ctx, c.poster, c.save, clearAddressPayload(name), "clear address "+name,
 		func() { c.queries.Interfaces.Invalidate(name) },
 		c.queries.Routes.InvalidateAll,
 		c.queries.RunningConfig.InvalidateAll)
