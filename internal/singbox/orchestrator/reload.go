@@ -86,6 +86,7 @@ func (o *Orchestrator) Reload() error {
 		return res
 	}
 	o.lastReloadValidation = nil // валидация прошла — прошлый провал неактуален
+	newHash := o.enabledConfigHashLocked()
 	needRunning := o.hasActiveWorkLocked()
 	proc := o.proc
 	shouldRun := o.shouldRun
@@ -96,9 +97,34 @@ func (o *Orchestrator) Reload() error {
 		o.log("warn", m) // см. комментарий на warn-логировании prune выше
 	}
 
+	// Skip gate: if the config we are about to apply hashes identical to
+	// what we last successfully applied AND sing-box is already running
+	// in the shape we need, there is nothing to do — a SIGHUP would be a
+	// no-op and a tun-restart would be actively harmful. This is what
+	// lets a daemon restart (in-memory prevHasTun resets to false) ADOPT
+	// an already-running sing-box instead of needlessly tearing it down.
+	if proc != nil {
+		if st, ok := loadAppliedState(o.appliedPath); ok && st.Hash == newHash {
+			if running, pid := proc.IsRunning(); running && needRunning {
+				o.mu.Lock()
+				o.prevHasTun = st.HasTun
+				o.reloading = false
+				o.mu.Unlock()
+				o.log("info", fmt.Sprintf("orchestrator: config unchanged — reload skipped (sing-box pid %d adopted)", pid))
+				return nil
+			}
+		}
+	}
+
 	var err error
+	// newApplied/saveApplied are decided per-branch below so the
+	// suppressed cold-start sub-case (process stays down) does not get
+	// mistaken for a successful apply just because err stayed nil.
+	var newApplied appliedState
+	saveApplied := false
 	if proc == nil {
-		// Test mode or pre-wiring — nothing to do.
+		// Test mode or pre-wiring — nothing to do, no real process to
+		// describe, applied state left untouched.
 	} else {
 		running, _ := proc.IsRunning()
 		switch {
@@ -109,10 +135,15 @@ func (o *Orchestrator) Reload() error {
 			// stop branches stay unaffected — they don't cold-start.
 			if shouldRun != nil && !shouldRun() {
 				o.log("info", "orchestrator: cold-start suppressed by manual-stop intent")
+				saveApplied = true // process stays down — record "nothing applied"
 				break
 			}
 			o.log("info", "orchestrator: starting sing-box (active slots present)")
 			err = proc.Start()
+			if err == nil {
+				newApplied = appliedState{Hash: newHash, HasTun: newHasTun}
+			}
+			saveApplied = err == nil
 		case needRunning && running:
 			if newHasTun != prevHasTun {
 				// sing-box cannot add/remove a tun inbound via SIGHUP — the
@@ -127,11 +158,24 @@ func (o *Orchestrator) Reload() error {
 				o.log("info", "orchestrator: SIGHUP sing-box (config changed)")
 				err = proc.Reload()
 			}
+			if err == nil {
+				newApplied = appliedState{Hash: newHash, HasTun: newHasTun}
+			}
+			saveApplied = err == nil
 		case !needRunning && running:
 			o.log("info", "orchestrator: stopping sing-box (no active slots)")
 			err = proc.Stop()
+			saveApplied = true // process is dead either way — record it
 		default:
-			// !needRunning && !running — nothing to do.
+			// !needRunning && !running — nothing to do, but record
+			// "nothing applied" (idempotent) so a stale hash from a
+			// since-disabled config can't later satisfy the skip gate.
+			saveApplied = true
+		}
+	}
+	if saveApplied {
+		if e := saveAppliedState(o.appliedPath, newApplied); e != nil {
+			o.log("warn", "orchestrator: persist applied state: "+e.Error())
 		}
 	}
 

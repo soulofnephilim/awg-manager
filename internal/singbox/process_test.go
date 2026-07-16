@@ -62,6 +62,7 @@ func TestProcessStartUsesConfigDir(t *testing.T) {
 		binary:     "sing-box",
 		configPath: "/tmp/singbox/config.d",
 		pidPath:    filepath.Join(dir, "pid"),
+		logDir:     dir,
 		startCmd: func(bin string, args ...string) (*exec.Cmd, error) {
 			gotArgs = args
 			return exec.Command("/bin/sleep", "1"), nil
@@ -114,6 +115,7 @@ func TestProcessStartReportsImmediateExit(t *testing.T) {
 	p := &Process{
 		binary:  "sing-box",
 		pidPath: filepath.Join(dir, "pid"),
+		logDir:  dir,
 		startCmd: func(bin string, args ...string) (*exec.Cmd, error) {
 			c := exec.Command("/bin/sh", "-c", "echo 'FATAL boom node.example.org 203.0.113.77' >&2; exit 1")
 			return c, nil
@@ -192,6 +194,7 @@ func TestProcess_StartIsConcurrencySafe(t *testing.T) {
 	var spawnCount atomic.Int32
 
 	p := NewProcess("/bin/sleep", "/dev/null", filepath.Join(dir, "sing-box.pid"))
+	p.logDir = dir
 	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
 		spawnCount.Add(1)
 		// Use a 2s sleep so the process outlives the 500ms grace period and
@@ -235,6 +238,7 @@ func TestProcess_ReloadRestartsWhenTunPresent(t *testing.T) {
 	var sawSIGHUP, sawSIGTERM bool
 	var spawnCount atomic.Int32
 	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	p.logDir = dir
 	p.signalFn = func(pid int, sig syscall.Signal) error {
 		switch sig {
 		case syscall.SIGHUP:
@@ -276,6 +280,7 @@ func TestProcess_ReloadSIGHUPsWhenNoTun(t *testing.T) {
 	var sawSIGHUP bool
 	var spawnCount atomic.Int32
 	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	p.logDir = dir
 	// The pidfile borrows the test's own pid to keep the process "alive" for
 	// the SIGHUP path; its cmdline is the test binary, not /bin/sleep, so the
 	// real identity check would (correctly) see a mismatch. Model "alive AND
@@ -315,6 +320,7 @@ func TestProcess_ReloadRespawnsWhenPidNotOurs(t *testing.T) {
 	}
 	var spawnCount atomic.Int32
 	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	p.logDir = dir
 	p.matchBinaryFn = func(int) bool { return false } // foreign/recycled pid
 	p.signalFn = func(pid int, sig syscall.Signal) error { return nil }
 	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
@@ -330,6 +336,75 @@ func TestProcess_ReloadRespawnsWhenPidNotOurs(t *testing.T) {
 	_ = p.Stop()
 }
 
+// C1: the post-grace OnExit monitor must capture the dying generation's
+// stderr tail BEFORE the delayed 2*procLogTailPoll sleep, not after — once
+// cmd.Wait returns, the child's writes are fully visible on disk, and a
+// successor startLocked (tun-restart/watchdog) can truncate err.log inside
+// that sleep window. The old (buggy) ordering read the tail only after the
+// sleep, so it would see the SUCCESSOR's freshly-written startup lines
+// instead of the dying generation's own content.
+//
+// This test starts a process whose child sleeps past startupGracePeriod,
+// writes a marker to stderr and exits — driving Start into the post-grace
+// async monitor branch. A watcher goroutine detects the pidfile removal
+// (cleanupPidIfOurs, which the fixed code runs immediately before the tail
+// capture) and — as fast as possible — truncates err.log and writes a
+// DIFFERENT marker, simulating a successor generation's fresh spawn inside
+// the 1s grace-sleep window. OnExit's stderrTail must still carry the OLD
+// generation's marker.
+func TestProcess_OnExitTailNotStolenBySuccessor(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	p := NewProcess("sing-box", "/dev/null", pidPath)
+	p.logDir = dir
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		// Sleeps past the 500ms grace period, then dies with a
+		// recognisable stderr marker — drives the post-grace branch.
+		return exec.Command("/bin/sh", "-c", "sleep 0.7; echo OLD-GEN-MARKER >&2; exit 1"), nil
+	}
+
+	done := make(chan struct{})
+	var stderrTail string
+	p.OnExit = func(_ error, tail string, _ bool) {
+		stderrTail = tail
+		close(done)
+	}
+
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	errPath := filepath.Join(dir, procErrLogName)
+	// Race the fix: as soon as the pidfile is gone (cleanupPidIfOurs ran,
+	// meaning cmd.Wait already returned), immediately truncate err.log and
+	// write a successor's marker — exactly what a tun-restart/watchdog
+	// Start does. With the fix, the tail is already captured by the time
+	// this goroutine can react; with the bug, the delayed read after the
+	// sleep would pick this up instead.
+	go func() {
+		for {
+			if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+		_ = os.WriteFile(errPath, []byte("NEW-GEN-MARKER\n"), 0644)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnExit did not fire in time")
+	}
+
+	if !strings.Contains(stderrTail, "OLD-GEN-MARKER") {
+		t.Errorf("stderrTail = %q, want it to contain OLD-GEN-MARKER (own generation's dying output)", stderrTail)
+	}
+	if strings.Contains(stderrTail, "NEW-GEN-MARKER") {
+		t.Errorf("stderrTail = %q, must NOT contain NEW-GEN-MARKER (successor's content leaked into the dead generation)", stderrTail)
+	}
+}
+
 // FIX-C (#456): у каждого запуска СВОЯ генерация deliberate-флага.
 // Мгновенный stop→start раньше стирал флаг предшественника (общий
 // atomic.Bool очищался следующим startLocked до того, как exit-монитор
@@ -340,6 +415,7 @@ func TestProcess_ReloadRespawnsWhenPidNotOurs(t *testing.T) {
 func TestProcess_RapidStopStartKeepsDeliberateFlag(t *testing.T) {
 	dir := t.TempDir()
 	p := NewProcess("/bin/sleep", "/dev/null", filepath.Join(dir, "sing-box.pid"))
+	p.logDir = dir
 	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
 		return exec.Command("/bin/sleep", "30"), nil
 	}
@@ -378,5 +454,195 @@ func TestProcess_RapidStopStartKeepsDeliberateFlag(t *testing.T) {
 	}
 	if got := crashes.Load(); got != 0 {
 		t.Fatalf("%d deliberate stops misclassified as crashes, want 0", got)
+	}
+}
+
+// I1 round 2: a rapid Stop→Start must never let the DEAD generation's tail
+// goroutine deliver bytes belonging to the NEW generation. tailFile's own
+// truncate detection is a size-only heuristic (fi.Size() < offset) and
+// misses a same-size-or-larger replace landing within one poll window —
+// worst case, a quiet log sits at offset 0 and would replay the entire next
+// generation's output. Here gen1 writes NOTHING to stdout (offset stays 0,
+// the worst case), so without the startLocked join a successor's marker
+// would be delivered twice: once by the dead gen1 tail replaying from
+// offset 0, once by gen2's own fresh tail. With the join, gen1's tail is
+// cancelled and joined before gen2's log truncate, so it can never observe
+// gen2's bytes — the marker must be delivered exactly once.
+func TestProcess_RapidRestartNoCrossGenerationDelivery(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	p := NewProcess("/bin/sh", "/dev/null", pidPath)
+	p.logDir = dir
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	p.OnStdoutLine = func(line string) {
+		mu.Lock()
+		counts[line]++
+		mu.Unlock()
+	}
+
+	// gen1: silent on stdout — its tail stays positioned at offset 0.
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		return exec.Command("/bin/sh", "-c", "sleep 30"), nil
+	}
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start gen1: %v", err)
+	}
+	// Give gen1's tail goroutines a moment to position past startup.
+	time.Sleep(50 * time.Millisecond)
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("stop gen1: %v", err)
+	}
+
+	// gen2: writes a marker immediately — exactly the "successor catches up
+	// within one poll" scenario from the reviewer's report.
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		return exec.Command("/bin/sh", "-c", "echo gen2-marker; sleep 30"), nil
+	}
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start gen2: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := counts["gen2-marker"]
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = p.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if counts["gen2-marker"] != 1 {
+		t.Errorf("gen2-marker delivered %d times, want exactly 1 (cross-generation misdelivery through the dead generation's tail)", counts["gen2-marker"])
+	}
+}
+
+// AttachIfRunning: живой identity-процесс усыновляется (tail fromEnd),
+// повторный вызов не плодит второй комплект tail'ов (уже attached).
+func TestProcess_AttachIfRunning(t *testing.T) {
+	dir := t.TempDir()
+	p := NewProcess("/bin/true", filepath.Join(dir, "cfg"), filepath.Join(dir, "sing-box.pid"))
+	p.logDir = dir
+	// Эмулируем «живой процесс»: pid-файл с нашим pid + identity-стаб.
+	if err := os.WriteFile(filepath.Join(dir, "sing-box.pid"), []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p.matchBinaryFn = func(pid int) bool { return pid == os.Getpid() }
+	var mu sync.Mutex
+	var lines []string
+	p.OnStderrLine = func(l string) { mu.Lock(); lines = append(lines, l); mu.Unlock() }
+	// В err-логе уже есть история — не должна реиграться (fromEnd).
+	if err := os.WriteFile(filepath.Join(dir, procErrLogName), []byte("history\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, pid := p.AttachIfRunning()
+	if !adopted || pid != os.Getpid() {
+		t.Fatalf("AttachIfRunning = (%v,%d), want (true,%d)", adopted, pid, os.Getpid())
+	}
+	if a2, _ := p.AttachIfRunning(); a2 {
+		t.Fatal("second AttachIfRunning must be no-op false (already attached)")
+	}
+	time.Sleep(700 * time.Millisecond)
+	f, err := os.OpenFile(filepath.Join(dir, procErrLogName), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("live-line\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(lines)
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 1 || lines[0] != "live-line" {
+		t.Fatalf("adopted tail lines = %v, want exactly [live-line]", lines)
+	}
+}
+
+// AttachIfRunning path variant of I1: an adopted generation's tail
+// positions at offset 0 on a quiet, already-existing (empty) log — the
+// same worst case TestProcess_RapidRestartNoCrossGenerationDelivery
+// exercises for a spawned gen1. A subsequent StartSpawned (the adopted
+// process turns out to be dead — matchBinaryFn flips false) must join
+// the adopted tail before truncating the log for its own fresh spawn, or
+// the dead adopted tail would replay the new generation's entire output
+// from offset 0 — delivering it twice.
+func TestProcess_AttachThenStartSpawnedJoinsAdoptedTails(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	p := NewProcess("/bin/sh", "/dev/null", pidPath)
+	p.logDir = dir
+
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Out-log already exists (empty) so the adopted tail positions at
+	// offset 0 (fromEnd of an empty file) on its very first poll.
+	if err := os.WriteFile(filepath.Join(dir, procOutLogName), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	live := true
+	p.matchBinaryFn = func(pid int) bool { return live && pid == os.Getpid() }
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	p.OnStdoutLine = func(line string) {
+		mu.Lock()
+		counts[line]++
+		mu.Unlock()
+	}
+
+	adopted, pid := p.AttachIfRunning()
+	if !adopted || pid != os.Getpid() {
+		t.Fatalf("AttachIfRunning = (%v,%d), want (true,%d)", adopted, pid, os.Getpid())
+	}
+	// Let the adopted tail position past its first poll cycle.
+	time.Sleep(600 * time.Millisecond)
+
+	// The adopted process turns out to be dead — StartSpawned must join
+	// its tail and spawn fresh rather than no-op'ing.
+	live = false
+	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
+		return exec.Command("/bin/sh", "-c", "echo gen2-marker; sleep 30"), nil
+	}
+	if _, err := p.StartSpawned(); err != nil {
+		t.Fatalf("start gen2: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := counts["gen2-marker"]
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = p.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if counts["gen2-marker"] != 1 {
+		t.Errorf("gen2-marker delivered %d times, want exactly 1 (adopted tail not joined before spawn truncate)", counts["gen2-marker"])
 	}
 }

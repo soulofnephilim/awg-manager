@@ -1587,6 +1587,61 @@ func TestNormalizeSingboxRouterSettings_PreservesFakeIPFields(t *testing.T) {
 	}
 }
 
+// reapplyFakeIPOverlay гейтится на выключенном/tproxy режиме и в окне
+// провижининга (Enabled уже true, FakeIP state ещё nil/не provisioned) —
+// во всех этих случаях пайплайн fakeipWithConfig НЕ должен запускаться.
+// Прокси-сигнал: у ServiceImpl с пустыми deps запуск пайплайна паникует
+// (nil Settings) — чистый nil означает «пропущено». Контроль вакуозности —
+// позитивный тест ниже (тот же вызов на живом harness'е доходит до слота).
+func TestReapplyFakeIPOverlay_Gating(t *testing.T) {
+	s := &ServiceImpl{deps: Deps{}}
+	on := storage.SingboxRouterSettings{Enabled: true, RoutingMode: "fakeip-tun"}
+	cases := []struct {
+		name string
+		mut  func(st *storage.Settings)
+	}{
+		{"disabled", func(st *storage.Settings) { st.SingboxRouter.Enabled = false }},
+		{"tproxy mode", func(st *storage.Settings) { st.SingboxRouter.RoutingMode = "tproxy" }},
+		{"fakeip state nil (provisioning window)", func(st *storage.Settings) { st.FakeIP = nil }},
+		{"fakeip state not provisioned", func(st *storage.Settings) { st.FakeIP = &storage.FakeIPState{} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &storage.Settings{SingboxRouter: on, FakeIP: &storage.FakeIPState{Provisioned: true}}
+			tc.mut(st)
+			if err := s.reapplyFakeIPOverlay(context.Background(), st); err != nil {
+				t.Errorf("reapplyFakeIPOverlay = %v, want nil (skip)", err)
+			}
+		})
+	}
+}
+
+// Позитивный путь (и контроль вакуозности гейтинг-теста выше): на включённом
+// provisioned fakeip-tun reapply перегенерирует 21-fakeip.json из ТЕКУЩИХ
+// настроек — смена FakeIPRealServer доезжает до слота без disable/enable.
+func TestReapplyFakeIPOverlay_RegeneratesSlot(t *testing.T) {
+	s, dir := newFakeIPTestService(t)
+	st, err := s.deps.Settings.Load()
+	if err != nil {
+		t.Fatalf("settings load: %v", err)
+	}
+	st.SingboxRouter.Enabled = true
+	st.SingboxRouter.FakeIPRealServer = "9.9.9.9"
+	if err := s.deps.Settings.Save(st); err != nil {
+		t.Fatalf("settings save: %v", err)
+	}
+	if err := s.reapplyFakeIPOverlay(context.Background(), st); err != nil {
+		t.Fatalf("reapplyFakeIPOverlay: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "21-fakeip.json"))
+	if err != nil {
+		t.Fatalf("read slot: %v", err)
+	}
+	if !strings.Contains(string(data), "9.9.9.9") {
+		t.Errorf("21-fakeip.json must carry the new real server, got:\n%s", data)
+	}
+}
+
 func TestValidateSingboxRouterSettings_FakeIPFields(t *testing.T) {
 	base := storage.SingboxRouterSettings{WANAutoDetect: true}
 	cases := []struct {

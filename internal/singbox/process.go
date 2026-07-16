@@ -2,9 +2,8 @@
 package singbox
 
 import (
-	"bufio"
+	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,18 +17,26 @@ import (
 
 // Process manages the sing-box process lifecycle (single-process model).
 //
-// stdout is scanned line-by-line and forwarded to OnStdoutLine (nil =
-// silently consumed). stderr is scanned line-by-line for the entire
-// process lifetime — each line is forwarded to OnStderrLine (so FATAL
-// messages from sing-box reach the app log even after the startup
-// grace period passes) AND retained in a bounded buffer so a startup
-// failure can include the message in its returned error. cmd.Wait is
-// monitored even past the grace window so OnExit fires on every
-// post-grace exit (e.g. config-rejection FATAL after rule-set fetch).
+// stdout/stderr are written to tmpfs log files (not pipes — an orphaned
+// sing-box used to die of SIGPIPE on its first write after awg-manager
+// exited) and tailed line-by-line: each line is forwarded to
+// OnStdoutLine/OnStderrLine (nil = silently consumed; stderr forwarding
+// spans the entire process lifetime, so FATAL messages reach the app log
+// even after the startup grace period passes) AND retained on disk so a
+// startup failure can include the message in its returned error
+// (readLogTail). cmd.Wait is monitored even past the grace window so
+// OnExit fires on every post-grace exit (e.g. config-rejection FATAL
+// after rule-set fetch).
 type Process struct {
 	binary     string
 	configPath string
 	pidPath    string
+
+	// logDir is the directory holding this process's stdout/stderr log
+	// files. Defaults to procLogDir (set by NewProcess); zero-value
+	// Process{} in tests falls back to the procLogDir var-seam via
+	// effectiveLogDir.
+	logDir string
 
 	// OnStderrLine is invoked once per newline-terminated line written to
 	// sing-box's stderr. Nil = stderr is silently consumed (still scanned,
@@ -79,6 +86,29 @@ type Process struct {
 	// монитор успевал его прочитать, и наш же рестарт считался падением).
 	curGen *processGen
 
+	// tailCancel/tailDone track the CURRENT generation's tail goroutines
+	// (see startTails). startLocked joins the PREVIOUS generation's tails
+	// — cancel then <-tailDone — before truncating the log files for a new
+	// spawn, so no old tail goroutine can ever be alive (mid-poll or about
+	// to start one) when the truncate happens. This closes I1 (cross-
+	// generation misdelivery) structurally: tailFile's own truncate
+	// detection is a size-only heuristic (fi.Size() < offset) and misses a
+	// same-size-or-larger replace landing within one poll window (≤500ms —
+	// e.g. a quiet log at offset 0 replaying the entire next generation).
+	// Only ever written by startLocked/AttachIfRunning (both guarded by
+	// startMu); no other goroutine touches these fields.
+	tailCancel context.CancelFunc
+	tailDone   chan struct{}
+
+	// attached is true when the CURRENT generation's tails were raised by
+	// AttachIfRunning (adopting a live sing-box from a previous awgm
+	// instance) rather than by startLocked spawning a child. Guarded by
+	// startMu. Reset to false by startLocked (the adopted process is being
+	// superseded by a fresh spawn) and by stopLocked (the adopted process
+	// was signalled and its death is confirmed/assumed) — either way the
+	// next Start spawns a real child instead of no-op'ing.
+	attached bool
+
 	// For tests
 	startCmd      func(bin string, args ...string) (*exec.Cmd, error)
 	signalFn      func(pid int, sig syscall.Signal) error
@@ -111,6 +141,7 @@ func NewProcess(binary, configPath, pidPath string) *Process {
 		binary:     binary,
 		configPath: configPath,
 		pidPath:    pidPath,
+		logDir:     procLogDir,
 		startCmd: func(bin string, args ...string) (*exec.Cmd, error) {
 			return exec.Command(bin, args...), nil
 		},
@@ -164,56 +195,68 @@ func (p *Process) startLocked() (spawned bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(p.pidPath), 0755); err != nil {
 		return false, err
 	}
+	// Join the previous generation's tail goroutines BEFORE
+	// openProcLog(truncate) below truncates the log files (see the
+	// tailCancel/tailDone field comment for why this must be a join, not
+	// just a cancel). tailFile selects on ctx.Done() in its poll loop, so
+	// the join completes in at most one poll cycle — in practice near-
+	// instant, since cancellation preempts the poll timer.
+	//
+	// Tradeoff: the exit-monitor's delayed drain (sleep 2*procLogTailPoll
+	// then cancel, below) still runs for the normal death path, giving a
+	// dying generation's tail goroutines one extra poll cycle to deliver
+	// its last lines. This join overrides that on a rapid restart —
+	// losing at most the dead generation's final drain cycle — in
+	// exchange for correct attribution (no bytes of the new generation
+	// can ever reach the old generation's tail).
+	if p.tailCancel != nil {
+		p.tailCancel()
+		<-p.tailDone
+	}
+	// Whatever generation held tailCancel/tailDone above (adopted or
+	// spawned) is being superseded by this fresh spawn.
+	p.attached = false
 	cmd, err := p.startCmd(p.binary, "run", "-C", p.configPath)
 	if err != nil {
 		return false, err
 	}
 	cmd.Env = singboxRuntimeEnv(os.Environ())
-	pr, pw := io.Pipe()
-	cmd.Stderr = pw
 
-	stdoutR, stdoutW := io.Pipe()
-	cmd.Stdout = stdoutW
-
-	go func() {
-		sc := bufio.NewScanner(stdoutR)
-		sc.Buffer(make([]byte, 0, 4096), 64*1024)
-		for sc.Scan() {
-			if p.OnStdoutLine != nil {
-				p.OnStdoutLine(sc.Text())
-			}
-		}
-	}()
+	logDir := p.effectiveLogDir()
+	outPath := filepath.Join(logDir, procOutLogName)
+	errPath := filepath.Join(logDir, procErrLogName)
+	outF, err := openProcLog(outPath, true)
+	if err != nil {
+		return false, fmt.Errorf("open sing-box stdout log: %w", err)
+	}
+	errF, err := openProcLog(errPath, true)
+	if err != nil {
+		_ = outF.Close()
+		return false, fmt.Errorf("open sing-box stderr log: %w", err)
+	}
+	cmd.Stdout = outF
+	cmd.Stderr = errF
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
-	stderr := newLimitedBuffer(stderrBufferSize)
-	scannerDone := make(chan struct{})
-	go func() {
-		defer close(scannerDone)
-		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 0, 4096), 64*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			stderr.Write([]byte(line + "\n"))
-			if p.OnStderrLine != nil {
-				p.OnStderrLine(line)
-			}
-		}
-	}()
 	p.setLastStderr("")
 
 	if err := cmd.Start(); err != nil {
-		_ = pw.Close()
-		_ = stdoutW.Close()
-		<-scannerDone
+		_ = outF.Close()
+		_ = errF.Close()
 		return false, fmt.Errorf("start sing-box: %w", err)
 	}
+	// The child holds its own duplicated fds after fork/exec; the
+	// parent's copies are no longer needed.
+	_ = outF.Close()
+	_ = errF.Close()
+
+	// Fresh spawn: tail from the start of the (just-truncated) log files.
+	tailCancel := p.startTails(false)
+
 	if err := p.writePID(cmd.Process.Pid); err != nil {
 		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
 		_ = cmd.Wait()
-		_ = pw.Close()
-		_ = stdoutW.Close()
-		<-scannerDone
+		tailCancel()
 		return false, err
 	}
 	// Свежая генерация процесса со своим «not a deliberate stop» флагом;
@@ -224,16 +267,12 @@ func (p *Process) startLocked() (spawned bool, err error) {
 	p.curGen = gen
 	errCh := make(chan error, 1)
 	go func() {
-		err := cmd.Wait()
-		_ = pw.Close()
-		_ = stdoutW.Close()
-		<-scannerDone
-		errCh <- err
+		errCh <- cmd.Wait()
 	}()
 	select {
 	case waitErr := <-errCh:
 		p.cleanupPidIfOurs(cmd.Process.Pid)
-		msg := strings.TrimSpace(stderr.String())
+		msg := strings.TrimSpace(readLogTail(errPath, stderrBufferSize))
 		if msg == "" {
 			if waitErr != nil {
 				msg = waitErr.Error()
@@ -243,6 +282,15 @@ func (p *Process) startLocked() (spawned bool, err error) {
 		}
 		safeMsg := sanitizeSingboxLogText(msg)
 		p.setLastStderr(safeMsg)
+		// Delay the cancel by one poll cycle so the tail goroutines get a
+		// chance to deliver the process's dying lines to OnStderrLine
+		// before they stop; the returned error already carries the tail
+		// read directly from disk above, so this does not block the
+		// caller.
+		go func() {
+			time.Sleep(2 * procLogTailPoll)
+			tailCancel()
+		}()
 		return true, fmt.Errorf("sing-box exited during startup: %s", safeMsg)
 	case <-time.After(startupGracePeriod):
 		myPid := cmd.Process.Pid
@@ -254,15 +302,107 @@ func (p *Process) startLocked() (spawned bool, err error) {
 			// мгновенном stop→start (FIX-C).
 			deliberate := gen.deliberate.Load()
 			p.cleanupPidIfOurs(myPid)
-			tail := strings.TrimSpace(stderr.String())
+			// Capture the tail RIGHT NOW, before the delayed cancel
+			// below: cmd.Wait already returned, so this generation's
+			// writes are fully visible on disk. A successor startLocked
+			// (tun-restart/watchdog) can truncate err.log within the
+			// sleep that follows — a delayed read here would see the NEW
+			// generation's startup lines instead of ours: phantom
+			// lastError overwriting the new gen's setLastError(""), and
+			// the OOM heuristic (stderrTail=="" && exitedBySIGKILL)
+			// defeated. Mirrors the immediate-exit branch above.
+			tail := strings.TrimSpace(readLogTail(errPath, stderrBufferSize))
 			safeTail := sanitizeSingboxLogText(tail)
 			p.setLastStderr(safeTail)
+			// Give the tail goroutines one poll cycle to catch the
+			// process's last lines before cancelling them.
+			time.Sleep(2 * procLogTailPoll)
+			tailCancel()
 			if p.OnExit != nil {
 				p.OnExit(waitErr, safeTail, deliberate)
 			}
 		}()
 		return true, nil
 	}
+}
+
+// AttachIfRunning adopts a live sing-box left running by a previous awgm
+// instance (e.g. after an in-place update/restart of the daemon itself):
+// if the pid file names a live, identity-matched process, it raises this
+// generation's tail goroutines with fromEnd=true (so the pre-adoption
+// history already on disk is not replayed into the app log) and returns
+// (true, pid). A no-op process — already attached, or a generation already
+// spawned/attached (tailCancel != nil) — returns (false, 0), so a repeat
+// call or a call after StartSpawned never raises a second tail set.
+//
+// The adopted process is NOT under our direct control the way a spawned
+// child is: there is no cmd.Wait, so OnExit never fires for it and no
+// exit-code/deliberate flag is ever known. Its death is observed
+// indirectly — the next watchdog IsRunning tick sees the pid gone — and
+// only the tail of its err-log (not a captured stderr buffer) is
+// available for diagnostics. Lifecycle control (skip/SIGHUP/stop) works
+// by pid exactly as for a spawned process (orchestrator, Stop, Reload all
+// go through readPID/signal, which do not care who forked the pid).
+func (p *Process) AttachIfRunning() (bool, int) {
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+	if p.attached || p.tailCancel != nil {
+		return false, 0
+	}
+	running, pid := p.IsRunning()
+	if !running {
+		return false, 0
+	}
+	p.startTails(true)
+	p.attached = true
+	return true, pid
+}
+
+// effectiveLogDir returns p.logDir, falling back to the procLogDir
+// var-seam for zero-value Process{} constructed directly (tests).
+func (p *Process) effectiveLogDir() string {
+	if p.logDir != "" {
+		return p.logDir
+	}
+	return procLogDir
+}
+
+// startTails запускает tail-горутины логов текущего поколения, кладёт
+// cancel/done в p.tailCancel/p.tailDone (см. комментарий у полей — join
+// следующим startLocked) и возвращает cancel для локального использования
+// вызывающим (delayed drain на нормальном пути смерти процесса).
+// fromEnd=true — адопция (не реиграть историю). done закрывается только
+// когда ОБЕ tail-горутины вернулись (WaitGroup), так что join в
+// startLocked не может проскочить, пока одна из них ещё дочитывает файл.
+func (p *Process) startTails(fromEnd bool) context.CancelFunc {
+	logDir := p.effectiveLogDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		tailFile(ctx, filepath.Join(logDir, procOutLogName), fromEnd, func(l string) {
+			if p.OnStdoutLine != nil {
+				p.OnStdoutLine(l)
+			}
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		tailFile(ctx, filepath.Join(logDir, procErrLogName), fromEnd, func(l string) {
+			if p.OnStderrLine != nil {
+				p.OnStderrLine(l)
+			}
+		})
+	}()
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	p.tailCancel = cancel
+	p.tailDone = done
+	return cancel
 }
 
 func singboxRuntimeEnv(base []string) []string {
@@ -347,6 +487,11 @@ func (p *Process) stopLocked() error {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	// Whether this pid was ours (spawned) or adopted, it is gone (or we
+	// gave up waiting after SIGKILL) — the next Start must spawn a real
+	// child rather than treating a stale attached=true as "already
+	// running". No-op for a spawned process (already false).
+	p.attached = false
 	_ = os.Remove(p.pidPath)
 	return nil
 }
