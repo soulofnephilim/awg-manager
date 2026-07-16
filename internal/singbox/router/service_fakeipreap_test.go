@@ -323,3 +323,19 @@ func TestReconcile_ReapsForeignOrphanEachTick(t *testing.T) {
 		t.Errorf("owned iface must not be touched: %v", h.log.calls)
 	}
 }
+
+// Тик scheduler'а реапает сирот и при ВЫКЛЮЧЕННОМ движке — runtime-сирота
+// (провал delete при disable) возникает именно в выключенном состоянии и не
+// должна ждать перезагрузки (стенд-регрессия 2026-07-16).
+func TestSchedulerTick_ReapsOrphanWhenEngineDisabled(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false) // Enabled=false по умолчанию
+	opkg := &recordingOpkgTunProvisioner{}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning([]string{"OpkgTun5"}, nil)})
+	sched := NewScheduler(svc, store)
+
+	sched.tickPolicySync(context.Background())
+
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun5" {
+		t.Errorf("deleted = %v, want [OpkgTun5] (reap must run with engine disabled)", opkg.deleted)
+	}
+}
