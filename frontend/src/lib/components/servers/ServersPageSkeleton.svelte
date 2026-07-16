@@ -9,6 +9,8 @@
 </script>
 
 <div class="layout" aria-hidden="true">
+	<!-- Мобильный (<768px) реальный рейл прячется за компакт-селектором — зеркалим -->
+	<div class="skeleton mobile-bar"></div>
 	<aside class="rail">
 		<div class="skeleton" style="height: 0.875rem; width: 60%; margin-bottom: 12px;"></div>
 		{#each Array.from({ length: count }) as _, i (i)}
@@ -35,11 +37,21 @@
 		align-items: flex-start;
 	}
 	.rail {
-		width: 220px;
+		/* Геометрия реального ServerRail: 240px + карточный chrome (ревью T4) */
+		width: 240px;
 		flex: none;
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
+		padding: 8px;
+		border: 1px solid var(--color-border);
+		border-radius: 12px;
+		background: var(--color-bg-secondary);
+	}
+	.mobile-bar {
+		display: none;
+		height: 2.5rem;
+		width: 100%;
 	}
 	.rail-item {
 		display: flex;
@@ -68,7 +80,12 @@
 			flex-direction: column;
 			gap: 0.75rem;
 		}
-		.rail,
+		.rail {
+			display: none;
+		}
+		.mobile-bar {
+			display: block;
+		}
 		.detail {
 			width: 100%;
 		}
