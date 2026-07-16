@@ -34,6 +34,12 @@ type OpkgTunProvisioner interface {
 	SetMTU(ctx context.Context, name string, mtu int) error
 	InterfaceUp(ctx context.Context, name string) error
 	InterfaceDown(ctx context.Context, name string) error
+	// SetPermitAllACL / RemovePermitAllACL — NDMS-native разрешение трафика в
+	// интерфейс: permit-all access-list `_WEBADMIN_<name>` + `ip access-group
+	// … in` + auto-delete (как галка доступа в веб-морде). Без него firewall
+	// NDMS (isolate-private и т.п.) режет LAN→tun форвард и DNS на tun-адрес.
+	SetPermitAllACL(ctx context.Context, name string) error
+	RemovePermitAllACL(ctx context.Context, name string) error
 }
 
 // StaticRouteProvider manages NDMS auto static routes for the fakeip pool + reject route.

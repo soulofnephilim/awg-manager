@@ -77,6 +77,14 @@ func (r *recOpkgTun) ClearAddress(_ context.Context, name string) error {
 	r.log.add("ClearAddress:" + name)
 	return nil
 }
+func (r *recOpkgTun) SetPermitAllACL(_ context.Context, name string) error {
+	r.log.add("SetPermitACL:" + name)
+	return r.maybeFail("SetPermitACL")
+}
+func (r *recOpkgTun) RemovePermitAllACL(_ context.Context, name string) error {
+	r.log.add("RemovePermitACL:" + name)
+	return nil
+}
 func (r *recOpkgTun) ClearIPv6Address(_ context.Context, name string) error {
 	r.log.add("ClearIPv6Address:" + name)
 	return nil
@@ -1577,5 +1585,119 @@ func TestReconcileFakeIPTun_NoReprovision(t *testing.T) {
 	}
 	if h.log.has("Create:OpkgTun1:private") {
 		t.Errorf("Reconcile leaked a new index: %v", h.log.calls)
+	}
+}
+
+// === permit-all ACL (NDMS-native разрешение трафика в tun) ===
+
+// Enable ставит permit-ACL (после создания интерфейса — bind требует его
+// существования), Disable снимает через teardownOpkgTun.
+func TestFakeIPTun_PermitACL_EnableSetsDisableRemoves(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	ia, ib := h.log.idxOf("Create:OpkgTun0:private"), h.log.idxOf("SetPermitACL:OpkgTun0")
+	if ib < 0 {
+		t.Fatalf("permit ACL not set on enable: %v", h.log.calls)
+	}
+	if ia < 0 || ia >= ib {
+		t.Errorf("permit ACL must be set AFTER interface create (bind needs it): %v", h.log.calls)
+	}
+
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	h.log.calls = nil
+	if err := h.svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	if !h.log.has("RemovePermitACL:OpkgTun0") {
+		t.Errorf("permit ACL not removed on disable: %v", h.log.calls)
+	}
+}
+
+// Провал установки ACL — жёсткая ошибка Enable с полным откатом (включая
+// снятие ACL через teardown в rollback-стеке).
+func TestFakeIPTun_PermitACL_FailureRollsBack(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "SetPermitACL")
+
+	if err := h.svc.Enable(context.Background()); err == nil {
+		t.Fatal("expected Enable to fail on permit-ACL error")
+	}
+	if !h.log.has("RemovePermitACL:OpkgTun0") || !h.log.has("Delete:OpkgTun0") {
+		t.Errorf("rollback must tear down iface incl. ACL: %v", h.log.calls)
+	}
+	if st := h.loadFakeIP(t); st != nil {
+		t.Errorf("FakeIP persist = %+v, want nil after rollback", st)
+	}
+}
+
+// Reap сироты снимает ACL (teardownOpkgTun — общий chokepoint).
+func TestReapOrphaned_ScanRemovesPermitACL(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false)
+	log := &callLog{}
+	opkg := &recOpkgTun{log: log}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning([]string{"OpkgTun1"}, nil)})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if !log.has("RemovePermitACL:OpkgTun1") {
+		t.Errorf("scan reap must remove permit ACL: %v", log.calls)
+	}
+}
+
+// Drift-heal ассертит permit-ACL ровно один раз за жизнь процесса
+// (upgrade-путь: fakeip включён более старой версией без ACL).
+func TestReconcileFakeIPTun_PermitACL_AssertedOnce(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	stubFakeIPPoolRoutePresent(t, func(string, netip.Prefix) bool { return true })
+	h.log.calls = nil
+
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	for i := 0; i < 3; i++ {
+		if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+			t.Fatalf("reconcileFakeIPTun #%d: %v", i, err)
+		}
+	}
+	if got := countCalls(h.log, "SetPermitACL:OpkgTun0"); got != 1 {
+		t.Errorf("permit ACL asserted %d times over 3 ticks, want exactly 1", got)
+	}
+}
+
+// Провал permit-ACL ассерта НЕ съедает one-shot: флаг взводится только после
+// успеха, следующий тик ретраит (ревью: медленный RCI на буте).
+func TestReconcileFakeIPTun_PermitACL_RetriedAfterFailure(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	stubFakeIPPoolRoutePresent(t, func(string, netip.Prefix) bool { return true })
+	failing := &recOpkgTun{log: h.log, failAt: "SetPermitACL"}
+	h.svc.deps.OpkgTun = failing
+	h.log.calls = nil
+
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick1: %v", err)
+	}
+	failing.failAt = "" // RCI ожил
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick2: %v", err)
+	}
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick3: %v", err)
+	}
+	// tick1 — провал, tick2 — успешный ретрай, tick3 — уже не зовёт.
+	if got := countCalls(h.log, "SetPermitACL:OpkgTun0"); got != 2 {
+		t.Errorf("SetPermitACL called %d times, want 2 (fail, retry-success, then stop)", got)
 	}
 }

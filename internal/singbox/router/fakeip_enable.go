@@ -175,6 +175,16 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		_ = s.teardownOpkgTun(rbCtx, ndmsName, "fakeip-rollback")
 	})
 
+	// NDMS-native разрешение трафика в tun: permit-all access-list
+	// `_WEBADMIN_<iface>` + `ip access-group … in` + auto-delete (как галка
+	// доступа в веб-морде). Восстановлено — потеряно при интеграции PoC; без
+	// него firewall NDMS (isolate-private и т.п.) режет LAN→tun форвард и DNS
+	// на tun-адрес. Снятие — в teardownOpkgTun (rollback идёт через него же);
+	// auto-delete дополнительно каскадит ACL при удалении интерфейса.
+	if err = s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); err != nil {
+		return fmt.Errorf("enable fakeip-tun: permit acl: %w", err)
+	}
+
 	if err = s.deps.OpkgTun.SetAddress(ctx, ndmsName, addr4, mask4); err != nil {
 		return fmt.Errorf("enable fakeip-tun: set address: %w", err)
 	}

@@ -102,6 +102,25 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		}
 	}
 
+	// One-shot (до первого УСПЕХА) ассерт permit-ACL: покрывает апгрейд
+	// awg-manager поверх уже включённого fakeip (ACL появился в этой версии)
+	// и удаление списка до старта демона. Идемпотентно (дубль permit NDMS
+	// отклоняет без дублирования); флаг взводится только ПОСЛЕ успеха —
+	// провал (медленный RCI на буте) ретраится следующим тиком (ревью).
+	// Гейт probeErr == nil: живость интерфейса подтверждена — иначе permit
+	// создал бы список, bind упал бы, и осиротевший unreferenced-список
+	// (auto-delete не взведён) навсегда сохранился бы в конфиг. Флаг под
+	// transitionMu (Reconcile). Галку _WEBADMIN_, снятую пользователем в
+	// веб-морде при живом процессе, НЕ переустанавливаем намеренно — она
+	// видна в UI как правило firewall, и её снятие — решение пользователя.
+	if !s.fakeipACLAsserted && s.deps.OpkgTun != nil && probeErr == nil {
+		if nerr := s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); nerr != nil {
+			s.appLog.Warn("fakeip-reconcile", iface, "permit acl: "+nerr.Error())
+		} else {
+			s.fakeipACLAsserted = true
+		}
+	}
+
 	// Re-add the pool routes ONLY on real drift (Fix B1): probe the v4 pool route
 	// with the same fakeIPPoolRoutePresent seam GetStatus uses; an AddStaticRoute
 	// fires only when the route is ABSENT. In steady state the route is present, so
