@@ -1535,7 +1535,7 @@
 			{:else}
 				<div
 					class="tunnel-grid"
-					class:tunnel-grid--cards={!dashboardOn && awgViewMode === 'cards'}
+					class:tunnel-grid--dense={!dashboardOn && awgViewMode === 'cards'}
 					class:tunnel-grid--compact={dashboardOn || awgViewMode === 'compact'}
 				>
 					{#each Array.from({ length: $tunnelsSkeletonCount }) as _, i (i)}
