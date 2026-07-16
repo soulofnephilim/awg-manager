@@ -63,7 +63,7 @@ func (r *recOpkgTun) SetIPGlobal(_ context.Context, name string) error {
 }
 func (r *recOpkgTun) DeleteOpkgTun(_ context.Context, name string) error {
 	r.log.add("Delete:" + name)
-	return nil
+	return r.maybeFail("Delete")
 }
 func (r *recOpkgTun) SetAddress(_ context.Context, name, addr, mask string) error {
 	r.log.add("SetAddress:" + name + ":" + addr + ":" + mask)
@@ -72,6 +72,10 @@ func (r *recOpkgTun) SetAddress(_ context.Context, name, addr, mask string) erro
 func (r *recOpkgTun) SetIPv6Address(_ context.Context, name, addr string) error {
 	r.log.add("SetIPv6Address:" + name + ":" + addr)
 	return r.maybeFail("SetIPv6Address")
+}
+func (r *recOpkgTun) ClearAddress(_ context.Context, name string) error {
+	r.log.add("ClearAddress:" + name)
+	return nil
 }
 func (r *recOpkgTun) ClearIPv6Address(_ context.Context, name string) error {
 	r.log.add("ClearIPv6Address:" + name)
@@ -1145,6 +1149,104 @@ func TestDisableFakeIPTun_Ordering(t *testing.T) {
 	}
 	if last := h.log.calls[len(h.log.calls)-1]; last != rmKillSwitch {
 		t.Errorf("last call = %q, want kill-switch removal LAST", last)
+	}
+}
+
+// Happy-path teardown (delete succeeds) must NOT issue the address clears —
+// they exist only to defuse the ndm nginx-reload loop when the delete fails,
+// and on the normal path they would be wasted RCI round-trips.
+func TestDisableFakeIPTun_NoAddressClearsOnHappyPath(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+	provisionForDisable(t, h)
+
+	const ndmsName = "OpkgTun0"
+	if err := h.svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable(fakeip-tun): %v", err)
+	}
+	if h.log.has("ClearAddress:" + ndmsName) {
+		t.Errorf("happy path must not clear the address (delete removes it): %v", h.log.calls)
+	}
+	if !h.log.has("InterfaceDown:"+ndmsName) || !h.log.has("Delete:"+ndmsName) {
+		t.Errorf("teardown missing down/delete: %v", h.log.calls)
+	}
+}
+
+// When the delete FAILS, the teardown must clear the configured v4+v6
+// addresses: a leftover `ip address` on a kernel-less OpkgTun sends ndm's
+// nginx into an endless reload loop, stalling all RCI (stand-verified
+// 2026-07-15).
+func TestDisableFakeIPTun_DeleteFailureClearsAddresses(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+	provisionForDisable(t, h)
+	h.svc.deps.OpkgTun = &recOpkgTun{log: h.log, failAt: "Delete"}
+
+	const ndmsName = "OpkgTun0"
+	if err := h.svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable(fakeip-tun): %v", err)
+	}
+	mustOrder := func(a, b string) {
+		ia, ib := h.log.idxOf(a), h.log.idxOf(b)
+		if ia < 0 || ib < 0 {
+			t.Fatalf("missing call %q or %q in %v", a, b, h.log.calls)
+		}
+		if ia >= ib {
+			t.Errorf("expected %q (#%d) before %q (#%d): %v", a, ia, b, ib, h.log.calls)
+		}
+	}
+	mustOrder("Delete:"+ndmsName, "ClearAddress:"+ndmsName)
+	mustOrder("Delete:"+ndmsName, "ClearIPv6Address:"+ndmsName)
+}
+
+// ctxCancelOpkgTun simulates real NDMS HTTP behaviour for the rollback-ctx
+// regression: SetMTU cancels the Enable ctx (client disconnect mid-Enable) and
+// fails; the teardown ops honour ctx cancellation like HTTP calls do. The
+// rollback must still tear the iface down — it runs on a WithoutCancel ctx.
+type ctxCancelOpkgTun struct {
+	*recOpkgTun
+	cancel context.CancelFunc
+}
+
+func (c *ctxCancelOpkgTun) SetMTU(ctx context.Context, name string, mtu int) error {
+	c.cancel()
+	return ctx.Err()
+}
+
+func (c *ctxCancelOpkgTun) InterfaceDown(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.recOpkgTun.InterfaceDown(ctx, name)
+}
+
+func (c *ctxCancelOpkgTun) DeleteOpkgTun(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.recOpkgTun.DeleteOpkgTun(ctx, name)
+}
+
+func TestEnableFakeIPTun_RollbackSurvivesCtxCancel(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.svc.deps.OpkgTun = &ctxCancelOpkgTun{
+		recOpkgTun: &recOpkgTun{log: h.log},
+		cancel:     cancel,
+	}
+
+	if err := h.svc.Enable(ctx); err == nil {
+		t.Fatal("expected Enable to fail (ctx cancelled at SetMTU)")
+	}
+	// Rollback ran on a detached ctx: the iface teardown must have reached NDMS
+	// despite the cancelled request ctx (otherwise the orphan keeps its address
+	// and ndm enters the nginx-reload loop).
+	if !h.log.has("Delete:OpkgTun0") {
+		t.Errorf("rollback teardown skipped on cancelled ctx: %v", h.log.calls)
+	}
+	if st := h.loadFakeIP(t); st != nil {
+		t.Errorf("FakeIP persist = %+v, want nil after rollback", st)
 	}
 }
 

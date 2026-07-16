@@ -28,6 +28,7 @@ type OpkgTunProvisioner interface {
 	SetIPGlobal(ctx context.Context, name string) error
 	DeleteOpkgTun(ctx context.Context, name string) error
 	SetAddress(ctx context.Context, name, address, mask string) error
+	ClearAddress(ctx context.Context, name string) error
 	SetIPv6Address(ctx context.Context, name, address string) error
 	ClearIPv6Address(ctx context.Context, name string) error
 	SetMTU(ctx context.Context, name string, mtu int) error

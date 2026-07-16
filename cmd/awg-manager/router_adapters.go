@@ -245,6 +245,26 @@ func (a *routerOpkgTunIndexAdapter) LiveOpkgTunIndices(ctx context.Context) (map
 	return router.UnionOpkgTunIndices(sysNums, names), nil
 }
 
+// opkgTunScanner returns the router Deps.OpkgTunScan hook: NDMS OpkgTun
+// interface IDs stamped with the given description — the reap's persist-less
+// fakeip-orphan fallback. "OpkgTun" is the NDMS (CamelCase) ID prefix, the
+// same convention fakeIPNDMSName produces on the router side.
+func opkgTunScanner(store *ndmsquery.InterfaceStore) func(ctx context.Context, description string) ([]string, error) {
+	return func(ctx context.Context, description string) ([]string, error) {
+		all, err := store.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var ids []string
+		for _, i := range all {
+			if strings.HasPrefix(i.ID, "OpkgTun") && i.Description == description {
+				ids = append(ids, i.ID)
+			}
+		}
+		return ids, nil
+	}
+}
+
 // ListBindable returns router interfaces a user can bind a direct outbound to:
 // egress-capable (security-level "public"), minus our own auto-managed
 // interfaces — except KeenOS-native proxies (kernel t2sN whose NDMS ProxyN is
