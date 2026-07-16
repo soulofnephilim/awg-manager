@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms/command"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -246,13 +247,17 @@ func newCreateTestService(t *testing.T) (*Service, *storage.SettingsStore) {
 	getter := &stateAwareGetter{store: store, asc: map[string]map[string]string{}}
 	ifaces := query.NewInterfaceStoreWithTTL(getter, query.NopLogger(), 0, 0)
 	queries := &query.Queries{
-		Interfaces: ifaces,
-		Policies:   query.NewPolicyStore(getter, query.NopLogger()),
-		WGServers:  query.NewWGServerStore(getter, query.NopLogger(), ifaces),
+		Interfaces:    ifaces,
+		Policies:      query.NewPolicyStore(getter, query.NopLogger()),
+		WGServers:     query.NewWGServerStore(getter, query.NopLogger(), ifaces),
+		RunningConfig: query.NewRunningConfigStore(getter, query.NopLogger()),
 	}
 	poster := &recordingPoster{onPost: getter.applyPost}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := New(poster, nil, queries, nil, store, log, nil)
+	// ACL-операции идут через command.Commands — строим его над тем же
+	// recordingPoster, чтобы тесты видели parse-строки в том же журнале.
+	cmds := command.NewCommands(command.Deps{Poster: poster, Queries: queries})
+	svc := New(poster, nil, queries, cmds, store, log, nil)
 	// Create now requires immediate private-key capture; tests should not
 	// depend on host wg-tools availability.
 	svc.wgRun = func(_ context.Context, _ string, _ ...string) (string, error) {
@@ -649,13 +654,17 @@ func newLANSegmentsTestService(t *testing.T) (*Service, *storage.SettingsStore, 
 	}
 	ifaces := query.NewInterfaceStoreWithTTL(getter, query.NopLogger(), 0, 0)
 	queries := &query.Queries{
-		Interfaces: ifaces,
-		Policies:   query.NewPolicyStore(getter, query.NopLogger()),
-		WGServers:  query.NewWGServerStore(getter, query.NopLogger(), ifaces),
+		Interfaces:    ifaces,
+		Policies:      query.NewPolicyStore(getter, query.NopLogger()),
+		WGServers:     query.NewWGServerStore(getter, query.NopLogger(), ifaces),
+		RunningConfig: query.NewRunningConfigStore(getter, query.NopLogger()),
 	}
 	poster := &recordingPoster{onPost: getter.applyPost}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := New(poster, nil, queries, nil, store, log, nil)
+	// ACL-операции идут через command.Commands — строим его над тем же
+	// recordingPoster, чтобы тесты видели parse-строки в том же журнале.
+	cmds := command.NewCommands(command.Deps{Poster: poster, Queries: queries})
+	svc := New(poster, nil, queries, cmds, store, log, nil)
 	svc.wgRun = func(_ context.Context, _ string, _ ...string) (string, error) {
 		return "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", nil
 	}
