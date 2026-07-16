@@ -62,6 +62,7 @@ func TestProcessStartUsesConfigDir(t *testing.T) {
 		binary:     "sing-box",
 		configPath: "/tmp/singbox/config.d",
 		pidPath:    filepath.Join(dir, "pid"),
+		logDir:     dir,
 		startCmd: func(bin string, args ...string) (*exec.Cmd, error) {
 			gotArgs = args
 			return exec.Command("/bin/sleep", "1"), nil
@@ -114,6 +115,7 @@ func TestProcessStartReportsImmediateExit(t *testing.T) {
 	p := &Process{
 		binary:  "sing-box",
 		pidPath: filepath.Join(dir, "pid"),
+		logDir:  dir,
 		startCmd: func(bin string, args ...string) (*exec.Cmd, error) {
 			c := exec.Command("/bin/sh", "-c", "echo 'FATAL boom node.example.org 203.0.113.77' >&2; exit 1")
 			return c, nil
@@ -192,6 +194,7 @@ func TestProcess_StartIsConcurrencySafe(t *testing.T) {
 	var spawnCount atomic.Int32
 
 	p := NewProcess("/bin/sleep", "/dev/null", filepath.Join(dir, "sing-box.pid"))
+	p.logDir = dir
 	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
 		spawnCount.Add(1)
 		// Use a 2s sleep so the process outlives the 500ms grace period and
@@ -235,6 +238,7 @@ func TestProcess_ReloadRestartsWhenTunPresent(t *testing.T) {
 	var sawSIGHUP, sawSIGTERM bool
 	var spawnCount atomic.Int32
 	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	p.logDir = dir
 	p.signalFn = func(pid int, sig syscall.Signal) error {
 		switch sig {
 		case syscall.SIGHUP:
@@ -276,6 +280,7 @@ func TestProcess_ReloadSIGHUPsWhenNoTun(t *testing.T) {
 	var sawSIGHUP bool
 	var spawnCount atomic.Int32
 	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	p.logDir = dir
 	// The pidfile borrows the test's own pid to keep the process "alive" for
 	// the SIGHUP path; its cmdline is the test binary, not /bin/sleep, so the
 	// real identity check would (correctly) see a mismatch. Model "alive AND
@@ -315,6 +320,7 @@ func TestProcess_ReloadRespawnsWhenPidNotOurs(t *testing.T) {
 	}
 	var spawnCount atomic.Int32
 	p := NewProcess("/bin/sleep", "/dev/null", pidPath)
+	p.logDir = dir
 	p.matchBinaryFn = func(int) bool { return false } // foreign/recycled pid
 	p.signalFn = func(pid int, sig syscall.Signal) error { return nil }
 	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
@@ -340,6 +346,7 @@ func TestProcess_ReloadRespawnsWhenPidNotOurs(t *testing.T) {
 func TestProcess_RapidStopStartKeepsDeliberateFlag(t *testing.T) {
 	dir := t.TempDir()
 	p := NewProcess("/bin/sleep", "/dev/null", filepath.Join(dir, "sing-box.pid"))
+	p.logDir = dir
 	p.startCmd = func(bin string, args ...string) (*exec.Cmd, error) {
 		return exec.Command("/bin/sleep", "30"), nil
 	}

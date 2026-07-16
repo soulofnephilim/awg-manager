@@ -2,9 +2,8 @@
 package singbox
 
 import (
-	"bufio"
+	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,18 +17,26 @@ import (
 
 // Process manages the sing-box process lifecycle (single-process model).
 //
-// stdout is scanned line-by-line and forwarded to OnStdoutLine (nil =
-// silently consumed). stderr is scanned line-by-line for the entire
-// process lifetime — each line is forwarded to OnStderrLine (so FATAL
-// messages from sing-box reach the app log even after the startup
-// grace period passes) AND retained in a bounded buffer so a startup
-// failure can include the message in its returned error. cmd.Wait is
-// monitored even past the grace window so OnExit fires on every
-// post-grace exit (e.g. config-rejection FATAL after rule-set fetch).
+// stdout/stderr are written to tmpfs log files (not pipes — an orphaned
+// sing-box used to die of SIGPIPE on its first write after awg-manager
+// exited) and tailed line-by-line: each line is forwarded to
+// OnStdoutLine/OnStderrLine (nil = silently consumed; stderr forwarding
+// spans the entire process lifetime, so FATAL messages reach the app log
+// even after the startup grace period passes) AND retained on disk so a
+// startup failure can include the message in its returned error
+// (readLogTail). cmd.Wait is monitored even past the grace window so
+// OnExit fires on every post-grace exit (e.g. config-rejection FATAL
+// after rule-set fetch).
 type Process struct {
 	binary     string
 	configPath string
 	pidPath    string
+
+	// logDir is the directory holding this process's stdout/stderr log
+	// files. Defaults to procLogDir (set by NewProcess); zero-value
+	// Process{} in tests falls back to the procLogDir var-seam via
+	// effectiveLogDir.
+	logDir string
 
 	// OnStderrLine is invoked once per newline-terminated line written to
 	// sing-box's stderr. Nil = stderr is silently consumed (still scanned,
@@ -111,6 +118,7 @@ func NewProcess(binary, configPath, pidPath string) *Process {
 		binary:     binary,
 		configPath: configPath,
 		pidPath:    pidPath,
+		logDir:     procLogDir,
 		startCmd: func(bin string, args ...string) (*exec.Cmd, error) {
 			return exec.Command(bin, args...), nil
 		},
@@ -169,51 +177,42 @@ func (p *Process) startLocked() (spawned bool, err error) {
 		return false, err
 	}
 	cmd.Env = singboxRuntimeEnv(os.Environ())
-	pr, pw := io.Pipe()
-	cmd.Stderr = pw
 
-	stdoutR, stdoutW := io.Pipe()
-	cmd.Stdout = stdoutW
-
-	go func() {
-		sc := bufio.NewScanner(stdoutR)
-		sc.Buffer(make([]byte, 0, 4096), 64*1024)
-		for sc.Scan() {
-			if p.OnStdoutLine != nil {
-				p.OnStdoutLine(sc.Text())
-			}
-		}
-	}()
+	logDir := p.effectiveLogDir()
+	outPath := filepath.Join(logDir, procOutLogName)
+	errPath := filepath.Join(logDir, procErrLogName)
+	outF, err := openProcLog(outPath, true)
+	if err != nil {
+		return false, fmt.Errorf("open sing-box stdout log: %w", err)
+	}
+	errF, err := openProcLog(errPath, true)
+	if err != nil {
+		_ = outF.Close()
+		return false, fmt.Errorf("open sing-box stderr log: %w", err)
+	}
+	cmd.Stdout = outF
+	cmd.Stderr = errF
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
-	stderr := newLimitedBuffer(stderrBufferSize)
-	scannerDone := make(chan struct{})
-	go func() {
-		defer close(scannerDone)
-		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 0, 4096), 64*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			stderr.Write([]byte(line + "\n"))
-			if p.OnStderrLine != nil {
-				p.OnStderrLine(line)
-			}
-		}
-	}()
 	p.setLastStderr("")
 
 	if err := cmd.Start(); err != nil {
-		_ = pw.Close()
-		_ = stdoutW.Close()
-		<-scannerDone
+		_ = outF.Close()
+		_ = errF.Close()
 		return false, fmt.Errorf("start sing-box: %w", err)
 	}
+	// The child holds its own duplicated fds after fork/exec; the
+	// parent's copies are no longer needed.
+	_ = outF.Close()
+	_ = errF.Close()
+
+	// Fresh spawn: tail from the start of the (just-truncated) log files.
+	tailCancel := p.startTails(false)
+
 	if err := p.writePID(cmd.Process.Pid); err != nil {
 		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
 		_ = cmd.Wait()
-		_ = pw.Close()
-		_ = stdoutW.Close()
-		<-scannerDone
+		tailCancel()
 		return false, err
 	}
 	// Свежая генерация процесса со своим «not a deliberate stop» флагом;
@@ -224,16 +223,12 @@ func (p *Process) startLocked() (spawned bool, err error) {
 	p.curGen = gen
 	errCh := make(chan error, 1)
 	go func() {
-		err := cmd.Wait()
-		_ = pw.Close()
-		_ = stdoutW.Close()
-		<-scannerDone
-		errCh <- err
+		errCh <- cmd.Wait()
 	}()
 	select {
 	case waitErr := <-errCh:
 		p.cleanupPidIfOurs(cmd.Process.Pid)
-		msg := strings.TrimSpace(stderr.String())
+		msg := strings.TrimSpace(readLogTail(errPath, stderrBufferSize))
 		if msg == "" {
 			if waitErr != nil {
 				msg = waitErr.Error()
@@ -243,6 +238,15 @@ func (p *Process) startLocked() (spawned bool, err error) {
 		}
 		safeMsg := sanitizeSingboxLogText(msg)
 		p.setLastStderr(safeMsg)
+		// Delay the cancel by one poll cycle so the tail goroutines get a
+		// chance to deliver the process's dying lines to OnStderrLine
+		// before they stop; the returned error already carries the tail
+		// read directly from disk above, so this does not block the
+		// caller.
+		go func() {
+			time.Sleep(2 * procLogTailPoll)
+			tailCancel()
+		}()
 		return true, fmt.Errorf("sing-box exited during startup: %s", safeMsg)
 	case <-time.After(startupGracePeriod):
 		myPid := cmd.Process.Pid
@@ -254,7 +258,11 @@ func (p *Process) startLocked() (spawned bool, err error) {
 			// мгновенном stop→start (FIX-C).
 			deliberate := gen.deliberate.Load()
 			p.cleanupPidIfOurs(myPid)
-			tail := strings.TrimSpace(stderr.String())
+			// Give the tail goroutines one poll cycle to catch the
+			// process's last lines before cancelling them.
+			time.Sleep(2 * procLogTailPoll)
+			tailCancel()
+			tail := strings.TrimSpace(readLogTail(errPath, stderrBufferSize))
 			safeTail := sanitizeSingboxLogText(tail)
 			p.setLastStderr(safeTail)
 			if p.OnExit != nil {
@@ -263,6 +271,33 @@ func (p *Process) startLocked() (spawned bool, err error) {
 		}()
 		return true, nil
 	}
+}
+
+// effectiveLogDir returns p.logDir, falling back to the procLogDir
+// var-seam for zero-value Process{} constructed directly (tests).
+func (p *Process) effectiveLogDir() string {
+	if p.logDir != "" {
+		return p.logDir
+	}
+	return procLogDir
+}
+
+// startTails запускает tail-горутины логов текущего поколения и
+// возвращает cancel. fromEnd=true — адопция (не реиграть историю).
+func (p *Process) startTails(fromEnd bool) context.CancelFunc {
+	logDir := p.effectiveLogDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	go tailFile(ctx, filepath.Join(logDir, procOutLogName), fromEnd, func(l string) {
+		if p.OnStdoutLine != nil {
+			p.OnStdoutLine(l)
+		}
+	})
+	go tailFile(ctx, filepath.Join(logDir, procErrLogName), fromEnd, func(l string) {
+		if p.OnStderrLine != nil {
+			p.OnStderrLine(l)
+		}
+	})
+	return cancel
 }
 
 func singboxRuntimeEnv(base []string) []string {
