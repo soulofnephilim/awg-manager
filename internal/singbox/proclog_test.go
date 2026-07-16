@@ -253,6 +253,74 @@ func TestTailFile_PendingCapFlushes(t *testing.T) {
 	}
 }
 
+// Self-ротация: когда полностью потреблённый файл превышает procLogMaxBytes,
+// tail усекает его САМ и продолжает то же поколение с offset 0 — писатель с
+// O_APPEND-fd (как child sing-box) продолжает писать с нуля, и его новые
+// строки доезжают до onLine тем же tail'ом (генерация НЕ завершается, в
+// отличие от чужого truncate из TestTailFile_TruncateEndsGeneration).
+func TestTailFile_SelfRotationKeepsGeneration(t *testing.T) {
+	old := procLogMaxBytes
+	procLogMaxBytes = 16
+	t.Cleanup(func() { procLogMaxBytes = old })
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "out.log")
+	// 20 байт > потолка 16 — после потребления tail обязан усечь файл.
+	if err := os.WriteFile(p, []byte("line-one\nline-two-\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// O_APPEND-fd писателя открыт ДО ротации — как у живого sing-box.
+	w, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	var mu sync.Mutex
+	var got []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go tailFile(ctx, p, false, func(line string) {
+		mu.Lock()
+		got = append(got, line)
+		mu.Unlock()
+	})
+
+	// Ждём ротацию: файл усечён до нуля.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if fi, err := os.Stat(p); err == nil && fi.Size() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("file was not self-truncated after exceeding procLogMaxBytes")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Писатель продолжает через старый O_APPEND-fd — строка должна доехать
+	// тем же tail'ом (поколение живо).
+	if _, err := w.WriteString("after-rotation\n"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := "line-one,line-two-,after-rotation"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("tail lines = %v, want [%s]", got, want)
+	}
+}
+
 // readLogTail: возвращает последние maxBytes (целыми строками не обязан).
 func TestReadLogTail(t *testing.T) {
 	dir := t.TempDir()
