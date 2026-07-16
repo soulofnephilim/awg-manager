@@ -22,17 +22,19 @@ type Getter interface {
 }
 
 // Logger is the logging surface Stores use for warnings (e.g. serving
-// stale cache on upstream error). Implemented by *logger.Logger; can be
-// stubbed in tests.
+// stale cache on upstream error) and debug diagnostics. Implemented by
+// *logger.Logger; can be stubbed in tests.
 type Logger interface {
 	Warnf(format string, args ...any)
+	Debugf(format string, args ...any)
 }
 
 // nopLogger is a no-op logger used when a store is constructed without
 // one (tests, or consumers that don't care).
 type nopLogger struct{}
 
-func (nopLogger) Warnf(string, ...any) {}
+func (nopLogger) Warnf(string, ...any)  {}
+func (nopLogger) Debugf(string, ...any) {}
 
 // NopLogger returns a Logger that drops everything. Use in tests.
 func NopLogger() Logger { return nopLogger{} }

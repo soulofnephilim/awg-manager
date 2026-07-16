@@ -635,7 +635,7 @@ func (s *InterfaceStore) ListAll(ctx context.Context) ([]ndms.AllInterface, erro
 			winnerID[kernelName] = iface.ID
 			kept, dropped = iface.ID, prevWinner
 		}
-		s.log.Warnf("ListAll: duplicate kernel name %q from NDMS IDs %q and %q; kept %q", kernelName, kept, dropped, kept)
+		s.log.Debugf("ListAll: duplicate kernel name %q from NDMS IDs %q and %q; kept %q", kernelName, kept, dropped, kept)
 	}
 	out := make([]ndms.AllInterface, 0, len(seen))
 	for _, v := range seen {
