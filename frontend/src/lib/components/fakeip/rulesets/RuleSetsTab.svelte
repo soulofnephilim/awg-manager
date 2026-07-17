@@ -425,6 +425,7 @@
 			onapply={applyBulkDetour}
 			oncancel={cancelSelectMode}
 			busy={bulkBusy}
+			allowEmpty
 		/>
 	{/if}
 </section>

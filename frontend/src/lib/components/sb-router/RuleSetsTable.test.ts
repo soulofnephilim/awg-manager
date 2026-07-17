@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
 import RuleSetsTable from './RuleSetsTable.svelte';
 
 describe('RuleSetsTable', () => {
@@ -44,5 +44,28 @@ describe('RuleSetsTable', () => {
 
     expect(screen.getByText('geosite: GOOGLE-PLAY, GOOGLE-DEEPMIND, GOOGLE-GEMINI')).toBeTruthy();
     expect(screen.queryByText(/geosite:GOOGLE-DEEPMIND/)).toBeNull();
+  });
+
+  it('reports only remote tags visible under the active type-filter via onSelectableChange', async () => {
+    const onSelectableChange = vi.fn();
+    render(RuleSetsTable, {
+      props: {
+        ruleSets: [
+          { tag: 'remote-a', type: 'remote', url: 'https://example.com/a.srs', update_interval: '24h' },
+          { tag: 'local-a', type: 'local', path: '/tmp/a.srs' },
+        ],
+        onEdit: vi.fn(),
+        onDelete: vi.fn(),
+        onSelectableChange,
+      },
+    });
+
+    // Изначально фильтр «Все» — виден remote-тег.
+    expect(onSelectableChange).toHaveBeenLastCalledWith(['remote-a']);
+
+    // Переключаем на фильтр «Local» — единственный remote-тег больше не виден.
+    onSelectableChange.mockClear();
+    await fireEvent.click(screen.getByText('Local'));
+    expect(onSelectableChange).toHaveBeenLastCalledWith([]);
   });
 });

@@ -14,9 +14,10 @@
     onapply: (value: string) => void | Promise<void>;
     oncancel: () => void;
     busy?: boolean;
+    allowEmpty?: boolean;
   }
 
-  let { count, options, applyLabel = 'Применить', onapply, oncancel, busy = false }: Props = $props();
+  let { count, options, applyLabel = 'Применить', onapply, oncancel, busy = false, allowEmpty = false }: Props = $props();
 
   let value = $state('');
 
@@ -27,7 +28,7 @@
   });
 
   async function handleApply() {
-    if (busy || !value || count === 0) return;
+    if (busy || (!allowEmpty && !value) || count === 0) return;
     await onapply(value);
   }
 </script>
@@ -37,7 +38,13 @@
   <div class="dropdown-slot">
     <Dropdown bind:value options={options as DropdownOption[]} disabled={busy} fullWidth />
   </div>
-  <Button variant="primary" size="sm" disabled={busy || !value || count === 0} loading={busy} onclick={handleApply}>
+  <Button
+    variant="primary"
+    size="sm"
+    disabled={busy || (!allowEmpty && !value) || count === 0}
+    loading={busy}
+    onclick={handleApply}
+  >
     {applyLabel}
   </Button>
   <Button variant="ghost" size="sm" disabled={busy} onclick={oncancel}>

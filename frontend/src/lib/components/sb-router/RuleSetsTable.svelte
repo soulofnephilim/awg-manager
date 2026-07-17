@@ -24,6 +24,7 @@
     selectMode?: boolean;
     selected?: Set<string>;
     onToggleSelect?: (tag: string) => void;
+    onSelectableChange?: (tags: string[]) => void;
   }
 
   let {
@@ -36,6 +37,7 @@
     selectMode = false,
     selected = new Set(),
     onToggleSelect = () => {},
+    onSelectableChange,
   }: Props = $props();
 
   let filter = $state<RsFilter>('all');
@@ -44,6 +46,17 @@
     if (filter === 'all') return ruleSets;
     if (filter === 'dat') return ruleSets.filter((rs) => datInfo(rs) !== null);
     return ruleSets.filter((rs) => (rs.type ?? 'remote') === filter);
+  });
+
+  // Видимые-выбираемые теги (remote среди отфильтрованных) — наружу для
+  // «Выбрать все» в ExpertPanel, чтобы bulk-detour не трогал скрытые
+  // фильтром наборы (#558 fix-волна, finding F2).
+  const filteredSelectableTags = $derived(
+    filtered.filter((rs) => (rs.type ?? 'remote') === 'remote').map((rs) => rs.tag),
+  );
+
+  $effect(() => {
+    onSelectableChange?.(filteredSelectableTags);
   });
 
   function sourceFor(rs: SingboxRouterRuleSet): string {

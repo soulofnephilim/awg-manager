@@ -568,9 +568,10 @@
   let rsBulkBusy = $state(false);
   let prevRuleSetsRef: SingboxRouterRuleSet[] | undefined;
 
-  const selectableRsTags = $derived(
-    $storeRuleSets.filter((rs) => rs.type === 'remote').map((rs) => rs.tag),
-  );
+  // Видимые-выбираемые теги (remote среди отфильтрованных RuleSetsTable) —
+  // «Выбрать все» и видимость кнопки должны идти от активного тип-фильтра
+  // таблицы, а не от полного $storeRuleSets (#558 fix-волна, finding F2).
+  let rsFilteredSelectableTags = $state<string[]>([]);
 
   const rsBulkDetourOptions = $derived(buildDownloadDetourOptions($storeOptions, '— сбросить —'));
 
@@ -592,7 +593,7 @@
   }
 
   function selectAllRs(): void {
-    rsSelected = new Set(selectableRsTags);
+    rsSelected = new Set(rsFilteredSelectableTags);
   }
 
   async function applyRsBulkDetour(value: string): Promise<void> {
@@ -938,7 +939,7 @@
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={rsBulkBusy || selectableRsTags.length === 0}
+                disabled={rsBulkBusy || rsFilteredSelectableTags.length === 0}
                 onclick={selectAllRs}
               >
                 Выбрать все
@@ -946,7 +947,7 @@
               <Button variant="ghost" size="sm" disabled={rsBulkBusy} onclick={cancelRsSelectMode}>
                 Отмена
               </Button>
-            {:else if selectableRsTags.length > 0}
+            {:else if rsFilteredSelectableTags.length > 0}
               <Button variant="ghost" size="sm" onclick={toggleRsSelectMode}>Выбрать</Button>
             {/if}
             <Button variant="secondary" size="sm" onclick={() => (rsCatalogOpen = true)}>
@@ -983,6 +984,7 @@
           selectMode={rsSelectMode}
           selected={rsSelected}
           onToggleSelect={toggleRsSelect}
+          onSelectableChange={(tags) => (rsFilteredSelectableTags = tags)}
         />
         {#if rsSelectMode}
           <BulkSelectBar
@@ -992,6 +994,7 @@
             onapply={applyRsBulkDetour}
             oncancel={cancelRsSelectMode}
             busy={rsBulkBusy}
+            allowEmpty
           />
         {/if}
       </SidePanel>
