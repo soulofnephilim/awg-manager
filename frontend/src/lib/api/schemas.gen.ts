@@ -1369,6 +1369,15 @@ const api_SingboxProxyMember: v.GenericSchema = v.looseObject({
 	type: v.optional(v.nullable(v.string())),
 });
 
+const api_SingboxRouterBulkUpdatedData: v.GenericSchema = v.looseObject({
+	updated: v.optional(v.nullable(v.number())),
+});
+
+const api_SingboxRouterBulkUpdatedResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SingboxRouterBulkUpdatedData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
 const api_SingboxRouterDatRuleSetURLData: v.GenericSchema = v.looseObject({
 	url: v.optional(v.nullable(v.string())),
 });
@@ -2610,10 +2619,12 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /singbox/fakeip/config/outbounds/update": v.lazy(() => api_OkResponse),
 	"POST /singbox/fakeip/config/route/final": v.lazy(() => api_OkResponse),
 	"POST /singbox/fakeip/config/rules/add": v.lazy(() => api_OkResponse),
+	"POST /singbox/fakeip/config/rules/bulk-outbound": v.lazy(() => api_SingboxRouterBulkUpdatedResponse),
 	"POST /singbox/fakeip/config/rules/delete": v.lazy(() => api_OkResponse),
 	"POST /singbox/fakeip/config/rules/move": v.lazy(() => api_OkResponse),
 	"POST /singbox/fakeip/config/rules/update": v.lazy(() => api_OkResponse),
 	"POST /singbox/fakeip/config/rulesets/add": v.lazy(() => api_OkResponse),
+	"POST /singbox/fakeip/config/rulesets/bulk-detour": v.lazy(() => api_SingboxRouterBulkUpdatedResponse),
 	"POST /singbox/fakeip/config/rulesets/delete": v.lazy(() => api_OkResponse),
 	"POST /singbox/fakeip/config/rulesets/update": v.lazy(() => api_OkResponse),
 	"POST /singbox/install": v.lazy(() => api_APIEnvelope),
@@ -2649,10 +2660,12 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 })]),
 	"POST /singbox/router/route/final": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/rules/add": v.lazy(() => api_OkResponse),
+	"POST /singbox/router/rules/bulk-outbound": v.lazy(() => api_SingboxRouterBulkUpdatedResponse),
 	"POST /singbox/router/rules/delete": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/rules/move": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/rules/update": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/rulesets/add": v.lazy(() => api_OkResponse),
+	"POST /singbox/router/rulesets/bulk-detour": v.lazy(() => api_SingboxRouterBulkUpdatedResponse),
 	"POST /singbox/router/rulesets/delete": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/rulesets/update": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/selective/install-conntrack": v.lazy(() => api_SelectiveStatusData),

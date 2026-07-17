@@ -9,17 +9,28 @@ var (
 	ErrOutboundReferenced        = errors.New("outbound is referenced by one or more rules")
 	ErrInvalidMatchers           = errors.New("rule must have at least one matcher")
 	ErrRuleIndexOutOfRange       = errors.New("rule index out of range")
-	ErrRuleSetTagConflict        = errors.New("rule set with this tag already exists")
-	ErrRuleSetNotFound           = errors.New("rule set not found")
-	ErrDatRuleSetForbidden       = errors.New("dat rule set token is invalid")
-	ErrOutboundTagConflict       = errors.New("outbound with this tag already exists")
-	ErrOutboundNotFound          = errors.New("outbound not found")
-	ErrDNSServerTagConflict      = errors.New("dns server with this tag already exists")
-	ErrDNSServerReferenced       = errors.New("dns server is referenced by one or more dns rules or used as final/default")
-	ErrDNSServerNotFound         = errors.New("dns server not found")
-	ErrDNSRuleIndexOutOfRange    = errors.New("dns rule index out of range")
-	ErrDNSServerIndexOutOfRange  = errors.New("dns server index out of range")
-	ErrDNSInvalidServer          = errors.New("dns rule references unknown server tag")
+	// ErrBulkEmptyIndices / ErrBulkEmptyTags reject an empty selection passed
+	// to a bulk rule/ruleset mutation (nothing to do — client error). Mapped
+	// to 400 by the API.
+	ErrBulkEmptyIndices = errors.New("empty indices")
+	ErrBulkEmptyTags    = errors.New("empty tags")
+	// ErrBulkInvalidSelection rejects a non-empty bulk selection that is
+	// itself invalid (duplicate index/tag, a rule that isn't a route rule,
+	// an unknown outbound tag, or a rule set that isn't type=remote) — a
+	// client error just like the empty-selection cases above. Mapped to 400
+	// by the API.
+	ErrBulkInvalidSelection     = errors.New("invalid bulk selection")
+	ErrRuleSetTagConflict       = errors.New("rule set with this tag already exists")
+	ErrRuleSetNotFound          = errors.New("rule set not found")
+	ErrDatRuleSetForbidden      = errors.New("dat rule set token is invalid")
+	ErrOutboundTagConflict      = errors.New("outbound with this tag already exists")
+	ErrOutboundNotFound         = errors.New("outbound not found")
+	ErrDNSServerTagConflict     = errors.New("dns server with this tag already exists")
+	ErrDNSServerReferenced      = errors.New("dns server is referenced by one or more dns rules or used as final/default")
+	ErrDNSServerNotFound        = errors.New("dns server not found")
+	ErrDNSRuleIndexOutOfRange   = errors.New("dns rule index out of range")
+	ErrDNSServerIndexOutOfRange = errors.New("dns server index out of range")
+	ErrDNSInvalidServer         = errors.New("dns rule references unknown server tag")
 
 	ErrPolicyNotConfigured = errors.New("router policy not configured (settings.policyName is empty)")
 	ErrPolicyMissing       = errors.New("policy has no fwmark in NDMS (deleted or has no permitted interface)")

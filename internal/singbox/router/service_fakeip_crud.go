@@ -110,6 +110,14 @@ func (s *ServiceImpl) FakeIPMoveRule(ctx context.Context, from, to int) error {
 	return s.fakeipWithConfig(ctx, "rules", func(c *RouterConfig) error { return c.MoveRule(from, to) })
 }
 
+// FakeIPBulkSetRuleOutbound is the fakeip-tun (SlotFakeIP) counterpart of
+// BulkSetRuleOutbound — same validation, routed through fakeipWithConfig.
+func (s *ServiceImpl) FakeIPBulkSetRuleOutbound(ctx context.Context, indices []int, outbound string) error {
+	return s.fakeipWithConfig(ctx, "rules", func(c *RouterConfig) error {
+		return bulkSetRuleOutbound(c, indices, outbound, func(t string) bool { return s.isKnownOutboundTag(ctx, t, c) })
+	})
+}
+
 // --- Route final ---
 
 // FakeIPSetRouteFinal sets route.final on the fakeip config slot.
@@ -162,6 +170,14 @@ func (s *ServiceImpl) FakeIPUpdateRuleSet(ctx context.Context, tag string, rs Ru
 		rs.UpdateInterval = "24h"
 	}
 	return s.fakeipWithConfig(ctx, "rulesets", func(c *RouterConfig) error { return c.UpdateRuleSet(tag, rs) })
+}
+
+// FakeIPBulkSetRuleSetDetour is the fakeip-tun (SlotFakeIP) counterpart of
+// BulkSetRuleSetDetour — same validation, routed through fakeipWithConfig.
+func (s *ServiceImpl) FakeIPBulkSetRuleSetDetour(ctx context.Context, tags []string, detour string) error {
+	return s.fakeipWithConfig(ctx, "rulesets", func(c *RouterConfig) error {
+		return bulkSetRuleSetDetour(c, tags, detour, func(t string) bool { return s.isKnownOutboundTag(ctx, t, c) })
+	})
 }
 
 func (s *ServiceImpl) FakeIPDeleteRuleSet(ctx context.Context, tag string, force bool) error {
@@ -254,6 +270,7 @@ type FakeIPConfigService interface {
 	FakeIPUpdateRule(ctx context.Context, index int, r Rule) error
 	FakeIPDeleteRule(ctx context.Context, index int) error
 	FakeIPMoveRule(ctx context.Context, from, to int) error
+	FakeIPBulkSetRuleOutbound(ctx context.Context, indices []int, outbound string) error
 
 	// Route final
 	FakeIPSetRouteFinal(ctx context.Context, tag string) error
@@ -263,6 +280,7 @@ type FakeIPConfigService interface {
 	FakeIPAddRuleSet(ctx context.Context, rs RuleSet) error
 	FakeIPUpdateRuleSet(ctx context.Context, tag string, rs RuleSet) error
 	FakeIPDeleteRuleSet(ctx context.Context, tag string, force bool) error
+	FakeIPBulkSetRuleSetDetour(ctx context.Context, tags []string, detour string) error
 
 	// Composite outbounds
 	FakeIPListCompositeOutbounds(ctx context.Context) ([]CompositeOutboundView, error)

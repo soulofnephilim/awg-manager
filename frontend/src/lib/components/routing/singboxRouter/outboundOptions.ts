@@ -1,4 +1,5 @@
 import type { AWGTagInfo, SingboxRouterOutbound, SingboxTunnel, Subscription } from '$lib/types';
+import type { DropdownOption } from '$lib/components/ui';
 
 export interface OutboundGroup {
 	group: string;
@@ -89,4 +90,20 @@ export function buildOutboundOptions(
 	}
 
 	return groups;
+}
+
+// Download detour dropdown options (для remote rule-set'ов): плоский список
+// outbound'ов из OutboundGroup[] + сбрасывающий пункт со значением "" первым.
+// resetLabel параметризован — RuleSetAddModal формулирует его как «применится
+// автоматически», массовые bulk-detour бары — как «сбросить».
+export function buildDownloadDetourOptions(
+	outboundOptions: OutboundGroup[],
+	resetLabel: string,
+): DropdownOption[] {
+	return [
+		{ value: '', label: resetLabel },
+		...outboundOptions.flatMap((g) =>
+			g.items.map((i) => ({ value: i.value, label: i.label, group: g.group })),
+		),
+	];
 }

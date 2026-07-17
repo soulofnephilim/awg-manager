@@ -6,6 +6,7 @@ import {
   extractMatchersForCard,
   firstDomainFromInlineRules,
   isSystemRule,
+  mapRuleAction,
   systemRuleTooltip,
 } from './adapters';
 import { classifyRuleSimplicity } from './simpleRule';
@@ -41,6 +42,39 @@ describe('isSystemRule', () => {
   });
   it('regular routing rule is not system', () => {
     expect(isSystemRule({ domain_suffix: ['netflix.com'], outbound: 'warp' })).toBe(false);
+  });
+});
+
+// Bulk-выбор правил (RulesPanel/ExpertPanel/RoutesTab) строится по одному и
+// тому же предикату `!isSystem && (action === 'route' || action === 'direct')`
+// поверх isSystemRule + mapRuleAction. Тестируем сами строительные блоки,
+// чтобы регресс #558 fix-волна 2 (Minor 3: direct-правила исключались) не
+// повторился — «Локальная сеть» и reject должны остаться невыбираемыми.
+describe('bulk rule selectability building blocks', () => {
+  function isSelectable(rule: SingboxRouterRule): boolean {
+    const action = mapRuleAction(rule);
+    return !isSystemRule(rule) && (action === 'route' || action === 'direct');
+  }
+
+  it('user rule routed to a tunnel outbound is selectable', () => {
+    expect(isSelectable({ domain_suffix: ['netflix.com'], outbound: 'warp' })).toBe(true);
+  });
+
+  it('user rule with direct outbound is selectable', () => {
+    expect(isSelectable({ domain_suffix: ['example.com'], outbound: 'direct' })).toBe(true);
+  });
+
+  it('"Локальная сеть" (ip_is_private + direct) stays non-selectable', () => {
+    expect(isSelectable({ ip_is_private: true, outbound: 'direct' })).toBe(false);
+  });
+
+  it('block/reject rule stays non-selectable', () => {
+    expect(isSelectable({ action: 'reject', domain_suffix: ['ads.example.com'] })).toBe(false);
+  });
+
+  it('sniff/hijack-dns system rules stay non-selectable', () => {
+    expect(isSelectable({ action: 'sniff' })).toBe(false);
+    expect(isSelectable({ action: 'hijack-dns' })).toBe(false);
   });
 });
 

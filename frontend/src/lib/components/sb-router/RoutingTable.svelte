@@ -29,6 +29,10 @@
     onDelete: (idx: number) => void;
     onMove: (idx: number, dir: 'up' | 'down') => void;
     bare?: boolean;
+    selectMode?: boolean;
+    selected?: Set<number>;
+    onToggleSelect?: (index: number) => void;
+    isSelectable?: (index: number) => boolean;
   }
 
   let {
@@ -42,6 +46,10 @@
     onDelete,
     onMove,
     bare = false,
+    selectMode = false,
+    selected = new Set(),
+    onToggleSelect = () => {},
+    isSelectable = () => false,
   }: Props = $props();
 
   type ActionLabel = 'SNIFF' | 'HIJACK' | 'BYPASS' | 'REJECT' | 'ROUTE' | 'UDP TTL';
@@ -144,9 +152,21 @@
       class:route={!row.sys && row.outboundDisplay?.kind !== 'direct' && row.outboundDisplay?.kind !== 'block'}
       title={row.tooltip}
     >
-      <div class="idx">{row.idx}</div>
+      <div class="idx">
+        {#if selectMode && isSelectable(row.idx)}
+          <input
+            type="checkbox"
+            class="rule-checkbox"
+            checked={selected.has(row.idx)}
+            onchange={() => onToggleSelect(row.idx)}
+            aria-label={`Выбрать правило ${row.idx}`}
+          />
+        {:else}
+          {row.idx}
+        {/if}
+      </div>
       <div class="reorder">
-        {#if !row.sys}
+        {#if !row.sys && !selectMode}
           <button
             type="button"
             class="route-reorder-btn"
@@ -289,6 +309,12 @@
     font-family: var(--font-mono);
     color: var(--text-muted);
     font-size: 12px;
+  }
+  .rule-checkbox {
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    accent-color: var(--accent);
   }
   .reorder {
     display: flex;

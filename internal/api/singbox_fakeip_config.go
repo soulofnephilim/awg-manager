@@ -57,6 +57,14 @@ func (h *SingboxFakeIPConfigHandler) handleErr(w http.ResponseWriter, action str
 	case errors.Is(err, router.ErrInvalidMatchers),
 		errors.Is(err, router.ErrDNSInvalidServer):
 		response.Error(w, err.Error(), "INVALID_MATCHERS")
+	case errors.Is(err, router.ErrBulkEmptyIndices),
+		errors.Is(err, router.ErrBulkEmptyTags):
+		// 400: empty selection for a bulk rule/ruleset mutation — nothing to do.
+		response.Error(w, err.Error(), "BULK_EMPTY_SELECTION")
+	case errors.Is(err, router.ErrBulkInvalidSelection):
+		// 400: non-empty but invalid bulk selection (duplicate index/tag,
+		// non-route rule, unknown outbound tag, non-remote rule set).
+		response.Error(w, err.Error(), "BULK_INVALID_SELECTION")
 	default:
 		response.InternalError(w, err.Error())
 	}
@@ -534,6 +542,39 @@ func (h *SingboxFakeIPConfigHandler) UpdateRule(w http.ResponseWriter, r *http.R
 	response.Success(w, map[string]bool{"ok": true})
 }
 
+// BulkSetRuleOutbound sets Outbound on every route rule at the given indices
+// in a single write (fakeip-tun slot).
+//
+//	@Summary		Bulk-set outbound on fakeip-config route rules
+//	@Description	Sets Outbound on every route rule at the given indices in a single config write (fakeip-tun slot). Rejects an empty/duplicate index list, an out-of-range index, a non-route rule, or an unknown outbound tag.
+//	@Tags			singbox-fakeip
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxRouterRuleBulkOutboundRequest	true	"Rule indices + new outbound tag"
+//	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/fakeip/config/rules/bulk-outbound [post]
+func (h *SingboxFakeIPConfigHandler) BulkSetRuleOutbound(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body SingboxRouterRuleBulkOutboundRequest
+	if err := decodeBody(r, &body); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	if err := h.svc.FakeIPBulkSetRuleOutbound(r.Context(), body.Indices, body.Outbound); err != nil {
+		h.handleErr(w, "request", err)
+		return
+	}
+	h.log.Info("fakeip-rules-bulk-outbound", body.Outbound,
+		strconv.Itoa(len(body.Indices))+" fakeip routing rule(s) set to outbound "+body.Outbound)
+	response.Success(w, map[string]int{"updated": len(body.Indices)})
+}
+
 // DeleteRule removes the route rule at the given index (fakeip-tun slot).
 //
 //	@Summary		Delete fakeip-config route rule
@@ -734,6 +775,39 @@ func (h *SingboxFakeIPConfigHandler) UpdateRuleSet(w http.ResponseWriter, r *htt
 	}
 	h.log.Info("fakeip-ruleset-update", body.Tag, "fakeip ruleset updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
+}
+
+// BulkSetRuleSetDetour sets download_detour on every rule set with a tag in
+// the given list, in a single write (fakeip-tun slot).
+//
+//	@Summary		Bulk-set download_detour on fakeip-config rulesets
+//	@Description	Sets download_detour on every rule set with a tag in the given list, in a single config write (fakeip-tun slot). Rejects an empty/duplicate tag list, an unknown tag, a rule set whose type isn't "remote", or an unknown outbound tag (empty detour clears the field and skips the known-tag check).
+//	@Tags			singbox-fakeip
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxRouterRuleSetBulkDetourRequest	true	"Rule set tags + new download_detour"
+//	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/fakeip/config/rulesets/bulk-detour [post]
+func (h *SingboxFakeIPConfigHandler) BulkSetRuleSetDetour(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body SingboxRouterRuleSetBulkDetourRequest
+	if err := decodeBody(r, &body); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	if err := h.svc.FakeIPBulkSetRuleSetDetour(r.Context(), body.Tags, body.DownloadDetour); err != nil {
+		h.handleErr(w, "request", err)
+		return
+	}
+	h.log.Info("fakeip-rulesets-bulk-detour", body.DownloadDetour,
+		strconv.Itoa(len(body.Tags))+" fakeip rule set(s) detour set to "+body.DownloadDetour)
+	response.Success(w, map[string]int{"updated": len(body.Tags)})
 }
 
 // DeleteRuleSet removes the ruleset identified by tag from the fakeip-tun slot.
