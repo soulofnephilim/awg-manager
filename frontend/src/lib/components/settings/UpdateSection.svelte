@@ -1,22 +1,45 @@
 <script lang="ts">
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
-	import { Modal, Button } from '$lib/components/ui';
+	import { Modal, Button, Toggle } from '$lib/components/ui';
 	import ChangelogModal from './ChangelogModal.svelte';
 	import DownloadErrorNotice from '$lib/components/downloads/DownloadErrorNotice.svelte';
 	import { downloadErrorToText } from '$lib/utils/downloadError';
-	import type { UpdateInfo } from '$lib/types';
+	import { formatDate } from '$lib/utils/format';
+	import { setSettings as setGlobalSettings } from '$lib/stores/settings';
+	import { isAutoInstallSettingsVisible } from '$lib/types/usageLevel';
+	import type { Settings, UpdateInfo } from '$lib/types';
 
 	interface Props {
 		updateInfo: UpdateInfo | null;
+		settings: Settings;
 	}
 
-	let { updateInfo = $bindable() }: Props = $props();
+	let { updateInfo = $bindable(), settings = $bindable() }: Props = $props();
 
 	let checking = $state(false);
 	let upgrading = $state(false);
 	let showConfirm = $state(false);
 	let showChangelog = $state(false);
+	let savingAutoInstall = $state(false);
+
+	let localIntervalDays = $state(settings.updates.autoInstallIntervalDays || 7);
+	let localTime = $state(settings.updates.autoInstallTime || '05:00');
+
+	let savedIntervalDays = $derived(settings.updates.autoInstallIntervalDays || 7);
+	let savedTime = $derived(settings.updates.autoInstallTime || '05:00');
+
+	let autoInstallScheduleChanged = $derived(
+		localIntervalDays !== savedIntervalDays || localTime !== savedTime
+	);
+
+	$effect(() => {
+		localIntervalDays = savedIntervalDays;
+	});
+
+	$effect(() => {
+		localTime = savedTime;
+	});
 
 	const manualCheckTitle = $derived(
 		updateInfo?.available ? 'Проверить наличие более новой версии' : 'Проверить обновления'
@@ -92,6 +115,44 @@
 		notifications.error('Сервер не ответил после обновления');
 		upgrading = false;
 	}
+
+	async function toggleAutoInstall(enabled: boolean) {
+		savingAutoInstall = true;
+		try {
+			settings = await api.updateSettings({
+				...settings,
+				updates: { ...settings.updates, autoInstallEnabled: enabled },
+			});
+			setGlobalSettings(settings);
+			notifications.success(
+				enabled ? 'Автоустановка обновлений включена' : 'Автоустановка обновлений отключена'
+			);
+		} catch (e) {
+			notifications.error(`Автоустановка обновлений: ${downloadErrorToText(e)}`);
+		} finally {
+			savingAutoInstall = false;
+		}
+	}
+
+	async function saveAutoInstallSchedule() {
+		savingAutoInstall = true;
+		try {
+			settings = await api.updateSettings({
+				...settings,
+				updates: {
+					...settings.updates,
+					autoInstallIntervalDays: localIntervalDays,
+					autoInstallTime: localTime,
+				},
+			});
+			setGlobalSettings(settings);
+			notifications.success('Расписание автоустановки сохранено');
+		} catch (e) {
+			notifications.error(`Расписание автоустановки: ${downloadErrorToText(e)}`);
+		} finally {
+			savingAutoInstall = false;
+		}
+	}
 </script>
 
 <div class="setting-row update-row">
@@ -156,6 +217,62 @@
 		{/if}
 	</div>
 </div>
+
+{#if isAutoInstallSettingsVisible(settings.usageLevel)}
+	<div class="setting-row toggle-inline-row">
+		<div class="flex flex-col gap-1">
+			<span class="font-medium">Автоматическая установка</span>
+			<span class="setting-description">
+				Устанавливать проверенные обновления автоматически по расписанию.
+			</span>
+		</div>
+		<Toggle
+			checked={settings.updates.autoInstallEnabled}
+			onchange={toggleAutoInstall}
+			disabled={savingAutoInstall}
+		/>
+	</div>
+
+	{#if settings.updates.autoInstallEnabled}
+		<div class="settings-panel">
+			<div class="inline-form">
+				<div class="input-with-suffix">
+					<input
+						type="number"
+						id="autoInstallIntervalDays"
+						bind:value={localIntervalDays}
+						min="1"
+						max="30"
+						disabled={savingAutoInstall}
+					/>
+					<span class="input-suffix">каждые N дней</span>
+				</div>
+				<input
+					type="time"
+					id="autoInstallTime"
+					bind:value={localTime}
+					disabled={savingAutoInstall}
+				/>
+				{#if autoInstallScheduleChanged}
+					<Button
+						variant="primary"
+						size="sm"
+						onclick={saveAutoInstallSchedule}
+						loading={savingAutoInstall}
+					>
+						{savingAutoInstall ? 'Сохранение...' : 'Сохранить'}
+					</Button>
+				{/if}
+			</div>
+			{#if updateInfo?.nextAutoInstallAt}
+				<p class="auto-install-status">Следующее окно: {formatDate(updateInfo.nextAutoInstallAt)}</p>
+			{/if}
+			{#if updateInfo?.lastAutoInstallAt}
+				<p class="auto-install-status">Последняя автоустановка: {formatDate(updateInfo.lastAutoInstallAt)}</p>
+			{/if}
+		</div>
+	{/if}
+{/if}
 
 <Modal
 	open={showConfirm}
@@ -295,5 +412,61 @@
 	.modal-text {
 		color: var(--text-secondary);
 		margin: 0;
+	}
+
+	.inline-form {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.input-with-suffix {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		min-width: 0;
+	}
+
+	.input-suffix {
+		font-size: 0.8125rem;
+		color: var(--text-secondary);
+	}
+
+	.inline-form input[type="number"] {
+		width: 4.75rem;
+	}
+
+	.inline-form input[type="time"] {
+		width: 8rem;
+	}
+
+	.auto-install-status {
+		margin: 0.5rem 0 0;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+	}
+
+	@media (max-width: 640px) {
+		.inline-form {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.input-with-suffix {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			width: 100%;
+		}
+
+		.inline-form input[type="number"],
+		.inline-form input[type="time"] {
+			width: 100%;
+			box-sizing: border-box;
+		}
+
+		.inline-form :global(.btn) {
+			width: 100%;
+		}
 	}
 </style>

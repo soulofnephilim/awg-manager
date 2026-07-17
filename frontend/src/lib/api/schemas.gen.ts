@@ -2099,10 +2099,15 @@ const api_UpdateInfoData: v.GenericSchema = v.looseObject({
 	checkedAt: v.optional(v.nullable(v.string())),
 	checking: v.optional(v.nullable(v.boolean())),
 	currentVersion: v.optional(v.nullable(v.string())),
+	lastAutoInstallAt: v.optional(v.nullable(v.string())),
 	latestVersion: v.optional(v.nullable(v.string())),
+	nextAutoInstallAt: v.optional(v.nullable(v.string())),
 });
 
 const api_UpdateSettingsDTO: v.GenericSchema = v.looseObject({
+	autoInstallEnabled: v.optional(v.nullable(v.boolean())),
+	autoInstallIntervalDays: v.optional(v.nullable(v.number())),
+	autoInstallTime: v.optional(v.nullable(v.string())),
 	channel: v.optional(v.nullable(v.string())),
 	checkEnabled: v.optional(v.nullable(v.boolean())),
 });

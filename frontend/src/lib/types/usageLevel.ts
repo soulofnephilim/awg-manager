@@ -69,6 +69,9 @@ export const TUNNEL_DASHBOARD_MIN_LEVEL: UsageLevel = 'advanced';
 /** Переключатель stable/develop — только на «Продвинутом». */
 export const UPDATE_CHANNEL_MIN_LEVEL: UsageLevel = 'expert';
 
+/** Блок «Автоматическая установка» обновлений — только на «Продвинутом». */
+export const AUTO_INSTALL_MIN_LEVEL: UsageLevel = 'expert';
+
 /** Подробности маршрута служебных загрузок: "через Direct (WAN)", route labels и transport hints. */
 export const DOWNLOAD_ROUTE_DETAILS_MIN_LEVEL: UsageLevel = 'expert';
 
@@ -86,6 +89,10 @@ export function isTunnelDashboardAvailable(level: UsageLevel): boolean {
 
 export function isUpdateChannelSwitchVisible(level: UsageLevel): boolean {
 	return isUsageLevelAtLeast(level, UPDATE_CHANNEL_MIN_LEVEL);
+}
+
+export function isAutoInstallSettingsVisible(level: UsageLevel): boolean {
+	return isUsageLevelAtLeast(level, AUTO_INSTALL_MIN_LEVEL);
 }
 
 export function areDownloadRouteDetailsVisible(level: UsageLevel): boolean {

@@ -723,7 +723,7 @@ $effect(() => {
 				<div id="awgm-update" class="settings-block">
 					<div class="card settings-highlight-target" class:highlighted={$settingsUpdateHighlight}>
 						<SettingsSectionLabel label="Обновление AWGM" icon={CircleArrowDown} tone="green" header />
-						<UpdateSection bind:updateInfo />
+						<UpdateSection bind:updateInfo bind:settings />
 					</div>
 				</div>
 
