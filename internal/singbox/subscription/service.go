@@ -119,10 +119,10 @@ func (s *Service) proxyEnabled() bool {
 // re-register every subscription that already holds an index (occupying its
 // router slot), then allocate fresh indices for the proxy-less ones. Without
 // pass 1 a fresh allocation could land on a slot a retained subscription still
-// owns in the store but hasn't re-registered yet — store.List() order is
-// non-deterministic, so the proxy-less subscription is not reliably processed
-// last. Within pass 2 each proxy is committed via EnsureProxy before the next
-// index is allocated, for the same reason.
+// owns in the store but hasn't re-registered yet — store.List() is ordered by
+// label, which says nothing about proxy state, so the proxy-less subscription
+// is not reliably processed last. Within pass 2 each proxy is committed via
+// EnsureProxy before the next index is allocated, for the same reason.
 func (s *Service) SyncProxies(ctx context.Context) error {
 	if !s.proxyEnabled() {
 		return nil
