@@ -117,4 +117,3 @@ func splitHostPortOptionalIPv6(s string) (host, port string) {
 	}
 	return s, ""
 }
-

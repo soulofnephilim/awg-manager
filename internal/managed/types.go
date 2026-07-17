@@ -71,7 +71,7 @@ type TogglePeerRequest struct {
 
 // ManagedServerStats holds runtime statistics for the managed server.
 type ManagedServerStats struct {
-	Status string            `json:"status"` // "up" or "down"
+	Status string             `json:"status"` // "up" or "down"
 	Peers  []ManagedPeerStats `json:"peers"`
 }
 

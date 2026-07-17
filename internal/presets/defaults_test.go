@@ -56,7 +56,7 @@ func TestDefaultsCatalogInvariants(t *testing.T) {
 			t.Errorf("expected id %q present", need)
 		}
 	}
-	// singbox-only presets (except rkn) get DNS from vernette/rulesets/raw where lists exist.
+	// singbox-only presets (except rkn) get DNS from hoaxisr/rulesets/raw where lists exist.
 	for _, id := range []string{"unavailable-in-russia", "google-play"} {
 		var found *Preset
 		for i := range ps {
@@ -70,7 +70,7 @@ func TestDefaultsCatalogInvariants(t *testing.T) {
 			continue
 		}
 		if found.Engines.DNS == nil {
-			t.Errorf("preset %q: expected dns engine from vernette/raw", id)
+			t.Errorf("preset %q: expected dns engine from hoaxisr/raw", id)
 		}
 	}
 	// russian-services is DNS-only (no .srs).
@@ -103,12 +103,12 @@ func TestDefaultsCatalogCovers(t *testing.T) {
 		}
 	}
 	wantParents := map[string]int{
-		"category-ai":     6,
-		"category-games":  10,
-		"category-media":  12,
-		"meta":            4,
-		"dev-tools":       3,
-		"google":          2,
+		"category-ai":    6,
+		"category-games": 10,
+		"category-media": 12,
+		"meta":           4,
+		"dev-tools":      3,
+		"google":         2,
 	}
 	for id, n := range wantParents {
 		var found *Preset

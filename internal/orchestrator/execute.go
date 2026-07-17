@@ -153,7 +153,6 @@ func (o *Orchestrator) executeOne(ctx context.Context, action Action) error {
 	case ActionPersistStopped:
 		return o.executePersistStopped(action)
 	default:
-		// Live config actions (ActionApplyConfig, ActionSetMTU, etc.) — not yet implemented.
 		return nil
 	}
 }
@@ -578,9 +577,6 @@ func (o *Orchestrator) executePersistRunning(action Action) error {
 	}
 
 	stored.Enabled = true
-	if action.WAN != "" {
-		stored.ActiveWAN = action.WAN
-	}
 	if stored.StartedAt == "" {
 		stored.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	}

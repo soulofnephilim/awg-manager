@@ -324,22 +324,22 @@ func (s *Service) WriteConfig(cfg *Config) error {
 		effectiveMaxElem = defaultMaxElem
 		s.appLog.Warn("config-normalize", "IpsetMaxElem", "invalid value <=0 normalized to 65536")
 	}
+	if err := WriteConfig(cfg); err != nil {
+		s.appLog.Warn("config-write", "", "full config write failed: "+err.Error())
+		return err
+	}
+
 	s.appLog.Info(
 		"config-write",
 		"",
 		fmt.Sprintf(
-			"full config write: geoip=%d geosite=%d ipsetMaxElem=%d policyOrder=%d",
+			"HydraRoute settings updated: geoip=%d geosite=%d ipsetMaxElem=%d policyOrder=%d",
 			len(cfg.GeoIPFiles),
 			len(cfg.GeoSiteFiles),
 			effectiveMaxElem,
 			len(cfg.PolicyOrder),
 		),
 	)
-
-	if err := WriteConfig(cfg); err != nil {
-		s.appLog.Warn("config-write", "", "full config write failed: "+err.Error())
-		return err
-	}
 
 	s.scheduleRestart("config-write")
 	return nil

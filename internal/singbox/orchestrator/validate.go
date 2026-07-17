@@ -5,17 +5,21 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 )
 
 // ValidationError describes one cross-slot consistency problem.
 // Slot is the slot whose JSON contained the offending construct;
 // References (when set) names what was referenced.
 type ValidationError struct {
-	Slot    Slot
-	Kind    string // "duplicate-outbound" / "duplicate-inbound" / "duplicate-dns" / "unknown-outbound" / "unknown-rule-set" / "unknown-dns-server"
-	Tag     string // the offending tag value
-	InRule  string // optional: human-readable location (e.g. "rules[3]" or "selector default")
-	Message string
+	Slot Slot
+	Kind string // "duplicate-outbound" / "duplicate-inbound" / "duplicate-dns" / "unknown-outbound" / "unknown-rule-set" / "unknown-dns-server" / "dns-final-conflict" / "route-final-conflict"
+	// Severity is "" (error, blocks reload) or SeverityWarning (advisory,
+	// does not block). Defaults to error so existing entries keep blocking.
+	Severity string
+	Tag      string // the offending tag value
+	InRule   string // optional: human-readable location (e.g. "rules[3]" or "selector default")
+	Message  string
 
 	// OutboundSlot / OutboundIndex attribute a "sing-box check" failure to
 	// a specific outbound: the slot whose file declares it and the index
@@ -28,6 +32,13 @@ type ValidationError struct {
 	OutboundSlot  Slot
 	OutboundIndex *int
 }
+
+// Severity values for ValidationError. Empty string is an error (blocks
+// reload); SeverityWarning is advisory and does not affect ValidationResult.Ok.
+const (
+	SeverityError   = ""
+	SeverityWarning = "warning"
+)
 
 func (e ValidationError) Error() string {
 	if e.InRule != "" {
@@ -48,7 +59,17 @@ type ValidationResult struct {
 	HasTun bool
 }
 
-func (r ValidationResult) Ok() bool { return len(r.Errors) == 0 }
+// Ok reports whether the config is safe to apply: true when there are no
+// blocking errors. Advisory warnings (SeverityWarning) are ignored so a
+// defense-in-depth warning (e.g. dns-final-conflict) never blocks a reload.
+func (r ValidationResult) Ok() bool {
+	for _, e := range r.Errors {
+		if e.Severity != SeverityWarning {
+			return false
+		}
+	}
+	return true
+}
 
 func (r ValidationResult) Error() string {
 	if r.Ok() {
@@ -79,15 +100,25 @@ func (o *Orchestrator) readActiveBytes(slot Slot) ([]byte, error) {
 	return readIfExists(o.activePath(meta))
 }
 
-// validateWith runs the cross-slot consistency algorithm. bytesFor is
-// the source of slot JSON — callers pass readActiveBytes for normal
-// validation and a swapping variant for draft validation. Caller MUST
-// hold o.mu.
+// validateWith runs the cross-slot consistency algorithm over the
+// currently-enabled slots. bytesFor is the source of slot JSON — callers
+// pass readActiveBytes for normal validation and a swapping variant for
+// draft validation. Caller MUST hold o.mu.
+func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) ValidationResult {
+	return o.validateWithEnabled(bytesFor, func(s Slot) bool { return o.enabled[s] })
+}
+
+// validateWithEnabled is validateWith with an explicit enabled-predicate.
+// Draft validation passes a predicate that treats the TARGET slot as
+// enabled regardless of its current state — "validate as if applied"
+// (the CheckMerged contract): без этого черновик отключённого слота
+// (типично 90-user.json до первого включения) тихо проходил бы
+// логическую проверку. Caller MUST hold o.mu.
 //
 // We deliberately tolerate JSON parse errors: a single broken slot file
 // is reported as one error, scan continues. This makes the result more
 // useful when developing.
-func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) ValidationResult {
+func (o *Orchestrator) validateWithEnabled(bytesFor func(Slot) ([]byte, error), enabledFor func(Slot) bool) ValidationResult {
 	type tagOrigin struct {
 		slot Slot
 	}
@@ -97,6 +128,13 @@ func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) Validat
 	ruleSetsBySlot := map[Slot]map[string]bool{}
 	var errs []ValidationError
 	var hasTun bool
+
+	// Slots (in scan order) that set route.final / dns.final. More than one
+	// setter is a shadowing hazard: sing-box keeps the lexically-first slot's
+	// value and silently ignores the rest (bug #445). Surfaced as a warning
+	// after the scan.
+	var routeFinalSlots []Slot
+	var dnsFinalSlots []Slot
 
 	var pending []validationSectionRefs
 
@@ -113,7 +151,7 @@ func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) Validat
 	}
 
 	for _, os := range ordered {
-		if !o.enabled[os.slot] {
+		if !enabledFor(os.slot) {
 			continue
 		}
 		data, err := bytesFor(os.slot)
@@ -200,9 +238,11 @@ func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) Validat
 		}
 		if c.Route.Final != "" {
 			rs.finals = append(rs.finals, finalSection{outbound: c.Route.Final})
+			routeFinalSlots = append(routeFinalSlots, os.slot)
 		}
 		if c.DNS.Final != "" {
 			rs.dnsTagRefs = append(rs.dnsTagRefs, dnsTagRefSection{refTag: c.DNS.Final, where: "dns.final"})
+			dnsFinalSlots = append(dnsFinalSlots, os.slot)
 		}
 		if c.Route.DefaultDomainResolver != nil && c.Route.DefaultDomainResolver.Server != "" {
 			rs.dnsTagRefs = append(rs.dnsTagRefs, dnsTagRefSection{refTag: c.Route.DefaultDomainResolver.Server, where: "route.default_domain_resolver.server"})
@@ -327,6 +367,33 @@ func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) Validat
 		}
 	}
 
+	// Defense in depth: flag when more than one enabled slot sets a scalar
+	// `final`. sing-box merges these first-file-wins, so a second setter is
+	// silently shadowed. After #445 phase 1 the base slot no longer sets
+	// dns.final/route.final, so this stays quiet in the normal path.
+	if len(routeFinalSlots) > 1 {
+		errs = append(errs, ValidationError{
+			Slot:     routeFinalSlots[0],
+			Kind:     "route-final-conflict",
+			Severity: SeverityWarning,
+			InRule:   "route.final",
+			Message: fmt.Sprintf(
+				"route.final set by multiple slots (%s); sing-box keeps the first and ignores the rest",
+				slotsList(routeFinalSlots)),
+		})
+	}
+	if len(dnsFinalSlots) > 1 {
+		errs = append(errs, ValidationError{
+			Slot:     dnsFinalSlots[0],
+			Kind:     "dns-final-conflict",
+			Severity: SeverityWarning,
+			InRule:   "dns.final",
+			Message: fmt.Sprintf(
+				"dns.final set by multiple slots (%s); sing-box keeps the first and ignores the rest",
+				slotsList(dnsFinalSlots)),
+		})
+	}
+
 	sort.SliceStable(errs, func(i, j int) bool {
 		if errs[i].Slot != errs[j].Slot {
 			return errs[i].Slot < errs[j].Slot
@@ -346,12 +413,26 @@ func (o *Orchestrator) validateWith(bytesFor func(Slot) ([]byte, error)) Validat
 // Use case: ApplyDraft pre-flights cross-slot consistency before
 // renaming pending → active.
 func (o *Orchestrator) validateDraftLocked(target Slot, draftBytes []byte) ValidationResult {
-	return o.validateWith(func(slot Slot) ([]byte, error) {
-		if slot == target {
-			return draftBytes, nil
-		}
-		return o.readActiveBytes(slot)
-	})
+	return o.validateWithEnabled(
+		func(slot Slot) ([]byte, error) {
+			if slot == target {
+				return draftBytes, nil
+			}
+			return o.readActiveBytes(slot)
+		},
+		// Цель считается включённой — «валидируем как будто применили»,
+		// в согласии со снапшотом sing-box check в checkMergedLocked.
+		func(slot Slot) bool { return slot == target || o.enabled[slot] },
+	)
+}
+
+// slotsList renders slots as a comma-separated string for warning messages.
+func slotsList(slots []Slot) string {
+	parts := make([]string, len(slots))
+	for i, s := range slots {
+		parts[i] = string(s)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Validate is the public, lock-acquiring entry point.

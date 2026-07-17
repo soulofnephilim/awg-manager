@@ -50,7 +50,7 @@ type Config struct {
 
 func (c *Config) EffectiveMaxElem() int {
 	if c.IpsetMaxElem <= 0 {
-		return 65536
+		return defaultMaxElem
 	}
 	return c.IpsetMaxElem
 }

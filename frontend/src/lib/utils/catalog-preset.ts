@@ -193,3 +193,104 @@ export function dnsRouteCatalogPresetFilter(
 export function singboxRouterCatalogPresetFilter(p: CatalogPreset): boolean {
 	return !!p.engines.singbox;
 }
+
+/** All own singbox ruleSet tags of the preset are already in config (and non-empty).
+ *  Mirrors the "added" predicate of fullyAddedPresetNames; a non-empty ruleSets list
+ *  implies the singbox engine exists, so singboxRouterCatalogPresetFilter is implied. */
+export function isPresetFullyAdded(p: CatalogPreset, existingRuleSetTags: Set<string>): boolean {
+	const refs = p.engines.singbox?.ruleSets ?? [];
+	return refs.length > 0 && refs.every((rs) => existingRuleSetTags.has(rs.tag));
+}
+
+/** member preset id → первый подходящий композит в порядке ПЕРЕДАННОГО каталога
+ *  (вызывающие передают отсортированный по имени список — first-wins детерминирован),
+ *  чьи covers включают участника И чьи собственные singbox rule-set'ы уже в конфиге. */
+export function addedCompositesByMember(
+	catalog: CatalogPreset[],
+	existingRuleSetTags: Set<string>,
+): Map<string, CatalogPreset> {
+	const byMember = new Map<string, CatalogPreset>();
+	if (existingRuleSetTags.size === 0) return byMember;
+	for (const p of catalog) {
+		if (!p.covers?.length || !isPresetFullyAdded(p, existingRuleSetTags)) continue;
+		for (const memberId of p.covers) {
+			if (memberId !== p.id && !byMember.has(memberId)) byMember.set(memberId, p);
+		}
+	}
+	return byMember;
+}
+
+/** First composite already added to config that covers `presetId`, if any (#450). */
+export function findAddedCompositeForMember(
+	presetId: string,
+	catalog: CatalogPreset[],
+	existingRuleSetTags: Set<string>,
+): CatalogPreset | undefined {
+	return addedCompositesByMember(catalog, existingRuleSetTags).get(presetId);
+}
+
+/** Corner-marker precedence ladder for a catalog card (top-right slot / member mark). */
+export interface CatalogCardFlags {
+	/** Disabled «добавлено» state (markExisting + name already in the target list). */
+	added: boolean;
+	/** Covered by a composite selected in-session (disabled «в {name}»). */
+	coveredBySelection: boolean;
+	/** All own singbox rule-set tags already in config (wizard: set will be reused). */
+	ownSetAdded: boolean;
+	/** Member of a composite whose rule set is already in config (#450). */
+	memberOfAddedComposite: boolean;
+}
+
+export type CatalogCardMarker =
+	| 'added'
+	| 'covered'
+	| 'own-set-added'
+	| 'member-of-added'
+	| 'none';
+
+export function catalogCardMarker(f: CatalogCardFlags): CatalogCardMarker {
+	if (f.added) return 'added';
+	if (f.coveredBySelection) return 'covered';
+	if (f.ownSetAdded) return 'own-set-added';
+	if (f.memberOfAddedComposite) return 'member-of-added';
+	return 'none';
+}
+
+export interface PresetBadge {
+	text: string;
+	tooltip?: string;
+}
+
+/** Badge for an added (disabled) preset: with rule-set usage known, differentiate
+ *  «набор используется правилами» vs «добавлен, но не используется ни одним правилом». */
+export function presetAddedBadge(
+	preset: CatalogPreset,
+	ruleSetUsage?: Map<string, number>,
+): PresetBadge {
+	const tags = (preset.engines.singbox?.ruleSets ?? []).map((r) => r.tag);
+	if (!ruleSetUsage || tags.length === 0) return { text: 'добавлено' };
+	const used = tags.some((t) => (ruleSetUsage.get(t) ?? 0) > 0);
+	if (used) {
+		return {
+			text: 'добавлено',
+			tooltip: 'Набор уже добавлен и используется правилами',
+		};
+	}
+	return {
+		text: 'добавлено, без правил',
+		tooltip: 'Добавлен как набор — не используется ни одним правилом',
+	};
+}
+
+/** Wizard (мастер правил): rule set already in config — only a rule will be created. */
+export function presetSetReuseBadge(): PresetBadge {
+	return {
+		text: 'набор уже есть',
+		tooltip: 'Набор уже добавлен — будет создано только правило',
+	};
+}
+
+/** Tooltip for the member-of-added-composite corner mark (#450). */
+export function memberOfAddedCompositeTitle(compositeName: string): string {
+	return `Уже входит в добавленный композитный список «${compositeName}». Можно добавить и отдельно.`;
+}

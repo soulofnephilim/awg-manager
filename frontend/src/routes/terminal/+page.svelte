@@ -6,6 +6,7 @@
 	import { Button } from '$lib/components/ui';
 	import { TerminalInstall, TerminalView } from '$lib/components/terminal';
 	import type { TerminalStatus } from '$lib/types';
+	import { errorMessage } from '$lib/utils/errorMessage';
 
 	type PageState = 'loading' | 'not-installed' | 'starting' | 'active' | 'session-busy' | 'error';
 
@@ -45,8 +46,8 @@
 			await api.terminalInstall();
 			notifications.success('ttyd установлен');
 			await startTerminal();
-		} catch (e: any) {
-			installError = e.message || 'Неизвестная ошибка';
+		} catch (e) {
+			installError = errorMessage(e, 'Неизвестная ошибка');
 		} finally {
 			installing = false;
 		}
@@ -57,8 +58,8 @@
 		try {
 			await api.terminalStart();
 			pageState = 'active';
-		} catch (e: any) {
-			notifications.error('Не удалось запустить терминал: ' + (e.message || ''));
+		} catch (e) {
+			notifications.error('Не удалось запустить терминал: ' + (errorMessage(e, '')));
 			pageState = 'error';
 		}
 	}

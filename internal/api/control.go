@@ -10,7 +10,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/response"
-	"github.com/hoaxisr/awg-manager/internal/routing"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
 )
 
@@ -64,11 +63,6 @@ func (h *ControlHandler) SetTunnelsHandler(th *TunnelsHandler) {
 // SetEventBus sets the event bus for SSE publishing.
 func (h *ControlHandler) SetEventBus(bus *events.Bus) { h.bus = bus }
 
-// SetCatalog is a no-op retained for API compatibility. The control
-// handler no longer needs direct catalog access — it just emits a
-// resource:invalidated hint so the polling store refetches.
-func (h *ControlHandler) SetCatalog(_ routing.Catalog) {}
-
 // publishRoutingTunnels posts a resource:invalidated hint so clients
 // refetch the routing tunnel list after a start/stop that changed
 // which tunnels are available for routing dropdowns.
@@ -98,9 +92,8 @@ func (h *ControlHandler) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -114,6 +107,10 @@ func (h *ControlHandler) Start(w http.ResponseWriter, r *http.Request) {
 	})
 	if errors.Is(err, tunnel.ErrAlreadyRunning) {
 		err = nil // tunnel already running — user's intent fulfilled
+	}
+	if errors.Is(err, tunnel.ErrOperationInProgress) {
+		response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+		return
 	}
 	if err != nil {
 		h.log.Warn("start", id, "Failed to start tunnel: "+err.Error())
@@ -151,9 +148,8 @@ func (h *ControlHandler) Stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -165,6 +161,11 @@ func (h *ControlHandler) Stop(w http.ResponseWriter, r *http.Request) {
 		Type:   orchestrator.EventStop,
 		Tunnel: id,
 	}); err != nil {
+		if errors.Is(err, tunnel.ErrOperationInProgress) {
+			// Busy lock — nothing was attempted, do NOT flip Enabled.
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+			return
+		}
 		// Always sync Enabled=false — user's intent is "OFF" regardless of current state.
 		// ErrNotRunning means tunnel is already stopped/disabled, but we still want Enabled=false
 		// so it doesn't auto-start on boot.
@@ -204,9 +205,8 @@ func (h *ControlHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -218,6 +218,10 @@ func (h *ControlHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		Type:   orchestrator.EventRestart,
 		Tunnel: id,
 	}); err != nil {
+		if errors.Is(err, tunnel.ErrOperationInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+			return
+		}
 		h.log.Warn("restart", id, "Failed to restart tunnel: "+err.Error())
 		response.Error(w, err.Error(), "RESTART_FAILED")
 		return
@@ -311,9 +315,8 @@ func (h *ControlHandler) ToggleEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {
@@ -369,9 +372,8 @@ func (h *ControlHandler) ToggleDefaultRoute(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		response.Error(w, "missing id parameter", "MISSING_ID")
+	id, ok := requireQueryID(w, r)
+	if !ok {
 		return
 	}
 	if !isValidTunnelID(id) {

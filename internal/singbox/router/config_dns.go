@@ -134,7 +134,14 @@ func validateDNSServer(s DNSServer) error {
 
 func validateDNSRule(r DNSRule, serverTags map[string]bool) error {
 	if !dnsRuleHasMatcher(r) {
-		return ErrInvalidMatchers
+		// A matcher-less DNS rule is valid sing-box — it matches every query
+		// (catch-all). Permit it PROVIDED it carries a server or an action;
+		// a bare rule with neither is a no-op and almost certainly a mistake
+		// (bug #445 phase 3). A catch-all with a server is the frontend
+		// contract: a normal DNSRule with zero matchers plus a `server`.
+		if strings.TrimSpace(r.Server) == "" && strings.TrimSpace(r.Action) == "" {
+			return ErrInvalidMatchers
+		}
 	}
 	for _, c := range r.SourceIPCIDR {
 		if err := validateCIDROrAddr("dns rule: invalid source_ip_cidr", c); err != nil {
@@ -179,6 +186,30 @@ func dnsRuleHasMatcher(r DNSRule) bool {
 		len(r.DomainKeyword) > 0 ||
 		len(r.DomainRegex) > 0 ||
 		len(r.QueryType) > 0
+}
+
+// DNSRulesShadowedByCatchAll returns the indices of DNS rules that can never
+// match because an earlier rule is a matcher-less catch-all: sing-box
+// evaluates DNS rules top-down and a matcher-less rule matches every query, so
+// nothing after it is ever reached. Returns nil when there is no catch-all or
+// nothing follows it. Intended for the UI / validator to surface dead rules
+// (bug #445 phase 3).
+func (c *RouterConfig) DNSRulesShadowedByCatchAll() []int {
+	catchAll := -1
+	for i := range c.DNS.Rules {
+		if !dnsRuleHasMatcher(c.DNS.Rules[i]) {
+			catchAll = i
+			break
+		}
+	}
+	if catchAll < 0 || catchAll == len(c.DNS.Rules)-1 {
+		return nil
+	}
+	shadowed := make([]int, 0, len(c.DNS.Rules)-catchAll-1)
+	for i := catchAll + 1; i < len(c.DNS.Rules); i++ {
+		shadowed = append(shadowed, i)
+	}
+	return shadowed
 }
 
 func (c *RouterConfig) dnsServerTags() map[string]bool {

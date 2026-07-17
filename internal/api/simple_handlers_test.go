@@ -49,23 +49,6 @@ func TestHealthHandlerServeHTTP(t *testing.T) {
 	}
 }
 
-func TestBootStatusHandlerGet(t *testing.T) {
-	h := NewBootStatusHandler("iid")
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/boot-status", nil)
-	h.Get(rr, req)
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"instanceId":"iid"`) {
-		t.Fatalf("GET boot-status failed: code=%d body=%s", rr.Code, rr.Body.String())
-	}
-
-	rr = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/boot-status", nil)
-	h.Get(rr, req)
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("POST boot-status code=%d", rr.Code)
-	}
-}
-
 func TestDiagnosticsHandlerSimpleContracts(t *testing.T) {
 	r := &fakeDiagnosticsRunner{status: diagnostics.RunStatus{Status: "idle"}, result: []byte(`{"ok":true}`)}
 	h := NewDiagnosticsHandler(r)

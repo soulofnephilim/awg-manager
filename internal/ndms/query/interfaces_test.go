@@ -433,16 +433,16 @@ func TestLooksLikeKernelIfname(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"",               // empty
-		"ISP",            // upper-case
-		"Wireguard0",     // NDMS id
-		"PPPoE0",         // NDMS id
-		"GigabitEthernet1", // 16 chars AND upper-case
-		"AccessPoint",    // upper-case
-		"0eth",           // starts with digit
-		".eth",           // starts with punctuation
-		"eth/0",          // forbidden char
-		"a b",            // space
+		"",                   // empty
+		"ISP",                // upper-case
+		"Wireguard0",         // NDMS id
+		"PPPoE0",             // NDMS id
+		"GigabitEthernet1",   // 16 chars AND upper-case
+		"AccessPoint",        // upper-case
+		"0eth",               // starts with digit
+		".eth",               // starts with punctuation
+		"eth/0",              // forbidden char
+		"a b",                // space
 		"thisifnametoolong1", // 18 chars > IFNAMSIZ-1
 	}
 	for _, s := range bad {
@@ -895,7 +895,7 @@ func TestInterfaceStore_Concurrent_ReadWrite(t *testing.T) {
 
 // === ListAll dedup ===
 
-// dedupCaptureLogger records every Warnf call so tests can assert
+// dedupCaptureLogger records every Warnf/Debugf call so tests can assert
 // observability of duplicate-kernel-name collisions.
 type dedupCaptureLogger struct {
 	mu   sync.Mutex
@@ -903,6 +903,12 @@ type dedupCaptureLogger struct {
 }
 
 func (c *dedupCaptureLogger) Warnf(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, fmt.Sprintf(format, args...))
+}
+
+func (c *dedupCaptureLogger) Debugf(format string, args ...any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.msgs = append(c.msgs, fmt.Sprintf(format, args...))

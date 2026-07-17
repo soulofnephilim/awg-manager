@@ -76,9 +76,10 @@ func (o *OperatorNativeWG) SyncAWGParams(ctx context.Context, stored *storage.AW
 // and on Update (to hot-apply changes to a running tunnel).
 func (o *OperatorNativeWG) SyncAddressMTU(ctx context.Context, stored *storage.AWGTunnel) error {
 	ndmsName := NewNWGNames(stored.NWGIndex).NDMSName
-	ipv4 := extractIPv4(stored.Interface.Address)
 
-	addr, mask := splitAddressMask(ipv4)
+	// extractIPv4 сохраняет CIDR-суффикс — маска пользователя доезжает до
+	// RCI, а не заменяется дефолтным /32 (issue #531).
+	addr, mask := splitAddressMask(extractIPv4(stored.Interface.Address))
 	if err := o.commands.Interfaces.SetAddress(ctx, ndmsName, addr, mask); err != nil {
 		return fmt.Errorf("sync address: %w", err)
 	}
@@ -96,7 +97,7 @@ func (o *OperatorNativeWG) SyncAddressMTU(ctx context.Context, stored *storage.A
 		return fmt.Errorf("sync mtu: %w", err)
 	}
 
-	o.appLog.Info("sync-address-mtu", ndmsName, fmt.Sprintf("address=%s ipv6=%s mtu=%d", ipv4, ipv6, stored.Interface.MTU))
+	o.appLog.Info("sync-address-mtu", ndmsName, fmt.Sprintf("address=%s mask=%s ipv6=%s mtu=%d", addr, mask, ipv6, stored.Interface.MTU))
 	return nil
 }
 
@@ -136,9 +137,44 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 	ndmsName := NewNWGNames(stored.NWGIndex).NDMSName
 	o.appLog.Full("replace-config", stored.Name, "Syncing peer parameters to NDMS")
 
+	// NDMS отвергает IPv6-endpoint в peer-командах: в RCI уходит заглушка,
+	// реальный endpoint живёт в ядре (wg set ниже + endpoint-страж).
+	// Hostname резолвим здесь же (v4 предпочтителен — netutil.preferIPv4),
+	// причём СВЕЖИМ резолвом, без кэш-фолбэка: кэш может нести адрес
+	// прежнего endpoint'а. AAAA-only-имя NDMS резолвить не умеет — ему
+	// тоже нужна заглушка.
+	rciEndpoint := stored.Peer.Endpoint
+	kernelEndpoint, kernelV6 := canonicalV6Endpoint(stored.Peer.Endpoint)
+	v4Confirmed := false
+	if !kernelV6 {
+		host, ok := splitEndpointHost(stored.Peer.Endpoint)
+		switch {
+		case !ok:
+			// Пустой/мусорный endpoint — резолвить нечего.
+		case net.ParseIP(host) != nil:
+			// IP-литерал. Форма с двоеточиями — v6 без валидного порта
+			// (canonicalV6Endpoint дал false): в ядро её не поставить,
+			// v4 она не является. v4Confirmed — только настоящий v4.
+			v4Confirmed = !strings.Contains(host, ":")
+		default:
+			if ip, port, err := o.resolveEndpointFresh(stored.Peer.Endpoint); err == nil {
+				if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() == nil {
+					kernelEndpoint = net.JoinHostPort(ip, strconv.Itoa(port))
+					kernelV6 = true
+				} else {
+					v4Confirmed = true
+				}
+			}
+			// Ошибка резолва: ни v4, ни v6 не подтверждены — hostname
+			// уходит в RCI как раньше, судьба стража решается ниже.
+		}
+	}
+	if kernelV6 {
+		rciEndpoint = ndmsEndpointPlaceholder
+	}
 	peerCfg := payloads.PeerConfig{
 		PublicKey: stored.Peer.PublicKey,
-		Endpoint:  stored.Peer.Endpoint,
+		Endpoint:  rciEndpoint,
 	}
 	if stored.Peer.PersistentKeepalive > 0 {
 		peerCfg.KeepaliveInterval = stored.Peer.PersistentKeepalive
@@ -190,6 +226,63 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 	if stored.ISPInterface != "" {
 		if _, err := o.transport.Post(ctx, payloads.CmdWireguardPeerConnect(ndmsName, stored.Peer.PublicKey, stored.ISPInterface)); err != nil {
 			o.appLog.Warn("sync-peer", ndmsName, "peer connect via: "+err.Error())
+		}
+	}
+
+	// Смена ключа/endpoint'а должна доехать до ядра сразу, а реестр стража —
+	// обновиться (устаревшая запись не просто восстановит старые значения:
+	// wg set по старому ключу ВОСКРЕШАЕТ удалённого RCI-батчем пира).
+	switch {
+	case kernelV6:
+		ifaceName := NewNWGNames(stored.NWGIndex).IfaceName
+		entry := guardEntry{
+			iface:    ifaceName,
+			pubkey:   stored.Peer.PublicKey,
+			endpoint: kernelEndpoint,
+			spec:     stored.Peer.Endpoint,
+			name:     ndmsName,
+		}
+		// Реестр — ДО wg set и независимо от его исхода: RCI-батч выше уже
+		// заменил пира, и упавший wg set не повод оставить в страже старый
+		// ключ. Свежая запись при упавшем wg set безопасна — страж сам
+		// доведёт endpoint на ближайшем проходе (≤guardInterval).
+		// Replace-if-present, не register: параллельный Stop/Delete
+		// (оркестратор, другой лок-домен) мог снять туннель со стражи —
+		// безусловный register воскресил бы запись навсегда.
+		guarded := o.guardReplaceIfPresent(stored.ID, entry)
+		err := setKernelPeerEndpoint(ctx, ifaceName, entry.pubkey, kernelEndpoint)
+		switch {
+		case err != nil && guarded:
+			o.appLog.Warn("sync-peer", ndmsName, "kernel endpoint: "+err.Error()+" — страж доведёт на ближайшем проходе")
+		case err != nil:
+			// Устройства нет (туннель не запускался) — endpoint доедет
+			// при старте, как и раньше.
+			o.appLog.Full("sync-peer", ndmsName, "kernel endpoint отложен до старта: "+err.Error())
+		case !guarded:
+			// Живой переход v4→v6 (реестр был пуст, устройство есть):
+			// заглушка уже ушла в RCI, без стража NDMS затрёт ею
+			// kernel-endpoint при первом же переприменении конфига.
+			o.guardRegister(stored.ID, entry)
+			o.appLog.Info("sync-peer", ndmsName,
+				fmt.Sprintf("endpoint теперь IPv6 — %s выставлен в ядро (%s), взят под endpoint-страж", kernelEndpoint, ifaceName))
+		}
+	case v4Confirmed:
+		// Туннель вернулся на v4 — endpoint'ом снова управляет NDMS
+		// (реальный адрес ушёл в RCI выше), стражу здесь делать нечего.
+		if o.guardHas(stored.ID) {
+			o.guardUnregister(stored.ID)
+			o.appLog.Info("sync-peer", ndmsName, "endpoint теперь v4 — endpoint-страж снят, адресом управляет NDMS")
+		}
+	default:
+		// Резолв hostname'а не удался (или endpoint непригоден). Если ключ
+		// или endpoint изменились, реестр стража устарел — снять, иначе он
+		// воскресит старого пира. При неизменном пире транзиентный сбой
+		// DNS защиту не снимает.
+		if e, ok := o.guardGet(stored.ID); ok &&
+			(e.pubkey != stored.Peer.PublicKey || e.spec != stored.Peer.Endpoint) {
+			o.guardUnregister(stored.ID)
+			o.appLog.Warn("sync-peer", ndmsName,
+				"endpoint не резолвится, параметры пира изменились — endpoint-страж снят; если имя резолвится только в IPv6, перезапустите туннель")
 		}
 	}
 

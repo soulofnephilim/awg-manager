@@ -4,7 +4,7 @@
 
   ИСТОЧНИК (§4): store singboxTraffic — Map<tag, {upload, download}> с
   КУМУЛЯТИВНЫМИ байтами. Скорость = дельта суммы байт между снимками (та же
-  техника, что liveTraffic.ts/computeRate). Держим скользящее окно последних
+  техника, что singboxTrafficRate.ts/computeRate). Держим скользящее окно последних
   WINDOW отсчётов; высота столбца — % от максимума окна. Честно: пока отсчётов
   мало, рисуем меньше столбцов (не выдумываем форму графика).
 
@@ -12,7 +12,7 @@
 -->
 <script lang="ts">
 	import { singboxTraffic } from '$lib/stores/singbox';
-	import { aggregateTotals, computeRate, type RateSnapshot } from './liveTraffic';
+	import { aggregateTotals, computeRate, type RateSnapshot } from '$lib/utils/singboxTrafficRate';
 
 	interface Props {
 		/** Живой ли движок (движок запущен и clash-runtime доступен). */

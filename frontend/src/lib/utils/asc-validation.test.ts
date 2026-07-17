@@ -113,7 +113,7 @@ describe('validateASCBeforeSave', () => {
 			i3: 'C',
 			i4: 'D',
 			i5: 'E',
-		} as ASCParamsExtended;
+		};
 		applyDisabledASCState(p);
 		expect(isZeroASCState(p)).toBe(true);
 		expect(p.s3).toBe(0);

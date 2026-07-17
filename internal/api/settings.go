@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -22,8 +23,13 @@ import (
 
 // ServerSettingsDTO mirrors frontend ServerSettings.
 type ServerSettingsDTO struct {
-	Port      int    `json:"port" example:"8080"`
+	Port int `json:"port" example:"8080"`
+	// Interface is the legacy single bind interface (superseded by
+	// interfaces; kept for downgrade compatibility).
 	Interface string `json:"interface" example:""`
+	// Interfaces are kernel interface names the HTTP server binds to;
+	// empty = all (0.0.0.0). Changed live via /server/listen/change.
+	Interfaces []string `json:"interfaces,omitempty" example:"br0"`
 }
 
 // PingCheckDefaultsDTO mirrors frontend PingCheckDefaults.
@@ -46,7 +52,7 @@ type LoggingSettingsDTO struct {
 	Enabled           bool   `json:"enabled" example:"true"`
 	MaxAge            int    `json:"maxAge" example:"2"`
 	LogLevel          string `json:"logLevel" example:"info"`
-	SingboxLogLevel   string `json:"singboxLogLevel" example:"trace" enums:"trace,debug,info,warn,error,fatal,panic"`
+	SingboxLogLevel   string `json:"singboxLogLevel" example:"info" enums:"trace,debug,info,warn,error,fatal,panic"`
 	AppMaxEntries     int    `json:"appMaxEntries" example:"5000"`
 	SingboxMaxEntries int    `json:"singboxMaxEntries" example:"5000"`
 }
@@ -55,6 +61,15 @@ type LoggingSettingsDTO struct {
 type UpdateSettingsDTO struct {
 	CheckEnabled bool   `json:"checkEnabled" example:"true"`
 	Channel      string `json:"channel" example:"stable" enums:"stable,develop"`
+	// AutoInstallEnabled turns on unattended installation of checked
+	// updates on the configured schedule.
+	AutoInstallEnabled bool `json:"autoInstallEnabled" example:"false"`
+	// AutoInstallIntervalDays is the minimum number of days between
+	// auto-install attempts, 1..30.
+	AutoInstallIntervalDays int `json:"autoInstallIntervalDays" example:"7" minimum:"1" maximum:"30"`
+	// AutoInstallTime is the daily "HH:MM" (24h) window an auto-install
+	// attempt may start in.
+	AutoInstallTime string `json:"autoInstallTime" example:"05:00"`
 }
 
 type DownloadSettingsDTO struct {
@@ -80,8 +95,15 @@ type GeoFileSettingsDTO struct {
 
 // SettingsData is the payload for GET /settings/get.
 type SettingsData struct {
-	SchemaVersion             int                  `json:"schemaVersion" example:"16"`
-	AuthEnabled               bool                 `json:"authEnabled" example:"false"`
+	SchemaVersion int  `json:"schemaVersion" example:"16"`
+	AuthEnabled   bool `json:"authEnabled" example:"false"`
+	// SessionTtlHours is the auth session lifetime in hours (1..720,
+	// sliding window; server-side expiry applies immediately, browser
+	// cookie Max-Age of existing sessions updates on next login).
+	SessionTtlHours int `json:"sessionTtlHours" example:"24" minimum:"1" maximum:"720"`
+	// EntwareAuthEnabled allows login with Entware system credentials
+	// (/opt/etc/shadow) verified locally, without the NDMS /auth call.
+	EntwareAuthEnabled        bool                 `json:"entwareAuthEnabled" example:"false"`
 	Server                    ServerSettingsDTO    `json:"server"`
 	PingCheck                 PingCheckSettingsDTO `json:"pingCheck"`
 	Logging                   LoggingSettingsDTO   `json:"logging"`
@@ -135,6 +157,9 @@ type SettingsHandler struct {
 }
 
 const settingsMonitoringRefreshTimeout = 10 * time.Second
+
+// autoInstallTimePattern validates updates.autoInstallTime as 24h "HH:MM".
+var autoInstallTimePattern = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
 
 // NewSettingsHandler creates a new settings handler.
 func NewSettingsHandler(store *storage.SettingsStore, appLogger logging.AppLogger) *SettingsHandler {
@@ -285,6 +310,19 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		merged.Download.RouteKind = strings.TrimSpace(info.Kind)
 	}
 
+	// Validate session TTL ONLY when the client explicitly sends it. An
+	// unrelated save must never fail on a pre-existing zero — e.g. a downgrade
+	// rewrote settings.json at the current schemaVersion without the field, so
+	// migrateToV29 never re-ran; the stored value self-heals to the default in
+	// SettingsStore.Load. When the patch omits the field, merged.SessionTtlHours
+	// carries the (healed) existing value and needs no re-validation.
+	if patch.SessionTtlHours != nil && (merged.SessionTtlHours < storage.MinSessionTTLHours || merged.SessionTtlHours > storage.MaxSessionTTLHours) {
+		response.ErrorWithStatus(w, http.StatusBadRequest,
+			"время жизни сессии должно быть от 1 до 720 часов",
+			"INVALID_SESSION_TTL")
+		return
+	}
+
 	// Validate usageLevel after merge. Empty merged.UsageLevel is
 	// impossible because oldSettings always carries a value (default
 	// settings populate it; migration v15 backfills it), so we only
@@ -305,6 +343,25 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	merged.Logging.SingboxLogLevel = storage.NormalizeSingboxLogLevel(merged.Logging.SingboxLogLevel)
+
+	// Validate auto-install schedule fields only when the client sent an
+	// updates block (Updates is patched as a whole struct, not per-field —
+	// mirrors DNSRoute/GeoFile/PingCheck). An omitted block leaves
+	// merged.Updates carrying the already-valid stored value.
+	if patch.Updates != nil {
+		if merged.Updates.AutoInstallIntervalDays < 1 || merged.Updates.AutoInstallIntervalDays > 30 {
+			response.ErrorWithStatus(w, http.StatusBadRequest,
+				"updates.autoInstallIntervalDays must be between 1 and 30",
+				"INVALID_AUTO_INSTALL_INTERVAL")
+			return
+		}
+		if !autoInstallTimePattern.MatchString(merged.Updates.AutoInstallTime) {
+			response.ErrorWithStatus(w, http.StatusBadRequest,
+				"updates.autoInstallTime must be in HH:MM (24h) format",
+				"INVALID_AUTO_INSTALL_TIME")
+			return
+		}
+	}
 
 	// Detect ping check toggle change before saving
 	pingCheckWasEnabled := oldSettings.PingCheck.Enabled
@@ -333,6 +390,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	// Save settings BEFORE starting monitoring (so service reads new values)
 	if err := h.store.Save(&merged); err != nil {
+		h.log.Warn("settings", "", "save failed: "+err.Error())
 		response.Error(w, err.Error(), "SETTINGS_SAVE_ERROR")
 		return
 	}
@@ -399,12 +457,50 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			h.log.Warn("auth", "", "Authentication disabled")
 		}
 	}
+	if oldSettings.EntwareAuthEnabled != merged.EntwareAuthEnabled {
+		if merged.EntwareAuthEnabled {
+			h.log.Info("auth", "", "Entware authentication enabled")
+		} else {
+			h.log.Info("auth", "", "Entware authentication disabled")
+		}
+	}
+	if oldSettings.SessionTtlHours != merged.SessionTtlHours {
+		h.log.Info("auth", "", fmt.Sprintf("Session TTL changed: %dh -> %dh", oldSettings.SessionTtlHours, merged.SessionTtlHours))
+	}
 	if oldSettings.DisableMemorySaving != merged.DisableMemorySaving {
 		if merged.DisableMemorySaving {
 			h.log.Info("memory-saving", "", "Memory saving disabled")
 		} else {
 			h.log.Info("memory-saving", "", "Memory saving enabled")
 		}
+	}
+	if oldSettings.ConnectivityCheckURL != merged.ConnectivityCheckURL {
+		h.log.Info("connectivity-check", "", fmt.Sprintf("Connectivity check URL changed: %s -> %s", oldSettings.ConnectivityCheckURL, merged.ConnectivityCheckURL))
+	}
+	if oldSettings.Download != merged.Download {
+		h.log.Info("download-route", "", fmt.Sprintf("Download route changed: %s -> %s", formatDownloadRoute(oldSettings.Download), formatDownloadRoute(merged.Download)))
+	}
+	if oldSettings.UsageLevel != merged.UsageLevel {
+		h.log.Info("usage-level", "", fmt.Sprintf("Usage level changed: %s -> %s", oldSettings.UsageLevel, merged.UsageLevel))
+	}
+	// Сравниваем отрендеренные расписания, а не структуры: правка поля,
+	// не влияющего на действующее расписание (интервал при выключенном
+	// авто-обновлении), не должна давать строку «off -> off».
+	if from, to := formatRefreshSchedule(oldSettings.DNSRoute.AutoRefreshEnabled, oldSettings.DNSRoute.RefreshMode, oldSettings.DNSRoute.RefreshIntervalHours, oldSettings.DNSRoute.RefreshDailyTime),
+		formatRefreshSchedule(merged.DNSRoute.AutoRefreshEnabled, merged.DNSRoute.RefreshMode, merged.DNSRoute.RefreshIntervalHours, merged.DNSRoute.RefreshDailyTime); from != to {
+		h.log.Info("dns-route-schedule", "", fmt.Sprintf("DNS route auto-refresh schedule changed: %s -> %s", from, to))
+	}
+	if from, to := formatRefreshSchedule(oldSettings.GeoFile.AutoRefreshEnabled, oldSettings.GeoFile.RefreshMode, oldSettings.GeoFile.RefreshIntervalHours, oldSettings.GeoFile.RefreshDailyTime),
+		formatRefreshSchedule(merged.GeoFile.AutoRefreshEnabled, merged.GeoFile.RefreshMode, merged.GeoFile.RefreshIntervalHours, merged.GeoFile.RefreshDailyTime); from != to {
+		h.log.Info("geo-file-schedule", "", fmt.Sprintf("Geo file auto-refresh schedule changed: %s -> %s", from, to))
+	}
+	if oldSettings.Logging.MaxAge != merged.Logging.MaxAge {
+		h.log.Info("logging", "", fmt.Sprintf("Log max age changed: %dh -> %dh", oldSettings.Logging.MaxAge, merged.Logging.MaxAge))
+	}
+	if oldSettings.Logging.AppMaxEntries != merged.Logging.AppMaxEntries || oldSettings.Logging.SingboxMaxEntries != merged.Logging.SingboxMaxEntries {
+		h.log.Info("logging", "", fmt.Sprintf("Log max entries changed: app %d -> %d, singbox %d -> %d",
+			oldSettings.Logging.AppMaxEntries, merged.Logging.AppMaxEntries,
+			oldSettings.Logging.SingboxMaxEntries, merged.Logging.SingboxMaxEntries))
 	}
 
 	if h.pingCheckSnapshot != nil && (toggleEnabled || toggleDisabled) {
@@ -471,6 +567,27 @@ func generateUUIDv4() (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// formatDownloadRoute renders a download route for the settings diff log,
+// e.g. "direct" or "vless-de (outbound)".
+func formatDownloadRoute(d storage.DownloadSettings) string {
+	if d.RouteKind == "" || d.RouteKind == d.RouteTag {
+		return d.RouteTag
+	}
+	return d.RouteTag + " (" + d.RouteKind + ")"
+}
+
+// formatRefreshSchedule renders an auto-refresh schedule (dnsRoute/geoFile)
+// for the settings diff log, e.g. "off", "every 24h" or "daily at 03:00".
+func formatRefreshSchedule(enabled bool, mode string, intervalHours int, dailyTime string) string {
+	if !enabled {
+		return "off"
+	}
+	if mode == "daily" {
+		return "daily at " + dailyTime
+	}
+	return fmt.Sprintf("every %dh", intervalHours)
 }
 
 func normalizePingCheckTarget(target string) string {

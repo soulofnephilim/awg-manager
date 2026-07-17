@@ -18,12 +18,12 @@ func TestIsStandardPolicyName(t *testing.T) {
 		{"HydraRoute", false},
 		{"HrNeoUS", false},
 		{"", false},
-		{"Policy", false},     // prefix only, no number
-		{"PolicyABC", false},  // suffix is not a number
-		{"Policy-1", false},   // strconv.Atoi accepts "-1"; filter rejects negatives
-		{"Policy+1", false},   // strconv.Atoi accepts "+1"; filter rejects signed prefix
-		{"Policy 1", false},   // space inside
-		{"policy0", false},    // case-sensitive prefix
+		{"Policy", false},    // prefix only, no number
+		{"PolicyABC", false}, // suffix is not a number
+		{"Policy-1", false},  // strconv.Atoi accepts "-1"; filter rejects negatives
+		{"Policy+1", false},  // strconv.Atoi accepts "+1"; filter rejects signed prefix
+		{"Policy 1", false},  // space inside
+		{"policy0", false},   // case-sensitive prefix
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -3,6 +3,7 @@ package nwg
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -175,6 +176,45 @@ func TestCreateViaBatch_BackToBack_DistinctIndices(t *testing.T) {
 	}
 	if idxA != 0 || idxB != 2 {
 		t.Fatalf("got indices A=%d B=%d, want A=0 B=2 (lowest-free over {1, A})", idxA, idxB)
+	}
+}
+
+// Все 100 индексов Wireguard0..99 заняты — nextFreeIndex обязан вернуть
+// честную ошибку ёмкости NDMS (ID-аллокатор storage при этом безлимитен,
+// реальный предел NativeWG — именно здесь).
+func TestCreateViaBatch_AllWireguardIndicesOccupied(t *testing.T) {
+	seed := make([]string, 0, MaxTunnels)
+	for i := 0; i < MaxTunnels; i++ {
+		seed = append(seed, fmt.Sprintf("Wireguard%d", i))
+	}
+	f := newFakeNDMS(t, seed...)
+	op := newCreateTestOperator(t, f)
+
+	_, err := op.Create(context.Background(), testTunnel("a", "CH"))
+	if err == nil {
+		t.Fatal("Create with all indices occupied: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "достигнут максимум NativeWG-туннелей (100)") {
+		t.Fatalf("error = %q, want capacity message with Wireguard0..99", err.Error())
+	}
+}
+
+// Индексы выше старого лимита 10 реально выдаются: заняты Wireguard0..9 →
+// следующий свободный Wireguard10.
+func TestCreateViaBatch_AllocatesBeyondTen(t *testing.T) {
+	seed := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		seed = append(seed, fmt.Sprintf("Wireguard%d", i))
+	}
+	f := newFakeNDMS(t, seed...)
+	op := newCreateTestOperator(t, f)
+
+	idx, err := op.Create(context.Background(), testTunnel("a", "CH"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if idx != 10 {
+		t.Fatalf("index = %d, want 10 (first free above Wireguard0..9)", idx)
 	}
 }
 

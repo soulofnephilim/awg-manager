@@ -329,22 +329,50 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 		return o.executeActionsGrouped(ctx, actions)
 	}
 
-	// Single-tunnel event: lock that tunnel
-	o.lockTunnel(tunnelID)
+	// Single-tunnel event: lock that tunnel. Bounded acquisition (issue
+	// #426): if a previous operation wedged (dead endpoint, slow NDMS), an
+	// unbounded mutex made every subsequent start/stop/replace request
+	// queue forever — piling up stale actions that then executed one after
+	// another and kept the tunnel wedged until the daemon was restarted.
+	// Failing fast with ErrOperationInProgress gives the UI an honest,
+	// retryable "операция уже выполняется" instead of a hung request.
+	if err := o.lockTunnel(ctx, tunnelID); err != nil {
+		return err
+	}
 	defer o.unlockTunnel(tunnelID)
 	return o.executeActions(ctx, actions)
 }
 
-// lockTunnel acquires the per-tunnel mutex.
-func (o *Orchestrator) lockTunnel(tunnelID string) {
-	mu, _ := o.tunnelMu.LoadOrStore(tunnelID, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
+// tunnelLockTimeout bounds how long a caller waits for a busy tunnel's
+// execution lock before giving up with ErrOperationInProgress. Long enough
+// to ride out a normal start/stop sequence ahead in the queue, short enough
+// that the HTTP caller gets an answer instead of a hung request.
+const tunnelLockTimeout = 15 * time.Second
+
+// lockTunnel acquires the per-tunnel execution semaphore. Gives up when ctx
+// is cancelled (client disconnected) or after tunnelLockTimeout.
+func (o *Orchestrator) lockTunnel(ctx context.Context, tunnelID string) error {
+	semAny, _ := o.tunnelMu.LoadOrStore(tunnelID, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	timer := time.NewTimer(tunnelLockTimeout)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w (%s)", tunnel.ErrOperationInProgress, tunnelID)
+	case <-timer.C:
+		return fmt.Errorf("%w (%s)", tunnel.ErrOperationInProgress, tunnelID)
+	}
 }
 
-// unlockTunnel releases the per-tunnel mutex.
+// unlockTunnel releases the per-tunnel execution semaphore.
 func (o *Orchestrator) unlockTunnel(tunnelID string) {
-	if mu, ok := o.tunnelMu.Load(tunnelID); ok {
-		mu.(*sync.Mutex).Unlock()
+	if semAny, ok := o.tunnelMu.Load(tunnelID); ok {
+		select {
+		case <-semAny.(chan struct{}):
+		default: // already released / entry recreated after cleanup — no-op
+		}
 	}
 }
 
@@ -358,6 +386,17 @@ func (o *Orchestrator) cleanupTunnelLock(tunnelID string) {
 func (o *Orchestrator) executeActions(ctx context.Context, actions []Action) error {
 	var firstErr error
 	for _, action := range actions {
+		// Abandoned caller (client disconnected / request deadline) — stop
+		// BETWEEN actions, never mid-action, so each executed step is whole.
+		// Any partially-applied sequence is healed by the reconcile loop;
+		// grinding through the rest of a stale queue while holding the
+		// tunnel lock is what wedged the UI in issue #426.
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
 		if err := o.executeOne(ctx, action); err != nil {
 			o.appLog.Warn("execute-action", action.Tunnel, fmt.Sprintf("action type %d failed: %s", action.Type, err.Error()))
 			if firstErr == nil {
@@ -420,7 +459,12 @@ func (o *Orchestrator) executeGroup(ctx context.Context, group []Action) error {
 	if tid == "" {
 		return o.executeActions(ctx, group)
 	}
-	o.lockTunnel(tid)
+	// Bounded like the single-tunnel path: a wedged tunnel skips its group
+	// (logged via firstErr) instead of stalling the whole boot/reconnect
+	// sweep behind one dead endpoint.
+	if err := o.lockTunnel(ctx, tid); err != nil {
+		return err
+	}
 	defer o.unlockTunnel(tid)
 	return o.executeActions(ctx, group)
 }
@@ -466,7 +510,7 @@ func (o *Orchestrator) updateState(action Action) {
 	}
 
 	// Publish SSE event
-	if o.bus != nil && t != nil {
+	if o.bus != nil {
 		switch action.Type {
 		case ActionColdStartKernel, ActionStartNativeWG, ActionReconcileNativeWG, ActionReconcileKernel, ActionResumeKernel:
 			// tunnel:state is still consumed internally by

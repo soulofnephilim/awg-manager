@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/ndms/types"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
@@ -323,12 +322,18 @@ func (r *Runner) collectProxyInfo(ctx context.Context, stored *storage.AWGTunnel
 	}
 
 	endpointHost, endpointPort, _ := net.SplitHostPort(stored.Peer.Endpoint)
-	if net.ParseIP(endpointHost) == nil {
-		if resolved, err := netutil.ResolveHost(endpointHost); err == nil {
-			endpointHost = resolved
-		}
+	if ip := net.ParseIP(endpointHost); ip != nil {
+		// Normalize user-typed literals (e.g. "[2001:DB8::1]",
+		// "2001:0db8::1") to the canonical RFC 5952 form — the kernel's
+		// %pI6c prints compressed lowercase in /proc list rows, so a
+		// non-canonical spelling would never match below.
+		endpointHost = ip.String()
+	} else if resolved, err := netutil.ResolveHost(endpointHost); err == nil {
+		endpointHost = resolved
 	}
-	targetPrefix := endpointHost + ":" + endpointPort + " "
+	// net.JoinHostPort brackets IPv6 hosts ("[2001:db8::1]:51820") — the
+	// same form awg_proxy.ko >= 1.3.0 prints in /proc list rows.
+	targetPrefix := net.JoinHostPort(endpointHost, endpointPort) + " "
 
 	for line := range strings.SplitSeq(string(listData), "\n") {
 		if !strings.HasPrefix(line, targetPrefix) {
@@ -452,15 +457,6 @@ func extractRouteGetVia(output string) string {
 		}
 	}
 	return ""
-}
-
-func (r *Runner) collectLogs() []logging.LogEntry {
-	if r.deps.LogService == nil {
-		return nil
-	}
-	// Diagnostics report keeps only warn/error-level journal entries.
-	// logging.LevelWarn includes both WARN and ERROR via IsVisible().
-	return r.deps.LogService.GetLogs("", string(logging.LevelWarn))
 }
 
 // --- Helpers ---

@@ -473,7 +473,7 @@ func TestBatcher_Close_FinalFlushOfPending(t *testing.T) {
 		}(i)
 	}
 	time.Sleep(20 * time.Millisecond) // enqueued
-	b.Close()                          // should trigger final flush
+	b.Close()                         // should trigger final flush
 
 	for i := 0; i < 3; i++ {
 		select {

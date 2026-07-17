@@ -23,7 +23,10 @@
 			href: '/',
 			label: 'ТУННЕЛИ',
 			matches: (p) =>
-				p === '/' || p.startsWith('/tunnels') || p.startsWith('/system-tunnels'),
+				p === '/' ||
+				p.startsWith('/tunnels') ||
+				p.startsWith('/system-tunnels') ||
+				p.startsWith('/freeturn'),
 		},
 		{
 			section: 'servers',

@@ -45,10 +45,8 @@ type Batcher struct {
 	shutdownCancel context.CancelFunc
 	done           chan struct{}
 
-	// Counters
-	submittedReads atomic.Uint64 // всего submits от callers (raw inbound)
-	coalescedReads atomic.Uint64 // unique paths после dedup (что реально просят NDMS)
-	httpCalls      atomic.Uint64 // реальное число HTTP вызовов (GET fast-path + POST batches)
+	// cancelledDrops считает reads, выброшенные из батча из-за отменённого
+	// контекста caller'а. Наблюдаемость для тестов drop-поведения.
 	cancelledDrops atomic.Uint64
 }
 
@@ -125,15 +123,6 @@ func (b *Batcher) Submit(ctx context.Context, path string) ([]byte, error) {
 func (b *Batcher) Close() {
 	b.shutdownCancel()
 	<-b.done
-}
-
-// snapshot возвращает текущие counters и обнуляет их. Для periodic
-// dump в perf-summary log'е. ВРЕМЕННЫЙ — удалить после perf-анализа.
-func (b *Batcher) snapshot() (submits, posted, httpCalls, dropped uint64) {
-	return b.submittedReads.Swap(0),
-		b.coalescedReads.Swap(0),
-		b.httpCalls.Swap(0),
-		b.cancelledDrops.Swap(0)
 }
 
 // flusherLoop is the core scheduler — runs as goroutine.
@@ -246,16 +235,12 @@ func (b *Batcher) flush(ctx context.Context, pending []readReq) {
 		return
 	}
 
-	b.submittedReads.Add(uint64(len(pending)))
-	b.coalescedReads.Add(uint64(len(batch)))
-
 	// Fast path: single unique path → direct GET вместо POST batch.
 	// POST через NDMS заметно дороже GET (handler overhead),
 	// и для одного запроса batching выгод не даёт. Coalescing N
 	// callers одного path всё равно работает — все они получают
 	// результат одного GET. Multi-path batches идут через POST.
 	if b.useFastPath && len(validPaths) == 1 {
-		b.httpCalls.Add(1)
 		path := validPaths[0]
 		body, err := b.cli.getRawDirect(ctx, path)
 		var itemErr error
@@ -271,7 +256,6 @@ func (b *Batcher) flush(ctx context.Context, pending []readReq) {
 		return
 	}
 
-	b.httpCalls.Add(1)
 	raw, err := b.cli.postJSON(ctx, batch)
 	if err != nil {
 		b.distributeAll(byPath, validPaths, nil, fmt.Errorf("rci batch: %w", err))

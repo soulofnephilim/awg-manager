@@ -55,6 +55,49 @@ func inlineTagFromSRSTag(tag string) (string, bool) {
 	return base, true
 }
 
+// inspectRuleSetsWithInlineAliases возвращает rule_set'ы конфига,
+// дополненные алиасами: каждый материализованный inline-набор (managed
+// local "X-srs") дублируется под базовым тегом "X". Инспектор ходит по
+// восстановленным правилам (как их видит пользователь в UI), где ссылки
+// указывают на "X" — без алиаса поиск по карте наборов давал «не
+// определён в rule_set[]» (#506). Алиас указывает на скомпилированный
+// .srs, поэтому матчинг полноценный, пока файл существует на диске
+// (иначе инспектор честно деградирует к «не удалось проверить») —
+// inline-содержимое сам инспектор проверять не умеет.
+//
+// Алиасы добавляются в конец: при построении карты «последний
+// побеждает», и alias перекрывает возможную сырую inline-запись с тем
+// же тегом. Настоящий НЕ-inline набор с тегом "X" (remote/local в
+// legacy/ручных конфигах) алиас не затеняет — иначе инспектор молча
+// матчил бы не тот файл.
+func (m ruleSetMaterializer) inspectRuleSetsWithInlineAliases(cfg *RouterConfig) []RuleSet {
+	if cfg == nil {
+		return nil
+	}
+	rawType := make(map[string]string, len(cfg.Route.RuleSet))
+	for _, rs := range cfg.Route.RuleSet {
+		rawType[rs.Tag] = rs.Type
+	}
+	out := make([]RuleSet, 0, len(cfg.Route.RuleSet)+4)
+	out = append(out, cfg.Route.RuleSet...)
+	for _, rs := range cfg.Route.RuleSet {
+		if !m.isManagedLocalRuleSet(rs) {
+			continue
+		}
+		base, ok := inlineTagFromSRSTag(rs.Tag)
+		if !ok {
+			continue
+		}
+		if t, exists := rawType[base]; exists && t != "inline" {
+			continue
+		}
+		alias := rs
+		alias.Tag = base
+		out = append(out, alias)
+	}
+	return out
+}
+
 func ruleSetTagsWithCompanion(tag string) []string {
 	if _, ok := inlineTagFromSRSTag(tag); ok {
 		return []string{tag}
@@ -171,7 +214,7 @@ func (m ruleSetMaterializer) rewritePersistedSRSRefsToInline(src, dst *RouterCon
 // in route/DNS rules so the UI always shows the inline tag (defense in depth).
 func (m ruleSetMaterializer) rewriteSRSSuffixRuleSetRefs(cfg *RouterConfig) {
 	for i := range cfg.Route.Rules {
-		cfg.Route.Rules[i].RuleSet = rewriteRuleSetTagsStripSRSSuffix(cfg.Route.Rules[i].RuleSet)
+		rewriteRuleRefsDeep(&cfg.Route.Rules[i], rewriteRuleSetTagsStripSRSSuffix)
 	}
 	for i := range cfg.DNS.Rules {
 		cfg.DNS.Rules[i].RuleSet = rewriteRuleSetTagsStripSRSSuffix(cfg.DNS.Rules[i].RuleSet)
@@ -211,10 +254,23 @@ func (m ruleSetMaterializer) rewriteRuleSetRefs(cfg *RouterConfig, from, to stri
 		return
 	}
 	for i := range cfg.Route.Rules {
-		cfg.Route.Rules[i].RuleSet = rewriteRuleSetSlice(cfg.Route.Rules[i].RuleSet, from, to)
+		rewriteRuleRefsDeep(&cfg.Route.Rules[i], func(tags []string) []string {
+			return rewriteRuleSetSlice(tags, from, to)
+		})
 	}
 	for i := range cfg.DNS.Rules {
 		cfg.DNS.Rules[i].RuleSet = rewriteRuleSetSlice(cfg.DNS.Rules[i].RuleSet, from, to)
+	}
+}
+
+// rewriteRuleRefsDeep применяет fn к rule_set-ссылкам правила и всех его
+// вложенных logical-подправил: ссылка на inline-набор внутри
+// type:"logical" без рекурсии избегала переписывания при материализации
+// и указывала на несуществующий после неё тег.
+func rewriteRuleRefsDeep(rule *Rule, fn func([]string) []string) {
+	rule.RuleSet = fn(rule.RuleSet)
+	for i := range rule.Rules {
+		rewriteRuleRefsDeep(&rule.Rules[i], fn)
 	}
 }
 
@@ -325,6 +381,74 @@ func (m ruleSetMaterializer) removeInlineArtifacts(tag string) {
 			m.log.Warn("cleanup", tag, fmt.Sprintf("remove %s: %v", path, err))
 		}
 	}
+}
+
+// gcArtifacts deletes orphaned rule-set artifacts under rule-sets/inline/
+// (*.json, *.srs) and rule-sets/dat/ (*.json, *.srs, *.meta.json) whose base
+// name is not in referenced. The dat token file and *.tmp files (in-flight
+// compiles) are never touched. Callers build referenced as the union of every
+// config that may still point at the files (active + pending, router + fakeip)
+// — see (*ServiceImpl).gcRuleSetArtifacts.
+func (m ruleSetMaterializer) gcArtifacts(referenced map[string]struct{}) {
+	if m.configDir == "" {
+		return
+	}
+	removed := m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "inline"), referenced)
+	removed += m.gcArtifactDir(filepath.Join(m.configDir, "rule-sets", "dat"), referenced)
+	// Пофайловые строки — debug; сводка уборки видна на info.
+	if removed > 0 && m.log != nil {
+		m.log.Info("gc", "", fmt.Sprintf("removed %d orphaned rule-set artifact(s)", removed))
+	}
+}
+
+func (m ruleSetMaterializer) gcArtifactDir(dir string, referenced map[string]struct{}) (removed int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0 // dir absent — nothing to sweep
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		name := entry.Name()
+		base, ok := ruleSetArtifactBase(name)
+		if !ok {
+			continue
+		}
+		if _, ok := referenced[base]; ok {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			if !os.IsNotExist(err) && m.log != nil {
+				m.log.Warn("gc", base, fmt.Sprintf("remove orphaned rule-set artifact %s: %v", path, err))
+			}
+			continue
+		}
+		removed++
+		if m.log != nil {
+			m.log.Debug("gc", base, "removed orphaned rule-set artifact "+path)
+		}
+	}
+	return removed
+}
+
+// ruleSetArtifactBase maps an artifact filename to the base name compared
+// against the referenced set. Returns ok=false for files GC must never touch
+// (the dat token, in-flight *.tmp compiles, unknown extensions).
+func ruleSetArtifactBase(name string) (string, bool) {
+	if name == datRuleSetTokenFile || strings.HasSuffix(name, ".tmp") {
+		return "", false
+	}
+	if strings.HasSuffix(name, datRuleSetMetaExt) {
+		return strings.TrimSuffix(name, datRuleSetMetaExt), true
+	}
+	for _, ext := range []string{".json", ".srs"} {
+		if strings.HasSuffix(name, ext) {
+			return strings.TrimSuffix(name, ext), true
+		}
+	}
+	return "", false
 }
 
 func (m ruleSetMaterializer) restoreRuleSet(rs RuleSet) RuleSet {

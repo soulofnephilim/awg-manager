@@ -124,12 +124,28 @@
 		.segmented-control {
 			display: flex;
 			width: 100%;
+			min-width: 0;
 		}
 
 		.segmented-control-btn {
-			flex: 1;
+			flex: 1 1 0;
 			min-width: 0;
 			padding-inline: 0.5rem;
+		}
+
+		/* Text buttons: min-width:0 lets them shrink below the label's
+		   intrinsic width, and nowrap text would otherwise spill over the
+		   neighbouring button (labels visually overlapping). Clip with an
+		   ellipsis instead. display:block because text-overflow does not
+		   apply to text inside a flex container; line-height keeps the
+		   26px vertical centering. Icon buttons keep their flex layout. */
+		.segmented-control:not(.segmented-control--icon) .segmented-control-btn {
+			display: block;
+			line-height: 26px;
+			text-align: center;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
 		}
 
 		.segmented-control--icon .segmented-control-btn {

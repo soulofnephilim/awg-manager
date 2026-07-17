@@ -1,6 +1,9 @@
 package transport
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Semaphore is a channel-backed bounded concurrency gate. Acquire blocks
 // until a slot is free or ctx is cancelled; Release returns a slot.
@@ -25,6 +28,24 @@ func (s *Semaphore) Acquire(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// semAcquireBackstop bounds a deadline-less wait for an RCI slot. Callers
+// passing context.Background() (boot paths, background loops) must not queue
+// forever behind a wedged request.
+const semAcquireBackstop = 60 * time.Second
+
+// acquireWithBackstop is Acquire with semAcquireBackstop applied ONLY when
+// ctx carries no deadline of its own — explicitly-set deadlines (shorter or
+// longer) are honored as-is. The backstop covers just the slot wait, never
+// the request that follows.
+func (s *Semaphore) acquireWithBackstop(ctx context.Context) error {
+	if _, ok := ctx.Deadline(); ok {
+		return s.Acquire(ctx)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, semAcquireBackstop)
+	defer cancel()
+	return s.Acquire(waitCtx)
 }
 
 // Release returns a slot. Panics if called without a matching Acquire.

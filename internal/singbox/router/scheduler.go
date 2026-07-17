@@ -59,7 +59,18 @@ func (s *Scheduler) run() {
 
 func (s *Scheduler) tickPolicySync(ctx context.Context) {
 	settings, err := s.settings.Load()
-	if err != nil || !settings.SingboxRouter.Enabled {
+	if err != nil {
+		return
+	}
+	if !settings.SingboxRouter.Enabled {
+		// Движок выключен — Reconcile не гоняем, но reap fakeip-сирот обязан
+		// работать и здесь: runtime-сирота (провал delete при disable)
+		// возникает именно в выключенном состоянии. В steady-state дёшево —
+		// скан читает кэш InterfaceStore. При включённом движке reap делает
+		// сам Reconcile.
+		if err := s.svc.ReapOrphanedFakeIPTun(ctx); err != nil {
+			s.svc.appLog.Warn("fakeip-reap", "", err.Error())
+		}
 		return
 	}
 	if err := s.svc.Reconcile(ctx); err != nil {

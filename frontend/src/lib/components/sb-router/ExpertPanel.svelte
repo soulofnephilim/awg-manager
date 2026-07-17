@@ -15,10 +15,14 @@
 
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { subscriptionsStore } from '$lib/stores/subscriptions';
   import { singboxProxies } from '$lib/stores/singboxProxies';
   import { singboxTunnels } from '$lib/stores/singbox';
+  import { singboxMemory } from '$lib/stores/singboxMemory';
+  import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
+  import { formatBytes, formatByteRate } from '$lib/utils/format';
   import { notifications } from '$lib/stores/notifications';
   import { api } from '$lib/api/client';
   import { computeRuleSetUsage, DNSGlobalsEditModal } from '$lib/components/routing/singboxRouter';
@@ -32,8 +36,10 @@
     SingboxRouterDNSRule,
     SingboxRouterDNSStrategy,
     DeviceProxyInstance,
+    SingboxInboundEntry,
   } from '$lib/types';
   import { newDeviceProxyInstance } from '$lib/utils/deviceProxyInstance';
+  import { inboundsPanelTotal } from '$lib/utils/singboxInbounds';
   import { deleteDeviceProxyInstanceWithNotice } from '$lib/utils/deviceProxyDeleteNotice';
   import { pluralize, SET_WORDS } from '$lib/utils/pluralize';
 
@@ -41,11 +47,17 @@
   import SidePanel from './SidePanel.svelte';
   import RoutingTable from './RoutingTable.svelte';
   import RuleSetsTable from './RuleSetsTable.svelte';
+  import BulkSelectBar from './BulkSelectBar.svelte';
+  import { isSystemRule, mapRuleAction } from './adapters';
+  import { buildDownloadDetourOptions } from '$lib/components/routing/singboxRouter/outboundOptions';
   import SbRouterRuleSetCatalogModal from './SbRouterRuleSetCatalogModal.svelte';
-  import { applyCatalogPresetsAsRuleSets } from './rulesetCatalogActions';
+  import SbRouterGeositeCatalogModal from './SbRouterGeositeCatalogModal.svelte';
+  import { addGeositeRuleSets, applyCatalogPresetsAsRuleSets } from './rulesetCatalogActions';
   import OutboundsCompact from './OutboundsCompact.svelte';
   import DnsServersCompact from './DnsServersCompact.svelte';
   import DeviceProxyCompact from './DeviceProxyCompact.svelte';
+  import InboundsMirror from './InboundsMirror.svelte';
+  import { expertPanelCollapse } from './expertPanelCollapseStore';
   import InboundSettingsDrawer from './InboundSettingsDrawer.svelte';
   import EngineFatalModal from './EngineFatalModal.svelte';
 
@@ -56,7 +68,7 @@
   import DNSRuleEditModal from '$lib/components/routing/singboxRouter/DNSRuleEditModal.svelte';
   import { DNSRewritesList } from '$lib/components/routing/singboxRouter';
   import { ConfirmModal, Dropdown, Button, type DropdownOption } from '$lib/components/ui';
-  import { LayoutGrid } from 'lucide-svelte';
+  import { LayoutGrid, Library } from 'lucide-svelte';
   import { browser } from '$app/environment';
 
   // Store subscriptions
@@ -117,10 +129,14 @@
 
   async function saveRouteFinal() {
     if (!routeFinalDirty || routeFinalBusy) return;
+    const wasSelective = get(singboxRouterStore.settings)?.selectiveBypass ?? false;
     routeFinalBusy = true;
     try {
       await api.singboxRouterPutRouteFinal(draftRouteFinal);
       await singboxRouterStore.loadAll();
+      if (draftRouteFinal !== 'direct' && wasSelective) {
+        notifications.info('Селективный перехват выключен: несовместим с route.final ≠ direct');
+      }
     } catch (e) {
       notifications.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -180,6 +196,44 @@
     activeProxyCount === null || totalProxyCount === null ? '—' : `${activeProxyCount}/${totalProxyCount}`,
   );
 
+  // ── Зеркало inbound'ов merged-конфига (GET /api/singbox/inbounds) ────
+  // Панель «Inbounds» показывает ВСЕ inbound'ы, а не только device-proxy:
+  // интерактивная часть device-proxy остаётся в DeviceProxyCompact, остальные
+  // источники — read-only списком (InboundsMirror).
+  let allInbounds = $state<SingboxInboundEntry[] | null>(null);
+  let inboundWarnings = $state<string[]>([]);
+
+  async function loadAllInbounds() {
+    try {
+      const res = await api.listSingboxInbounds();
+      allInbounds = res.inbounds;
+      inboundWarnings = res.warnings ?? [];
+    } catch {
+      allInbounds = null;
+      inboundWarnings = [];
+    }
+  }
+
+  const mirrorInbounds = $derived(
+    (allInbounds ?? []).filter((e) => e.source !== 'deviceproxy'),
+  );
+  // Счётчик панели = все видимые элементы: inbound'ы merged-конфига плюс
+  // выключенные инстансы device-proxy (их нет в слоте 30, но карточки
+  // рендерятся). При недоступном endpoint'е деградируем к прежней метке.
+  const inboundsPanelCountLabel = $derived(
+    allInbounds === null
+      ? activeProxyCountLabel
+      : String(inboundsPanelTotal(allInbounds, deviceProxyInstances.map((in_) => in_.id))),
+  );
+
+  // Refetch при разворачивании панели «Inbounds» (mount покрыт в onMount).
+  let prevInboundsCollapsed = $expertPanelCollapse.inbounds;
+  $effect(() => {
+    const collapsed = $expertPanelCollapse.inbounds;
+    if (prevInboundsCollapsed && !collapsed) void loadAllInbounds();
+    prevInboundsCollapsed = collapsed;
+  });
+
   // Modal state
   let ruleEditIdx = $state<number | null>(null);
   let ruleAddOpen = $state(false);
@@ -188,6 +242,8 @@
   let rsAddOpen = $state(false);
   let rsCatalogOpen = $state(false);
   let rsCatalogBusy = $state(false);
+  let geositeCatalogOpen = $state(false);
+  let geositeCatalogBusy = $state(false);
   let outboundEditTag = $state<string | null>(null);
   let outboundAddOpen = $state(false);
   let dnsServerEditTag = $state<string | null>(null);
@@ -234,6 +290,7 @@
     inboundDrawerOpen = false;
     dpReloadKey += 1;
     void loadActiveProxyCount();
+    void loadAllInbounds();
   }
   function deleteInbound(in_: DeviceProxyInstance) {
     pendingConfirm = {
@@ -248,6 +305,7 @@
           });
           dpReloadKey += 1;
           await loadActiveProxyCount();
+          await loadAllInbounds();
         } catch (e) {
           notifications.error(`Не удалось удалить: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -258,6 +316,7 @@
   onMount(() => {
     void singboxRouterStore.loadAll();
     void loadActiveProxyCount();
+    void loadAllInbounds();
   });
 
   // Derived modal targets
@@ -284,6 +343,11 @@
       ? new Map<string, number>()
       : computeRuleSetUsage($storeRules, ruleEditIdx)
   );
+  // Catalog «добавлено»-tile differentiation: a set counts as used when ANY rule —
+  // route or DNS — references it (route-only usage would mislabel DNS-only sets).
+  const ruleSetUsageForCatalog = $derived(
+    computeRuleSetUsage([...$storeRules, ...$storeDnsRules])
+  );
   // ruleSetUsage for DNSRuleEditModal: exclude currently edited index
   const ruleSetUsageForDnsAdd = $derived(computeRuleSetUsage($storeDnsRules));
   const ruleSetUsageForDnsEdit = $derived(
@@ -305,6 +369,26 @@
       : { value: 'СБОЙ', tone: 'error' };
   });
 
+  // Живые ресурсы движка: память из SSE singbox:memory, скорость и объём —
+  // кумулятивные totals Clash (singbox:traffic-totals). Значения честные:
+  // без работающего TProxy-движка (в т.ч. в режиме FakeIP, где ячейка
+  // «Движок» показывает НЕАКТИВЕН) или до второго снимка — «—», а не
+  // протухшие числа.
+  const engineRunning = $derived(
+    ($storeStatus?.enabled ?? false)
+    && ($storeStatus?.active ?? false)
+    && $storeSettings?.routingMode !== 'fakeip-tun',
+  );
+  const liveStats = $derived($singboxTrafficLive);
+  const memCellValue = $derived(
+    engineRunning && $singboxMemory > 0 ? formatBytes($singboxMemory) : '—',
+  );
+  const rateCellValue = $derived(
+    engineRunning && liveStats.rate.hasRate
+      ? formatByteRate(liveStats.rate.downloadRate)
+      : '—',
+  );
+
   const statCells: StatCellData[] = $derived([
     {
       label: 'Движок',
@@ -320,6 +404,24 @@
           ? () => (engineFatalOpen = true)
           : undefined,
       actionLabel: 'подробнее',
+    },
+    {
+      label: 'Память',
+      value: memCellValue,
+      compact: true,
+      helpTitle: 'Память sing-box',
+      helpText: 'Память Go-рантайма sing-box по данным Clash API (фактический RSS процесса выше). Обновляется каждые ~2 секунды, пока движок работает.',
+    },
+    {
+      label: 'Трафик ↓',
+      value: rateCellValue,
+      compact: true,
+      helpTitle: 'Трафик через движок',
+      helpText: 'Агрегатная скорость скачивания через sing-box (кумулятивные счётчики Clash, включая закрытые соединения).',
+      helpItems: [
+        `Отдача: ${engineRunning && liveStats.rate.hasRate ? formatByteRate(liveStats.rate.uploadRate) : '—'}`,
+        `За сессию: ${engineRunning ? formatBytes(liveStats.totals.downloadBytes + liveStats.totals.uploadBytes) : '—'}`,
+      ],
     },
     {
       label: 'Правил',
@@ -383,6 +485,158 @@
       ],
     },
   ]);
+
+  // ── Bulk-выбор правил (Эксперт: RoutingTable) ─────────────────────────
+  let rulesSelectMode = $state(false);
+  let rulesSelected = $state<Set<number>>(new Set());
+  let rulesBulkBusy = $state(false);
+  let prevRulesRef: SingboxRouterRule[] | undefined;
+
+  function isSelectableRule(r: SingboxRouterRule): boolean {
+    const action = mapRuleAction(r);
+    return !isSystemRule(r) && (action === 'route' || action === 'direct');
+  }
+
+  const selectableRuleIndices = $derived(
+    $storeRules.reduce<number[]>((acc, r, i) => {
+      if (isSelectableRule(r)) acc.push(i);
+      return acc;
+    }, []),
+  );
+  const selectableRuleIndexSet = $derived(new Set(selectableRuleIndices));
+
+  // Тот же каталог outbound'ов, что у RuleEditModal ($storeOptions), сплющенный
+  // в плоский список для BulkSelectBar.
+  const bulkOutboundOptions = $derived(
+    $storeOptions.flatMap((g) => g.items.map((i) => ({ value: i.value, label: i.label, group: g.group }))),
+  );
+
+  function toggleRulesSelectMode(): void {
+    rulesSelectMode = true;
+    rulesSelected = new Set();
+  }
+
+  function cancelRulesSelectMode(): void {
+    rulesSelectMode = false;
+    rulesSelected = new Set();
+  }
+
+  function toggleRuleSelect(index: number): void {
+    const next = new Set(rulesSelected);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    rulesSelected = next;
+  }
+
+  function selectAllRules(): void {
+    rulesSelected = new Set(selectableRuleIndices);
+  }
+
+  async function applyRulesBulkOutbound(value: string): Promise<void> {
+    if (rulesSelected.size === 0 || rulesBulkBusy) return;
+    rulesBulkBusy = true;
+    try {
+      const { updated } = await api.singboxRouterBulkOutbound([...rulesSelected], value);
+      notifications.success(`Изменено ${updated}`);
+      rulesSelectMode = false;
+      rulesSelected = new Set();
+      await singboxRouterStore.loadAll();
+    } catch (e) {
+      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      rulesBulkBusy = false;
+    }
+  }
+
+  // Список правил мог перезагрузиться из другого источника, пока шло
+  // выделение (SSE-инвалидация, чужое действие) — индексы больше не
+  // гарантированно соответствуют выбранным чекбоксам. bulkBusy гейтит
+  // собственный apply (см. applyRulesBulkOutbound — selectMode уже false
+  // к моменту прихода нового $storeRules).
+  $effect(() => {
+    const current = $storeRules;
+    if (rulesSelectMode && !rulesBulkBusy && prevRulesRef !== undefined && current !== prevRulesRef) {
+      rulesSelectMode = false;
+      rulesSelected = new Set();
+      notifications.info('Список изменился, выбор сброшен');
+    }
+    prevRulesRef = current;
+  });
+
+  // ── Bulk-выбор rule-set'ов (Эксперт: RuleSetsTable) ────────────────────
+  let rsSelectMode = $state(false);
+  let rsSelected = $state<Set<string>>(new Set());
+  let rsBulkBusy = $state(false);
+  let prevRuleSetsRef: SingboxRouterRuleSet[] | undefined;
+
+  // Видимые-выбираемые теги (remote среди отфильтрованных RuleSetsTable) —
+  // «Выбрать все» и видимость кнопки должны идти от активного тип-фильтра
+  // таблицы, а не от полного $storeRuleSets (#558 fix-волна, finding F2).
+  let rsFilteredSelectableTags = $state<string[]>([]);
+
+  const rsBulkDetourOptions = $derived(buildDownloadDetourOptions($storeOptions, '— сбросить —'));
+
+  function toggleRsSelectMode(): void {
+    rsSelectMode = true;
+    rsSelected = new Set();
+  }
+
+  function cancelRsSelectMode(): void {
+    rsSelectMode = false;
+    rsSelected = new Set();
+  }
+
+  function toggleRsSelect(tag: string): void {
+    const next = new Set(rsSelected);
+    if (next.has(tag)) next.delete(tag);
+    else next.add(tag);
+    rsSelected = next;
+  }
+
+  function selectAllRs(): void {
+    rsSelected = new Set(rsFilteredSelectableTags);
+  }
+
+  async function applyRsBulkDetour(value: string): Promise<void> {
+    if (rsSelected.size === 0 || rsBulkBusy) return;
+    rsBulkBusy = true;
+    try {
+      const { updated } = await handleRsBulkDetour([...rsSelected], value);
+      notifications.success(`Изменено ${updated}`);
+      rsSelectMode = false;
+      rsSelected = new Set();
+    } catch (e) {
+      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      rsBulkBusy = false;
+    }
+  }
+
+  // Аналогичный сброс выделения rule-set'ов при внешней инвалидации списка.
+  $effect(() => {
+    const current = $storeRuleSets;
+    if (rsSelectMode && !rsBulkBusy && prevRuleSetsRef !== undefined && current !== prevRuleSetsRef) {
+      rsSelectMode = false;
+      rsSelected = new Set();
+      notifications.info('Список изменился, выбор сброшен');
+    }
+    prevRuleSetsRef = current;
+  });
+
+  // Смена тип-фильтра в RuleSetsTable могла скрыть уже выбранные теги —
+  // держим rsSelected ⊆ видимых-выбираемых, иначе count в баре и Apply
+  // затрагивали бы невидимые наборы (#558 fix-волна 2, Minor 4).
+  $effect(() => {
+    const visible = new Set(rsFilteredSelectableTags);
+    if (rsSelected.size === 0) return;
+    let changed = false;
+    const next = new Set<string>();
+    for (const tag of rsSelected) {
+      if (visible.has(tag)) next.add(tag);
+      else changed = true;
+    }
+    if (changed) rsSelected = next;
+  });
 
   // Rule handlers
   function handleDeleteRule(idx: number) {
@@ -487,6 +741,12 @@
     await singboxRouterStore.loadAll();
   }
 
+  async function handleRsBulkDetour(tags: string[], downloadDetour: string) {
+    const result = await api.singboxRouterBulkDetour(tags, downloadDetour);
+    await singboxRouterStore.loadAll();
+    return result;
+  }
+
   async function handleRsCatalogConfirm(presets: CatalogPreset[]) {
     if (rsCatalogBusy || presets.length === 0) return;
     rsCatalogBusy = true;
@@ -512,6 +772,34 @@
       notifications.error(e instanceof Error ? e.message : String(e));
     } finally {
       rsCatalogBusy = false;
+    }
+  }
+
+  async function handleGeositeCatalogConfirm(names: string[], baseUrl: string) {
+    if (geositeCatalogBusy || names.length === 0) return;
+    geositeCatalogBusy = true;
+    try {
+      const result = await addGeositeRuleSets(names, baseUrl, $storeRuleSets);
+      await singboxRouterStore.loadAll();
+
+      if (result.added.length > 0) {
+        notifications.success(
+          `Добавлено ${pluralize(result.added.length, SET_WORDS)} из каталога SagerNet`,
+        );
+      } else if (result.failures.length === 0) {
+        notifications.info('Выбранные наборы уже есть в конфиге');
+      }
+
+      if (result.failures.length > 0) {
+        const msg = result.failures.map((f) => `${f.tag}: ${f.error}`).join('; ');
+        notifications.error(`Не удалось добавить: ${msg}`);
+      } else {
+        geositeCatalogOpen = false;
+      }
+    } catch (e) {
+      notifications.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      geositeCatalogBusy = false;
     }
   }
 
@@ -595,10 +883,27 @@
         section="rules"
         title="Правила маршрутизации"
         count={String($storeRules.length)}
-        actionLabel="+ Правило"
-        actionVariant="filled"
-        onAction={() => (ruleAddOpen = true)}
       >
+        {#snippet actions()}
+          {#if rulesSelectMode}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={rulesBulkBusy || selectableRuleIndices.length === 0}
+              onclick={selectAllRules}
+            >
+              Выбрать все
+            </Button>
+            <Button variant="ghost" size="sm" disabled={rulesBulkBusy} onclick={cancelRulesSelectMode}>
+              Отмена
+            </Button>
+          {:else}
+            {#if selectableRuleIndices.length > 0}
+              <Button variant="ghost" size="sm" onclick={toggleRulesSelectMode}>Выбрать</Button>
+            {/if}
+            <Button variant="primary" size="sm" onclick={() => (ruleAddOpen = true)}>+ Правило</Button>
+          {/if}
+        {/snippet}
         <div class="globals-bar">
           <span class="gb-label gb-label-full">first-match-wins · если ничего не подошло →</span>
           <span class="gb-label gb-label-mobile">если не подошло →</span>
@@ -622,7 +927,21 @@
           onEdit={(idx) => (ruleEditIdx = idx)}
           onDelete={handleDeleteRule}
           onMove={handleMoveRule}
+          selectMode={rulesSelectMode}
+          selected={rulesSelected}
+          onToggleSelect={toggleRuleSelect}
+          isSelectable={(i) => selectableRuleIndexSet.has(i)}
         />
+        {#if rulesSelectMode}
+          <BulkSelectBar
+            count={rulesSelected.size}
+            options={bulkOutboundOptions}
+            applyLabel="Применить"
+            onapply={applyRulesBulkOutbound}
+            oncancel={cancelRulesSelectMode}
+            busy={rulesBulkBusy}
+          />
+        {/if}
       </SidePanel>
 
       <SidePanel
@@ -632,11 +951,37 @@
       >
         {#snippet actions()}
           <div class="rs-head-actions">
+            {#if rsSelectMode}
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={rsBulkBusy || rsFilteredSelectableTags.length === 0}
+                onclick={selectAllRs}
+              >
+                Выбрать все
+              </Button>
+              <Button variant="ghost" size="sm" disabled={rsBulkBusy} onclick={cancelRsSelectMode}>
+                Отмена
+              </Button>
+            {:else if rsFilteredSelectableTags.length > 0}
+              <Button variant="ghost" size="sm" onclick={toggleRsSelectMode}>Выбрать</Button>
+            {/if}
             <Button variant="secondary" size="sm" onclick={() => (rsCatalogOpen = true)}>
               {#snippet iconBefore()}
                 <LayoutGrid size={14} aria-hidden="true" />
               {/snippet}
               Каталог
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onclick={() => (geositeCatalogOpen = true)}
+              title="Все geosite-наборы из репозитория SagerNet/sing-geosite"
+            >
+              {#snippet iconBefore()}
+                <Library size={14} aria-hidden="true" />
+              {/snippet}
+              SagerNet
             </Button>
             <Button variant="primary" size="sm" onclick={() => (rsAddOpen = true)}>+ Набор</Button>
           </div>
@@ -652,7 +997,22 @@
           }}
           onEdit={(tag) => (rsEditTag = tag)}
           onDelete={handleDeleteRs}
+          selectMode={rsSelectMode}
+          selected={rsSelected}
+          onToggleSelect={toggleRsSelect}
+          onSelectableChange={(tags) => (rsFilteredSelectableTags = tags)}
         />
+        {#if rsSelectMode}
+          <BulkSelectBar
+            count={rsSelected.size}
+            options={rsBulkDetourOptions}
+            applyLabel="Применить"
+            onapply={applyRsBulkDetour}
+            oncancel={cancelRsSelectMode}
+            busy={rsBulkBusy}
+            allowEmpty
+          />
+        {/if}
       </SidePanel>
     </div>
 
@@ -669,6 +1029,8 @@
           outbounds={$storeOutbounds}
           subscriptions={$subscriptionsStore.data ?? []}
           usage={outboundUsageContext}
+          proxyGroups={$singboxProxies.data ?? []}
+          outboundOptions={$storeOptions}
           onEdit={(tag) => (outboundEditTag = tag)}
           onDelete={handleDeleteOutbound}
         />
@@ -733,7 +1095,7 @@
         <SidePanel
           section="inbounds"
           title="Inbounds"
-          count={activeProxyCountLabel}
+          count={inboundsPanelCountLabel}
           actionLabel="+ Добавить"
           actionVariant="filled"
           onAction={addInbound}
@@ -741,6 +1103,11 @@
         {#key dpReloadKey}
           <DeviceProxyCompact bare onSelect={openInbound} onDelete={deleteInbound} />
         {/key}
+        {#if mirrorInbounds.length > 0 || inboundWarnings.length > 0}
+          <div class="inbounds-mirror-wrap">
+            <InboundsMirror entries={mirrorInbounds} warnings={inboundWarnings} />
+          </div>
+        {/if}
       </SidePanel>
     </div>
   </div>
@@ -772,11 +1139,22 @@
 <SbRouterRuleSetCatalogModal
   open={rsCatalogOpen}
   existingRuleSetTags={$storeRuleSets.map((rs) => rs.tag)}
+  ruleSetUsage={ruleSetUsageForCatalog}
   submitting={rsCatalogBusy}
   onclose={() => {
     if (!rsCatalogBusy) rsCatalogOpen = false;
   }}
   onconfirm={handleRsCatalogConfirm}
+/>
+
+<SbRouterGeositeCatalogModal
+  open={geositeCatalogOpen}
+  existingRuleSetTags={$storeRuleSets.map((rs) => rs.tag)}
+  submitting={geositeCatalogBusy}
+  onclose={() => {
+    if (!geositeCatalogBusy) geositeCatalogOpen = false;
+  }}
+  onconfirm={handleGeositeCatalogConfirm}
 />
 
 <!-- RuleSetAddModal: add -->
@@ -904,6 +1282,10 @@
   .rs-head-actions {
     display: flex;
     align-items: center;
+    /* Три кнопки не влезают в шапку панели на узких телефонах — перенос
+       вместо молчаливого обрезания overflow:hidden родителя. */
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 8px;
   }
   .panel-cap {
@@ -914,6 +1296,11 @@
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  /* Read-only зеркало остальных inbound'ов под интерактивным device-proxy */
+  .inbounds-mirror-wrap {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
   }
   /* Globals-бар route-final (шапка панели «Правила») */
   .globals-bar {

@@ -305,7 +305,10 @@ func (l *Loader) selectBundledModule() {
 	os.RemoveAll(BundledDir)
 }
 
-// copyFile copies src to dst atomically (write to .tmp, then rename).
+// copyFile copies src to dst atomically (write to .tmp, fsync, then rename).
+// The fsync matters: the caller deletes the only source (BundledDir) right
+// after, so a power loss before writeback would otherwise leave a torn .ko
+// with no way to recover short of reinstalling the package.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -320,6 +323,9 @@ func copyFile(src, dst string) error {
 	}
 
 	_, err = io.Copy(out, in)
+	if err == nil {
+		err = out.Sync()
+	}
 	closeErr := out.Close()
 	if err != nil {
 		os.Remove(tmpPath)
@@ -336,4 +342,3 @@ func copyFile(src, dst string) error {
 	}
 	return nil
 }
-

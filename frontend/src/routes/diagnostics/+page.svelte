@@ -182,7 +182,9 @@
 	/>
 
 	{#if activeTab === 'logs'}
-		<LogsTerminal />
+		<!-- Журнал — только действия приложения; логи sing-box смотрятся на своих
+		     вкладках (Sing-box: TProxy → «Логи», Sing-box: FakeIP → «Журнал»). -->
+		<LogsTerminal lockBucket="app" />
 	{:else if activeTab === 'monitoring'}
 		<MonitoringTab />
 	{:else if activeTab === 'connections'}

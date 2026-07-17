@@ -1,13 +1,14 @@
-<script lang="ts">
+<script lang="ts" generics="T">
     import type { PollingStore } from '$lib/stores/polling';
     import Badge from './Badge.svelte';
 
     interface Props {
-        // `PollingStore<any>` because the badge only reads status/error/age/
-        // lastFetchedAt/consecutiveFailures — it never calls applyMutationResponse,
-        // which is the method whose invariant T prevents assigning typed stores
-        // to `PollingStore<unknown>`.
-        store: PollingStore<any>;
+        // Generic over the store's payload T: the badge only reads status/error/
+        // age/lastFetchedAt/consecutiveFailures, but T sits in a contravariant
+        // position on applyMutationResponse, so `PollingStore<unknown>` would
+        // reject typed stores. The component parameter keeps callers type-safe
+        // without a widening cast.
+        store: PollingStore<T>;
         /**
          * Must match the `errorThreshold` passed to createPollingStore for this store.
          * Default 3 matches the createPollingStore default. If the store was created

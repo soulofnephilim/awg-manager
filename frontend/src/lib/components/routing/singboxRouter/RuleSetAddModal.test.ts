@@ -41,7 +41,7 @@ describe('RuleSetAddModal', () => {
 			},
 		});
 
-		const tagInput = screen.getByPlaceholderText('geosite-example') as HTMLInputElement;
+		const tagInput = screen.getByPlaceholderText<HTMLInputElement>('geosite-example');
 		expect(tagInput.disabled).toBe(false);
 
 		await fireEvent.input(tagInput, { target: { value: 'new-set' } });

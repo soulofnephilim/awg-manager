@@ -286,6 +286,39 @@ func (h *ServersHandler) listServers(ctx context.Context) ([]ndms.WireguardServe
 	return servers, nil
 }
 
+// ListServers exposes the filtered system WG-server list for cross-handler
+// reuse (sing-box connections peer-name enrichment, issue #435). It applies
+// the same stored-secret description fallback as enrichServerDTO, on copied
+// peer slices so the shared query-cache data is never mutated. Satisfies
+// api.WGServerPeersLister.
+func (h *ServersHandler) ListServers(ctx context.Context) ([]ndms.WireguardServer, error) {
+	servers, err := h.listServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range servers {
+		srv := &servers[i]
+		var peers []ndms.WireguardServerPeer // copy-on-write
+		for j, p := range srv.Peers {
+			if p.Description != "" {
+				continue
+			}
+			sec, ok := h.settings.GetServerPeerSecret(srv.ID, p.PublicKey)
+			if !ok || sec.Description == "" {
+				continue
+			}
+			if peers == nil {
+				peers = append([]ndms.WireguardServerPeer(nil), srv.Peers...)
+			}
+			peers[j].Description = sec.Description
+		}
+		if peers != nil {
+			srv.Peers = peers
+		}
+	}
+	return servers, nil
+}
+
 // List returns all server WireGuard interfaces (built-in VPN Server + user-marked).
 // GET /api/servers
 func (h *ServersHandler) List(w http.ResponseWriter, r *http.Request) {

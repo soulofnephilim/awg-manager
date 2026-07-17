@@ -190,7 +190,18 @@
 </script>
 
 <div class="picker">
-    <div class="chips" bind:this={containerEl}>
+    <!-- preventDefault на кликах по не-интерактивным частям: если компонент
+         обёрнут в <label>, браузер по умолчанию форвардит такой клик в первый
+         labelable-элемент — крестик первого чипа, «случайно» удаляя его
+         (bug #446). Кнопки (крестики, «+») обрабатываются своими onclick. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+    <div
+        class="chips"
+        bind:this={containerEl}
+        onclick={(e) => {
+            if (!(e.target as HTMLElement | null)?.closest('button')) e.preventDefault();
+        }}
+    >
         {#if values.length === 0}
             <span class="placeholder">{placeholder}</span>
         {/if}

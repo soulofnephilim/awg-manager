@@ -3,45 +3,69 @@ package router
 import (
 	"fmt"
 	"net"
-	"sort"
 	"strconv"
 	"strings"
 )
 
-type portSet struct {
-	UDP []int
-	TCP []int
+// PortRange represents a single port or a contiguous range of ports.
+// When From == To it is a single port.
+type PortRange struct {
+	From int
+	To   int
 }
 
-// knownPresets maps preset name → UDP and TCP ports to exclude from TPROXY/REDIRECT.
-var knownPresets = map[string]portSet{
+// String returns the iptables --dport representation: "N" for single ports,
+// "N:M" for ranges (iptables multiport uses "N:M" range syntax).
+func (pr PortRange) String() string {
+	if pr.From == pr.To {
+		return strconv.Itoa(pr.From)
+	}
+	return fmt.Sprintf("%d:%d", pr.From, pr.To)
+}
+
+// portRangeKey returns a canonical dedup key for a PortRange.
+func portRangeKey(pr PortRange) string {
+	return fmt.Sprintf("%d-%d", pr.From, pr.To)
+}
+
+type bypassPreset struct {
+	UDP []int
+	TCP []int
+	// CIDRs — destination-IP исключения пресета (канонические IPv4 CIDR).
+	// Вливаются в spec.BypassCIDRs наравне с bypassExtraSubnets, т.е. весь
+	// трафик к этим адресам идёт мимо sing-box (включая DNS/53).
+	CIDRs []string
+}
+
+// knownPresets maps preset name → UDP/TCP ports and destination CIDRs to
+// exclude from TPROXY/REDIRECT.
+var knownPresets = map[string]bypassPreset{
 	"l2tp":        {UDP: []int{500, 4500, 1701}},
 	"ntp":         {UDP: []int{123}},
 	"netbios-smb": {UDP: []int{137, 138}, TCP: []int{139, 445}},
+	// KeenDNS/CrazeDNS (issue #490): статическая A-запись доменов
+	// my.keenetic.net / my.netcraze.net и доменов 4-го уровня указывает на
+	// анонсируемый Keenetic'ом IP 78.47.125.180, который роутер при локальном
+	// доступе обслуживает сам. TPROXY-перехват уводит эти соединения в
+	// туннель → ERR_CONNECTION_REFUSED; исключение возвращает их роутеру.
+	"keendns": {CIDRs: []string{"78.47.125.180/32"}},
 }
 
-// KnownPresetNames returns the sorted list of valid preset names.
-// Used by ValidateSingboxRouterSettings.
-func KnownPresetNames() []string {
-	names := make([]string, 0, len(knownPresets))
-	for k := range knownPresets {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// resolveBypassPorts collects the final UDP and TCP port lists from named
-// presets and the user-supplied extra-ports string.
+// resolveBypassPorts collects the final UDP and TCP port/range lists from
+// named presets and the user-supplied extra-ports string.
 // Returns an error if any preset name is unknown or the extra string is malformed.
-func resolveBypassPorts(presets []string, extra string) (udp, tcp []int, err error) {
+func resolveBypassPorts(presets []string, extra string) (udp, tcp []PortRange, err error) {
 	for _, name := range presets {
 		ps, ok := knownPresets[name]
 		if !ok {
 			return nil, nil, fmt.Errorf("unknown bypass preset %q", name)
 		}
-		udp = append(udp, ps.UDP...)
-		tcp = append(tcp, ps.TCP...)
+		for _, p := range ps.UDP {
+			udp = append(udp, PortRange{From: p, To: p})
+		}
+		for _, p := range ps.TCP {
+			tcp = append(tcp, PortRange{From: p, To: p})
+		}
 	}
 	eu, et, err := parseExtraPorts(extra)
 	if err != nil {
@@ -50,6 +74,39 @@ func resolveBypassPorts(presets []string, extra string) (udp, tcp []int, err err
 	udp = append(udp, eu...)
 	tcp = append(tcp, et...)
 	return udp, tcp, nil
+}
+
+// resolveBypassCIDRs собирает итоговый список destination-CIDR исключений:
+// CIDR-часть именованных пресетов + пользовательский extra-список
+// (resolveBypassSubnets). Дедуп со стабильным порядком — пользователь мог
+// продублировать IP пресета вручную, а дубли в iptables-правилах не нужны.
+func resolveBypassCIDRs(presets []string, extra string) ([]string, error) {
+	var out []string
+	seen := make(map[string]struct{})
+	add := func(c string) {
+		if _, ok := seen[c]; ok {
+			return
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	for _, name := range presets {
+		ps, ok := knownPresets[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown bypass preset %q", name)
+		}
+		for _, c := range ps.CIDRs {
+			add(c)
+		}
+	}
+	subnets, err := resolveBypassSubnets(extra)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range subnets {
+		add(c)
+	}
+	return out, nil
 }
 
 // resolveBypassSubnets парсит список IPv4 IP/CIDR (через запятую/пробел) в
@@ -83,10 +140,17 @@ func resolveBypassSubnets(extra string) ([]string, error) {
 	return out, nil
 }
 
-// parseExtraPorts parses a comma-separated list of "<port> <UDP|TCP>" entries.
-// Empty string returns nil slices and no error.
+// parseExtraPorts parses a comma-separated list of port entries in the format
+// "PORT UDP|TCP" or "PORT-PORT UDP|TCP" (range). Single ports and ranges are
+// both supported. Empty string returns nil slices and no error.
 // Case-insensitive for the protocol part.
-func parseExtraPorts(s string) (udp, tcp []int, err error) {
+//
+// Examples:
+//
+//	"51820 UDP"         → UDP range {51820,51820}
+//	"5000-5500 UDP"     → UDP range {5000,5500}
+//	"51820 UDP, 443 TCP, 8000-9000 TCP"
+func parseExtraPorts(s string) (udp, tcp []PortRange, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil, nil, nil
@@ -98,17 +162,39 @@ func parseExtraPorts(s string) (udp, tcp []int, err error) {
 		}
 		parts := strings.Fields(entry)
 		if len(parts) != 2 {
-			return nil, nil, fmt.Errorf("invalid port entry %q: expected \"PORT UDP|TCP\"", entry)
+			return nil, nil, fmt.Errorf("invalid port entry %q: expected \"PORT UDP|TCP\" or \"PORT-PORT UDP|TCP\"", entry)
 		}
-		port, err := strconv.Atoi(parts[0])
-		if err != nil || port < 1 || port > 65535 {
-			return nil, nil, fmt.Errorf("invalid port %q in %q: must be 1–65535", parts[0], entry)
+		portPart := parts[0]
+		var from, to int
+		if idx := strings.Index(portPart, "-"); idx >= 0 {
+			// Range: "5000-5500"
+			fromStr := portPart[:idx]
+			toStr := portPart[idx+1:]
+			from, err = strconv.Atoi(fromStr)
+			if err != nil || from < 1 || from > 65535 {
+				return nil, nil, fmt.Errorf("invalid start port %q in %q: must be 1–65535", fromStr, entry)
+			}
+			to, err = strconv.Atoi(toStr)
+			if err != nil || to < 1 || to > 65535 {
+				return nil, nil, fmt.Errorf("invalid end port %q in %q: must be 1–65535", toStr, entry)
+			}
+			if from > to {
+				return nil, nil, fmt.Errorf("invalid range %q in %q: start must be ≤ end", portPart, entry)
+			}
+		} else {
+			// Single port
+			from, err = strconv.Atoi(portPart)
+			if err != nil || from < 1 || from > 65535 {
+				return nil, nil, fmt.Errorf("invalid port %q in %q: must be 1–65535", portPart, entry)
+			}
+			to = from
 		}
+		pr := PortRange{From: from, To: to}
 		switch strings.ToUpper(parts[1]) {
 		case "UDP":
-			udp = append(udp, port)
+			udp = append(udp, pr)
 		case "TCP":
-			tcp = append(tcp, port)
+			tcp = append(tcp, pr)
 		default:
 			return nil, nil, fmt.Errorf("invalid protocol %q in %q: must be UDP or TCP", parts[1], entry)
 		}

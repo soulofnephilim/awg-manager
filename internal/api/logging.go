@@ -23,6 +23,10 @@ type LogEntryDTO struct {
 	Target    string `json:"target" example:"dns"`
 	Message   string `json:"message" example:"lookup succeed for node.example.org: 203.0.113.77"`
 	Sanitized bool   `json:"sanitized" example:"false"`
+	// Схлопнутые повторы: Repeats — сколько идентичных записей свёрнуто в
+	// эту (0 = уникальна), LastSeen — время последнего повтора.
+	Repeats  int    `json:"repeats,omitempty" example:"4"`
+	LastSeen string `json:"lastSeen,omitempty" example:"2024-01-15T10:35:00Z"`
 }
 
 // LogsData mirrors frontend LogsResponse.
@@ -125,7 +129,7 @@ func logEntryDTO(entry logging.LogEntry, sanitized bool) LogEntryDTO {
 		message = logging.SanitizeLogText(message)
 	}
 
-	return LogEntryDTO{
+	dto := LogEntryDTO{
 		Timestamp: entry.Timestamp.UTC().Format(time.RFC3339Nano),
 		Level:     entry.Level,
 		Group:     entry.Group,
@@ -134,7 +138,12 @@ func logEntryDTO(entry logging.LogEntry, sanitized bool) LogEntryDTO {
 		Target:    target,
 		Message:   message,
 		Sanitized: sanitized,
+		Repeats:   entry.Repeats,
 	}
+	if entry.LastSeen != nil {
+		dto.LastSeen = entry.LastSeen.UTC().Format(time.RFC3339Nano)
+	}
+	return dto
 }
 
 func logEntryDTOs(entries []logging.LogEntry, sanitized bool) []LogEntryDTO {

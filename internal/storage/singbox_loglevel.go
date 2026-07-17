@@ -2,7 +2,10 @@ package storage
 
 import "strings"
 
-const DefaultSingboxLogLevel = "trace"
+// DefaultSingboxLogLevel is "info": the old "trace" default self-inflicted
+// hundreds of journal lines per minute on low-RAM routers. Explicitly
+// configured "trace" keeps working.
+const DefaultSingboxLogLevel = "info"
 
 var validSingboxLogLevels = map[string]struct{}{
 	"trace": {},

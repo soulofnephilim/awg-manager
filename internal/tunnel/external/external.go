@@ -183,4 +183,3 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (*service.TunnelW
 
 	return s.tunnelService.Get(ctx, t.ID)
 }
-

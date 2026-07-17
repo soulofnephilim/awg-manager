@@ -272,6 +272,8 @@ func (c *captureLogger) Warnf(format string, args ...interface{}) {
 	c.warnings = append(c.warnings, format)
 }
 
+func (c *captureLogger) Infof(format string, args ...interface{}) {}
+
 func TestFailoverManager_HandlePingCheckEvent_LogsTypeMismatch(t *testing.T) {
 	fm := NewFailoverManager(nil)
 	logger := &captureLogger{}

@@ -33,8 +33,7 @@ type TransportSpec struct {
 	Mode       TransportMode
 	Interface  string   // bind mode: kernel iface name
 	DNSServers []string // bind mode: tunnel DNS for hostname resolution
-	ProxyPort  int      // proxy mode: local mixed inbound port (ignored when ProxyURL set)
-	ProxyURL   string   // proxy mode: full proxy URL (supports auth)
+	ProxyPort  int      // proxy mode: local mixed inbound port
 }
 
 // AWGEgressLookup resolves tunnel DNS for an AWG outbound tag.
@@ -181,13 +180,10 @@ func newHTTPClientFromSpec(spec TransportSpec) (*http.Client, error) {
 		cfg.Interface = spec.Interface
 		cfg.DNSServers = spec.DNSServers
 	case TransportModeProxy:
-		if spec.ProxyURL != "" {
-			cfg.ProxyURL = spec.ProxyURL
-		} else if spec.ProxyPort > 0 {
-			cfg.ProxyURL = fmt.Sprintf("http://%s:%d", localProxyHost, spec.ProxyPort)
-		} else {
-			return nil, fmt.Errorf("proxy transport requires ProxyURL or ProxyPort")
+		if spec.ProxyPort <= 0 {
+			return nil, fmt.Errorf("proxy transport requires ProxyPort")
 		}
+		cfg.ProxyURL = fmt.Sprintf("http://%s:%d", localProxyHost, spec.ProxyPort)
 	default:
 		return nil, fmt.Errorf("unsupported transport mode %q", spec.Mode)
 	}

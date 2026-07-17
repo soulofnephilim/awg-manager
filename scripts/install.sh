@@ -1,9 +1,11 @@
 #!/bin/sh
 # AWG Manager — установщик для роутеров Keenetic
 #
-# Установка / обновление:
+# Установка / обновление. curl не требуется: busybox wget есть на любом
+# Keenetic, а зеркало отдаёт скрипт по plain-HTTP (busybox wget прошивки
+# может не уметь HTTPS — для GitHub-варианта нужен curl или полноценный wget):
+#   wget -qO- http://repo.hoaxisr.ru/install.sh | sh
 #   curl -sL https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
-#   wget -qO- https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
 #
 # Скрипт добавляет репозиторий http://repo.hoaxisr.ru и делает
 # `opkg update && opkg install awg-manager`. Повторный запуск —
@@ -80,9 +82,17 @@ start_service() {
 }
 
 # --- Проверка работоспособности ---
+# Только busybox wget: он есть на любом Keenetic/Entware, а проба — plain-HTTP
+# на localhost, где curl не даёт ничего сверх wget. curl намеренно не
+# используется, чтобы установка не поощряла лишнюю зависимость (#482) —
+# awg-manager не требует curl/libcurl ни на одном этапе.
+probe_health() {
+    wget -q -O /dev/null "$1" 2>/dev/null
+}
+
 health_check() {
     PORT=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-        /opt/etc/awg-manager/settings.json 2>/dev/null)
+        /opt/etc/awg-manager/settings.json 2>/dev/null | head -n 1)
     [ -z "$PORT" ] && PORT=2222
 
     info "Проверяю работоспособность (порт $PORT)..."
@@ -91,7 +101,7 @@ health_check() {
     max_attempts=3
     while [ "$attempts" -lt "$max_attempts" ]; do
         attempts=$((attempts + 1))
-        if curl -sf "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+        if probe_health "http://127.0.0.1:${PORT}/api/health"; then
             info "Сервис работает!"
             return 0
         fi

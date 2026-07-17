@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/events"
-	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/ndms"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
 )
@@ -30,11 +30,10 @@ func (a *nwgOpPollAdapter) PollPingCheck(ctx context.Context, tunnelID string) (
 // Facade unifies kernel (custom loop) and NativeWG (NDMS native) ping-check
 // behind a single interface. All dispatch is based on stored.Backend.
 type Facade struct {
-	custom   *Service
-	tunnels  *storage.AWGTunnelStore
-	settings *storage.SettingsStore
-	nwgOp    *nwg.OperatorNativeWG
-	bus      *events.Bus
+	custom  *Service
+	tunnels *storage.AWGTunnelStore
+	nwgOp   *nwg.OperatorNativeWG
+	bus     *events.Bus
 
 	nwgSource       nwgPollSource // nil when nwgOp is nil; overridable for tests
 	nwgMonMu        sync.RWMutex
@@ -46,12 +45,11 @@ type Facade struct {
 
 // NewFacade creates a unified ping-check facade.
 // nwgOp may be nil if NativeWG is unavailable.
-func NewFacade(custom *Service, tunnels *storage.AWGTunnelStore, settings *storage.SettingsStore, nwgOp *nwg.OperatorNativeWG) *Facade {
+func NewFacade(custom *Service, tunnels *storage.AWGTunnelStore, nwgOp *nwg.OperatorNativeWG) *Facade {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Facade{
 		custom:      custom,
 		tunnels:     tunnels,
-		settings:    settings,
 		nwgOp:       nwgOp,
 		nwgMonitors: make(map[string]*nwgMonitor),
 		ctx:         ctx,

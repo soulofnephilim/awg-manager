@@ -28,15 +28,24 @@ import (
 //     the pool routes idempotently. Never re-allocates an index or re-creates the
 //     iface, and never hard-fails the reconcile on a single drifted step.
 func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.SingboxRouterSettings) error {
-	if !sr.Enabled {
-		return s.Disable(ctx)
-	}
-
 	settings, err := s.deps.Settings.Load()
 	if err != nil {
 		return err
 	}
 	st := settings.FakeIP
+
+	if !sr.Enabled {
+		// Teardown нужен только когда что-то реально поднято. Безусловный
+		// Disable здесь писал ложное «выключение движка» в журнал на каждом
+		// boot-reconcile при выключенном fakeip (ревью #523) — журнал терял
+		// диагностическую ценность, ради которой запись добавлялась.
+		provisioned := st != nil && st.Provisioned
+		slotActive := s.deps.Orch != nil && s.routerSlotEnabled()
+		if !provisioned && !slotActive {
+			return nil
+		}
+		return s.Disable(ctx)
+	}
 
 	// LiveOpkgTunIndices probes which opkgtun ifaces actually exist on the box.
 	// Capture the error (Fix B4): a TRANSIENT probe failure (NDMS glitch mid-reload)
@@ -69,26 +78,46 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 	iface := fakeIPIfaceName(st.Index)   // kernel name: /proc route probe, log labels
 	ndmsName := fakeIPNDMSName(st.Index) // NDMS RCI name: static-route Interface
 
-	// Restart a dead sing-box. The idempotency guard skips this; the drift-heal
-	// MUST do it or a crashed process stays down until the next Enable. Bounded
-	// wait: log on timeout, don't hard-fail a reconcile.
-	if running, _ := s.deps.Singbox.IsRunning(); !running {
-		// Ensure the slot file is enabled (idempotent). NB: SetEnabled is a
-		// no-op when the slot is already enabled (orchestrator.go), so it can
-		// NOT revive a process that died with the slot on — we must start the
-		// process directly below.
-		if s.deps.Orch != nil {
+	// Запаркованный слот 21 — дрейф НЕЗАВИСИМО от жизни процесса (ревью #523):
+	// раньше слот чинился только при мёртвом sing-box, а при живом (крутит
+	// подписки/device-proxy) merged-конфиг оставался без tun-in навсегда —
+	// enableFakeIPTun no-op'ится на provisioned+live и слот не трогает.
+	// Рестарт мёртвого процесса — по-прежнему только watchdog (Operator.
+	// Reconcile); fail-closed при мёртвом движке присущ fakeip: маршруты пула
+	// указывают в OpkgTun без читателя, трафик дропается, не утекает.
+	// SetEnabled — только при фактически запаркованном слоте, иначе каждый
+	// тик взводил бы debounced reload.
+	if s.deps.Orch != nil {
+		if st, ok := s.slotSnapshot(orchestrator.SlotFakeIP); !ok || !st.Enabled {
 			if e := s.deps.Orch.SetEnabled(orchestrator.SlotFakeIP, true); e != nil {
 				s.appLog.Warn("fakeip-reconcile", iface, "enable slot: "+e.Error())
+			} else {
+				s.appLog.Info("fakeip-reconcile", iface,
+					"слот 21-fakeip был запаркован — возвращён в конфиг (drift-heal)")
+				// Слот вернулся в merged-конфиг — device-proxy должен
+				// восстановить композитные ссылки (ветка reprovision покрыта
+				// через enableLocked, эта — нет).
+				s.notifyRoutingSlotsChanged()
 			}
 		}
-		// Start the dead process directly (real spawn). This is the actual
-		// recovery — gated on !running above, so it never double-starts.
-		if e := s.deps.Singbox.Start(); e != nil {
-			s.appLog.Warn("fakeip-reconcile", iface, "restart sing-box: "+e.Error())
-		}
-		if e := s.waitForSingbox(ctx, bootWaitWithFloor()); e != nil {
-			s.appLog.Warn("fakeip-reconcile", iface, "sing-box not ready after restart: "+e.Error())
+	}
+
+	// One-shot (до первого УСПЕХА) ассерт permit-ACL: покрывает апгрейд
+	// awg-manager поверх уже включённого fakeip (ACL появился в этой версии)
+	// и удаление списка до старта демона. Идемпотентно (дубль permit NDMS
+	// отклоняет без дублирования); флаг взводится только ПОСЛЕ успеха —
+	// провал (медленный RCI на буте) ретраится следующим тиком (ревью).
+	// Гейт probeErr == nil: живость интерфейса подтверждена — иначе permit
+	// создал бы список, bind упал бы, и осиротевший unreferenced-список
+	// (auto-delete не взведён) навсегда сохранился бы в конфиг. Флаг под
+	// transitionMu (Reconcile). Галку _WEBADMIN_, снятую пользователем в
+	// веб-морде при живом процессе, НЕ переустанавливаем намеренно — она
+	// видна в UI как правило firewall, и её снятие — решение пользователя.
+	if !s.fakeipACLAsserted && s.deps.OpkgTun != nil && probeErr == nil {
+		if nerr := s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); nerr != nil {
+			s.appLog.Warn("fakeip-reconcile", iface, "permit acl: "+nerr.Error())
+		} else {
+			s.fakeipACLAsserted = true
 		}
 	}
 
@@ -106,6 +135,11 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 						Network: poolNet4, Mask: poolMask4, Interface: ndmsName, Comment: fakeIPPoolRouteComment,
 					}); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "re-add pool route v4: "+e.Error())
+					} else {
+						// Успешный drift-heal: маршрут пула пропадал (утечка
+						// трафика мимо туннеля) и был восстановлен — событие,
+						// а не рутинная проверка.
+						s.appLog.Info("fakeip-reconcile", iface, "pool route v4 was absent, re-added (drift-heal)")
 					}
 					// v6 re-add is gated on the SAME v4-absence signal: routes are added
 					// together at Enable, so v4-present ⇒ v6-present is a sound v1
@@ -116,6 +150,8 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 							V6: true, Network: st.Inet6Range, Interface: ndmsName,
 						}); e != nil {
 							s.appLog.Warn("fakeip-reconcile", iface, "re-add pool route v6: "+e.Error())
+						} else {
+							s.appLog.Info("fakeip-reconcile", iface, "pool route v6 was absent, re-added (drift-heal)")
 						}
 					}
 				}
@@ -144,6 +180,8 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoutePresent(iface, pfx.Masked()) {
 					if e := s.addCIDRRoute(ctx, ndmsName, c, false); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "re-add cidr route "+c+": "+e.Error())
+					} else {
+						s.appLog.Info("fakeip-reconcile", iface, "cidr route "+c+" was absent, re-added (drift-heal)")
 					}
 				}
 			}
@@ -156,6 +194,8 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoute6Present(iface, pfx.Masked()) {
 					if e := s.addCIDRRoute(ctx, ndmsName, c, true); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "re-add cidr route v6 "+c+": "+e.Error())
+					} else {
+						s.appLog.Info("fakeip-reconcile", iface, "cidr route v6 "+c+" was absent, re-added (drift-heal)")
 					}
 				}
 			}

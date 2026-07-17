@@ -19,6 +19,20 @@ func ExtractGeoSiteTagLines(path, tag string) ([]string, error) {
 	return extractTagLines(path, want, "geosite", parseGeoSiteDomainLine)
 }
 
+// ExtractGeoSiteTagLinesTyped returns geosite lines with LOSSLESS v2ray domain
+// type prefixes ("keyword:", "domain_regex:", ".", "full:"). Unlike the legacy
+// ExtractGeoSiteTagLines (whose bare-value output the Geo File Viewer and
+// other consumers depend on), the typed form lets the dat→SRS compiler map
+// Plain→domain_keyword and Full→domain instead of collapsing everything into
+// domain_suffix (issue #448).
+func ExtractGeoSiteTagLinesTyped(path, tag string) ([]string, error) {
+	want := strings.ToUpper(strings.TrimSpace(tag))
+	if want == "" {
+		return nil, fmt.Errorf("empty geosite tag")
+	}
+	return extractTagLines(path, want, "geosite", parseGeoSiteDomainLineTyped)
+}
+
 // ExtractGeoIPTagLines returns sing-box inline list lines (CIDR) for a geoip tag.
 func ExtractGeoIPTagLines(path, tag string) ([]string, error) {
 	want := strings.ToUpper(strings.TrimSpace(tag))
@@ -91,7 +105,10 @@ func parseEntryItems(br *bufio.Reader, entryLen int, wantTag string, parseItem i
 				return nil, "", fmt.Errorf("entry LD field %d length: %w", fieldNum, err)
 			}
 			remaining -= n
-			if int(length) > remaining {
+			// Compare in uint64 space: on 32-bit MIPS int(length) truncates,
+			// letting a corrupt length >= 2^31 slip past the guard and panic
+			// in make([]byte, length) below.
+			if remaining < 0 || length > uint64(remaining) {
 				return nil, "", fmt.Errorf("entry field %d length %d exceeds remaining %d", fieldNum, length, remaining)
 			}
 
@@ -142,50 +159,15 @@ func parseEntryItems(br *bufio.Reader, entryLen int, wantTag string, parseItem i
 	return lines, name, nil
 }
 
-// parseGeoSiteDomainLine converts a v2fly Domain submessage to an inline list line.
+// parseGeoSiteDomainLine converts a v2fly Domain submessage to an inline list
+// line (LEGACY, lossy format: Plain and Full both come out bare). Kept
+// byte-stable — the Geo File Viewer HTTP endpoint and the selective-bypass
+// streaming path consume this output.
 func parseGeoSiteDomainLine(data []byte) (string, bool, error) {
-	var domainType int
-	var value string
-	off := 0
-
-	for off < len(data) {
-		fieldNum, wireType, n, err := readProtoTagBytesFromSlice(data[off:])
-		if err != nil {
-			return "", false, fmt.Errorf("domain tag: %w", err)
-		}
-		off += n
-
-		switch wireType {
-		case 0:
-			v, consumed, err := readProtoVarintFromSlice(data[off:])
-			if err != nil {
-				return "", false, err
-			}
-			off += consumed
-			if fieldNum == 1 {
-				domainType = int(v)
-			}
-
-		case 2:
-			length, consumed, err := readProtoVarintFromSlice(data[off:])
-			if err != nil {
-				return "", false, err
-			}
-			off += consumed
-			if off+int(length) > len(data) {
-				return "", false, fmt.Errorf("domain field %d length overflow", fieldNum)
-			}
-			if fieldNum == 2 {
-				value = string(data[off : off+int(length)])
-			}
-			off += int(length)
-
-		default:
-			return "", false, fmt.Errorf("domain field %d: unsupported wire type %d", fieldNum, wireType)
-		}
+	domainType, value, err := decodeGeoSiteDomain(data)
+	if err != nil {
+		return "", false, err
 	}
-
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", false, nil
 	}
@@ -205,6 +187,83 @@ func parseGeoSiteDomainLine(data []byte) (string, bool, error) {
 	default:
 		return value, true, nil
 	}
+}
+
+// parseGeoSiteDomainLineTyped converts a v2fly Domain submessage to a typed
+// line that preserves the v2ray domain type: Plain → "keyword:" (v2ray Plain
+// is substring/keyword semantics), Regex → "domain_regex:", RootDomain → "."
+// prefix, Full → "full:" (exact match).
+func parseGeoSiteDomainLineTyped(data []byte) (string, bool, error) {
+	domainType, value, err := decodeGeoSiteDomain(data)
+	if err != nil {
+		return "", false, err
+	}
+	if value == "" {
+		return "", false, nil
+	}
+
+	switch domainType {
+	case 0: // Plain — keyword/substring semantics in v2ray
+		return "keyword:" + value, true, nil
+	case 1: // Regex
+		return "domain_regex:" + value, true, nil
+	case 2: // RootDomain
+		if strings.HasPrefix(value, ".") {
+			return value, true, nil
+		}
+		return "." + value, true, nil
+	case 3: // Full — exact domain match
+		return "full:" + value, true, nil
+	default: // unknown future type — defensive bare value (consumer treats as suffix)
+		return value, true, nil
+	}
+}
+
+// decodeGeoSiteDomain decodes the v2fly Domain submessage into its type and value.
+func decodeGeoSiteDomain(data []byte) (int, string, error) {
+	var domainType int
+	var value string
+	off := 0
+
+	for off < len(data) {
+		fieldNum, wireType, n, err := readProtoTagBytesFromSlice(data[off:])
+		if err != nil {
+			return 0, "", fmt.Errorf("domain tag: %w", err)
+		}
+		off += n
+
+		switch wireType {
+		case 0:
+			v, consumed, err := readProtoVarintFromSlice(data[off:])
+			if err != nil {
+				return 0, "", err
+			}
+			off += consumed
+			if fieldNum == 1 {
+				domainType = int(v)
+			}
+
+		case 2:
+			length, consumed, err := readProtoVarintFromSlice(data[off:])
+			if err != nil {
+				return 0, "", err
+			}
+			off += consumed
+			// uint64 comparison: off+int(length) can wrap negative on 32-bit.
+			if length > uint64(len(data)-off) {
+				return 0, "", fmt.Errorf("domain field %d length overflow", fieldNum)
+			}
+			if fieldNum == 2 {
+				value = string(data[off : off+int(length)])
+			}
+			off += int(length)
+
+		default:
+			return 0, "", fmt.Errorf("domain field %d: unsupported wire type %d", fieldNum, wireType)
+		}
+	}
+
+	return domainType, strings.TrimSpace(value), nil
 }
 
 func parseGeoIPCidrLine(data []byte) (string, bool, error) {
@@ -236,7 +295,8 @@ func parseGeoIPCidrLine(data []byte) (string, bool, error) {
 				return "", false, err
 			}
 			off += consumed
-			if off+int(length) > len(data) {
+			// uint64 comparison: off+int(length) can wrap negative on 32-bit.
+			if length > uint64(len(data)-off) {
 				return "", false, fmt.Errorf("cidr field %d length overflow", fieldNum)
 			}
 			if fieldNum == 1 {
@@ -288,6 +348,17 @@ func readProtoVarintFromSlice(b []byte) (uint64, int, error) {
 
 // ExpandGeoTag finds tag in tracked geo files and returns inline list lines.
 func (s *GeoDataStore) ExpandGeoTag(kind, tag string) (lines []string, filePath string, err error) {
+	return s.expandGeoTag(kind, tag, ExtractGeoSiteTagLines)
+}
+
+// ExpandGeoTagTyped is ExpandGeoTag with lossless v2ray domain-type prefixes
+// for geosite lines (see ExtractGeoSiteTagLinesTyped). The geoip path is
+// identical to the legacy one.
+func (s *GeoDataStore) ExpandGeoTagTyped(kind, tag string) (lines []string, filePath string, err error) {
+	return s.expandGeoTag(kind, tag, ExtractGeoSiteTagLinesTyped)
+}
+
+func (s *GeoDataStore) expandGeoTag(kind, tag string, geositeExtract func(path, tag string) ([]string, error)) (lines []string, filePath string, err error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	tag = strings.TrimSpace(tag)
 	if tag == "" {
@@ -311,7 +382,7 @@ func (s *GeoDataStore) ExpandGeoTag(kind, tag string) (lines []string, filePath 
 		var got []string
 		switch kind {
 		case "geosite":
-			got, err = ExtractGeoSiteTagLines(path, tag)
+			got, err = geositeExtract(path, tag)
 		case "geoip":
 			got, err = ExtractGeoIPTagLines(path, tag)
 		}

@@ -34,14 +34,16 @@
 	import { notifications } from '$lib/stores/notifications';
 	import { pluralize, SET_WORDS } from '$lib/utils/pluralize';
 	import { Plus, LayoutGrid, Pencil, Trash2 } from 'lucide-svelte';
-	import { ConfirmModal } from '$lib/components/ui';
+	import { Button, ConfirmModal } from '$lib/components/ui';
 	import RuleSetAddModal from '$lib/components/routing/singboxRouter/RuleSetAddModal.svelte';
 	import SbRouterRuleSetCatalogModal from '$lib/components/sb-router/SbRouterRuleSetCatalogModal.svelte';
 	import RuleSetTypeBadge from '$lib/components/sb-router/RuleSetTypeBadge.svelte';
+	import BulkSelectBar from '$lib/components/sb-router/BulkSelectBar.svelte';
 	import { applyCatalogPresetsAsRuleSets } from '$lib/components/sb-router/rulesetCatalogActions';
 	import { datInfo, resolveRuleSetDisplayType } from '$lib/utils/ruleSetType';
 	import { displayRuleSetTag } from '$lib/utils/singboxInlineRules';
 	import { computeRuleSetUsageRefs } from './ruleSetUsageRefs';
+	import { computeRuleSetUsage, buildDownloadDetourOptions } from '$lib/components/routing/singboxRouter';
 	import type { SingboxRouterRuleSet, CatalogPreset } from '$lib/types';
 
 	// ── Store sub-stores ───────────────────────────────────────────────────
@@ -87,6 +89,12 @@
 	// ── «используется в» (DNS #n · Route #m), 1-based по правилам ─────────
 	const usageRefs = $derived(computeRuleSetUsageRefs($storeDnsRules, $storeRules));
 
+	// Каталог: суммарные счётчики (DNS + route) для различения «добавлено» /
+	// «добавлено, без правил» на задизейбленных плитках.
+	const ruleSetUsageForCatalog = $derived(
+		computeRuleSetUsage([...$storeDnsRules, ...$storeRules]),
+	);
+
 	// ── Колонки-хелперы ──────────────────────────────────────────────────
 	// «тип»: бейдж remote/local/inline/dat + dim-сабкласс binary/source для dat.
 	function formatSub(rs: SingboxRouterRuleSet): string | null {
@@ -117,6 +125,90 @@
 		if (rs.type === 'remote') return rs.update_interval || '—';
 		return '—';
 	}
+
+	// ── Bulk download-detour select (тот же паттерн, что RoutesTab) ───────
+	// Только remote-наборы поддерживают download_detour — чекбоксы у local/
+	// inline не рендерятся (title-подсказка вместо них).
+	let selectMode = $state(false);
+	let selected = $state<Set<string>>(new Set());
+	let bulkBusy = $state(false);
+	let prevRuleSetsRef: SingboxRouterRuleSet[] | undefined;
+
+	const hasSelectable = $derived($storeRuleSets.some((rs) => rs.type === 'remote'));
+	const filteredSelectableTags = $derived(
+		filtered.filter((rs) => rs.type === 'remote').map((rs) => rs.tag),
+	);
+
+	const bulkDetourOptions = $derived(buildDownloadDetourOptions($storeOptions, '— сбросить —'));
+
+	function toggleSelectMode(): void {
+		selectMode = true;
+		selected = new Set();
+	}
+
+	function cancelSelectMode(): void {
+		selectMode = false;
+		selected = new Set();
+	}
+
+	function toggleSelect(tag: string): void {
+		const next = new Set(selected);
+		if (next.has(tag)) next.delete(tag);
+		else next.add(tag);
+		selected = next;
+	}
+
+	function selectAllRs(): void {
+		selected = new Set(filteredSelectableTags);
+	}
+
+	// FakeIP staging не завязан на этот bulk-эндпоинт — backend сам применяет
+	// изменение, здесь достаточно fakeipConfig.loadAll() после успеха.
+	async function applyBulkDetour(value: string): Promise<void> {
+		if (selected.size === 0 || bulkBusy) return;
+		bulkBusy = true;
+		try {
+			const { updated } = await api.singboxFakeIPBulkDetour([...selected], value);
+			notifications.success(`Изменено ${updated}`);
+			selectMode = false;
+			selected = new Set();
+			await fakeipConfig.loadAll();
+		} catch (e) {
+			notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			bulkBusy = false;
+		}
+	}
+
+	// Список наборов мог перезагрузиться из другого источника, пока шло
+	// выделение (SSE-инвалидация, чужое действие) — теги больше не
+	// гарантированно соответствуют актуальному списку. При собственном
+	// bulk-apply selectMode уже false к моменту прихода нового
+	// $storeRuleSets, поэтому условие ниже там не сработает.
+	$effect(() => {
+		const current = $storeRuleSets;
+		if (selectMode && prevRuleSetsRef !== undefined && current !== prevRuleSetsRef) {
+			selectMode = false;
+			selected = new Set();
+			notifications.info('Список изменился, выбор сброшен');
+		}
+		prevRuleSetsRef = current;
+	});
+
+	// Смена тип-фильтра могла скрыть уже выбранные теги — держим
+	// selected ⊆ видимых-выбираемых, иначе count в баре и Apply
+	// затрагивали бы невидимые наборы (#558 fix-волна 2, Minor 4).
+	$effect(() => {
+		const visible = new Set(filteredSelectableTags);
+		if (selected.size === 0) return;
+		let changed = false;
+		const next = new Set<string>();
+		for (const tag of selected) {
+			if (visible.has(tag)) next.add(tag);
+			else changed = true;
+		}
+		if (changed) selected = next;
+	});
 
 	// ── Модалы (state) ───────────────────────────────────────────────────
 	let rsAddOpen = $state(false);
@@ -212,12 +304,26 @@
 	<header class="ph">
 		<span class="nm">Rule sets · {$storeRuleSets.length}</span>
 		<div class="head-actions">
-			<button type="button" class="add ghost" onclick={() => (rsCatalogOpen = true)}>
-				<LayoutGrid size={14} strokeWidth={2} aria-hidden="true" /> Каталог
-			</button>
-			<button type="button" class="add" onclick={() => (rsAddOpen = true)}>
-				<Plus size={14} strokeWidth={2} aria-hidden="true" /> Rule set
-			</button>
+			{#if selectMode}
+				<Button
+					variant="ghost"
+					size="sm"
+					disabled={bulkBusy || filteredSelectableTags.length === 0}
+					onclick={selectAllRs}
+				>
+					Выбрать все
+				</Button>
+			{:else}
+				{#if hasSelectable}
+					<Button variant="ghost" size="sm" onclick={toggleSelectMode}>Выбрать</Button>
+				{/if}
+				<button type="button" class="add ghost" onclick={() => (rsCatalogOpen = true)}>
+					<LayoutGrid size={14} strokeWidth={2} aria-hidden="true" /> Каталог
+				</button>
+				<button type="button" class="add" onclick={() => (rsAddOpen = true)}>
+					<Plus size={14} strokeWidth={2} aria-hidden="true" /> Rule set
+				</button>
+			{/if}
 		</div>
 	</header>
 	<p class="pd">
@@ -259,7 +365,26 @@
 				{@const ref = usageRefs.get(displayRuleSetTag(rs.tag))}
 				{@const sub = formatSub(rs)}
 				<div class="row">
-					<div class="nm2">{displayRuleSetTag(rs.tag)}</div>
+					<div class="nm2">
+						{#if selectMode}
+							{#if rs.type === 'remote'}
+								<input
+									type="checkbox"
+									class="rs-checkbox"
+									checked={selected.has(rs.tag)}
+									onchange={() => toggleSelect(rs.tag)}
+									aria-label={`Выбрать набор ${displayRuleSetTag(rs.tag)}`}
+								/>
+							{:else}
+								<span
+									class="rs-checkbox-placeholder"
+									title="Download detour применим только к remote"
+									aria-hidden="true"
+								></span>
+							{/if}
+						{/if}
+						{displayRuleSetTag(rs.tag)}
+					</div>
 					<div class="type">
 						<RuleSetTypeBadge type={resolveRuleSetDisplayType(rs)} />
 						{#if sub}<span class="fmt">{sub}</span>{/if}
@@ -306,12 +431,25 @@
 			{/each}
 		{/if}
 	</div>
+
+	{#if selectMode}
+		<BulkSelectBar
+			count={selected.size}
+			options={bulkDetourOptions}
+			applyLabel="Применить"
+			onapply={applyBulkDetour}
+			oncancel={cancelSelectMode}
+			busy={bulkBusy}
+			allowEmpty
+		/>
+	{/if}
 </section>
 
 <!-- ── Модалы (переиспользуем вербатим) ──────────────────────────────── -->
 <SbRouterRuleSetCatalogModal
 	open={rsCatalogOpen}
 	existingRuleSetTags={$storeRuleSets.map((rs) => rs.tag)}
+	ruleSetUsage={ruleSetUsageForCatalog}
 	submitting={rsCatalogBusy}
 	onclose={() => {
 		if (!rsCatalogBusy) rsCatalogOpen = false;
@@ -488,12 +626,28 @@
 	}
 
 	.nm2 {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
 		color: var(--text-primary);
 		font-weight: 600;
 		font-family: var(--font-mono);
 		font-size: 0.8125rem;
 		min-width: 0;
 		overflow-wrap: anywhere;
+	}
+	.rs-checkbox {
+		flex-shrink: 0;
+		width: 14px;
+		height: 14px;
+		cursor: pointer;
+		accent-color: var(--color-accent, var(--accent));
+	}
+	.rs-checkbox-placeholder {
+		flex-shrink: 0;
+		display: inline-block;
+		width: 14px;
+		height: 14px;
 	}
 
 	.type {

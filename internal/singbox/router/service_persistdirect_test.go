@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,12 +135,17 @@ func TestPersistConfigDirect_WritesActiveWhenAbsent(t *testing.T) {
 // Reconcile→reconcileInstalled→healTProxyInbound. The old heal returned early
 // whenever a tproxy-in inbound was present, so a changed udpTimeout was never
 // written to the config (UI showed "1 час" while the file kept "3m0s").
+// #554: the system route-options rule must be brought to spec by the SAME
+// heal — it used to be regenerated only by Enable, so a changed timeout
+// stayed stale in the rule until the engine was toggled off/on.
 func TestHealTProxyInbound_AppliesChangedUDPTimeout(t *testing.T) {
 	svc, dir := newOrchedTestService(t)
 
-	// Seed active config with a tproxy-in at the default 3m0s timeout.
+	// Seed active config with a tproxy-in AND the route-options rule at the
+	// default (5m0s) timeout.
 	cfg := NewEmptyConfig()
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, "")
+	cfg.EnsureUDPTimeoutRule(resolveUDPTimeout(""))
 	seed, _ := json.MarshalIndent(cfg, "", "  ")
 	activePath := filepath.Join(dir, "20-router.json")
 	if err := os.WriteFile(activePath, seed, 0644); err != nil {
@@ -166,13 +172,115 @@ func TestHealTProxyInbound_AppliesChangedUDPTimeout(t *testing.T) {
 		if in.Tag == "tproxy-in" {
 			found = true
 			if in.UDPTimeout != "1h0m0s" {
-				t.Errorf("udp_timeout not applied: want 1h0m0s, got %q", in.UDPTimeout)
+				t.Errorf("inbound udp_timeout not applied: want 1h0m0s, got %q", in.UDPTimeout)
 			}
 		}
 	}
 	if !found {
 		t.Fatal("tproxy-in inbound missing after heal")
 	}
+	var ruleFound bool
+	for _, r := range got.Route.Rules {
+		if isSystemUDPTimeoutRule(r) {
+			ruleFound = true
+			if r.UDPTimeout != "1h0m0s" {
+				t.Errorf("route-options udp_timeout not applied (#554): want 1h0m0s, got %q", r.UDPTimeout)
+			}
+		}
+	}
+	if !ruleFound {
+		t.Fatal("system route-options rule missing after heal")
+	}
+}
+
+// Heal must judge and rewrite the APPLIED config, never the user's staged
+// pending draft: loadRouterConfig reads pending-first, so healing from it
+// would materialize an unvalidated draft into active/ (bypassing ApplyDraft)
+// while the pending banner keeps hanging over an already-applied config.
+func TestHealTProxyInbound_IgnoresPendingDraft(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+
+	// Active: drifted timeout (heal must rewrite it). Pending: a user draft
+	// with a marker rule that must NOT leak into active.
+	active := NewEmptyConfig()
+	active.Inbounds = ensureTProxyInbound(active.Inbounds, "")
+	active.EnsureUDPTimeoutRule(resolveUDPTimeout(""))
+	seed, _ := json.MarshalIndent(active, "", "  ")
+	activePath := filepath.Join(dir, "20-router.json")
+	if err := os.WriteFile(activePath, seed, 0644); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	draft := NewEmptyConfig()
+	draft.Inbounds = ensureTProxyInbound(draft.Inbounds, "")
+	draft.EnsureUDPTimeoutRule(resolveUDPTimeout(""))
+	draft.Route.Rules = append(draft.Route.Rules, Rule{Action: "route", Outbound: "draft-marker", Domain: []string{"draft.example"}})
+	draftBytes, _ := json.MarshalIndent(draft, "", "  ")
+	if err := os.MkdirAll(filepath.Join(dir, "pending"), 0755); err != nil {
+		t.Fatalf("mkdir pending: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pending", "20-router.json"), draftBytes, 0644); err != nil {
+		t.Fatalf("seed pending: %v", err)
+	}
+	if err := svc.deps.Orch.Bootstrap(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	if err := svc.healTProxyInbound(context.Background(), "1h0m0s"); err != nil {
+		t.Fatalf("healTProxyInbound: %v", err)
+	}
+
+	raw, _ := os.ReadFile(activePath)
+	if strings.Contains(string(raw), "draft-marker") {
+		t.Fatal("pending draft content leaked into active via heal (must heal the APPLIED config)")
+	}
+	var got RouterConfig
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, in := range got.Inbounds {
+		if in.Tag == "tproxy-in" && in.UDPTimeout != "1h0m0s" {
+			t.Errorf("active inbound not healed: got %q", in.UDPTimeout)
+		}
+	}
+	pendingRaw, err := os.ReadFile(filepath.Join(dir, "pending", "20-router.json"))
+	if err != nil || !strings.Contains(string(pendingRaw), "draft-marker") {
+		t.Errorf("pending draft must survive heal untouched (err=%v)", err)
+	}
+}
+
+// #554: the rule can drift alone (the inbound is already at spec — e.g. a
+// pre-fix build applied the inbound but never the rule). The heal must still
+// rewrite the config.
+func TestHealTProxyInbound_HealsRuleWhenOnlyRuleDrifted(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+
+	cfg := NewEmptyConfig()
+	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, "1h0m0s")
+	// Rule deliberately absent — the drifted-carrier case.
+	seed, _ := json.MarshalIndent(cfg, "", "  ")
+	activePath := filepath.Join(dir, "20-router.json")
+	if err := os.WriteFile(activePath, seed, 0644); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	if err := svc.deps.Orch.Bootstrap(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	if err := svc.healTProxyInbound(context.Background(), "1h0m0s"); err != nil {
+		t.Fatalf("healTProxyInbound: %v", err)
+	}
+
+	raw, _ := os.ReadFile(activePath)
+	var got RouterConfig
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range got.Route.Rules {
+		if isSystemUDPTimeoutRule(r) && r.UDPTimeout == "1h0m0s" {
+			return
+		}
+	}
+	t.Fatal("missing route-options rule was not healed")
 }
 
 // The cheap steady-state guard: when the timeout already matches, heal must
@@ -182,6 +290,7 @@ func TestHealTProxyInbound_NoOpWhenTimeoutMatches(t *testing.T) {
 
 	cfg := NewEmptyConfig()
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, "1h0m0s")
+	cfg.EnsureUDPTimeoutRule("1h0m0s")
 	seed, _ := json.MarshalIndent(cfg, "", "  ")
 	activePath := filepath.Join(dir, "20-router.json")
 	if err := os.WriteFile(activePath, seed, 0644); err != nil {

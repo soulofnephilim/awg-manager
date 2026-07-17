@@ -8,7 +8,7 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 OUT="$ROOT/internal/presets/decompiled/vernette"
 DECOMPILE="$ROOT/scripts/rulesets/decompile-ruleset.sh"
 BIN=${SINGBOX:-$ROOT/build/tools/sing-box}
-BASE_URL=https://github.com/vernette/rulesets/raw/master/srs
+BASE_URL=https://github.com/hoaxisr/rulesets/raw/master/srs
 
 SETS="
 claude

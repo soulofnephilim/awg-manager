@@ -1,5 +1,6 @@
 <script lang="ts">
     import { api } from '$lib/api/client';
+    import { errorMessage } from '$lib/utils/errorMessage';
     import type { ClientRoute, PolicyDevice, RoutingTunnel } from '$lib/types';
     import { ConfirmModal, StoreStatusBadge, Button, Dropdown, type DropdownOption } from '$lib/components/ui';
     import { ClientRouteCard, ClientRouteCreateModal } from '$lib/components/clientroute';
@@ -38,8 +39,8 @@
             clientRouteModalOpen = false;
             editingClientRoute = null;
             notifications.success('Правило создано');
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка создания');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка создания'));
         } finally {
             clientRouteSaving = false;
         }
@@ -54,8 +55,8 @@
             clientRouteModalOpen = false;
             editingClientRoute = null;
             notifications.success('Правило обновлено');
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка обновления');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка обновления'));
         } finally {
             clientRouteSaving = false;
         }
@@ -68,8 +69,8 @@
 
             clientRouteDeleteId = null;
             notifications.success('Правило удалено');
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка удаления');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка удаления'));
         }
     }
 
@@ -79,8 +80,8 @@
             await api.toggleClientRoute(id, enabled);
 
             notifications.success(enabled ? 'VPN включён' : 'VPN отключён');
-        } catch (e: any) {
-            notifications.error(e.message || 'Ошибка переключения');
+        } catch (e) {
+            notifications.error(errorMessage(e, 'Ошибка переключения'));
         } finally {
             clientRouteToggling = null;
         }

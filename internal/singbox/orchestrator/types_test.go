@@ -4,19 +4,24 @@ import "testing"
 
 func TestKnownSlotsIncludesDNSRewritesBeforeRouter(t *testing.T) {
 	slots := KnownSlots()
-	idxRewrites, idxRouter := -1, -1
+	idxRewrites, idxSelective, idxRouter := -1, -1, -1
 	for i, m := range slots {
-		if m.Slot == SlotDNSRewrites {
+		switch m.Slot {
+		case SlotDNSRewrites:
 			idxRewrites = i
-		}
-		if m.Slot == SlotRouter {
+		case SlotSelectiveRoutes:
+			idxSelective = i
+		case SlotRouter:
 			idxRouter = i
 		}
 	}
 	if idxRewrites < 0 {
 		t.Fatal("SlotDNSRewrites not registered")
 	}
-	if !(idxRewrites < idxRouter) {
-		t.Errorf("rewrites slot must sort before router: rewrites=%d router=%d", idxRewrites, idxRouter)
+	if idxSelective < 0 {
+		t.Fatal("SlotSelectiveRoutes not registered")
+	}
+	if !(idxRewrites < idxSelective && idxSelective < idxRouter) {
+		t.Errorf("slot order: rewrites=%d selective=%d router=%d", idxRewrites, idxSelective, idxRouter)
 	}
 }

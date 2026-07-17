@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -216,6 +217,15 @@ func Parse(content string) (*storage.AWGTunnel, error) {
 	if tunnel.Peer.Endpoint == "" {
 		return nil, ErrMissingEndpoint
 	}
+	// Нормализация формата: канонизирует небракетированный IPv6-с-портом
+	// (встречается в выгрузках некоторых провайдеров) и отсекает мусорные
+	// формы (без порта, нечисловой порт) с внятной ошибкой на импорте —
+	// вместо загадочного отказа NDMS/резолвера при старте.
+	normalized, err := NormalizeEndpoint(tunnel.Peer.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Endpoint %q in [Peer]: %w", tunnel.Peer.Endpoint, err)
+	}
+	tunnel.Peer.Endpoint = normalized
 
 	if len(tunnel.Peer.AllowedIPs) == 0 {
 		tunnel.Peer.AllowedIPs = DefaultAllowedIPs()
@@ -314,4 +324,33 @@ func parsePeerField(tunnel *storage.AWGTunnel, key, value string) {
 			peer.PersistentKeepalive = v
 		}
 	}
+}
+
+// NormalizeEndpoint приводит endpoint к канонической форме "host:port"
+// (IPv6 — "[addr]:port"). Небракетированный IPv6-с-портом бракетируется;
+// порт обязан быть числом 1-65535.
+func NormalizeEndpoint(endpoint string) (string, error) {
+	addr := strings.TrimSpace(endpoint)
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		if !validEndpointPort(port) {
+			return "", fmt.Errorf("port %q must be a number 1-65535", port)
+		}
+		if strings.Contains(host, ":") {
+			return net.JoinHostPort(host, port), nil
+		}
+		return host + ":" + port, nil
+	}
+	// Небракетированный IPv6:port — сплит по последнему двоеточию.
+	if i := strings.LastIndex(addr, ":"); i > 0 {
+		host, port := addr[:i], addr[i+1:]
+		if ip := net.ParseIP(host); ip != nil && strings.Contains(host, ":") && validEndpointPort(port) {
+			return net.JoinHostPort(host, port), nil
+		}
+	}
+	return "", errors.New("expected host:port")
+}
+
+func validEndpointPort(p string) bool {
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535
 }

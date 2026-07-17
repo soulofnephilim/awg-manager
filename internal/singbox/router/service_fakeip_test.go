@@ -63,7 +63,7 @@ func (r *recOpkgTun) SetIPGlobal(_ context.Context, name string) error {
 }
 func (r *recOpkgTun) DeleteOpkgTun(_ context.Context, name string) error {
 	r.log.add("Delete:" + name)
-	return nil
+	return r.maybeFail("Delete")
 }
 func (r *recOpkgTun) SetAddress(_ context.Context, name, addr, mask string) error {
 	r.log.add("SetAddress:" + name + ":" + addr + ":" + mask)
@@ -72,6 +72,18 @@ func (r *recOpkgTun) SetAddress(_ context.Context, name, addr, mask string) erro
 func (r *recOpkgTun) SetIPv6Address(_ context.Context, name, addr string) error {
 	r.log.add("SetIPv6Address:" + name + ":" + addr)
 	return r.maybeFail("SetIPv6Address")
+}
+func (r *recOpkgTun) ClearAddress(_ context.Context, name string) error {
+	r.log.add("ClearAddress:" + name)
+	return nil
+}
+func (r *recOpkgTun) SetPermitAllACL(_ context.Context, name string) error {
+	r.log.add("SetPermitACL:" + name)
+	return r.maybeFail("SetPermitACL")
+}
+func (r *recOpkgTun) RemovePermitAllACL(_ context.Context, name string) error {
+	r.log.add("RemovePermitACL:" + name)
+	return nil
 }
 func (r *recOpkgTun) ClearIPv6Address(_ context.Context, name string) error {
 	r.log.add("ClearIPv6Address:" + name)
@@ -445,12 +457,13 @@ func TestEnableFakeIPTun_UsesPersistedEngineSettings(t *testing.T) {
 	store := h.svc.deps.Settings
 	all, _ := store.Load()
 	all.SingboxRouter = storage.SingboxRouterSettings{
-		RoutingMode:   "fakeip-tun",
-		WANAutoDetect: true,
-		FakeIPStack:   "system",
-		FakeIPPool4:   "10.64.0.0/12",
-		FakeIPPool6:   "fc00::/7",
-		FakeIPMTU:     1280,
+		RoutingMode:      "fakeip-tun",
+		WANAutoDetect:    true,
+		FakeIPStack:      "system",
+		FakeIPPool4:      "10.64.0.0/12",
+		FakeIPPool6:      "fc00::/7",
+		FakeIPMTU:        1280,
+		FakeIPRealServer: "9.9.9.9",
 	}
 	normalized, err := NormalizeSingboxRouterSettings(all.SingboxRouter)
 	if err != nil {
@@ -523,6 +536,10 @@ func TestEnableFakeIPTun_UsesPersistedEngineSettings(t *testing.T) {
 	}
 	if fakeipSrv.Inet4Range != "10.64.0.0/12" || fakeipSrv.Inet6Range != "fc00::/7" {
 		t.Errorf("fakeip DNS server ranges = %q/%q, want overridden", fakeipSrv.Inet4Range, fakeipSrv.Inet6Range)
+	}
+	// The real-upstream override flows into the "real" DNS server (issue #487).
+	if realSrv := findDNSServerByTag(&cfg, "real"); realSrv == nil || realSrv.Server != "9.9.9.9" {
+		t.Errorf("real DNS server = %+v, want Server=9.9.9.9", realSrv)
 	}
 }
 
@@ -1143,6 +1160,104 @@ func TestDisableFakeIPTun_Ordering(t *testing.T) {
 	}
 }
 
+// Happy-path teardown (delete succeeds) must NOT issue the address clears —
+// they exist only to defuse the ndm nginx-reload loop when the delete fails,
+// and on the normal path they would be wasted RCI round-trips.
+func TestDisableFakeIPTun_NoAddressClearsOnHappyPath(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+	provisionForDisable(t, h)
+
+	const ndmsName = "OpkgTun0"
+	if err := h.svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable(fakeip-tun): %v", err)
+	}
+	if h.log.has("ClearAddress:" + ndmsName) {
+		t.Errorf("happy path must not clear the address (delete removes it): %v", h.log.calls)
+	}
+	if !h.log.has("InterfaceDown:"+ndmsName) || !h.log.has("Delete:"+ndmsName) {
+		t.Errorf("teardown missing down/delete: %v", h.log.calls)
+	}
+}
+
+// When the delete FAILS, the teardown must clear the configured v4+v6
+// addresses: a leftover `ip address` on a kernel-less OpkgTun sends ndm's
+// nginx into an endless reload loop, stalling all RCI (stand-verified
+// 2026-07-15).
+func TestDisableFakeIPTun_DeleteFailureClearsAddresses(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+	provisionForDisable(t, h)
+	h.svc.deps.OpkgTun = &recOpkgTun{log: h.log, failAt: "Delete"}
+
+	const ndmsName = "OpkgTun0"
+	if err := h.svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable(fakeip-tun): %v", err)
+	}
+	mustOrder := func(a, b string) {
+		ia, ib := h.log.idxOf(a), h.log.idxOf(b)
+		if ia < 0 || ib < 0 {
+			t.Fatalf("missing call %q or %q in %v", a, b, h.log.calls)
+		}
+		if ia >= ib {
+			t.Errorf("expected %q (#%d) before %q (#%d): %v", a, ia, b, ib, h.log.calls)
+		}
+	}
+	mustOrder("Delete:"+ndmsName, "ClearAddress:"+ndmsName)
+	mustOrder("Delete:"+ndmsName, "ClearIPv6Address:"+ndmsName)
+}
+
+// ctxCancelOpkgTun simulates real NDMS HTTP behaviour for the rollback-ctx
+// regression: SetMTU cancels the Enable ctx (client disconnect mid-Enable) and
+// fails; the teardown ops honour ctx cancellation like HTTP calls do. The
+// rollback must still tear the iface down — it runs on a WithoutCancel ctx.
+type ctxCancelOpkgTun struct {
+	*recOpkgTun
+	cancel context.CancelFunc
+}
+
+func (c *ctxCancelOpkgTun) SetMTU(ctx context.Context, name string, mtu int) error {
+	c.cancel()
+	return ctx.Err()
+}
+
+func (c *ctxCancelOpkgTun) InterfaceDown(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.recOpkgTun.InterfaceDown(ctx, name)
+}
+
+func (c *ctxCancelOpkgTun) DeleteOpkgTun(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.recOpkgTun.DeleteOpkgTun(ctx, name)
+}
+
+func TestEnableFakeIPTun_RollbackSurvivesCtxCancel(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.svc.deps.OpkgTun = &ctxCancelOpkgTun{
+		recOpkgTun: &recOpkgTun{log: h.log},
+		cancel:     cancel,
+	}
+
+	if err := h.svc.Enable(ctx); err == nil {
+		t.Fatal("expected Enable to fail (ctx cancelled at SetMTU)")
+	}
+	// Rollback ran on a detached ctx: the iface teardown must have reached NDMS
+	// despite the cancelled request ctx (otherwise the orphan keeps its address
+	// and ndm enters the nginx-reload loop).
+	if !h.log.has("Delete:OpkgTun0") {
+		t.Errorf("rollback teardown skipped on cancelled ctx: %v", h.log.calls)
+	}
+	if st := h.loadFakeIP(t); st != nil {
+		t.Errorf("FakeIP persist = %+v, want nil after rollback", st)
+	}
+}
+
 // The reject removal must be scheduled via the seam, not run inline: before the
 // captured closure is invoked, the reject route is still "present".
 func TestDisableFakeIPTun_DrainOffLock(t *testing.T) {
@@ -1470,5 +1585,134 @@ func TestReconcileFakeIPTun_NoReprovision(t *testing.T) {
 	}
 	if h.log.has("Create:OpkgTun1:private") {
 		t.Errorf("Reconcile leaked a new index: %v", h.log.calls)
+	}
+}
+
+// === permit-all ACL (NDMS-native разрешение трафика в tun) ===
+
+// Enable ставит permit-ACL (после создания интерфейса — bind требует его
+// существования), Disable снимает через teardownOpkgTun.
+func TestFakeIPTun_PermitACL_EnableSetsDisableRemoves(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	ia, ib := h.log.idxOf("Create:OpkgTun0:private"), h.log.idxOf("SetPermitACL:OpkgTun0")
+	if ib < 0 {
+		t.Fatalf("permit ACL not set on enable: %v", h.log.calls)
+	}
+	if ia < 0 || ia >= ib {
+		t.Errorf("permit ACL must be set AFTER interface create (bind needs it): %v", h.log.calls)
+	}
+
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	h.log.calls = nil
+	if err := h.svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	if !h.log.has("RemovePermitACL:OpkgTun0") {
+		t.Errorf("permit ACL not removed on disable: %v", h.log.calls)
+	}
+}
+
+// Провал установки ACL — жёсткая ошибка Enable с полным откатом (включая
+// снятие ACL через teardown в rollback-стеке).
+func TestFakeIPTun_PermitACL_FailureRollsBack(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "SetPermitACL")
+
+	if err := h.svc.Enable(context.Background()); err == nil {
+		t.Fatal("expected Enable to fail on permit-ACL error")
+	}
+	if !h.log.has("RemovePermitACL:OpkgTun0") || !h.log.has("Delete:OpkgTun0") {
+		t.Errorf("rollback must tear down iface incl. ACL: %v", h.log.calls)
+	}
+	if st := h.loadFakeIP(t); st != nil {
+		t.Errorf("FakeIP persist = %+v, want nil after rollback", st)
+	}
+}
+
+// Reap сироты снимает ACL (teardownOpkgTun — общий chokepoint).
+func TestReapOrphaned_ScanRemovesPermitACL(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false)
+	log := &callLog{}
+	opkg := &recOpkgTun{log: log}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning([]string{"OpkgTun1"}, nil)})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if !log.has("RemovePermitACL:OpkgTun1") {
+		t.Errorf("scan reap must remove permit ACL: %v", log.calls)
+	}
+}
+
+// Drift-heal ассертит permit-ACL ровно один раз за жизнь процесса
+// (upgrade-путь: fakeip включён более старой версией без ACL).
+func TestReconcileFakeIPTun_PermitACL_AssertedOnce(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	stubFakeIPPoolRoutePresent(t, func(string, netip.Prefix) bool { return true })
+	h.log.calls = nil
+
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	for i := 0; i < 3; i++ {
+		if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+			t.Fatalf("reconcileFakeIPTun #%d: %v", i, err)
+		}
+	}
+	if got := countCalls(h.log, "SetPermitACL:OpkgTun0"); got != 1 {
+		t.Errorf("permit ACL asserted %d times over 3 ticks, want exactly 1", got)
+	}
+}
+
+// Провал permit-ACL ассерта НЕ съедает one-shot: флаг взводится только после
+// успеха, следующий тик ретраит (ревью: медленный RCI на буте).
+func TestReconcileFakeIPTun_PermitACL_RetriedAfterFailure(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
+	stubFakeIPPoolRoutePresent(t, func(string, netip.Prefix) bool { return true })
+	failing := &recOpkgTun{log: h.log, failAt: "SetPermitACL"}
+	h.svc.deps.OpkgTun = failing
+	h.log.calls = nil
+
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick1: %v", err)
+	}
+	failing.failAt = "" // RCI ожил
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick2: %v", err)
+	}
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("tick3: %v", err)
+	}
+	// tick1 — провал, tick2 — успешный ретрай, tick3 — уже не зовёт.
+	if got := countCalls(h.log, "SetPermitACL:OpkgTun0"); got != 2 {
+		t.Errorf("SetPermitACL called %d times, want 2 (fail, retry-success, then stop)", got)
+	}
+}
+
+// #567: перед валидирующим reload'ом enable fakeip-tun обязан освежить
+// 15-awg.json — протухший каталог AWG-тегов (кэш lastBytes, пропущенная
+// инвалидация) валил enable «unknown-outbound» по живому туннелю.
+func TestEnableFakeIPTun_RefreshesAWGOutbounds(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	called := 0
+	h.svc.deps.AWGOutboundsRefresh = func(ctx context.Context) error { called++; return nil }
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable(fakeip-tun): %v", err)
+	}
+	if called == 0 {
+		t.Fatal("AWGOutboundsRefresh must be invoked during fakeip enable")
 	}
 }

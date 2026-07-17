@@ -49,7 +49,7 @@ func TestScheduler_SkipsInFlightRefresh(t *testing.T) {
 	}
 
 	sched := NewScheduler(store, doRefresh)
-	now := time.Now().Add(2 * time.Hour) // due
+	now := time.Now().Add(2 * time.Hour)  // due
 	sched.tick(context.Background(), now) // launches refresh #1
 	<-started                             // #1 is now in-flight
 	sched.tick(context.Background(), now) // still due, but #1 in-flight → must skip

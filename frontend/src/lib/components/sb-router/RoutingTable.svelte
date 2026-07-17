@@ -29,6 +29,10 @@
     onDelete: (idx: number) => void;
     onMove: (idx: number, dir: 'up' | 'down') => void;
     bare?: boolean;
+    selectMode?: boolean;
+    selected?: Set<number>;
+    onToggleSelect?: (index: number) => void;
+    isSelectable?: (index: number) => boolean;
   }
 
   let {
@@ -42,9 +46,13 @@
     onDelete,
     onMove,
     bare = false,
+    selectMode = false,
+    selected = new Set(),
+    onToggleSelect = () => {},
+    isSelectable = () => false,
   }: Props = $props();
 
-  type ActionLabel = 'SNIFF' | 'HIJACK' | 'BYPASS' | 'REJECT' | 'ROUTE';
+  type ActionLabel = 'SNIFF' | 'HIJACK' | 'BYPASS' | 'REJECT' | 'ROUTE' | 'UDP TTL';
   type ActionVariant = 'default' | 'accent' | 'success' | 'error' | 'warning' | 'info' | 'muted';
 
   interface RowData {
@@ -88,6 +96,7 @@
   function actionDisplay(r: SingboxRouterRule): { label: ActionLabel; variant: ActionVariant } {
     if (r.action === 'sniff') return { label: 'SNIFF', variant: 'default' };
     if (r.action === 'hijack-dns') return { label: 'HIJACK', variant: 'default' };
+    if (r.action === 'route-options') return { label: 'UDP TTL', variant: 'info' };
     if (r.ip_is_private && r.action === 'route' && (!r.outbound || r.outbound === 'direct')) {
       return { label: 'BYPASS', variant: 'default' };
     }
@@ -97,7 +106,7 @@
 
   function outboundForRule(r: SingboxRouterRule): OutboundDisplay | null {
     const action = mapRuleAction(r);
-    if (action === 'sniff' || action === 'hijack-dns') return null;
+    if (action === 'sniff' || action === 'hijack-dns' || action === 'udp-timeout') return null;
     if (action === 'route' && !r.outbound) return null;
     return resolveOutboundDisplay(
       r.outbound,
@@ -143,9 +152,21 @@
       class:route={!row.sys && row.outboundDisplay?.kind !== 'direct' && row.outboundDisplay?.kind !== 'block'}
       title={row.tooltip}
     >
-      <div class="idx">{row.idx}</div>
+      <div class="idx">
+        {#if selectMode && isSelectable(row.idx)}
+          <input
+            type="checkbox"
+            class="rule-checkbox"
+            checked={selected.has(row.idx)}
+            onchange={() => onToggleSelect(row.idx)}
+            aria-label={`Выбрать правило ${row.idx}`}
+          />
+        {:else}
+          {row.idx}
+        {/if}
+      </div>
       <div class="reorder">
-        {#if !row.sys}
+        {#if !row.sys && !selectMode}
           <button
             type="button"
             class="route-reorder-btn"
@@ -288,6 +309,12 @@
     font-family: var(--font-mono);
     color: var(--text-muted);
     font-size: 12px;
+  }
+  .rule-checkbox {
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    accent-color: var(--accent);
   }
   .reorder {
     display: flex;

@@ -92,11 +92,16 @@ type fakeSingboxOperator struct {
 	lastSpecNR          *ExternalSpec // ApplyDeviceProxyNoReload call
 	lastSelector        string
 	lastMember          string
-	runtimeActive       string // what GetSelectorActive returns
+	runtimeActive       string                 // what GetSelectorActive returns
 	lastInstanceSpecs   []ExternalInstanceSpec // last ApplyDeviceProxyInstances call payload
 	applyInstancesCalls int                    // number of ApplyDeviceProxyInstances invocations
 	applyInstancesErr   error                  // error to return from ApplyDeviceProxyInstances (nil = succeed)
+	availableTags       map[string]bool        // enabled-slot outbound tags; nil = "unknown" (legacy)
 }
+
+// AvailableOutboundTags satisfies availableOutboundTagsProvider — the fake
+// mirrors the production SingboxAdapter: nil means the oracle is unknown.
+func (f *fakeSingboxOperator) AvailableOutboundTags() map[string]bool { return f.availableTags }
 
 func (f *fakeSingboxOperator) ApplyDeviceProxy(_ context.Context, spec ExternalSpec) error {
 	f.lastSpec = &spec
@@ -110,7 +115,7 @@ func (f *fakeSingboxOperator) TunnelTags() []string { return f.tags }
 func (f *fakeSingboxOperator) TunnelOutbounds() []TunnelOutboundInfo {
 	return f.tunnelInfos
 }
-func (f *fakeSingboxOperator) IsRunning() bool      { return f.running }
+func (f *fakeSingboxOperator) IsRunning() bool { return f.running }
 func (f *fakeSingboxOperator) SetSelectorDefault(_ context.Context, selector, member string) error {
 	f.lastSelector, f.lastMember = selector, member
 	return nil
@@ -198,7 +203,7 @@ func TestService_ListOutbounds_IncludesSystemTunnels(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
 	awgCatalog := &fakeAWGOutboundsCatalog{
 		tags: []AWGTagInfo{
-			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Kind: "system", Iface: "nwg0"},
+			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Iface: "nwg0"},
 		},
 	}
 	s := NewService(Deps{Store: store, AWGOutbounds: awgCatalog})
@@ -276,7 +281,7 @@ func TestService_SaveConfig_AppliesToSingbox_SystemTunnels(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "deviceproxy.json"))
 	awgCatalog := &fakeAWGOutboundsCatalog{
 		tags: []AWGTagInfo{
-			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Kind: "system", Iface: "nwg0"},
+			{Tag: "awg-sys-Wireguard0", Label: "My VPN", Iface: "nwg0"},
 		},
 	}
 	s := NewService(Deps{Store: store, Singbox: sb, NDMSQuery: ndms, AWGOutbounds: awgCatalog})
@@ -685,7 +690,7 @@ func TestService_BuildSpec_RouterOutboundsBecomeSelectorMembers(t *testing.T) {
 	s := NewService(Deps{Store: store, Singbox: sb, NDMSQuery: ndms})
 	s.SetRouterOutbounds(cat)
 
-	spec, err := s.buildSpec(context.Background(), Config{Enabled: true, ListenAll: true, Port: 1099})
+	spec, err := s.buildSpec(context.Background(), "default", Config{Enabled: true, ListenAll: true, Port: 1099})
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}

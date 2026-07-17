@@ -353,6 +353,12 @@ definitions:
       authenticated:
         example: true
         type: boolean
+      entwareAuthEnabled:
+        description: |-
+          EntwareAuthEnabled tells the (unauthenticated) login form that
+          Entware system credentials are accepted in addition to Keenetic ones.
+        example: false
+        type: boolean
       expiresIn:
         example: 3600
         type: integer
@@ -453,6 +459,96 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.ConfigSlotContentResponse:
+    properties:
+      content:
+        description: |-
+          Content — эффективное содержимое слота (pending-preferred), пустая
+          строка когда слот не сконфигурирован.
+        type: string
+      filename:
+        type: string
+      hasDraft:
+        type: boolean
+      slot:
+        type: string
+      state:
+        description: 'State: "active" | "disabled" | "absent" — где лежит применённый
+          файл.'
+        enum:
+        - active
+        - disabled
+        - absent
+        type: string
+    type: object
+  api.ConfigSlotInfo:
+    properties:
+      enabled:
+        type: boolean
+      filename:
+        example: 20-router.json
+        type: string
+      hasDraft:
+        type: boolean
+      mtime:
+        example: "2026-07-06T12:00:00Z"
+        type: string
+      ownership:
+        description: |-
+          Ownership: "system" — слот генерируется продюсером и перезаписывается
+          целиком; "user" — 90-user.json, пишется только редактором.
+        enum:
+        - system
+        - user
+        type: string
+      size:
+        description: |-
+          Size/MTime описывают «эффективное» содержимое (pending → active →
+          disabled). Size 0 и пустой MTime — слот ещё не сконфигурирован.
+        type: integer
+      slot:
+        example: router
+        type: string
+    type: object
+  api.ConfigSlotsResponse:
+    properties:
+      slots:
+        items:
+          $ref: '#/definitions/api.ConfigSlotInfo'
+        type: array
+    type: object
+  api.ConnectionBucketDTO:
+    properties:
+      bytesIn:
+        example: 4096
+        type: integer
+      bytesOut:
+        example: 1024
+        type: integer
+      count:
+        example: 12
+        type: integer
+      key:
+        example: '@direct'
+        type: string
+      label:
+        example: Напрямую
+        type: string
+    type: object
+  api.ConnectionKillData:
+    properties:
+      ok:
+        example: true
+        type: boolean
+    type: object
+  api.ConnectionKillEnvelope:
+    properties:
+      data:
+        $ref: '#/definitions/api.ConnectionKillData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.ConnectionProtocolsDTO:
     properties:
       icmp:
@@ -465,13 +561,34 @@ definitions:
         example: 12
         type: integer
     type: object
+  api.ConnectionRuleHitDTO:
+    properties:
+      fqdn:
+        example: m.youtube.com
+        type: string
+      listId:
+        example: list_6
+        type: string
+      listName:
+        example: YouTube
+        type: string
+      pattern:
+        example: youtube.com
+        type: string
+    type: object
   api.ConnectionStatsDTO:
     properties:
       direct:
         example: 30
         type: integer
+      local:
+        example: 5
+        type: integer
       protocols:
         $ref: '#/definitions/api.ConnectionProtocolsDTO'
+      singbox:
+        example: 3
+        type: integer
       total:
         example: 42
         type: integer
@@ -481,6 +598,18 @@ definitions:
     type: object
   api.ConnectionsData:
     properties:
+      byClient:
+        items:
+          $ref: '#/definitions/api.ConnectionBucketDTO'
+        type: array
+      byDst:
+        items:
+          $ref: '#/definitions/api.ConnectionBucketDTO'
+        type: array
+      byTunnel:
+        items:
+          $ref: '#/definitions/api.ConnectionBucketDTO'
+        type: array
       connections:
         items:
           $ref: '#/definitions/api.ConntrackConnectionDTO'
@@ -495,8 +624,9 @@ definitions:
       tunnels:
         additionalProperties:
           $ref: '#/definitions/api.TunnelConnectionInfoDTO'
-        description: 'Tunnels: per-tunnel counts; key "" is direct traffic (same as
-          query tunnel=direct / UI Direct chip).'
+        description: |-
+          Tunnels: сводка по маршрутам; ключи — tunnelID и псевдо-классы
+          "@direct" / "@singbox" / "@local".
         type: object
     type: object
   api.ConnectionsPaginationDTO:
@@ -547,6 +677,12 @@ definitions:
       bytes:
         example: 4096
         type: integer
+      bytesIn:
+        example: 3072
+        type: integer
+      bytesOut:
+        example: 1024
+        type: integer
       clientMac:
         example: aa:bb:cc:dd:ee:ff
         type: string
@@ -568,6 +704,13 @@ definitions:
       protocol:
         example: tcp
         type: string
+      routeClass:
+        example: tunnel
+        type: string
+      rules:
+        items:
+          $ref: '#/definitions/api.ConnectionRuleHitDTO'
+        type: array
       src:
         example: 192.168.1.100
         type: string
@@ -577,6 +720,9 @@ definitions:
       state:
         example: ESTABLISHED
         type: string
+      ttl:
+        example: 1183
+        type: integer
       tunnelId:
         example: tun_abc123
         type: string
@@ -617,6 +763,29 @@ definitions:
         example: 1420
         type: integer
     type: object
+  api.CreateSubscriptionGroupRequest:
+    properties:
+      enabled:
+        example: true
+        type: boolean
+      filterExclude:
+        type: string
+      filterInclude:
+        type: string
+      label:
+        example: Все европейские
+        type: string
+      mode:
+        description: '"urltest" (default) | "selector"'
+        example: urltest
+        type: string
+      urlTest:
+        $ref: '#/definitions/api.SubscriptionURLTestDTO'
+      useSubscriptionIds:
+        items:
+          type: string
+        type: array
+    type: object
   api.CreateSubscriptionRequest:
     properties:
       enabled:
@@ -627,6 +796,14 @@ definitions:
         items:
           type: string
         type: array
+      filterExclude:
+        description: regex «исключать» (по имени сервера)
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        description: regex «включать только» (по имени сервера)
+        example: (?i)(DE|NL)
+        type: string
       headers:
         items:
           $ref: '#/definitions/api.SubscriptionHeader'
@@ -662,6 +839,20 @@ definitions:
         type: integer
       refreshMode:
         example: interval
+        type: string
+    type: object
+  api.DecodeLinkResponse:
+    properties:
+      data:
+        $ref: '#/definitions/freeturn.LinkPayload'
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.DeleteSubscriptionGroupRequest:
+    properties:
+      id:
+        example: a1b2c3d4e5f60718293a4b5c
         type: string
     type: object
   api.DeviceProxyAuthDTO:
@@ -770,6 +961,12 @@ definitions:
         type: boolean
       defaultTag:
         example: proxy-01
+        type: string
+      degradedOutbound:
+        example: vpn
+        type: string
+      fallbackTag:
+        example: awg-awg10
         type: string
     type: object
   api.DiagnosticsStatusData:
@@ -1166,6 +1363,37 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.FreeTurnConfigResponse:
+    properties:
+      data:
+        $ref: '#/definitions/freeturn.Config'
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.FreeTurnStatusResponse:
+    properties:
+      data:
+        $ref: '#/definitions/freeturn.Status'
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.GenerateLinkResponse:
+    properties:
+      data:
+        properties:
+          clientId:
+            type: string
+          link:
+            type: string
+          peer:
+            type: string
+        type: object
+      success:
+        example: true
+        type: boolean
+    type: object
   api.GeoExpandData:
     properties:
       count:
@@ -1262,6 +1490,25 @@ definitions:
       data:
         items:
           $ref: '#/definitions/api.GeoFileEntryDTO'
+        type: array
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.GeoTagDTO:
+    properties:
+      count:
+        example: 1250
+        type: integer
+      name:
+        example: google
+        type: string
+    type: object
+  api.GeoTagsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.GeoTagDTO'
         type: array
       success:
         example: true
@@ -1476,12 +1723,21 @@ definitions:
       group:
         example: singbox
         type: string
+      lastSeen:
+        example: "2024-01-15T10:35:00Z"
+        type: string
       level:
         example: info
         type: string
       message:
         example: 'lookup succeed for node.example.org: 203.0.113.77'
         type: string
+      repeats:
+        description: |-
+          Схлопнутые повторы: Repeats — сколько идентичных записей свёрнуто в
+          эту (0 = уникальна), LastSeen — время последнего повтора.
+        example: 4
+        type: integer
       sanitized:
         example: false
         type: boolean
@@ -1518,7 +1774,7 @@ definitions:
         - error
         - fatal
         - panic
-        example: trace
+        example: info
         type: string
       singboxMaxEntries:
         example: 5000
@@ -2513,6 +2769,37 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.RoutingTunnelDTO:
+    properties:
+      available:
+        example: true
+        type: boolean
+      id:
+        example: tun_abc123
+        type: string
+      iface:
+        example: nwg0
+        type: string
+      name:
+        example: My VPN
+        type: string
+      status:
+        example: connected
+        type: string
+      type:
+        example: managed
+        type: string
+    type: object
+  api.RoutingTunnelsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.RoutingTunnelDTO'
+        type: array
+      success:
+        example: true
+        type: boolean
+    type: object
   api.SaveStatusDTO:
     properties:
       lastError:
@@ -2524,6 +2811,112 @@ definitions:
       state:
         type: string
     type: object
+  api.SelectiveCancelData:
+    properties:
+      cancelled:
+        description: |-
+          Cancelled is true when an active rebuild run was found and its
+          cancellation was requested; false when no rebuild was running.
+        type: boolean
+    type: object
+  api.SelectiveDomainMatcherRecordDTO:
+    properties:
+      cdn:
+        type: boolean
+      error:
+        type: string
+      kind:
+        type: string
+      matcher:
+        type: string
+      outbound:
+        type: string
+      queryHosts:
+        items:
+          type: string
+        type: array
+    type: object
+  api.SelectiveRebuildSnapshotDTO:
+    properties:
+      domainMatcherCount:
+        type: integer
+      domainResults:
+        items: {}
+        type: array
+      entryCount:
+        type: integer
+      lastCDNRefresh:
+        type: string
+      rebuiltAt:
+        type: string
+      staticCidrCount:
+        type: integer
+      staticCidrs:
+        items:
+          type: string
+        type: array
+    type: object
+  api.SelectiveSnapshotMatchersData:
+    properties:
+      limit:
+        type: integer
+      matchers:
+        items:
+          $ref: '#/definitions/api.SelectiveDomainMatcherRecordDTO'
+        type: array
+      offset:
+        type: integer
+      total:
+        type: integer
+    type: object
+  api.SelectiveStatusData:
+    properties:
+      available:
+        description: Available reports whether the ipset binary is present on the
+          router.
+        type: boolean
+      conntrackAvailable:
+        description: |-
+          ConntrackAvailable reports whether the conntrack binary is present.
+          Without it a routing change applies only to new connections (existing
+          flows linger until they expire).
+        type: boolean
+      enabled:
+        description: Enabled mirrors SingboxRouterSettings.SelectiveBypass.
+        type: boolean
+      entryCount:
+        description: |-
+          EntryCount is the current number of entries in the AWGM-SELECTIVE ipset.
+          0 when the set does not exist or is empty.
+        type: integer
+      installing:
+        description: Installing is true while opkg install ipset is running.
+        type: boolean
+      lastError:
+        description: LastError is the error message from the last failed rebuild,
+          or empty.
+        type: string
+      lastRebuild:
+        description: |-
+          LastRebuild is the RFC3339 timestamp of the last successful rebuild, or
+          empty string if no rebuild has run yet.
+        type: string
+      rebuilding:
+        description: |-
+          Rebuilding is true while an ipset rebuild is in flight (POST /rebuild
+          responds 202 and runs the rebuild in the background; completion is
+          delivered via the singbox-router:selective-status SSE event).
+        type: boolean
+      snapshot:
+        allOf:
+        - $ref: '#/definitions/api.SelectiveRebuildSnapshotDTO'
+        description: Snapshot is summary metadata from the last rebuild (no IP lists).
+      xtSetAvailable:
+        description: |-
+          XtSetAvailable reports whether the xt_set kernel module is loaded or
+          available as a .ko file (required for -m set iptables matching).
+        type: boolean
+    type: object
   api.ServerAddPeerRequestDTO:
     properties:
       description:
@@ -2533,11 +2926,118 @@ definitions:
         example: 10.0.14.2/32
         type: string
     type: object
+  api.ServerListenChangeData:
+    properties:
+      boundAddrs:
+        description: BoundAddrs are the ip:port addresses now listening (new bind
+          applied).
+        example:
+        - 192.168.1.1:8080
+        items:
+          type: string
+        type: array
+      confirmDeadline:
+        description: ConfirmDeadline is the RFC3339 revert moment.
+        example: "2026-07-11T12:02:00+03:00"
+        type: string
+      confirmToken:
+        description: |-
+          ConfirmToken must be presented to /server/listen/confirm before
+          confirmDeadline, otherwise the change is reverted. The token also
+          authenticates the confirm call by itself — the session cookie does not
+          survive a host (interface) change.
+        example: 9f3c...
+        type: string
+    type: object
+  api.ServerListenChangeRequest:
+    properties:
+      interfaces:
+        description: |-
+          Interfaces are kernel interface names to bind (each must have an IPv4
+          address); empty/omitted = all interfaces (0.0.0.0). A loopback listener
+          on 127.0.0.1 is always kept regardless of this list.
+        example:
+        - br0
+        items:
+          type: string
+        type: array
+      port:
+        description: Port to listen on (1-65535).
+        example: 2222
+        type: integer
+    type: object
+  api.ServerListenChangeResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.ServerListenChangeData'
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.ServerListenConfirmRequest:
+    properties:
+      token:
+        example: 9f3c...
+        type: string
+    type: object
+  api.ServerListenStateData:
+    properties:
+      boundAddrs:
+        description: BoundAddrs are the ip:port addresses with an active listener
+          right now.
+        example:
+        - 192.168.1.1:2222
+        items:
+          type: string
+        type: array
+      confirmDeadline:
+        description: ConfirmDeadline is the RFC3339 revert moment; empty when no change
+          is pending.
+        example: "2026-07-11T12:00:00+03:00"
+        type: string
+      interfaces:
+        description: Interfaces are kernel interface names the server binds to; empty
+          = all (0.0.0.0).
+        example:
+        - br0
+        items:
+          type: string
+        type: array
+      pendingConfirm:
+        description: PendingConfirm is true while an applied change awaits confirmation
+          (see confirmDeadline).
+        example: false
+        type: boolean
+      port:
+        description: Port the HTTP server is configured to listen on.
+        example: 2222
+        type: integer
+    type: object
+  api.ServerListenStateResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.ServerListenStateData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.ServerSettingsDTO:
     properties:
       interface:
+        description: |-
+          Interface is the legacy single bind interface (superseded by
+          interfaces; kept for downgrade compatibility).
         example: ""
         type: string
+      interfaces:
+        description: |-
+          Interfaces are kernel interface names the HTTP server binds to;
+          empty = all (0.0.0.0). Changed live via /server/listen/change.
+        example:
+        - br0
+        items:
+          type: string
+        type: array
       port:
         example: 8080
         type: integer
@@ -2655,6 +3155,12 @@ definitions:
         $ref: '#/definitions/api.DNSRouteSettingsDTO'
       download:
         $ref: '#/definitions/api.DownloadSettingsDTO'
+      entwareAuthEnabled:
+        description: |-
+          EntwareAuthEnabled allows login with Entware system credentials
+          (/opt/etc/shadow) verified locally, without the NDMS /auth call.
+        example: false
+        type: boolean
       geoFile:
         $ref: '#/definitions/api.GeoFileSettingsDTO'
       logging:
@@ -2673,6 +3179,15 @@ definitions:
         type: integer
       server:
         $ref: '#/definitions/api.ServerSettingsDTO'
+      sessionTtlHours:
+        description: |-
+          SessionTtlHours is the auth session lifetime in hours (1..720,
+          sliding window; server-side expiry applies immediately, browser
+          cookie Max-Age of existing sessions updates on next login).
+        example: 24
+        maximum: 720
+        minimum: 1
+        type: integer
       updates:
         $ref: '#/definitions/api.UpdateSettingsDTO'
       usageLevel:
@@ -2716,6 +3231,40 @@ definitions:
     properties:
       data:
         $ref: '#/definitions/api.SignatureCaptureData'
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.SignatureGenerateData:
+    properties:
+      byteSize:
+        example: 344
+        type: integer
+      ok:
+        example: true
+        type: boolean
+      packets:
+        $ref: '#/definitions/api.SignaturePacketsDTO'
+      protocol:
+        example: quic_initial
+        type: string
+      source:
+        example: generated
+        type: string
+    type: object
+  api.SignatureGenerateRequest:
+    properties:
+      mtu:
+        example: 1280
+        type: integer
+      protocol:
+        example: quic_initial
+        type: string
+    type: object
+  api.SignatureGenerateResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SignatureGenerateData'
       success:
         example: true
         type: boolean
@@ -2973,6 +3522,78 @@ definitions:
         example: ipv4_only
         type: string
     type: object
+  api.SingboxGeositesData:
+    properties:
+      baseUrl:
+        description: BaseURL + "geosite-" + name + ".srs" — готовый URL для rule-set.
+        example: https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/
+        type: string
+      fetchedAt:
+        example: "2026-07-12T10:00:00Z"
+        type: string
+      names:
+        description: |-
+          Names — имена наборов без префикса geosite- и суффикса .srs
+          (например "youtube", "category-ads-all", "xiaomi@cn").
+        items:
+          type: string
+        type: array
+      stale:
+        description: |-
+          Stale — список отдан из кэша, потому что обновление не удалось
+          (GitHub недоступен). Фронт показывает предупреждение при refresh=1.
+        type: boolean
+    type: object
+  api.SingboxInboundEntry:
+    properties:
+      idle:
+        description: |-
+          Idle is true when the inbound is a deliberate port reservation that
+          nothing currently feeds. The signal is grounded in the config itself:
+          no route rule of the inbound's own slot references it (no_route_rule),
+          or the NDMS-proxy toggle is off / the entity has no ProxyN allocated.
+        type: boolean
+      idleReason:
+        description: no_route_rule | ndms_proxy_disabled | ndms_proxy_missing | ""
+        type: string
+      listen:
+        description: listen address, e.g. 127.0.0.1
+        type: string
+      listenPort:
+        description: 0 when the inbound has no listen_port (tun)
+        type: integer
+      ownerLabel:
+        description: |-
+          OwnerLabel is the human-readable owner name (subscription/group label,
+          tunnel tag, device-proxy instance name). Empty when not resolvable.
+        type: string
+      slot:
+        description: |-
+          Slot is the orchestrator slot name the inbound came from
+          (base | tunnels | awg | qos-routes | router | fakeip | deviceproxy | subscriptions | ...).
+        type: string
+      source:
+        description: |-
+          Source refines the slot to the owning feature:
+          subscription | group | tunnel | deviceproxy | qos | engine | other.
+        type: string
+      tag:
+        type: string
+      type:
+        description: mixed | tun | tproxy | redirect | socks | http | ...
+        type: string
+    type: object
+  api.SingboxInboundsResponse:
+    properties:
+      inbounds:
+        items:
+          $ref: '#/definitions/api.SingboxInboundEntry'
+        type: array
+      warnings:
+        items:
+          type: string
+        type: array
+    type: object
   api.SingboxProxiesListResponse:
     properties:
       groups:
@@ -3027,6 +3648,15 @@ definitions:
       type:
         type: string
     type: object
+  api.SingboxRenameRequest:
+    properties:
+      newTag:
+        example: proxy-eu
+        type: string
+      oldTag:
+        example: proxy-01
+        type: string
+    type: object
   api.SingboxRouterApplyPresetRequest:
     properties:
       id:
@@ -3044,6 +3674,20 @@ definitions:
       policyName:
         example: Policy0
         type: string
+    type: object
+  api.SingboxRouterBulkUpdatedData:
+    properties:
+      updated:
+        example: 2
+        type: integer
+    type: object
+  api.SingboxRouterBulkUpdatedResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SingboxRouterBulkUpdatedData'
+      success:
+        example: true
+        type: boolean
     type: object
   api.SingboxRouterCreatePolicyRequest:
     properties:
@@ -3471,10 +4115,53 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.SingboxRouterQoSClassDTO:
+    properties:
+      dscp:
+        example: 46
+        maximum: 63
+        minimum: 0
+        type: integer
+      enabled:
+        example: true
+        type: boolean
+      name:
+        example: VoIP
+        maxLength: 32
+        type: string
+      outbound:
+        example: my-selector
+        type: string
+      slot:
+        description: |-
+          Slot is the backend-assigned stable listen-port slot (0-7). Read-only:
+          clients send classes without it and the backend re-associates each
+          class with its persisted slot by DSCP, so a class keeps its ports when
+          other classes are edited, disabled or removed. Any value sent by a
+          client is ignored.
+        example: 0
+        maximum: 7
+        minimum: 0
+        readOnly: true
+        type: integer
+    type: object
   api.SingboxRouterRouteFinalRequest:
     properties:
       final:
         example: direct
+        type: string
+    type: object
+  api.SingboxRouterRuleBulkOutboundRequest:
+    properties:
+      indices:
+        example:
+        - 0
+        - 2
+        items:
+          type: integer
+        type: array
+      outbound:
+        example: my-selector
         type: string
     type: object
   api.SingboxRouterRuleDTO:
@@ -3485,6 +4172,16 @@ definitions:
       domain_suffix:
         example:
         - .example.com
+        items:
+          type: string
+        type: array
+      inbound:
+        description: |-
+          Inbound matches sing-box listener tags the connection entered through.
+          Managed QoS-DSCP rules use the reserved tproxy-qos-N / redirect-qos-N
+          tag pair (N = DSCP codepoint).
+        example:
+        - tproxy-qos-46
         items:
           type: string
         type: array
@@ -3533,6 +4230,18 @@ definitions:
       to:
         example: 0
         type: integer
+    type: object
+  api.SingboxRouterRuleSetBulkDetourRequest:
+    properties:
+      downloadDetour:
+        example: direct
+        type: string
+      tags:
+        example:
+        - geosite-cn
+        items:
+          type: string
+        type: array
     type: object
   api.SingboxRouterRuleSetDTO:
     properties:
@@ -3629,7 +4338,8 @@ definitions:
       bypassPresets:
         description: |-
           BypassPresets lists active named port-bypass presets.
-          Valid values: "l2tp", "ntp", "netbios-smb".
+          Valid values: "l2tp", "ntp", "netbios-smb" (port-based), "keendns"
+          (destination-IP 78.47.125.180, KeenDNS/CrazeDNS).
         example:
         - l2tp
         items:
@@ -3657,6 +4367,14 @@ definitions:
           "" disables v6.
         example: fc00::/18
         type: string
+      fakeipRealServer:
+        description: |-
+          FakeIPRealServer is the upstream resolver the engine-managed "real" DNS
+          server forwards to (default "1.1.1.1"). Must be a plain IP address. Also
+          captured from a user edit of the "real" server address in the fakeip DNS
+          panel.
+        example: 1.1.1.1
+        type: string
       fakeipStack:
         description: |-
           --- fakeip-tun engine settings (user-editable) ---
@@ -3678,6 +4396,16 @@ definitions:
       policyName:
         example: awgm-router
         type: string
+      qosClasses:
+        description: |-
+          QoSClasses lists DSCP-based QoS traffic classes routed to dedicated
+          outbounds. At most 8 classes; DSCP must be 0-63 and unique across
+          classes; outbound is required; name is limited to 32 characters.
+          Only effective when routingMode is "tproxy" and xt_dscp is available
+          (see status.xtDscpAvailable). Empty = feature off.
+        items:
+          $ref: '#/definitions/api.SingboxRouterQoSClassDTO'
+        type: array
       routingMode:
         enum:
         - tproxy
@@ -3689,9 +4417,9 @@ definitions:
         type: boolean
       udpTimeout:
         description: |-
-          UDPTimeout sets the UDP session timeout for the tproxy-in inbound
-          (Go duration string, e.g. "3m0s", "10m0s"). Empty = use default (3m0s).
-          Increase to prevent long-quiet UDP applications (games, etc.) from
+          UDPTimeout sets the UDP session timeout for the tproxy-in / fakeip tun-in
+          inbound (Go duration string, e.g. "5m0s", "10m0s"). Empty = use default
+          (5m0s). Increase to prevent long-quiet UDP applications (games, etc.) from
           having their sessions silently dropped mid-game.
         example: 10m0s
         type: string
@@ -3723,6 +4451,10 @@ definitions:
       active:
         example: true
         type: boolean
+      crashCount:
+        description: 'CrashCount — падения sing-box за последние 10 минут (issue #456).'
+        example: 2
+        type: integer
       deviceCount:
         example: 3
         type: integer
@@ -3754,6 +4486,11 @@ definitions:
         items:
           $ref: '#/definitions/api.SingboxRouterIssueDTO'
         type: array
+      lastCrashReason:
+        description: LastCrashReason — причина последнего падения в окне (например,
+          OOM-kill).
+        example: sing-box убит OOM-killer'ом
+        type: string
       lastError:
         example: engine start failed
         type: string
@@ -3778,6 +4515,12 @@ definitions:
       policyName:
         example: awgm-router
         type: string
+      restartSuppressedUntil:
+        description: |-
+          RestartSuppressedUntil — RFC3339-время окончания паузы авто-перезапуска
+          (анти crash-loop); пусто, когда авто-перезапуск не подавлен.
+        example: "2026-07-06T12:34:56+03:00"
+        type: string
       ruleCount:
         example: 12
         type: integer
@@ -3788,6 +4531,13 @@ definitions:
         example: true
         type: boolean
       tproxyTargetAvailable:
+        example: true
+        type: boolean
+      xtDscpAvailable:
+        description: |-
+          XtDscpAvailable reports whether iptables DSCP matching is usable
+          (xt_dscp kernel module present AND iptables `-m dscp` extension works).
+          The QoS-DSCP settings UI keys its "supported" badge on this field.
         example: true
         type: boolean
     type: object
@@ -4004,6 +4754,23 @@ definitions:
         example: tcp
         type: string
     type: object
+  api.SingboxTunnelGetData:
+    properties:
+      outbound:
+        additionalProperties: true
+        type: object
+      tag:
+        example: proxy-01
+        type: string
+    type: object
+  api.SingboxTunnelGetResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SingboxTunnelGetData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.SingboxTunnelsResponse:
     properties:
       data:
@@ -4150,6 +4917,16 @@ definitions:
         items:
           type: string
         type: array
+      filterExclude:
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        example: (?i)(DE|NL)
+        type: string
+      filteredMembers:
+        items:
+          $ref: '#/definitions/api.SubscriptionMemberDTO'
+        type: array
       headers:
         items:
           $ref: '#/definitions/api.SubscriptionHeader'
@@ -4218,6 +4995,79 @@ definitions:
         type: string
       urlTest:
         $ref: '#/definitions/api.SubscriptionURLTestDTO'
+    type: object
+  api.SubscriptionGroupDTO:
+    properties:
+      enabled:
+        example: true
+        type: boolean
+      filterExclude:
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        example: (?i)(DE|NL)
+        type: string
+      id:
+        example: a1b2c3d4e5f60718293a4b5c
+        type: string
+      inboundTag:
+        example: agg-a1b2c3d4-in
+        type: string
+      label:
+        example: Все европейские
+        type: string
+      listenPort:
+        example: 11002
+        type: integer
+      memberCount:
+        example: 12
+        type: integer
+      members:
+        items:
+          $ref: '#/definitions/api.SubscriptionGroupMemberDTO'
+        type: array
+      mode:
+        example: urltest
+        type: string
+      proxyIndex:
+        example: 2
+        type: integer
+      tag:
+        example: agg-a1b2c3d4
+        type: string
+      urlTest:
+        $ref: '#/definitions/api.SubscriptionURLTestDTO'
+      useSubscriptionIds:
+        items:
+          type: string
+        type: array
+    type: object
+  api.SubscriptionGroupListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.SubscriptionGroupDTO'
+        type: array
+      success:
+        example: true
+        type: boolean
+    type: object
+  api.SubscriptionGroupMemberDTO:
+    properties:
+      label:
+        example: "\U0001F1E9\U0001F1EA Frankfurt-1"
+        type: string
+      tag:
+        example: sub-abc12345-aabbccdd
+        type: string
+    type: object
+  api.SubscriptionGroupResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SubscriptionGroupDTO'
+      success:
+        example: true
+        type: boolean
     type: object
   api.SubscriptionHeader:
     properties:
@@ -4913,8 +5763,19 @@ definitions:
       currentVersion:
         example: 2.5.0
         type: string
+      lastAutoInstallAt:
+        example: "2024-01-15T05:00:00Z"
+        type: string
       latestVersion:
         example: 2.5.0
+        type: string
+      nextAutoInstallAt:
+        description: |-
+          NextAutoInstallAt/LastAutoInstallAt are computed by the auto-install
+          scheduler (internal/updater.Service.NextAutoInstallAt), not stored on
+          the cached UpdateInfo — they are injected into the response in both
+          the cached and force=true branches of Check (task #559-4, MAJOR-2).
+        example: "2024-01-16T05:00:00Z"
         type: string
     type: object
   api.UpdatePeerRequestDTO:
@@ -4955,6 +5816,26 @@ definitions:
     type: object
   api.UpdateSettingsDTO:
     properties:
+      autoInstallEnabled:
+        description: |-
+          AutoInstallEnabled turns on unattended installation of checked
+          updates on the configured schedule.
+        example: false
+        type: boolean
+      autoInstallIntervalDays:
+        description: |-
+          AutoInstallIntervalDays is the minimum number of days between
+          auto-install attempts, 1..30.
+        example: 7
+        maximum: 30
+        minimum: 1
+        type: integer
+      autoInstallTime:
+        description: |-
+          AutoInstallTime is the daily "HH:MM" (24h) window an auto-install
+          attempt may start in.
+        example: "05:00"
+        type: string
       channel:
         enum:
         - stable
@@ -4965,10 +5846,38 @@ definitions:
         example: true
         type: boolean
     type: object
+  api.UpdateSubscriptionGroupRequest:
+    properties:
+      enabled:
+        type: boolean
+      filterExclude:
+        type: string
+      filterInclude:
+        type: string
+      label:
+        type: string
+      mode:
+        example: selector
+        type: string
+      urlTest:
+        $ref: '#/definitions/api.SubscriptionURLTestDTO'
+      useSubscriptionIds:
+        items:
+          type: string
+        type: array
+    type: object
   api.UpdateSubscriptionRequest:
     properties:
       enabled:
         type: boolean
+      filterExclude:
+        description: regex «исключать»; "" снимает фильтр
+        example: (?i)(RU|Russia)
+        type: string
+      filterInclude:
+        description: regex «включать только»; "" снимает фильтр
+        example: (?i)(DE|NL)
+        type: string
       headers:
         items:
           $ref: '#/definitions/api.SubscriptionHeader'
@@ -4986,6 +5895,33 @@ definitions:
         type: string
       urlTest:
         $ref: '#/definitions/api.SubscriptionURLTestDTO'
+    type: object
+  api.UserConfigApplyResponse:
+    properties:
+      ok:
+        type: boolean
+      warnings:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
+    type: object
+  api.UserConfigCheckResponse:
+    properties:
+      errors:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
+      ok:
+        type: boolean
+      warnings:
+        items:
+          $ref: '#/definitions/api.RouterValidationErrorDTO'
+        type: array
+    type: object
+  api.UserConfigEnableRequest:
+    properties:
+      enabled:
+        type: boolean
     type: object
   api.WANIPData:
     properties:
@@ -5241,6 +6177,200 @@ definitions:
         type: string
       sni:
         type: string
+    type: object
+  freeturn.ClientConfig:
+    properties:
+      bond:
+        description: -bond, only meaningful with mode=tcp
+        type: boolean
+      browser:
+        description: -browser, chrome|firefox, provider=vk only
+        type: string
+      clientId:
+        description: -client-id, auto-generated if empty
+        type: string
+      debug:
+        type: boolean
+      dnsMode:
+        description: -dns-mode, plain|doh|auto
+        type: string
+      dnsServers:
+        description: -dns-servers, ip[:port][,ip[:port]...]
+        type: string
+      enabled:
+        type: boolean
+      links:
+        description: -links, comma-separated VK Calls URLs; required when provider=vk
+        type: string
+      listen:
+        description: -listen, local addr WG/Xray connects to (default 127.0.0.1:9000)
+        type: string
+      manualCaptcha:
+        description: -manual-captcha, provider=vk only
+        type: boolean
+      mode:
+        description: -mode, udp|tcp (tunnel mode)
+        type: string
+      obfKey:
+        description: -obf-key, 64 hex chars, required if obfProfile != none
+        type: string
+      obfProfile:
+        description: -obf-profile, none|rtpopus|rtpopus2|rtpopus3 (internal/config/config.go
+          ObfProfile enum; upstream docs/flags.md lags behind)
+        type: string
+      peer:
+        description: '-peer, required: VPS server addr host:port'
+        type: string
+      provider:
+        description: -provider, default "vk"
+        type: string
+      streams:
+        description: |-
+          (-link, singular, is upstream's deprecated one-link alias — we always
+          emit -links so multiple call links, i.e. multiple credential pools,
+          work: see internal/config/config.go in samosvalishe/free-turn-proxy.)
+        type: integer
+      streamsPerCred:
+        description: -streams-per-cred, provider=vk only
+        type: integer
+      sub:
+        description: -sub, subscription URL (see docs/sub.md)
+        type: string
+      transport:
+        description: -transport, tcp|udp (transport to TURN relay)
+        type: string
+      turnHost:
+        description: -turn, override TURN server IP
+        type: string
+      turnPort:
+        description: -port, override TURN server port
+        type: integer
+    type: object
+  freeturn.Config:
+    properties:
+      client:
+        $ref: '#/definitions/freeturn.ClientConfig'
+      server:
+        $ref: '#/definitions/freeturn.ServerConfig'
+    type: object
+  freeturn.LinkPayload:
+    properties:
+      bond:
+        type: boolean
+      cid:
+        description: -client-id — owner must allowlist this in clients.json
+        type: string
+      dns:
+        type: string
+      dnss:
+        type: string
+      key:
+        type: string
+      listen:
+        type: string
+      mcap:
+        type: boolean
+      mode:
+        type: string
+      mtu:
+        description: 'awg-manager extensions, not part of the upstream spec:'
+        type: integer
+      "n":
+        description: -n, parallel TURN streams
+        type: integer
+      name:
+        description: comment for the owner's own clients.json entry
+        type: string
+      obf:
+        type: string
+      peer:
+        type: string
+      provider:
+        type: string
+      spc:
+        description: -streams-per-cred
+        type: integer
+      transport:
+        type: string
+      v:
+        type: integer
+      wg:
+        description: optional bundled WireGuard client config
+        type: string
+    type: object
+  freeturn.ProcessStatus:
+    properties:
+      binary:
+        description: |-
+          Binary is the configured binary path; BinaryPresent reports whether
+          an executable actually exists there. awg-manager does NOT ship the
+          freeturn binaries — the panel uses this to show an honest
+          «установите бинарь» hint instead of an opaque exec error on Start.
+        type: string
+      binaryPresent:
+        type: boolean
+      lastError:
+        description: |-
+          LastError holds the tail of stderr from the most recent exit, only
+          populated when the process is not currently running and the last
+          run ended in a failure (e.g. missing -peer, captcha required, etc).
+        type: string
+      log:
+        description: |-
+          Log is the tail of combined stdout+stderr from the current (or most
+          recent) run — e.g. TURN allocation / VK-auth progress, handshake
+          confirmations — so the panel can show whether the tunnel actually
+          connected instead of just "running".
+        type: string
+      pid:
+        type: integer
+      running:
+        type: boolean
+      startedAt:
+        type: string
+    type: object
+  freeturn.ServerConfig:
+    properties:
+      clientsFile:
+        description: -clients-file, enables Client-ID allowlist auth
+        type: string
+      connect:
+        description: '-connect, required: local backend host:port'
+        type: string
+      debug:
+        type: boolean
+      enabled:
+        type: boolean
+      listen:
+        description: -listen, default 0.0.0.0:56000
+        type: string
+      mode:
+        description: -mode, udp|tcp
+        type: string
+      obfKey:
+        description: -obf-key
+        type: string
+      obfProfile:
+        description: -obf-profile, none|rtpopus|rtpopus2|rtpopus3
+        type: string
+    type: object
+  freeturn.Status:
+    properties:
+      client:
+        $ref: '#/definitions/freeturn.ProcessStatus'
+      installAvailable:
+        description: |-
+          InstallAvailable: для этой архитектуры есть закреплённая сборка и
+          загрузчик — панель может предложить установку в один клик.
+        type: boolean
+      installVersion:
+        description: InstallVersion — версия freeturn, которую поставит установка.
+        type: string
+      installing:
+        description: Installing — установка сейчас идёт (кнопка блокируется).
+        type: boolean
+      server:
+        $ref: '#/definitions/freeturn.ProcessStatus'
     type: object
   presets.DNSEngine:
     properties:
@@ -5777,10 +6907,15 @@ paths:
     post:
       consumes:
       - application/json
-      description: Authenticates with Keenetic credentials; sets HttpOnly session
-        cookie awg_session.
+      description: Authenticates with Keenetic credentials (or, when entwareAuthEnabled,
+        Entware system credentials verified locally first); sets HttpOnly session
+        cookie awg_session. Every failed attempt in which credentials were checked
+        (including a local Entware check while the router is unreachable) is delayed
+        300ms and counted; after 5 such failures per client IP the endpoint responds
+        429 for 30 seconds. Router-unavailable failures without any credential check
+        are not counted.
       parameters:
-      - description: Router login and password
+      - description: Router (or Entware) login and password
         in: body
         name: body
         required: true
@@ -5799,6 +6934,10 @@ paths:
             $ref: '#/definitions/api.APIErrorEnvelope'
         "401":
           description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "429":
+          description: Too Many Requests
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
         "503":
@@ -5830,6 +6969,8 @@ paths:
       - auth
   /auth/status:
     get:
+      description: Unauthenticated endpoint. Also reports entwareAuthEnabled so the
+        login form can adjust its copy.
       produces:
       - application/json
       responses:
@@ -6004,6 +7145,53 @@ paths:
       tags:
       - client-routes
   /connections:
+    delete:
+      parameters:
+      - description: source IP
+        in: query
+        name: src
+        required: true
+        type: string
+      - description: destination IP
+        in: query
+        name: dst
+        required: true
+        type: string
+      - description: source port
+        in: query
+        name: srcPort
+        required: true
+        type: integer
+      - description: destination port
+        in: query
+        name: dstPort
+        required: true
+        type: integer
+      - description: tcp | udp
+        in: query
+        name: protocol
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ConnectionKillEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Kill connection
+      tags:
+      - connections
     get:
       produces:
       - application/json
@@ -6762,6 +7950,68 @@ paths:
       summary: Adopt external tunnel
       tags:
       - tunnels
+  /freeturn/client/config:
+    put:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.FreeTurnConfigResponse'
+      summary: Update FreeTurn client configuration
+  /freeturn/config:
+    get:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.FreeTurnConfigResponse'
+      summary: Get FreeTurn client+server configuration
+  /freeturn/install:
+    post:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.APIEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Download and activate the pinned freeturn client+server binaries
+      tags:
+      - freeturn
+  /freeturn/link/decode:
+    post:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.DecodeLinkResponse'
+      summary: Decode a freeturn:// share link
+  /freeturn/server/config:
+    put:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.FreeTurnConfigResponse'
+      summary: Update FreeTurn server configuration
+  /freeturn/server/link:
+    post:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.GenerateLinkResponse'
+      summary: Generate a freeturn:// share link from the current server config
+  /freeturn/status:
+    get:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.FreeTurnStatusResponse'
+      summary: Get FreeTurn client+server live process status
   /health:
     get:
       description: Cheap check for frontend pollers; no NDMS or I/O.
@@ -7062,9 +8312,7 @@ paths:
         "200":
           description: OK
           schema:
-            items:
-              type: string
-            type: array
+            $ref: '#/definitions/api.GeoTagsResponse'
       security:
       - CookieAuth: []
       summary: HydraRoute geo tags
@@ -8634,7 +9882,12 @@ paths:
       - device-proxy
   /routing/access-policies:
     get:
-      description: Always {"data":[]}. Real data on KeeneticOS 5 only.
+      description: KeeneticOS 5 only when route is registered.
+      parameters:
+      - description: Pass 'true' to bypass NDMS cache
+        in: query
+        name: refresh
+        type: string
       produces:
       - application/json
       responses:
@@ -8642,19 +9895,15 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.AccessPoliciesListResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/api.APIErrorEnvelope'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: OS4 access policies stub
+      summary: List access policies
       tags:
-      - routing
+      - access-policy
   /routing/client-routes:
     get:
       produces:
@@ -8724,7 +9973,6 @@ paths:
       - access-policy
   /routing/policy-interfaces:
     get:
-      description: Always {"data":[]}. Real data on KeeneticOS 5 only.
       produces:
       - application/json
       responses:
@@ -8732,19 +9980,15 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.PolicyInterfacesListResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/api.APIErrorEnvelope'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: OS4 policy interfaces stub
+      summary: List global policy interfaces
       tags:
-      - routing
+      - access-policy
   /routing/refresh:
     post:
       produces:
@@ -8825,9 +10069,7 @@ paths:
         "200":
           description: OK
           schema:
-            items:
-              type: object
-            type: array
+            $ref: '#/definitions/api.RoutingTunnelsResponse'
         "400":
           description: Bad Request
           schema:
@@ -8841,6 +10083,99 @@ paths:
       summary: Routing tunnel catalog
       tags:
       - routing
+  /server/listen:
+    get:
+      description: Returns the configured port/interfaces, the ip:port addresses with
+        an active listener, and whether an applied change is still awaiting confirmation.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServerListenStateResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Get HTTP listen state
+      tags:
+      - server
+  /server/listen/change:
+    post:
+      consumes:
+      - application/json
+      description: 'Applies the new port/interfaces immediately without restarting
+        the daemon: new listeners are bound first, old ones closed after (the server
+        is never left without a listener). The change is NOT persisted yet — call
+        /server/listen/confirm with the returned token before confirmDeadline, otherwise
+        listeners revert to the previous address. A 127.0.0.1 listener is always kept
+        (NDMS reverse proxy, health probes, rescue hatch).'
+      parameters:
+      - description: New port and interface list (empty list = all interfaces)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.ServerListenChangeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ServerListenChangeResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Change HTTP listen address (live, confirm-or-revert)
+      tags:
+      - server
+  /server/listen/confirm:
+    post:
+      consumes:
+      - application/json
+      description: Cancels the scheduled revert and persists the new port/interfaces
+        to settings. Authenticated by the one-time token returned from /server/listen/change
+        (a session is not required — it does not survive a host change).
+      parameters:
+      - description: One-time confirm token
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.ServerListenConfirmRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Confirm a pending HTTP listen change
+      tags:
+      - server
   /servers/{name}/endpoint:
     post:
       consumes:
@@ -9057,9 +10392,7 @@ paths:
         "200":
           description: OK
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/api.PeerConfResponse'
         "404":
           description: Not Found
           schema:
@@ -9462,6 +10795,37 @@ paths:
       summary: Signature capture
       tags:
       - signature
+  /signature/generate:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Protocol and optional MTU
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.SignatureGenerateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SignatureGenerateResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Signature generate
+      tags:
+      - signature
   /singbox/awg-outbounds/tags:
     get:
       description: Returns the catalog of AWG-direct outbound tags currently exposed
@@ -9517,11 +10881,270 @@ paths:
       summary: Get merged sing-box configuration preview
       tags:
       - singbox
+  /singbox/config/slot:
+    get:
+      description: Эффективное содержимое слота (pending-preferred, затем active,
+        затем disabled) — для read-only просмотра системных слотов и загрузки user-слота
+        в редактор.
+      parameters:
+      - description: slot name (e.g. router, user)
+        in: query
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.ConfigSlotContentResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: unknown slot
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Get sing-box config slot content
+      tags:
+      - singbox-config
+  /singbox/config/slots:
+    get:
+      description: 'Возвращает все известные слоты config.d в порядке merge: имя,
+        файл, владелец (system — генерируется автоматически, user — 90-user.json эксперт-редактора),
+        включён ли слот, есть ли черновик и размер/время эффективного содержимого.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.ConfigSlotsResponse'
+              type: object
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List sing-box config.d slots
+      tags:
+      - singbox-config
+  /singbox/config/user:
+    put:
+      consumes:
+      - application/json
+      description: Тело запроса — сырой JSON слота целиком (не DTO, кап 1 МБ). Сервер
+        проверяет синтаксис и что верхний уровень — объект, затем пишет черновик pending/90-user.json.
+        Черновик инертен до /apply.
+      parameters:
+      - description: полный JSON слота
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: malformed JSON / not an object
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Save user config slot draft
+      tags:
+      - singbox-config
+  /singbox/config/user/apply:
+    post:
+      description: Валидирует черновик (кросс-слот + sing-box check) и атомарно коммитит
+        pending → active. Отключённый слот включается ПОСЛЕ успешного apply (провал
+        валидации оставляет слот припаркованным, старый конфиг не воскресает). В 200-ответе
+        могут быть advisory-предупреждения (warnings). Применение — debounced SIGHUP;
+        добавление/удаление tun-inbound вызовет полный рестарт sing-box.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.UserConfigApplyResponse'
+              type: object
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: no draft to apply
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/api.RouterStagingValidationError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Apply user config slot draft
+      tags:
+      - singbox-config
+  /singbox/config/user/check:
+    post:
+      consumes:
+      - application/json
+      description: 'Полный пайплайн валидации (кросс-слот + `sing-box check` над tmpdir-снапшотом
+        «как если бы применили») БЕЗ записи. Тело опционально: непустое — проверяем
+        его; пустое — проверяем текущий черновик; ни того ни другого — 409. Это запрос-вопрос,
+        поэтому логический провал — 200 {ok:false}, а не 422.'
+      parameters:
+      - description: полный JSON слота (опционально)
+        in: body
+        name: body
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.UserConfigCheckResponse'
+              type: object
+        "400":
+          description: malformed JSON / not an object
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: no body and no draft
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Validate user config slot
+      tags:
+      - singbox-config
+  /singbox/config/user/discard:
+    post:
+      description: Удаляет pending/90-user.json. Идемпотентно.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Discard user config slot draft
+      tags:
+      - singbox-config
+  /singbox/config/user/enable:
+    post:
+      consumes:
+      - application/json
+      description: Переносит 90-user.json между config.d/ и config.d/disabled/ — слот
+        можно «припарковать» целиком, не удаляя содержимое (вместо применения пустого
+        {}).
+      parameters:
+      - description: target state
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UserConfigEnableRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.OkResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Enable/disable user config slot
+      tags:
+      - singbox-config
   /singbox/connections/clients:
     get:
-      description: Returns the current NDMS hotspot mapping of source IPs to device
-        display names. Cached upstream (TTL 30s). On any error returns 200 with an
-        empty map (best-effort) so the UI keeps working with raw IPs.
+      description: 'Returns the current mapping of source IPs to display names: NDMS
+        hotspot devices (cached upstream, TTL 30s) merged with WireGuard-server peer
+        names — both system/NDMS VPN servers (peer description keyed by the /32 allowed
+        IP) and awg-manager managed servers (peer description keyed by the tunnel
+        IP). Hotspot names win on collision. On any error returns 200 with whatever
+        subset resolved (best-effort) so the UI keeps working with raw IPs.'
       produces:
       - application/json
       responses:
@@ -10183,6 +11806,40 @@ paths:
       summary: Add fakeip-config route rule
       tags:
       - singbox-fakeip
+  /singbox/fakeip/config/rules/bulk-outbound:
+    post:
+      consumes:
+      - application/json
+      description: Sets Outbound on every route rule at the given indices in a single
+        config write (fakeip-tun slot). Rejects an empty/duplicate index list, an
+        out-of-range index, a non-route rule, or an unknown outbound tag.
+      parameters:
+      - description: Rule indices + new outbound tag
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleBulkOutboundRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set outbound on fakeip-config route rules
+      tags:
+      - singbox-fakeip
   /singbox/fakeip/config/rules/delete:
     post:
       consumes:
@@ -10338,6 +11995,41 @@ paths:
       summary: Add fakeip-config ruleset
       tags:
       - singbox-fakeip
+  /singbox/fakeip/config/rulesets/bulk-detour:
+    post:
+      consumes:
+      - application/json
+      description: Sets download_detour on every rule set with a tag in the given
+        list, in a single config write (fakeip-tun slot). Rejects an empty/duplicate
+        tag list, an unknown tag, a rule set whose type isn't "remote", or an unknown
+        outbound tag (empty detour clears the field and skips the known-tag check).
+      parameters:
+      - description: Rule set tags + new download_detour
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleSetBulkDetourRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set download_detour on fakeip-config rulesets
+      tags:
+      - singbox-fakeip
   /singbox/fakeip/config/rulesets/delete:
     post:
       consumes:
@@ -10434,6 +12126,41 @@ paths:
       summary: Update fakeip-config ruleset
       tags:
       - singbox-fakeip
+  /singbox/inbounds:
+    get:
+      description: 'Walks every active config.d slot file, extracts its `inbounds`
+        array and attributes each inbound to its owning feature (subscription, aggregate
+        group, tunnel, device-proxy, QoS, engine). Idle inbounds are deliberate port
+        reservations nothing currently feeds: no route rule of the inbound''s own
+        slot references it (no_route_rule), the NDMS-proxy toggle is off (ndms_proxy_disabled)
+        or the entity has no ProxyN allocated (ndms_proxy_missing). Unreadable slot
+        files and duplicate inbound tags are reported in `warnings` instead of failing
+        the request.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.SingboxInboundsResponse'
+              type: object
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List all inbounds of the merged sing-box configuration
+      tags:
+      - singbox
   /singbox/install:
     post:
       produces:
@@ -11134,6 +12861,36 @@ paths:
       summary: Enable singbox-router
       tags:
       - singbox-router
+  /singbox/router/geosites/list:
+    get:
+      description: Full list of geosite rule-set names from the SagerNet/sing-geosite
+        rule-set branch, cached for 24h. Pass refresh=1 to force a re-fetch.
+      parameters:
+      - description: 1 = force refresh
+        in: query
+        name: refresh
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.OkResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.SingboxGeositesData'
+              type: object
+        "502":
+          description: listing fetch failed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List SagerNet sing-geosite catalog
+      tags:
+      - singbox-router
   /singbox/router/ingress-eligible-interfaces:
     get:
       description: Returns router interfaces eligible for sing-box ingress-scope (bindable
@@ -11814,6 +13571,40 @@ paths:
       summary: Add singbox-router rule
       tags:
       - singbox-router
+  /singbox/router/rules/bulk-outbound:
+    post:
+      consumes:
+      - application/json
+      description: Sets Outbound on every route rule at the given indices in a single
+        config write. Rejects an empty/duplicate index list, an out-of-range index,
+        a non-route rule, or an unknown outbound tag.
+      parameters:
+      - description: Rule indices + new outbound tag
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleBulkOutboundRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set outbound on singbox-router rules
+      tags:
+      - singbox-router
   /singbox/router/rules/delete:
     post:
       consumes:
@@ -11968,6 +13759,41 @@ paths:
       summary: Add singbox-router ruleset
       tags:
       - singbox-router
+  /singbox/router/rulesets/bulk-detour:
+    post:
+      consumes:
+      - application/json
+      description: Sets download_detour on every rule set with a tag in the given
+        list, in a single config write. Rejects an empty/duplicate tag list, an unknown
+        tag, a rule set whose type isn't "remote", or an unknown outbound tag (empty
+        detour clears the field and skips the known-tag check).
+      parameters:
+      - description: Rule set tags + new download_detour
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleSetBulkDetourRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set download_detour on singbox-router rulesets
+      tags:
+      - singbox-router
   /singbox/router/rulesets/dat-url:
     get:
       parameters:
@@ -12101,6 +13927,131 @@ paths:
       security:
       - CookieAuth: []
       summary: Update singbox-router ruleset
+      tags:
+      - singbox-router
+  /singbox/router/selective/install-conntrack:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SelectiveStatusData'
+      security:
+      - CookieAuth: []
+      summary: Install conntrack-tools package
+      tags:
+      - singbox-router
+  /singbox/router/selective/install-deps:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SelectiveStatusData'
+        "409":
+          description: already installing
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Install ipset package
+      tags:
+      - singbox-router
+  /singbox/router/selective/rebuild:
+    post:
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: rebuild started (or already running); rebuilding reflects live
+            state
+          schema:
+            $ref: '#/definitions/api.SelectiveStatusData'
+        "409":
+          description: sing-box config apply in progress
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "503":
+          description: builder not configured
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Force ipset rebuild (asynchronous)
+      tags:
+      - singbox-router
+  /singbox/router/selective/rebuild/cancel:
+    post:
+      description: Requests cancellation of the in-flight selective ipset rebuild.
+        Returns cancelled=false when no rebuild is running (safe no-op). Completion
+        is delivered via the selective-progress/selective-status SSE events.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SelectiveCancelData'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Cancel a running ipset rebuild
+      tags:
+      - singbox-router
+  /singbox/router/selective/snapshot/matchers:
+    get:
+      description: Returns a paginated slice of matcher records (DNS query hosts,
+        no IPs) from the NDJSON snapshot.
+      parameters:
+      - default: 0
+        description: Zero-based record offset
+        in: query
+        name: offset
+        type: integer
+      - default: 200
+        description: Page size (max 1000)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SelectiveSnapshotMatchersData'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: List domain matchers from last ipset rebuild
+      tags:
+      - singbox-router
+  /singbox/router/selective/status:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SelectiveStatusData'
+      security:
+      - CookieAuth: []
+      summary: Selective-bypass status
       tags:
       - singbox-router
   /singbox/router/settings:
@@ -12468,6 +14419,10 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
         "412":
           description: Precondition Failed
           schema:
@@ -12570,6 +14525,138 @@ paths:
       security:
       - CookieAuth: []
       summary: Stream subscription details progressively (SSE)
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups:
+    get:
+      description: Returns configured aggregate groups (one selector/urltest across
+        several subscriptions) with server-side resolved member previews.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SubscriptionGroupListResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: List aggregate subscription groups
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups/create:
+    post:
+      consumes:
+      - application/json
+      description: Creates a selector/urltest group over members of several subscriptions
+        with optional regex filters. Invalid regex or unknown subscription id → 400.
+      parameters:
+      - description: create request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateSubscriptionGroupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SubscriptionGroupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: sing-box validation rejected the group
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Create aggregate subscription group
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups/delete:
+    post:
+      consumes:
+      - application/json
+      description: Removes the group outbound, its mixed inbound / route rule and
+        the NDMS ProxyN, then drops the group from storage.
+      parameters:
+      - description: group id
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/api.DeleteSubscriptionGroupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.APIEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Delete aggregate subscription group
+      tags:
+      - subscriptions
+  /singbox/subscriptions/groups/update:
+    put:
+      consumes:
+      - application/json
+      description: Applies a partial patch (label, mode, urltest, subscriptions, filters,
+        enabled) and re-materializes the group with a single reload.
+      parameters:
+      - description: group id
+        in: query
+        name: id
+        required: true
+        type: string
+      - description: update request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateSubscriptionGroupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SubscriptionGroupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "422":
+          description: sing-box validation rejected the group
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      summary: Update aggregate subscription group
       tags:
       - subscriptions
   /singbox/subscriptions/members/add:
@@ -12829,6 +14916,10 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.SubscriptionResponse'
+        "409":
+          description: фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
         "422":
           description: sing-box validation rejected the refreshed subscription
           schema:
@@ -12870,6 +14961,10 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: фильтр и исключения скрывают все серверы (ALL_MEMBERS_FILTERED)
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
         "422":
           description: sing-box validation rejected the subscription
           schema:
@@ -12889,7 +14984,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/api.APIEnvelope'
+            $ref: '#/definitions/api.SingboxTunnelsResponse'
         "400":
           description: Bad Request
           schema:
@@ -12904,11 +14999,6 @@ paths:
       tags:
       - singbox
     get:
-      parameters:
-      - description: When set, returns single tunnel
-        in: query
-        name: tag
-        type: string
       produces:
       - application/json
       responses:
@@ -12926,7 +15016,7 @@ paths:
             $ref: '#/definitions/api.APIErrorEnvelope'
       security:
       - CookieAuth: []
-      summary: List or get sing-box tunnel(s)
+      summary: List sing-box tunnels
       tags:
       - singbox
     post:
@@ -12961,7 +15051,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/api.APIEnvelope'
+            $ref: '#/definitions/api.SingboxTunnelsResponse'
         "400":
           description: Bad Request
           schema:
@@ -13001,6 +15091,77 @@ paths:
       security:
       - CookieAuth: []
       summary: Sing-box delay check
+      tags:
+      - singbox
+  /singbox/tunnels/get:
+    get:
+      parameters:
+      - description: Outbound tag
+        in: query
+        name: tag
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxTunnelGetResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Get single sing-box tunnel outbound
+      tags:
+      - singbox
+  /singbox/tunnels/rename:
+    patch:
+      consumes:
+      - application/json
+      parameters:
+      - description: Old and new tag
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRenameRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxTunnelsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Rename sing-box tunnel tag
       tags:
       - singbox
   /singbox/tunnels/share-link:
@@ -13171,6 +15332,10 @@ paths:
             $ref: '#/definitions/api.SingboxStatusResponse'
         "405":
           description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: Conflict
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
         "500":
@@ -13733,10 +15898,10 @@ paths:
   /terminal/ws:
     get:
       produces:
-      - application/json
+      - text/plain
       responses:
-        "200":
-          description: WebSocket upgrade
+        "101":
+          description: Switching Protocols (WebSocket upgrade)
           schema:
             type: string
         "400":

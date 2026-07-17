@@ -14,7 +14,7 @@ import (
 
 func setTerminalSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid:   true,
+		Setpgid: true,
 		// PR_SET_PDEATHSIG: kernel sends SIGTERM to ttyd when our process
 		// dies (including SIGKILL/crash). Without this the child outlives
 		// us and keeps holding its TCP port — over multiple awg-manager

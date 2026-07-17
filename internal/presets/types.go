@@ -12,16 +12,16 @@ const (
 // Preset is a reusable service template. It is NOT an applied route — applied
 // routes are separate instances that reference a preset by ID.
 type Preset struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	IconSlug  string  `json:"iconSlug"`
-	Category  string  `json:"category"` // social|media|ai|developer|cloud|gaming|block (free string)
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	IconSlug  string   `json:"iconSlug"`
+	Category  string   `json:"category"` // social|media|ai|developer|cloud|gaming|block (free string)
 	Notice    string   `json:"notice,omitempty"`
 	Covers    []string `json:"covers,omitempty"` // preset ids included in this composite list
 	Featured  bool     `json:"featured,omitempty"`
 	Sensitive bool     `json:"sensitive,omitempty"`
 	Origin    Origin   `json:"origin"`
-	Engines   Engines `json:"engines"`
+	Engines   Engines  `json:"engines"`
 }
 
 // Engines holds per-engine payloads. A nil pointer means the preset does not

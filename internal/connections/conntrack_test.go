@@ -84,10 +84,66 @@ func TestParseConntrackLine_Loopback_Skipped(t *testing.T) {
 	}
 }
 
-func TestParseConntrackLine_IPv6_Skipped(t *testing.T) {
+func TestParseConntrackLine_IPv6LoopbackSkipped_Legacy(t *testing.T) {
 	line := `ipv6     10 tcp      6 299 ESTABLISHED src=::1 dst=::1 sport=1234 dport=80 packets=1 bytes=60 src=::1 dst=::1 sport=80 dport=1234 packets=1 bytes=60 mark=0 use=2`
 	if _, ok := parseConntrackLine(line); ok {
 		t.Error("expected skip for IPv6 connection")
+	}
+}
+
+func TestParseConntrackLine_NewFields(t *testing.T) {
+	line := `ipv4     2 tcp      6 1183 ESTABLISHED src=192.168.0.54 dst=77.88.21.232 sport=56939 dport=443 packets=10 bytes=2411 src=77.88.21.232 dst=91.144.142.72 sport=443 dport=56939 packets=10 bytes=1966 [ASSURED] [FASTNAT] mark=268434097 nmark=256 sc=0 ifw=32 ifl=28 mac=fc:8b:97:0a:52:74 slan attrs= use=2`
+	c, ok := parseConntrackLine(line)
+	if !ok {
+		t.Fatal("expected line to parse")
+	}
+	if c.TTL != 1183 {
+		t.Errorf("TTL = %d, want 1183", c.TTL)
+	}
+	if c.BytesOut != 2411 || c.BytesIn != 1966 {
+		t.Errorf("BytesOut/In = %d/%d, want 2411/1966", c.BytesOut, c.BytesIn)
+	}
+	if c.Bytes != 2411+1966 {
+		t.Errorf("Bytes = %d, want sum", c.Bytes)
+	}
+	if c.replyDst != "91.144.142.72" {
+		t.Errorf("replyDst = %q, want 91.144.142.72", c.replyDst)
+	}
+	if c.mark != 268434097 {
+		t.Errorf("mark = %d, want 268434097", c.mark)
+	}
+	if c.State != "ESTABLISHED" {
+		t.Errorf("State = %q, want ESTABLISHED", c.State)
+	}
+}
+
+func TestParseConntrackLine_IPv6Accepted(t *testing.T) {
+	line := `ipv6     10 udp      17 8 src=fe80:0000:0000:0000:85b2:42a1:1ffb:996e dst=ff02:0000:0000:0000:0000:0000:0000:00fb sport=5353 dport=5353 packets=42 bytes=3654 [UNREPLIED] src=ff02:0000:0000:0000:0000:0000:0000:00fb dst=fe80:0000:0000:0000:85b2:42a1:1ffb:996e sport=5353 dport=5353 packets=0 bytes=0 mark=0 nmark=0 sc=0 ifl=28 mac=98:de:d0:0d:ab:c3 slan attrs= use=2`
+	c, ok := parseConntrackLine(line)
+	if !ok {
+		t.Fatal("ipv6 line must parse now")
+	}
+	if c.Protocol != "udp" || c.TTL != 8 {
+		t.Errorf("proto/ttl = %q/%d, want udp/8", c.Protocol, c.TTL)
+	}
+	// КРИТИЧНО: nf_conntrack печатает v6 развёрнуто, а rules-карта (object-group)
+	// и карта локальных IP туннелей (net.IP.String()) — в сжатой RFC 5952 форме.
+	// Без нормализации все v6-lookup'ы молча промахиваются.
+	if c.Src != "fe80::85b2:42a1:1ffb:996e" {
+		t.Errorf("Src = %q, want compressed fe80::85b2:42a1:1ffb:996e", c.Src)
+	}
+	if c.Dst != "ff02::fb" {
+		t.Errorf("Dst = %q, want compressed ff02::fb", c.Dst)
+	}
+	if c.replyDst != "fe80::85b2:42a1:1ffb:996e" {
+		t.Errorf("replyDst = %q, want compressed form", c.replyDst)
+	}
+}
+
+func TestParseConntrackLine_IPv6LoopbackSkipped(t *testing.T) {
+	line := `ipv6     10 tcp      6 100 ESTABLISHED src=0000:0000:0000:0000:0000:0000:0000:0001 dst=0000:0000:0000:0000:0000:0000:0000:0001 sport=1000 dport=2000 packets=1 bytes=10 src=0000:0000:0000:0000:0000:0000:0000:0001 dst=0000:0000:0000:0000:0000:0000:0000:0001 sport=2000 dport=1000 packets=1 bytes=10 mark=0 use=2`
+	if _, ok := parseConntrackLine(line); ok {
+		t.Error("::1 loopback pair must be skipped")
 	}
 }
 

@@ -27,13 +27,18 @@ type Service struct {
 	awgStore *storage.AWGTunnelStore
 	settings *storage.SettingsStore
 	appLog   *logging.ScopedLogger
+	// connTracker классифицирует исходы connectivity-проверок по туннелям:
+	// в журнал попадают переходы (Warn на отказ, Info на восстановление),
+	// повторы одного и того же исхода — только Debug.
+	connTracker *logging.TransitionTracker
 }
 
 // NewService creates a new testing service.
 func NewService(awgStore *storage.AWGTunnelStore, appLogger logging.AppLogger) *Service {
 	return &Service{
-		awgStore: awgStore,
-		appLog:   logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubTest),
+		awgStore:    awgStore,
+		appLog:      logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubTest),
+		connTracker: logging.NewTransitionTracker(),
 	}
 }
 
@@ -52,14 +57,6 @@ func (s *Service) GetAWG(id string) *storage.AWGTunnel {
 func (s *Service) InterfaceExists(iface string) bool {
 	_, err := os.Stat(SysClassNet + "/" + iface)
 	return err == nil
-}
-
-// GetInterface returns the network interface name for a tunnel.
-func (s *Service) GetInterface(id string) (string, error) {
-	if !IsAWGID(id) {
-		return "", ErrInvalidTunnelID
-	}
-	return s.resolveIfaceName(id), nil
 }
 
 // GetInterfaceName returns the kernel interface name for a tunnel.

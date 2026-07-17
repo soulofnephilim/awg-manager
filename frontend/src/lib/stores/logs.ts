@@ -5,6 +5,10 @@ import type { LogEntryEvent } from '$lib/api/events';
 export type LogBucket = 'app' | 'singbox';
 
 const MAX_ENTRIES = 5000;
+// Кап скана при upsert повтора — зеркало backend coalesceScanLimit:
+// повторы почти всегда матчатся в свежих строках, полный проход по 5000
+// строк на каждое SSE-событие — лишняя работа на UI-потоке.
+const REPEAT_SCAN_LIMIT = 300;
 
 function keyOf(e: LogEntry): string {
   return `${e.timestamp}|${e.level}|${e.group}|${e.subgroup}|${e.action}|${e.target}|${e.message}`;
@@ -32,14 +36,44 @@ function createLogStore(bucket: LogBucket) {
     loaded: { subscribe: loaded.subscribe },
     lastSeenTs: { subscribe: lastSeenTs.subscribe },
     stats: { subscribe: stats.subscribe },
-    /** SSE-driven head append (newest at front). */
+    /** SSE-driven head append (newest at front). Повтор (repeats > 0)
+     * обновляет существующую строку по составному ключу вместо новой. */
     append(entry: LogEntryEvent) {
       const logEntry: LogEntry = {
         ...entry,
         subgroup: entry.subgroup ?? '',
       };
-      const ts = new Date(entry.timestamp).getTime();
+      const ts = new Date(entry.lastSeen ?? entry.timestamp).getTime();
       lastSeenTs.update((cur) => (ts > cur ? ts : cur));
+      if ((entry.repeats ?? 0) > 0) {
+        const key = keyOf(logEntry);
+        let found = false;
+        update((entries) => {
+          const limit = Math.min(entries.length, REPEAT_SCAN_LIMIT);
+          for (let i = 0; i < limit; i++) {
+            if (keyOf(entries[i]) !== key) continue;
+            found = true;
+            const next = entries.slice();
+            next[i] = { ...next[i], repeats: entry.repeats, lastSeen: entry.lastSeen };
+            return next;
+          }
+          return entries;
+        });
+        if (found) return;
+        // Первое появление не попало в клиентский буфер (страница открыта
+        // позже): вставляем строку по её timestamp (первое появление может
+        // быть давним — в голове списка она ломала бы порядок), total не
+        // трогаем — на сервере повтор не создал новой записи.
+        update((entries) => {
+          const ts2 = new Date(logEntry.timestamp).getTime();
+          const pos = entries.findIndex((e) => new Date(e.timestamp).getTime() <= ts2);
+          const at = pos === -1 ? entries.length : pos;
+          const updated = [...entries.slice(0, at), logEntry, ...entries.slice(at)];
+          if (updated.length > MAX_ENTRIES) updated.length = MAX_ENTRIES;
+          return updated;
+        });
+        return;
+      }
       update((entries) => {
         const updated = [logEntry, ...entries];
         if (updated.length > MAX_ENTRIES) updated.length = MAX_ENTRIES;
@@ -47,14 +81,23 @@ function createLogStore(bucket: LogBucket) {
       });
       logsTotal.update((n) => n + 1);
     },
-    /** Catch-up merge after SSE reconnect — keeps entries newest-first, dedups by composite key. */
+    /** Catch-up merge after SSE reconnect — keeps entries newest-first, dedups by composite key.
+     * Дубликат с бОльшим repeats освежает счётчик существующей строки. */
     appendMany(arr: LogEntry[]) {
       update((entries) => {
-        const seen = new Set(entries.map(keyOf));
+        const byKey = new Map(entries.map((e, i) => [keyOf(e), i]));
         const newOnes: LogEntry[] = [];
+        let refreshed: LogEntry[] | null = null;
         for (const e of arr) {
-          if (!seen.has(keyOf(e))) newOnes.push(e);
+          const idx = byKey.get(keyOf(e));
+          if (idx === undefined) {
+            newOnes.push(e);
+          } else if ((e.repeats ?? 0) > ((refreshed ?? entries)[idx].repeats ?? 0)) {
+            refreshed = refreshed ?? entries.slice();
+            refreshed[idx] = { ...refreshed[idx], repeats: e.repeats, lastSeen: e.lastSeen };
+          }
         }
+        if (refreshed) entries = refreshed;
         if (newOnes.length === 0) return entries;
         const newestTs = newOnes.reduce((m, e) => Math.max(m, new Date(e.timestamp).getTime()), 0);
         if (newestTs > 0) lastSeenTs.update((cur) => (newestTs > cur ? newestTs : cur));

@@ -110,4 +110,20 @@ describe('fakeipTransition reducer', () => {
 		expect(s.finalState).toBe('tproxy');
 		expect(s.steps.some((x) => x.step === 'error' && x.status === 'error')).toBe(true);
 	});
+
+	it('fail() is not overwritten by late SSE before terminal done event', () => {
+		fakeipTransition.begin('off', 'tproxy');
+		fakeipTransition.fail('sing-box timeout');
+		fakeipTransition.applyTransition(
+			ev({
+				transitionId: 'switch-late',
+				from: 'off',
+				to: 'tproxy',
+				step: { step: 'provision', status: 'current' },
+			}),
+		);
+		const s = get(fakeipTransition)!;
+		expect(s.done).toBe(true);
+		expect(s.error).toBe('sing-box timeout');
+	});
 });

@@ -89,18 +89,6 @@ func (s *Service) rciConfigureServer(ctx context.Context, name, description, add
 	})
 }
 
-// rciSetDescription updates the NDMS description for the interface.
-// The description is the user-facing display name on the router and in our UI.
-func (s *Service) rciSetDescription(ctx context.Context, ifaceName, description string) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"description": description,
-			},
-		},
-	})
-}
-
 // updateServerChanges holds the optional set of mutations rciUpdateServer
 // applies in a single atomic POST. Only fields with the corresponding flag
 // set are emitted into the payload.
@@ -163,54 +151,6 @@ func (s *Service) rciUpdateServer(ctx context.Context, ifaceName string, c updat
 	})
 }
 
-// rciSetListenPort updates the listen port.
-func (s *Service) rciSetListenPort(ctx context.Context, ifaceName string, port int) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"wireguard": map[string]interface{}{
-					"listen-port": map[string]interface{}{
-						"port": port,
-					},
-				},
-			},
-		},
-	})
-}
-
-// rciRemoveAddress removes an IP address from the interface.
-func (s *Service) rciRemoveAddress(ctx context.Context, ifaceName, address, mask string) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"ip": map[string]interface{}{
-					"address": map[string]interface{}{
-						"no":      true,
-						"address": address,
-						"mask":    mask,
-					},
-				},
-			},
-		},
-	})
-}
-
-// rciSetAddress sets an IP address on the interface.
-func (s *Service) rciSetAddress(ctx context.Context, ifaceName, address, mask string) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"interface": map[string]interface{}{
-			ifaceName: map[string]interface{}{
-				"ip": map[string]interface{}{
-					"address": map[string]interface{}{
-						"address": address,
-						"mask":    mask,
-					},
-				},
-			},
-		},
-	})
-}
-
 // rciSetNAT enables or disables NAT for an interface.
 func (s *Service) rciSetNAT(ctx context.Context, ifaceName string, enabled bool) error {
 	if enabled {
@@ -251,27 +191,6 @@ func (s *Service) rciSetStaticNAT(ctx context.Context, ifaceName, wanIface strin
 			},
 		},
 	})
-}
-
-// rciAclPermit adds a permit rule to an access-list via RCI parse command.
-func (s *Service) rciAclPermit(ctx context.Context, acl, srcSub, srcMask, dstSub, dstMask string) error {
-	return s.rciPost(ctx, map[string]interface{}{
-		"parse": fmt.Sprintf("access-list %s permit ip %s %s %s %s", acl, srcSub, srcMask, dstSub, dstMask),
-	})
-}
-
-// rciAclRemove removes an access-list via RCI parse command.
-func (s *Service) rciAclRemove(ctx context.Context, acl string) error {
-	return s.rciPost(ctx, map[string]interface{}{"parse": "no access-list " + acl})
-}
-
-// rciAccessGroup binds or unbinds an access-group to an interface via RCI parse command.
-func (s *Service) rciAccessGroup(ctx context.Context, iface, acl string, bind bool) error {
-	cmd := fmt.Sprintf("interface %s ip access-group %s in", iface, acl)
-	if !bind {
-		cmd = "no " + cmd
-	}
-	return s.rciPost(ctx, map[string]interface{}{"parse": cmd})
 }
 
 // rciSetPrivateKey installs an explicit WireGuard private key on the

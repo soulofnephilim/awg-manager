@@ -9,17 +9,29 @@ import (
 )
 
 // recordingOpkgTunProvisioner embeds fakeOpkgTunProvisioner (default no-op
-// methods) and overrides DeleteOpkgTun to record the names it was called with
-// and optionally return an injected error — the reap test only exercises Delete.
+// methods) and overrides DeleteOpkgTun/ClearAddress to record the names they
+// were called with; Delete optionally returns an injected error.
 type recordingOpkgTunProvisioner struct {
 	fakeOpkgTunProvisioner
 	deleted []string
+	cleared []string
 	delErr  error
 }
 
 func (r *recordingOpkgTunProvisioner) DeleteOpkgTun(_ context.Context, name string) error {
 	r.deleted = append(r.deleted, name)
 	return r.delErr
+}
+
+func (r *recordingOpkgTunProvisioner) ClearAddress(_ context.Context, name string) error {
+	r.cleared = append(r.cleared, name)
+	return nil
+}
+
+// scanReturning builds an OpkgTunScan hook returning a fixed set of NDMS
+// OpkgTun IDs (or an error) for the description-scan fallback tests.
+func scanReturning(ids []string, err error) func(context.Context, string) ([]string, error) {
+	return func(context.Context, string) ([]string, error) { return ids, err }
 }
 
 // newReapSettingsStore seeds a store with the given RoutingMode and, when
@@ -194,5 +206,136 @@ func TestReapOrphaned_NilOpkgKeepsPersist(t *testing.T) {
 	}
 	if got := loadFakeIP(t, store); got == nil {
 		t.Error("persist must be retained with nil OpkgTun, got nil")
+	}
+}
+
+// === Description-scan fallback (persist-less orphans) ===
+
+// A persist-less orphan (crash mid-Enable, failed disable delete after the
+// mandatory persist clear) is found by description and removed. On a
+// successful delete NO address clears are issued (they exist only for the
+// delete-failure path).
+func TestReapOrphaned_ScanRemovesPersistlessOrphan(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false)
+	opkg := &recordingOpkgTunProvisioner{}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning([]string{"OpkgTun1"}, nil)})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun1" {
+		t.Errorf("deleted = %v, want [OpkgTun1]", opkg.deleted)
+	}
+	if len(opkg.cleared) != 0 {
+		t.Errorf("cleared = %v, want none on successful delete", opkg.cleared)
+	}
+}
+
+// The scan removes the orphan's interface-bound pool route BEFORE deleting the
+// iface: the route survives the iface deletion (stand-verified) and would
+// otherwise stay reject-routed with no owner able to address it.
+func TestReapOrphaned_ScanRemovesPoolRouteBeforeDelete(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false)
+	opkg := &recordingOpkgTunProvisioner{}
+	log := &callLog{}
+	svc := newTestService(t, Deps{
+		Settings:     store,
+		OpkgTun:      opkg,
+		OpkgTunScan:  scanReturning([]string{"OpkgTun1"}, nil),
+		StaticRoutes: &recStaticRoutes{log: log},
+		FakeIPTun:    DefaultFakeIPTunParams(),
+	})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if !log.has("RemoveRoute:198.18.0.0:OpkgTun1") {
+		t.Errorf("orphan pool route not removed, got %v", log.calls)
+	}
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun1" {
+		t.Errorf("deleted = %v, want [OpkgTun1]", opkg.deleted)
+	}
+}
+
+// The currently-persisted iface is excluded from the scan: in fakeip-tun mode
+// the active Enable/Reconcile own it, foreign orphans still go.
+func TestReapOrphaned_ScanSkipsOwnedIface(t *testing.T) {
+	store := newReapSettingsStore(t, "fakeip-tun", 2, true)
+	opkg := &recordingOpkgTunProvisioner{}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning([]string{"OpkgTun2", "OpkgTun0"}, nil)})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun0" {
+		t.Errorf("deleted = %v, want [OpkgTun0] (owned OpkgTun2 must be skipped)", opkg.deleted)
+	}
+	if got := loadFakeIP(t, store); got == nil || got.Index != 2 {
+		t.Errorf("persist must be unchanged, got %+v", got)
+	}
+}
+
+// A failed scan delete clears the addresses (the loop-defusing part) and must
+// not fail the reap: the scan is best-effort, the next tick/boot retries.
+func TestReapOrphaned_ScanDeleteFailureStillClearsAddress(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false)
+	opkg := &recordingOpkgTunProvisioner{delErr: errors.New("ndms down")}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning([]string{"OpkgTun1"}, nil)})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("scan delete failure must not fail the reap: %v", err)
+	}
+	if len(opkg.cleared) != 1 || opkg.cleared[0] != "OpkgTun1" {
+		t.Errorf("cleared = %v, want [OpkgTun1]", opkg.cleared)
+	}
+}
+
+// A scanner error is logged and skipped — the persist-based reap still runs.
+func TestReapOrphaned_ScanErrorFallsBackToPersistReap(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 3, true)
+	opkg := &recordingOpkgTunProvisioner{}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning(nil, errors.New("rci down"))})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun3" {
+		t.Errorf("deleted = %v, want [OpkgTun3] via persist-based reap", opkg.deleted)
+	}
+}
+
+// Reconcile reaps persist-less orphans on every tick — a runtime orphan (e.g.
+// failed disable delete) heals without waiting for a reboot; the active
+// (persisted) iface is untouched.
+func TestReconcile_ReapsForeignOrphanEachTick(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	_ = captureDrain(t)
+	provisionForDisable(t, h) // fakeip-tun включён, OpkgTun0 — owned, лог очищен
+	h.svc.deps.OpkgTunScan = scanReturning([]string{"OpkgTun0", "OpkgTun7"}, nil)
+
+	if err := h.svc.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !h.log.has("Delete:OpkgTun7") {
+		t.Errorf("foreign orphan not reaped on tick: %v", h.log.calls)
+	}
+	if h.log.has("Delete:OpkgTun0") {
+		t.Errorf("owned iface must not be touched: %v", h.log.calls)
+	}
+}
+
+// Тик scheduler'а реапает сирот и при ВЫКЛЮЧЕННОМ движке — runtime-сирота
+// (провал delete при disable) возникает именно в выключенном состоянии и не
+// должна ждать перезагрузки (стенд-регрессия 2026-07-16).
+func TestSchedulerTick_ReapsOrphanWhenEngineDisabled(t *testing.T) {
+	store := newReapSettingsStore(t, "tproxy", 0, false) // Enabled=false по умолчанию
+	opkg := &recordingOpkgTunProvisioner{}
+	svc := newTestService(t, Deps{Settings: store, OpkgTun: opkg, OpkgTunScan: scanReturning([]string{"OpkgTun5"}, nil)})
+	sched := NewScheduler(svc, store)
+
+	sched.tickPolicySync(context.Background())
+
+	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun5" {
+		t.Errorf("deleted = %v, want [OpkgTun5] (reap must run with engine disabled)", opkg.deleted)
 	}
 }

@@ -61,6 +61,10 @@ func (s *AWGTunnelStore) List() ([]AWGTunnel, error) {
 
 		var tunnel AWGTunnel
 		if err := json.Unmarshal(data, &tunnel); err != nil {
+			// Quarantine instead of skipping silently: a skipped file's ID
+			// looks free to NextAvailableID, and the next created tunnel
+			// would overwrite the still-recoverable JSON (with its keys).
+			QuarantineCorrupt(path, err)
 			continue
 		}
 
@@ -193,27 +197,60 @@ func (s *AWGTunnelStore) ClearRuntimeState(id string) {
 }
 
 const (
-	// OS 5.x: OpkgTun indices 10-16 (NDMS limit is 16)
+	// OS 5.x: карта числовых индексов туннелей:
+	//   OpkgTun0..9   — зарезервированы под fakeip-движок sing-box
+	//                   (см. internal/singbox/router, fakeIPNDMSName);
+	//   OpkgTun10..16 — kernel-AWG туннели (awg10..awg16); потолок 16 —
+	//                   прошивочный лимит NDMS на индекс OpkgTun;
+	//   awg20+        — NativeWG: чистые storage-ключи, в OpkgTun НЕ
+	//                   отображаются (NDMS-интерфейс — WireguardN по
+	//                   NWGIndex, kernel-интерфейс — nwgN).
 	os5MinIndex = 10
 	os5MaxIndex = 16
+	// os5NWGMinIndex — начало диапазона ID для NativeWG на OS 5.x. Сверху
+	// диапазон не ограничен: реальную ёмкость задают индексы Wireguard0..99
+	// в NDMS (nwg.MaxTunnels) и слоты awg_proxy (16 одновременных туннелей
+	// с обфускацией на прошивках без нативного ASC), а не диапазон ID.
+	// Легаси NativeWG-туннели, созданные до разделения диапазонов, могут
+	// занимать awg10..awg16 — это допустимо, kernel-аллокатор просто
+	// пропускает занятые ими номера (миграция не выполняется).
+	os5NWGMinIndex = 20
 )
 
-// NextAvailableID finds the next available tunnel ID.
-// - OS 5.x: awg10..awg16 → OpkgTun10..OpkgTun16 (NDMS index limit is 16)
-// - OS 4.x: awgm0, awgm1, ... (uses 'm' prefix, no NDMS)
-func (s *AWGTunnelStore) NextAvailableID() (string, error) {
+// NextAvailableID finds the next available tunnel ID for the given backend
+// ("kernel" | "nativewg"; любое другое значение, включая пустое, трактуется
+// как kernel).
+// - OS 5.x, kernel:   awg10..awg16 → OpkgTun10..OpkgTun16 (прошивочный лимит NDMS — 16)
+// - OS 5.x, nativewg: awg20, awg21, ... (в OpkgTun не отображаются, см. os5NWGMinIndex)
+// - OS 4.x: awgm0, awgm1, ... (uses 'm' prefix, no NDMS; backend не различается)
+func (s *AWGTunnelStore) NextAvailableID(backend string) (string, error) {
 	tunnels, err := s.List()
 	if err != nil {
 		return "", err
 	}
+	return nextAvailableID(tunnels, backend, osdetect.Is5())
+}
 
+// nextAvailableID — чистая функция выбора ID (вынесена из NextAvailableID
+// для тестируемости без глобального osdetect-состояния).
+func nextAvailableID(tunnels []AWGTunnel, backend string, is5 bool) (string, error) {
 	existing := make(map[int]bool)
 
-	if osdetect.Is5() {
+	if is5 {
+		// Занятые номера собираются по ВСЕМ туннелям независимо от backend —
+		// так диапазоны не коллидируют между собой (легаси NativeWG на awg12
+		// продолжает занимать номер в kernel-диапазоне, и наоборот).
 		for _, t := range tunnels {
 			if len(t.ID) > 3 && t.ID[:3] == "awg" {
 				if num, err := strconv.Atoi(t.ID[3:]); err == nil {
 					existing[num] = true
+				}
+			}
+		}
+		if backend == "nativewg" {
+			for i := os5NWGMinIndex; ; i++ {
+				if !existing[i] {
+					return "awg" + strconv.Itoa(i), nil
 				}
 			}
 		}

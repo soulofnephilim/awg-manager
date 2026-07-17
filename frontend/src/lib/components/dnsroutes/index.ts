@@ -6,6 +6,5 @@ export { default as DnsRoutePresetModal } from './DnsRoutePresetModal.svelte';
 export { default as ServiceCatalogModal } from './ServiceCatalogModal.svelte';
 export { default as ServiceIcon } from './ServiceIcon.svelte';
 export { default as LetterIconTile } from './LetterIconTile.svelte';
-export { default as CatalogPresetRow } from './CatalogPresetRow.svelte';
 export { default as IconPickerModal } from './IconPickerModal.svelte';
 export { default as NdmsPolicyHintBanner } from './NdmsPolicyHintBanner.svelte';

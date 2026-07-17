@@ -42,7 +42,11 @@ func TestBuildFakeIPTunConfig_Shape(t *testing.T) {
 	if cfg.Route.DefaultDomainResolver == nil || cfg.Route.DefaultDomainResolver.Server != "real" {
 		t.Error("default_domain_resolver")
 	}
-	if cfg.Route.Rules[0].Action != "hijack-dns" || cfg.Route.Rules[1].Outbound != "proxy" {
+	// [hijack-dns, route-options(udp_timeout), route→proxy]
+	if cfg.Route.Rules[0].Action != "hijack-dns" ||
+		cfg.Route.Rules[1].Action != "route-options" || cfg.Route.Rules[1].Network != "udp" ||
+		cfg.Route.Rules[1].UDPTimeout != DefaultUDPTimeout ||
+		cfg.Route.Rules[2].Outbound != "proxy" {
 		t.Errorf("route rules: %#v", cfg.Route.Rules)
 	}
 	if cfg.Experimental == nil || cfg.Experimental.CacheFile == nil || !cfg.Experimental.CacheFile.StoreFakeIP {

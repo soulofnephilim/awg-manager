@@ -16,15 +16,18 @@ import "time"
 type Slot string
 
 const (
-	SlotBase          Slot = "base"          // 00-base.json — always on
-	SlotTunnels       Slot = "tunnels"       // 10-tunnels.json
-	SlotAwg           Slot = "awg"           // 15-awg.json
-	SlotDNSRewrites   Slot = "dns-rewrites"  // 17-dns-rewrites.json
-	SlotRouter        Slot = "router"        // 20-router.json
-	SlotFakeIP        Slot = "fakeip"        // 21-fakeip.json
-	SlotDeviceProxy   Slot = "deviceproxy"   // 30-deviceproxy.json
-	SlotDownloadProxy Slot = "downloadproxy" // 35-download-proxy.json
-	SlotSubscriptions Slot = "subscriptions" // 40-subscriptions.json
+	SlotBase            Slot = "base"             // 00-base.json — always on
+	SlotTunnels         Slot = "tunnels"          // 10-tunnels.json
+	SlotAwg             Slot = "awg"              // 15-awg.json
+	SlotDNSRewrites     Slot = "dns-rewrites"     // 17-dns-rewrites.json
+	SlotQoSRoutes       Slot = "qos-routes"       // 18-qos-routes.json
+	SlotSelectiveRoutes Slot = "selective-routes" // 19-selective-routes.json
+	SlotRouter          Slot = "router"           // 20-router.json
+	SlotFakeIP          Slot = "fakeip"           // 21-fakeip.json
+	SlotDeviceProxy     Slot = "deviceproxy"      // 30-deviceproxy.json
+	SlotDownloadProxy   Slot = "downloadproxy"    // 35-download-proxy.json
+	SlotSubscriptions   Slot = "subscriptions"    // 40-subscriptions.json
+	SlotUser            Slot = "user"             // 90-user.json — эксперт-редактор
 )
 
 // SlotMeta describes a producer's contract with the orchestrator.
@@ -67,11 +70,23 @@ func KnownSlots() []SlotMeta {
 		{Slot: SlotTunnels, Filename: "10-tunnels.json", AlwaysOn: true},
 		{Slot: SlotAwg, Filename: "15-awg.json", AlwaysOn: true},
 		{Slot: SlotDNSRewrites, Filename: "17-dns-rewrites.json"},
+		// 18 merges BEFORE 19/20 on purpose: sing-box evaluates route rules
+		// in merged-file order, so managed QoS rules (an explicit per-packet
+		// DSCP policy) win over selective /32 overlays and user rules.
+		{Slot: SlotQoSRoutes, Filename: "18-qos-routes.json"},
+		{Slot: SlotSelectiveRoutes, Filename: "19-selective-routes.json"},
 		{Slot: SlotRouter, Filename: "20-router.json"},
 		{Slot: SlotFakeIP, Filename: "21-fakeip.json"},
 		{Slot: SlotDeviceProxy, Filename: "30-deviceproxy.json"},
 		{Slot: SlotDownloadProxy, Filename: "35-download-proxy.json"},
 		{Slot: SlotSubscriptions, Filename: "40-subscriptions.json"},
+		// Пользовательский слот эксперт-редактора. НИКАКОЙ продюсер не
+		// пишет в него — только draft-пайплайн (SaveDraft/ApplyDraft) по
+		// явному действию пользователя; массивы (outbounds/inbounds/
+		// dns.servers/route.rules/…) конкатенируются последними, скаляры
+		// dns/route отсюда не переопределить (merge — first-file-wins).
+		// pruneDanglingSelectorRefsLocked этот файл тоже не мутирует.
+		{Slot: SlotUser, Filename: "90-user.json"},
 	}
 }
 

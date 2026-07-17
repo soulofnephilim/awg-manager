@@ -50,6 +50,10 @@ func (s *ClientRouteStore) loadUnlocked() {
 
 	var data clientRouteData
 	if err := json.Unmarshal(raw, &data); err != nil {
+		// Keep the corrupt file for recovery: resetting silently would also
+		// re-allocate routing table numbers that may still be referenced by
+		// rules in the kernel.
+		QuarantineCorrupt(s.path, err)
 		s.data = defaultClientRouteData()
 		return
 	}

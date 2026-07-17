@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 )
 
 type Deps struct {
@@ -15,7 +14,6 @@ type Deps struct {
 }
 
 type Service struct {
-	depsMu    sync.RWMutex
 	outbounds OutboundsProvider
 	transport TransportResolver
 	routeProv RouteProvider
@@ -29,27 +27,9 @@ func NewService(d Deps) *Service {
 	}
 }
 
-func (s *Service) SetOutboundsProvider(p OutboundsProvider) {
-	s.depsMu.Lock()
-	defer s.depsMu.Unlock()
-	s.outbounds = p
-}
-
-func (s *Service) SetTransportResolver(r TransportResolver) {
-	s.depsMu.Lock()
-	defer s.depsMu.Unlock()
-	s.transport = r
-}
-
-func (s *Service) SetRouteProvider(p RouteProvider) {
-	s.depsMu.Lock()
-	defer s.depsMu.Unlock()
-	s.routeProv = p
-}
-
+// snapshotDeps returns the wired dependencies. They are immutable after
+// construction, so no locking is needed.
 func (s *Service) snapshotDeps() (OutboundsProvider, TransportResolver, RouteProvider) {
-	s.depsMu.RLock()
-	defer s.depsMu.RUnlock()
 	return s.outbounds, s.transport, s.routeProv
 }
 
@@ -76,11 +56,6 @@ func (s *Service) ListOutbounds(ctx context.Context) []Outbound {
 		out = append(out, item)
 	}
 	return out
-}
-
-func (s *Service) DescribeRoute(ctx context.Context, route *Route) RouteInfo {
-	outbounds, _, _ := s.snapshotDeps()
-	return describeRouteWithProvider(ctx, outbounds, route)
 }
 
 func (s *Service) ValidateRoute(ctx context.Context, route *Route) (RouteInfo, error) {

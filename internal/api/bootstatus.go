@@ -41,10 +41,10 @@ func (h *BootStatusHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"initializing":     false,
-		"remainingSeconds": 0,
-		"phase":            "ready",
-		"instanceId":       h.InstanceID,
+	_ = json.NewEncoder(w).Encode(BootStatusResponse{
+		Initializing:     false,
+		RemainingSeconds: 0,
+		Phase:            "ready",
+		InstanceId:       h.InstanceID,
 	})
 }

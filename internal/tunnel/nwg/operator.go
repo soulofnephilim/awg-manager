@@ -34,8 +34,11 @@ import (
 const (
 	resolveAttempts       = 3
 	resolveAttemptTimeout = 1500 * time.Millisecond
-	resolveRetryGap       = 300 * time.Millisecond
 )
+
+// resolveRetryGap — пауза между попытками резолва. Var ради тестов
+// (failing-resolve сценарии не должны спать по 2×300ms).
+var resolveRetryGap = 300 * time.Millisecond
 
 // OperatorNativeWG manages tunnels via Keenetic native WireGuard + awg_proxy.ko.
 type OperatorNativeWG struct {
@@ -59,6 +62,12 @@ type OperatorNativeWG struct {
 	// supportsASC reports native ASC firmware support. Default:
 	// ndmsinfo.SupportsWireguardASC; overridable in tests.
 	supportsASC func() bool
+
+	// Endpoint-страж v6-туннелей на ASC (endpoint_guard.go): реестр
+	// «kernel-имя → ожидаемый endpoint», фоновая сверка wg show/set.
+	guardMu   sync.Mutex
+	guard     map[string]guardEntry
+	guardOnce sync.Once
 	// hasProxySlot reports a live kmod proxy slot on a listen port. Default:
 	// kmod.HasSlotListening; overridable in tests.
 	hasProxySlot func(listenPort int) bool
@@ -100,6 +109,17 @@ func (o *OperatorNativeWG) Create(ctx context.Context, stored *storage.AWGTunnel
 func (o *OperatorNativeWG) createViaImport(ctx context.Context, stored *storage.AWGTunnel) (int, error) {
 	// Generate .conf with all AWG params
 	confData := config.GenerateForExport(stored)
+
+	// NDMS RCI-импорт отвергает IPv6-endpoint в .conf («"WireguardN": invalid
+	// endpoint format») и создание падает целиком. Endpoint на этапе create —
+	// временный: Start переставляет его в любом случае (127.0.0.1:proxy у
+	// kmod-пути, реальный у нативного ASC). Для v6 подменяем строку Endpoint
+	// заглушкой; v4 и hostname NDMS принимает — оставляем как есть.
+	if EndpointHostIsIPv6(stored.Peer.Endpoint) {
+		confData = replaceConfEndpointLine(confData, ndmsEndpointPlaceholder)
+		o.appLog.Info("create", stored.Name,
+			"IPv6 endpoint: импорт .conf с endpoint-заглушкой (NDMS не принимает v6 в импорте), реальный endpoint выставит Start")
+	}
 
 	// Import via RCI — NDMS creates the interface and parses all params.
 	// ImportWireguardConfig is a multipart-upload helper with no new-layer equivalent yet.
@@ -173,11 +193,14 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 		return 0, fmt.Errorf("resolve endpoint: %w", err)
 	}
 
+	// Маска — из пользовательского CIDR (голый IP → /32): /24 и т.п. дают
+	// connected-маршрут на туннельную подсеть (LAN-to-LAN, issue #531).
+	ipv4Addr, ipv4Mask := splitAddressMask(extractIPv4(stored.Interface.Address))
 	cmds := []any{
 		payloads.CmdInterfaceCreate(ndmsName),
 		payloads.CmdInterfaceDescription(ndmsName, stored.Name),
 		payloads.CmdInterfaceSecurityLevel(ndmsName, "public"),
-		payloads.CmdInterfaceIPAddress(ndmsName, extractIPv4(stored.Interface.Address), "255.255.255.255"),
+		payloads.CmdInterfaceIPAddress(ndmsName, ipv4Addr, ipv4Mask),
 		payloads.CmdInterfaceMTU(ndmsName, stored.Interface.MTU),
 		payloads.CmdInterfaceAdjustMSS(ndmsName, true),
 		payloads.CmdInterfaceIPGlobal(ndmsName, true),
@@ -203,10 +226,16 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 		cmds = append(cmds, payloads.CmdInterfaceIPv6Address(ndmsName, ipv6Addr))
 	}
 
-	// Peer
+	// Peer. Endpoint на этапе create — временный (Start переставит его на
+	// 127.0.0.1:proxy или реальный); IPv6-литерал NDMS в create-команде не
+	// принимает — заглушка, как в createViaImport.
+	peerEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
+	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+		peerEndpoint = ndmsEndpointPlaceholder
+	}
 	peerCfg := payloads.PeerConfig{
 		PublicKey:   stored.Peer.PublicKey,
-		Endpoint:    fmt.Sprintf("%s:%d", endpointIP, endpointPort),
+		Endpoint:    peerEndpoint,
 		AllowedIPv4: []payloads.AllowedIP{{Address: "0.0.0.0", Mask: "0"}},
 	}
 	if hasIPv6AllowedIPs(stored.Peer.AllowedIPs) {
@@ -279,6 +308,13 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 	names := NewNWGNames(stored.NWGIndex)
 	pubkey := stored.Peer.PublicKey
 
+	// Fail fast ДО каких-либо RCI-команд и резолва: v6-литерал без
+	// wireguard-tools стартовать невозможно (hostname→v6 ловится второй
+	// проверкой после резолва).
+	if EndpointHostIsIPv6(stored.Peer.Endpoint) && wgToolLookup() == "" {
+		return errWGToolMissing()
+	}
+
 	// Sync ASC params from storage to NDMS — they may have been added/changed
 	// via the edit form after the initial Create (e.g. imported as plain WG, then edited).
 	o.appLog.Full("start", stored.Name, "Syncing ASC params to NDMS")
@@ -295,7 +331,23 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 	}
 	o.appLog.Full("start", stored.Name, fmt.Sprintf("Resolving endpoint %s -> %s:%d", stored.Peer.Endpoint, endpointIP, endpointPort))
 
+	// v4 — исторический "%s:%d" через RCI байт-в-байт. v6 через RCI NDMS не
+	// принимает вовсе (ни импорт, ни peer-команды — подтверждено автором на
+	// устройстве): endpoint выставляется напрямую в ядро через
+	// wireguard-tools по kernel-имени nwgN, ПОСЛЕ поднятия интерфейса —
+	// up/down у NDMS сбрасывает kernel-endpoint на значение из его конфига.
+	endpointIsV6 := false
+	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+		endpointIsV6 = true
+		// hostname→v6-only резолв: прекчек по литералу выше не сработал.
+		if wgToolLookup() == "" {
+			return errWGToolMissing()
+		}
+	}
 	realEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
+	if endpointIsV6 {
+		realEndpoint = net.JoinHostPort(endpointIP, strconv.Itoa(endpointPort))
+	}
 
 	// Sync address/MTU from storage
 	if err := o.SyncAddressMTU(ctx, stored); err != nil {
@@ -312,14 +364,52 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 		o.hookNotifier.ExpectHook(names.NDMSName, "running")
 	}
 
-	// Batch: set endpoint + connect via + up
+	// Batch: endpoint + connect via + up. Для v6 в RCI уходит ЗАГЛУШКА —
+	// она перезаписывает возможный устаревший реальный endpoint в конфиге
+	// NDMS (например после смены v4→v6 в редакторе: иначе NDMS хранил бы и
+	// переприменял старый v4-адрес).
+	rciEndpoint := realEndpoint
+	if endpointIsV6 {
+		rciEndpoint = ndmsEndpointPlaceholder
+	}
 	cmds := []any{
-		payloads.CmdWireguardPeerEndpoint(names.NDMSName, pubkey, realEndpoint),
+		payloads.CmdWireguardPeerEndpoint(names.NDMSName, pubkey, rciEndpoint),
 		payloads.CmdWireguardPeerConnect(names.NDMSName, pubkey, stored.ISPInterface),
 		payloads.CmdInterfaceUp(names.NDMSName, true),
 	}
 	if _, err := o.transport.PostBatch(ctx, cmds); err != nil {
 		return fmt.Errorf("start native: %w", err)
+	}
+
+	if endpointIsV6 {
+		// NDMS применяет up асинхронно и в ходе поднятия сам переписывает
+		// kernel-endpoint значением из конфига (заглушкой) — одиночный wg set
+		// сразу после батча может проиграть гонку или застать девайс ещё не
+		// созданным. Ретраи покрывают старт, endpoint-страж — все дальнейшие
+		// переприменения конфига NDMS (ребут, up/down, failover, ping-check).
+		var setErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(wgSetRetryDelay)
+			}
+			if setErr = setKernelPeerEndpoint(ctx, names.IfaceName, pubkey, realEndpoint); setErr == nil {
+				break
+			}
+		}
+		if setErr != nil {
+			return fmt.Errorf("start native: %w", setErr)
+		}
+		o.guardRegister(stored.ID, guardEntry{
+			iface:    names.IfaceName,
+			pubkey:   pubkey,
+			endpoint: realEndpoint,
+			spec:     stored.Peer.Endpoint,
+			name:     names.NDMSName,
+		})
+		o.appLog.Info("start", names.NDMSName,
+			fmt.Sprintf("IPv6 endpoint %s выставлен в ядро через wg set %s (RCI NDMS v6 не принимает); endpoint-страж следит за сбросами NDMS", realEndpoint, names.IfaceName))
+	} else {
+		o.guardUnregister(stored.ID)
 	}
 
 	viaInfo := ""
@@ -458,6 +548,7 @@ func (o *OperatorNativeWG) Stop(ctx context.Context, stored *storage.AWGTunnel) 
 	if !ndmsinfo.SupportsWireguardASC() {
 		_ = o.kmod.RemoveTunnel(stored.ID)
 	}
+	o.guardUnregister(stored.ID)
 
 	o.appLog.Info("stop", names.NDMSName, "tunnel stopped")
 	return nil
@@ -471,6 +562,7 @@ func (o *OperatorNativeWG) Delete(ctx context.Context, stored *storage.AWGTunnel
 	if !ndmsinfo.SupportsWireguardASC() {
 		_ = o.kmod.RemoveTunnel(stored.ID)
 	}
+	o.guardUnregister(stored.ID)
 
 	// 2. Remove ping-check profile (before interface deletion)
 	if stored.PingCheck != nil && stored.PingCheck.Enabled {
@@ -787,10 +879,9 @@ func (o *OperatorNativeWG) ResolveActiveWAN(ctx context.Context, stored *storage
 	return sysName
 }
 
-// nextFreeIndex finds the next available Wireguard index via cached InterfaceStore.
-// Раньше делал direct GetRaw + parseRCIInterfaceList; теперь идёт через
-// query.InterfaceStore.List() который кэширует bootstrap. Cold path (only
-// at tunnel creation) — миграция нужна для чистой архитектуры, не perf.
+// nextFreeIndex finds the next available Wireguard index via cached
+// InterfaceStore.List() (bootstrap-cached). Cold path — only at tunnel
+// creation.
 func (o *OperatorNativeWG) nextFreeIndex(ctx context.Context) (int, error) {
 	ifaces, err := o.queries.Interfaces.List(ctx)
 	if err != nil {
@@ -813,7 +904,7 @@ func (o *OperatorNativeWG) nextFreeIndex(ctx context.Context) (int, error) {
 			return i, nil
 		}
 	}
-	return 0, fmt.Errorf("all %d Wireguard slots are occupied", MaxTunnels)
+	return 0, fmt.Errorf("достигнут максимум NativeWG-туннелей (%d): все интерфейсы Wireguard0..%d в NDMS заняты", MaxTunnels, MaxTunnels-1)
 }
 
 // buildKmodConfigResolved builds a KmodConfig with a pre-resolved endpoint IP.
@@ -848,6 +939,26 @@ func (o *OperatorNativeWG) fallbackResolve(stored *storage.AWGTunnel, resolveErr
 	port, _ := strconv.Atoi(portStr)
 	o.appLog.Warn("resolve-endpoint", stored.Peer.Endpoint, "DNS failed, using cached IP "+stored.ResolvedEndpointIP)
 	return stored.ResolvedEndpointIP, port, nil
+}
+
+// resolveEndpointFresh — как resolveEndpointWithFallback, но БЕЗ фолбэка на
+// кэшированный ResolvedEndpointIP. Вызывающему нужно живое состояние DNS
+// (SyncPeer по результату решает судьбу endpoint-стража), а кэш может нести
+// адрес ПРЕЖНЕГО endpoint'а — «подтверждённый» им v4/v6 снял бы стража или
+// увёз в ядро чужой адрес.
+func (o *OperatorNativeWG) resolveEndpointFresh(endpoint string) (string, int, error) {
+	var lastErr error
+	for attempt := 1; attempt <= resolveAttempts; attempt++ {
+		ip, port, err := o.resolveOnce(endpoint, resolveAttemptTimeout)
+		if err == nil {
+			return ip, port, nil
+		}
+		lastErr = err
+		if attempt < resolveAttempts {
+			time.Sleep(resolveRetryGap)
+		}
+	}
+	return "", 0, lastErr
 }
 
 // resolveEndpointWithFallback resolves the tunnel's endpoint with a short retry
@@ -931,16 +1042,19 @@ func splitAddressMask(addr string) (string, string) {
 	return ip.String(), net.IP(ipNet.Mask).String()
 }
 
-// extractIPv4 extracts the bare IPv4 address from a WireGuard Address field
-// which may contain comma-separated IPv4 and IPv6 (e.g. "172.16.0.2/32, 2606::1/128").
-// Returns the IPv4 without CIDR suffix (caller provides mask separately for RCI).
+// extractIPv4 extracts the IPv4 entry from a WireGuard Address field which
+// may contain comma-separated IPv4 and IPv6 (e.g. "172.16.0.2/24, 2606::1/128").
+// The CIDR suffix is PRESERVED ("172.16.0.2/24") — callers pass the result
+// through splitAddressMask to get (ip, mask) for RCI. Раньше суффикс срезался
+// здесь, и splitAddressMask всегда получал голый IP → пользовательская маска
+// молча превращалась в /32 (issue #531).
 func extractIPv4(addr string) string {
 	for _, part := range strings.Split(addr, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		// Strip existing CIDR for the check
+		// Strip existing CIDR for the family check only.
 		host := part
 		if idx := strings.Index(part, "/"); idx != -1 {
 			host = part[:idx]
@@ -949,7 +1063,7 @@ func extractIPv4(addr string) string {
 		if strings.Contains(host, ":") {
 			continue
 		}
-		return host
+		return part
 	}
 	return addr
 }

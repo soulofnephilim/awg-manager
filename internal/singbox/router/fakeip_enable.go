@@ -14,8 +14,10 @@ import (
 )
 
 // fakeIPTunDescription is the NDMS interface description stamped on the
-// fakeip-tun OpkgTun at creation. Stable so a description-based reap fallback
-// could match it later (v1 reaps by persisted index only).
+// fakeip-tun OpkgTun at creation. LOAD-BEARING contract: the reap's
+// description scan (reapFakeIPOrphansByDescription) matches persist-less
+// orphans by exact equality with this string — do not change it without a
+// migration for ifaces stamped with the old value.
 const fakeIPTunDescription = "awgm fakeip-tun"
 
 // fakeIPPoolRouteComment labels the fakeip pool auto static route so it is
@@ -140,8 +142,9 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	push := func(undo func()) { rollback = append(rollback, undo) }
 
 	// INVARIANT: persist FakeIP state FIRST, before creating the iface, so a
-	// crash between here and CreateOpkgTun leaves a persist the startup reap can
-	// find (it reaps strictly by persisted index).
+	// crash between here and CreateOpkgTun leaves a persist the reap can find
+	// by index; a persist-less orphan that still slips through is caught by
+	// the reap's description scan.
 	if err = s.deps.Settings.SetFakeIPState(&storage.FakeIPState{
 		Provisioned: true,
 		Index:       idx,
@@ -163,14 +166,24 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	if err = s.deps.OpkgTun.CreateOpkgTunWithSecurityLevel(ctx, ndmsName, fakeIPTunDescription, "private"); err != nil {
 		return fmt.Errorf("enable fakeip-tun: create opkgtun: %w", err)
 	}
+	// rbCtx: рулбэк обязан доехать и когда Enable упал ИЗ-ЗА отмены ctx (клиент
+	// отвалился во время 60s waitForSingbox) — иначе NDMS-вызовы отката no-op'ятся
+	// с context.Canceled и OpkgTun остаётся с настроенным адресом (nginx-loop, см.
+	// teardownOpkgTun). Тот же приём, что у scheduleFakeIPDrain.
+	rbCtx := context.WithoutCancel(ctx)
 	push(func() {
-		if e := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); e != nil {
-			s.appLog.Warn("fakeip-rollback", iface, "iface down: "+e.Error())
-		}
-		if e := s.deps.OpkgTun.DeleteOpkgTun(ctx, ndmsName); e != nil {
-			s.appLog.Warn("fakeip-rollback", iface, "delete opkgtun: "+e.Error())
-		}
+		_ = s.teardownOpkgTun(rbCtx, ndmsName, "fakeip-rollback")
 	})
+
+	// NDMS-native разрешение трафика в tun: permit-all access-list
+	// `_WEBADMIN_<iface>` + `ip access-group … in` + auto-delete (как галка
+	// доступа в веб-морде). Восстановлено — потеряно при интеграции PoC; без
+	// него firewall NDMS (isolate-private и т.п.) режет LAN→tun форвард и DNS
+	// на tun-адрес. Снятие — в teardownOpkgTun (rollback идёт через него же);
+	// auto-delete дополнительно каскадит ACL при удалении интерфейса.
+	if err = s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); err != nil {
+		return fmt.Errorf("enable fakeip-tun: permit acl: %w", err)
+	}
 
 	if err = s.deps.OpkgTun.SetAddress(ctx, ndmsName, addr4, mask4); err != nil {
 		return fmt.Errorf("enable fakeip-tun: set address: %w", err)
@@ -225,6 +238,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		CachePath:  p.CachePath,
 		RealServer: p.RealServer,
 		Stack:      sr.FakeIPStack,
+		UDPTimeout: sr.UDPTimeout,
 	}
 	ensureFakeIPOverlay(fcfg, spec)
 
@@ -274,10 +288,28 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 			if e := s.deps.Orch.SetEnabled(orchestrator.SlotRouter, prevRouterEnabled); e != nil {
 				s.appLog.Warn("fakeip-rollback", iface, "restore router slot: "+e.Error())
 			}
+			// Rollback вернул прежнюю разметку слотов — device-proxy должен
+			// перегенерировать слот 30 под неё до следующего reload.
+			s.notifyRoutingSlotsChanged()
 		}
 	})
+	// Освежить 15-awg.json ДО валидирующего reload'а: протухший каталог
+	// AWG-тегов (byte-кэш, пропущенная инвалидация) даёт ложный
+	// «unknown-outbound» по живому туннелю и откат всего enable (#567).
+	// Best-effort: ошибка каталога не должна блокировать enable сама по себе.
+	if s.deps.AWGOutboundsRefresh != nil {
+		if e := s.deps.AWGOutboundsRefresh(ctx); e != nil {
+			s.appLog.Warn("fakeip-enable", "awg-outbounds", "refresh 15-awg.json: "+e.Error())
+		}
+	}
 	if err = s.persistFakeIPConfig(ctx, fcfg); err != nil {
 		return fmt.Errorf("enable fakeip-tun: persist fakeip config: %w", err)
+	}
+	// Slot XOR выше поменял видимость композитов (20 припаркован, 21 активен) —
+	// зависимый слот 30 device-proxy перегенерируется ДО reload ниже (issue #465).
+	s.notifyRoutingSlotsChanged()
+	if err = s.orchestratorApplyNow(); err != nil {
+		return fmt.Errorf("enable fakeip-tun: orchestrator reload: %w", err)
 	}
 
 	// Wait for sing-box to be truly ready (process + tun carrier + live fakeip
@@ -304,7 +336,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		return fmt.Errorf("enable fakeip-tun: add pool route: %w", err)
 	}
 	push(func() {
-		if e := s.deps.StaticRoutes.RemoveStaticRoute(ctx, StaticRouteSpec{
+		if e := s.deps.StaticRoutes.RemoveStaticRoute(rbCtx, StaticRouteSpec{
 			Network: poolNet4, Mask: poolMask4, Interface: ndmsName, Comment: fakeIPPoolRouteComment,
 		}); e != nil {
 			s.appLog.Warn("fakeip-rollback", iface, "remove pool route: "+e.Error())
@@ -317,7 +349,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 			return fmt.Errorf("enable fakeip-tun: add pool route v6: %w", err)
 		}
 		push(func() {
-			if e := s.deps.StaticRoutes.RemoveStaticRoute(ctx, StaticRouteSpec{
+			if e := s.deps.StaticRoutes.RemoveStaticRoute(rbCtx, StaticRouteSpec{
 				V6: true, Network: p.Inet6Range, Interface: ndmsName,
 			}); e != nil {
 				s.appLog.Warn("fakeip-rollback", iface, "remove pool route v6: "+e.Error())
@@ -336,7 +368,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		}
 		cc := c
 		push(func() {
-			if e := s.removeCIDRRoute(ctx, ndmsName, cc, false); e != nil {
+			if e := s.removeCIDRRoute(rbCtx, ndmsName, cc, false); e != nil {
 				s.appLog.Warn("fakeip-rollback", iface, "remove cidr route "+cc+": "+e.Error())
 			}
 		})
@@ -348,7 +380,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		}
 		cc := c
 		push(func() {
-			if e := s.removeCIDRRoute(ctx, ndmsName, cc, true); e != nil {
+			if e := s.removeCIDRRoute(rbCtx, ndmsName, cc, true); e != nil {
 				s.appLog.Warn("fakeip-rollback", iface, "remove cidr route v6 "+cc+": "+e.Error())
 			}
 		})

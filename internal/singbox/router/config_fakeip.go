@@ -30,6 +30,11 @@ type FakeIPTunSpec struct {
 	// the only stable system-stack combo on this router's kernel (4.9), where the
 	// system stack with GSO panics sing-tun under load (PoC-proven 2026-06-13).
 	Stack string
+	// UDPTimeout is the UDP-NAT expiration for the tun inbound (Go duration
+	// string). Empty → DefaultUDPTimeout via resolveUDPTimeout. Without it
+	// sing-box falls back to its built-in C.UDPTimeout (5m), so a user who set a
+	// longer timeout still lost UDP sessions at exactly 5 minutes in fakeip mode.
+	UDPTimeout string
 }
 
 // boolPtr returns a pointer to v. The tun inbound's auto_route / auto_redirect /
@@ -84,6 +89,7 @@ func BuildFakeIPTunConfig(s FakeIPTunSpec) (*RouterConfig, error) {
 	if stack == "" {
 		stack = "gvisor"
 	}
+	udpTimeout := resolveUDPTimeout(s.UDPTimeout)
 	in := Inbound{
 		Type:                   "tun",
 		Tag:                    "tun-in",
@@ -95,6 +101,7 @@ func BuildFakeIPTunConfig(s FakeIPTunSpec) (*RouterConfig, error) {
 		StrictRoute:            boolPtr(false),
 		Stack:                  stack,
 		EndpointIndependentNAT: boolPtr(false),
+		UDPTimeout:             udpTimeout,
 	}
 	if stack == "system" {
 		in.GSO = boolPtr(false)
@@ -145,6 +152,7 @@ func BuildFakeIPTunConfig(s FakeIPTunSpec) (*RouterConfig, error) {
 		{Action: "hijack-dns", Protocol: "dns"},
 		{Action: "route", Outbound: s.ProxyTag},
 	}
+	cfg.EnsureUDPTimeoutRule(udpTimeout)
 	cfg.Route.Final = s.ProxyTag
 	cfg.Route.DefaultDomainResolver = &DomainResolver{Server: "real"}
 
@@ -184,6 +192,7 @@ func ensureFakeIPOverlay(cfg *RouterConfig, spec FakeIPTunSpec) {
 	if stack == "" {
 		stack = "gvisor"
 	}
+	udpTimeout := resolveUDPTimeout(spec.UDPTimeout)
 	in := Inbound{
 		Type:                   "tun",
 		Tag:                    "tun-in",
@@ -195,6 +204,7 @@ func ensureFakeIPOverlay(cfg *RouterConfig, spec FakeIPTunSpec) {
 		StrictRoute:            boolPtr(false),
 		Stack:                  stack,
 		EndpointIndependentNAT: boolPtr(false),
+		UDPTimeout:             udpTimeout,
 	}
 	if stack == "system" {
 		in.GSO = boolPtr(false)
@@ -232,6 +242,9 @@ func ensureFakeIPOverlay(cfg *RouterConfig, spec FakeIPTunSpec) {
 
 	// --- fakeip DNS rules: restrict query_type to A/AAAA ---
 	normalizeFakeIPDNSRules(cfg)
+
+	// --- UDP idle-timeout override (route-options), same as tproxy path ---
+	cfg.EnsureUDPTimeoutRule(udpTimeout)
 }
 
 // upsertInbound replaces the first Inbound with the same Tag in-place, or

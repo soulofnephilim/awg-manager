@@ -52,16 +52,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PRESETS_PATH = resolve(__dirname, 'mock-data/presets-snapshot.json');
 const UNIFIED_PRESETS_PATH = resolve(__dirname, '../../internal/presets/defaults.json');
-let presetsCache = null;
 let unifiedPresetsCache = null;
-async function getPresets() {
-	if (!presetsCache) {
-		presetsCache = JSON.parse(await readFile(PRESETS_PATH, 'utf8'));
-	}
-	return presetsCache;
-}
 async function getUnifiedPresets() {
 	if (!unifiedPresetsCache) {
 		unifiedPresetsCache = JSON.parse(await readFile(UNIFIED_PRESETS_PATH, 'utf8'));
@@ -69,7 +61,17 @@ async function getUnifiedPresets() {
 	return unifiedPresetsCache;
 }
 
+// MOCK_DELAY_MS=1500 — искусственная задержка каждого ответа /api/*:
+// для визуальной проверки skeleton-состояний холодной загрузки.
+const MOCK_DELAY_MS = Number(process.env.MOCK_DELAY_MS || 0);
+
 const UPSTREAM = process.env.UPSTREAM ?? 'http://127.0.0.1:8080';
+// MOCK_DETERMINISTIC=1: вся "живость" (jitter трафика, delay-пробы,
+// вероятностные сбои) становится воспроизводимой — скриншот-сравнение
+// рефакторингов UI требует бит-в-бит одинаковых ответов между прогонами.
+const DETERMINISTIC = ['1', 'true'].includes(String(process.env.MOCK_DETERMINISTIC ?? ''));
+const rand = () => (DETERMINISTIC ? 0.5 : Math.random());
+
 const PORT = Number(process.env.PORT ?? 8081);
 const VALID = new Set(['basic', 'advanced', 'expert']);
 
@@ -184,6 +186,7 @@ function resetRuntimeControls() {
 	bucketCleared.singbox = false;
 	mockManagedAscByServer = createInitialMockManagedAscByServer();
 	mockSystemAscByTunnel = createInitialMockSystemAscByTunnel();
+	mockFreeturn = createInitialMockFreeturn();
 	applyDefaultMockKeeneticProfile();
 }
 const MOCK_DOWNLOAD_OUTBOUNDS = [
@@ -478,39 +481,6 @@ const MOCK_SYSTEM_TUNNELS = [
 	},
 ];
 
-/** Merge tunnel summary for GET /connections mocks (Prism omits map entries). */
-function enrichConnectionsTunnels(body) {
-	if (!body || typeof body !== 'object' || !body.data || typeof body.data !== 'object') return body;
-	const data = body.data;
-	const stats = data.stats;
-	if (!stats || typeof stats !== 'object') return body;
-
-	const direct = Math.max(0, Number(stats.direct) || 0);
-	const tunneled = Math.max(0, Number(stats.tunneled) || 0);
-	const tunnels = {
-		'': {
-			name: 'Direct',
-			interface: '—',
-			count: direct,
-		},
-	};
-	const list = MOCK_AWG_TUNNELS;
-	const n = list.length;
-	let rem = tunneled;
-	for (let i = 0; i < n; i++) {
-		const t = list[i];
-		const share = i === n - 1 ? rem : Math.floor(tunneled / n);
-		if (i < n - 1) rem -= share;
-		tunnels[t.id] = {
-			name: t.name,
-			interface: t.interfaceName ?? '—',
-			count: share,
-		};
-	}
-	data.tunnels = tunnels;
-	return body;
-}
-
 const MOCK_CONNECTIONS_POOL = (() => {
 	const items = [];
 	const protos = ['tcp', 'udp', 'icmp'];
@@ -519,9 +489,11 @@ const MOCK_CONNECTIONS_POOL = (() => {
 	for (let i = 0; i < 42; i++) {
 		const tunneled = i < 12;
 		const tunnel = tunneled ? getConnectionTunnel(i) : null;
+		const routeClass = tunneled ? 'tunnel' : i % 7 === 0 ? 'singbox' : i % 11 === 0 ? 'local' : 'direct';
 		const tunnelId = tunnel?.id ?? '';
-		const tunnelName = tunnel?.name ?? 'Direct';
-		const iface = tunnel?.interfaceName ?? 'eth3';
+		const tunnelName =
+			tunnel?.name ?? (routeClass === 'singbox' ? 'sing-box' : routeClass === 'local' ? 'Локально' : 'Direct');
+		const iface = (routeClass === 'local' || routeClass === 'singbox') ? '' : (tunnel?.interfaceName ?? 'eth3');
 		const proto = protos[i % protos.length];
 		const srcHost = directNames[i % directNames.length];
 		const srcA = 192;
@@ -539,15 +511,54 @@ const MOCK_CONNECTIONS_POOL = (() => {
 			dstPort,
 			state: states[i % states.length],
 			packets: 30 + i * 2,
-			bytes: 300 + i * 1111,
+			bytes: (100 + i * 337) + (200 + i * 774),
+			bytesOut: 100 + i * 337,
+			bytesIn: 200 + i * 774,
+			ttl: i % 13 === 0 ? 0 : 30 + ((i * 37) % 1170),
+			routeClass,
 			interface: iface,
 			tunnelId,
 			tunnelName,
 			clientMac: `AA:BB:CC:DD:EE:${String((10 + i) % 99).padStart(2, '0')}`,
 			clientName: srcHost,
 			rules: tunneled
-				? [{ listId: `list-${(i % 4) + 1}`, listName: ['YouTube', 'Discord', 'OpenAI', 'GitHub'][i % 4] }]
+				? [{
+					listId: `list-${(i % 4) + 1}`,
+					listName: ['YouTube', 'Discord', 'OpenAI', 'GitHub'][i % 4],
+					...(i % 3 !== 0 && { fqdn: ['m.youtube.com', 'gateway.discord.gg', 'api.openai.com', 'github.com'][i % 4] })
+				}]
 				: [],
+		});
+	}
+	const v6Tunnel = getConnectionTunnel(0);
+	const v6Specs = [
+		{ protocol: 'tcp', dstPort: 443, routeClass: 'direct' },
+		{ protocol: 'udp', dstPort: 443, routeClass: 'direct' },
+		{ protocol: 'tcp', dstPort: 80, routeClass: 'tunnel' },
+		{ protocol: 'udp', dstPort: 53, routeClass: 'tunnel' },
+	];
+	for (let j = 0; j < v6Specs.length; j++) {
+		const spec = v6Specs[j];
+		const tunneled = spec.routeClass === 'tunnel';
+		items.push({
+			protocol: spec.protocol,
+			src: 'fd00::10',
+			dst: '2606:4700::1111',
+			srcPort: 50000 + j * 13,
+			dstPort: spec.dstPort,
+			state: states[j % states.length],
+			packets: 20 + j * 3,
+			bytes: (150 + j * 421) + (250 + j * 683),
+			bytesOut: 150 + j * 421,
+			bytesIn: 250 + j * 683,
+			ttl: 60 + j * 45,
+			routeClass: spec.routeClass,
+			interface: tunneled ? (v6Tunnel?.interfaceName ?? 'eth3') : 'eth3',
+			tunnelId: tunneled ? (v6Tunnel?.id ?? '') : '',
+			tunnelName: tunneled ? (v6Tunnel?.name ?? 'Direct') : 'Direct',
+			clientMac: `AA:BB:CC:DD:FF:${String(10 + j).padStart(2, '0')}`,
+			clientName: directNames[j % directNames.length],
+			rules: [],
 		});
 	}
 	return items;
@@ -569,9 +580,32 @@ function sortConnections(items, sortBy, sortDir) {
 	});
 }
 
+function buildConnectionBuckets(pool, keyFn) {
+	const map = new Map();
+	for (const c of pool) {
+		const [key, label] = keyFn(c);
+		if (!key) continue;
+		const b = map.get(key) ?? { key, label, count: 0, bytesIn: 0, bytesOut: 0 };
+		b.count += 1;
+		b.bytesIn += c.bytesIn;
+		b.bytesOut += c.bytesOut;
+		map.set(key, b);
+	}
+	const sorted = [...map.values()].sort((a, b) => b.count - a.count);
+	if (sorted.length <= 10) return sorted;
+	const other = { key: '@other', label: 'Прочее', count: 0, bytesIn: 0, bytesOut: 0 };
+	for (const b of sorted.slice(10)) {
+		other.count += b.count;
+		other.bytesIn += b.bytesIn;
+		other.bytesOut += b.bytesOut;
+	}
+	return [...sorted.slice(0, 10), other];
+}
+
 function buildMockConnectionsResponse(url) {
 	const tunnel = (url.searchParams.get('tunnel') || 'all').toLowerCase();
 	const protocol = (url.searchParams.get('protocol') || 'all').toLowerCase();
+	const fstate = (url.searchParams.get('state') || 'all').toUpperCase();
 	const search = (url.searchParams.get('search') || '').trim().toLowerCase();
 	const offset = Math.max(0, Number(url.searchParams.get('offset') || 0) || 0);
 	const limit = Math.max(1, Number(url.searchParams.get('limit') || 50) || 50);
@@ -579,8 +613,11 @@ function buildMockConnectionsResponse(url) {
 	const sortDir = (url.searchParams.get('sortDir') || 'asc').toLowerCase();
 
 	let filtered = MOCK_CONNECTIONS_POOL.filter((c) => {
-		if (tunnel === 'direct' && c.tunnelId !== '') return false;
-		if (tunnel !== 'all' && tunnel !== 'direct' && c.tunnelId !== tunnel) return false;
+		if (tunnel === 'direct' && c.routeClass !== 'direct') return false;
+		else if (tunnel === 'singbox' && c.routeClass !== 'singbox') return false;
+		else if (tunnel === 'local' && c.routeClass !== 'local') return false;
+		else if (!['all', 'direct', 'singbox', 'local'].includes(tunnel) && c.tunnelId !== tunnel) return false;
+		if (fstate !== 'ALL' && c.state !== fstate) return false;
 		if (protocol !== 'all' && c.protocol !== protocol) return false;
 		if (search) {
 			const hay = `${c.src} ${c.dst} ${c.srcPort} ${c.dstPort} ${c.clientName} ${c.state} ${c.interface} ${c.tunnelName}`.toLowerCase();
@@ -595,8 +632,10 @@ function buildMockConnectionsResponse(url) {
 
 	const stats = {
 		total: MOCK_CONNECTIONS_POOL.length,
-		direct: MOCK_CONNECTIONS_POOL.filter((c) => !c.tunnelId).length,
-		tunneled: MOCK_CONNECTIONS_POOL.filter((c) => !!c.tunnelId).length,
+		direct: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'direct').length,
+		tunneled: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'tunnel').length,
+		singbox: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'singbox').length,
+		local: MOCK_CONNECTIONS_POOL.filter((c) => c.routeClass === 'local').length,
 		protocols: {
 			tcp: MOCK_CONNECTIONS_POOL.filter((c) => c.protocol === 'tcp').length,
 			udp: MOCK_CONNECTIONS_POOL.filter((c) => c.protocol === 'udp').length,
@@ -611,6 +650,17 @@ function buildMockConnectionsResponse(url) {
 		data: {
 			stats,
 			tunnels,
+			byTunnel: buildConnectionBuckets(MOCK_CONNECTIONS_POOL, (c) =>
+				c.routeClass === 'tunnel'
+					? [c.tunnelId, c.tunnelName]
+					: c.routeClass === 'singbox'
+						? ['@singbox', 'sing-box']
+						: c.routeClass === 'local'
+							? ['@local', 'Локально']
+							: ['@direct', 'Напрямую'],
+			),
+			byClient: buildConnectionBuckets(MOCK_CONNECTIONS_POOL, (c) => [c.clientName || c.src, c.clientName || '']),
+			byDst: buildConnectionBuckets(MOCK_CONNECTIONS_POOL, (c) => [c.dst, c.rules?.[0]?.fqdn ?? '']),
 			connections: page,
 			pagination: { total: totalFiltered, offset, limit, returned: page.length },
 			fetchedAt: new Date().toISOString(),
@@ -919,6 +969,39 @@ const singboxTrafficCounters = new Map(
 	]),
 );
 
+// Полный outbound-JSON для страницы редактирования туннеля — то, что на
+// реальном бэке лежит в 10-tunnels.json (упрощённое зеркало
+// clientCore.buildMockOutboundFromTunnel).
+function mockOutboundFromTunnel(t) {
+	const outbound = { type: t.protocol, tag: t.tag, server: t.server, server_port: t.port };
+	const tls = {};
+	if (t.sni) tls.server_name = t.sni;
+	if (t.fingerprint) tls.utls = { enabled: true, fingerprint: t.fingerprint };
+	if (t.security === 'reality') {
+		tls.enabled = true;
+		tls.reality = { enabled: true, public_key: 'EXAMPLE_PUBLIC_KEY', short_id: 'abcd1234' };
+	} else if (t.security === 'tls') {
+		tls.enabled = true;
+	}
+	if (t.protocol === 'vless') {
+		outbound.uuid = '00000000-0000-4000-8000-000000000001';
+		outbound.transport = { type: t.transport || 'tcp' };
+		if (Object.keys(tls).length > 0) outbound.tls = tls;
+	} else if (t.protocol === 'naive' || t.protocol === 'mieru') {
+		outbound.username = 'demo-user';
+		outbound.password = 'demo-password';
+		if (Object.keys(tls).length > 0) outbound.tls = tls;
+	} else if (t.protocol === 'shadowsocks') {
+		outbound.method = 'aes-256-gcm';
+		outbound.password = 'demo-password';
+	} else {
+		// hysteria2 / trojan / прочие password-протоколы
+		outbound.password = 'demo-password';
+		outbound.tls = { enabled: true, server_name: t.sni || t.server, ...tls };
+	}
+	return outbound;
+}
+
 function isSingboxTunnelTrafficActive(tag) {
 	const t = MOCK_SINGBOX_TUNNELS.find((x) => x.tag === tag);
 	return !!(t && t.running && t.connectivity?.connected);
@@ -1087,7 +1170,7 @@ const AWG_BASE_LATENCY = (() => {
 	};
 	const map = {};
 	for (const [id, range] of Object.entries(ranges)) {
-		map[id] = range ? range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1)) : null;
+		map[id] = range ? range[0] + Math.floor(rand() * (range[1] - range[0] + 1)) : null;
 	}
 	return map;
 })();
@@ -1226,8 +1309,8 @@ function buildConnectivityMatrixEvent({ forced = false } = {}) {
 			const failed = !profile.up || profile.failedTargets?.has(target.id);
 			const base = Number(profile.base) || 80;
 			const hash = hashNumber(target.id, tunnel.id);
-			const drift = Math.round(Math.sin((Date.now() / 1800) + hash) * 9);
-			const forceJitter = forced ? Math.floor(Math.random() * 15) - 7 : 0;
+			const drift = DETERMINISTIC ? 0 : Math.round(Math.sin((Date.now() / 1800) + hash) * 9);
+			const forceJitter = forced ? Math.floor(rand() * 15) - 7 : 0;
 			const latency = blank || failed
 				? null
 				: Math.max(10, Math.min(520, base + (hash % 55) + drift + forceJitter + ti * 6));
@@ -1250,50 +1333,6 @@ function buildConnectivityMatrixEvent({ forced = false } = {}) {
 		cells,
 		updatedAt: nowIso,
 	};
-}
-
-function buildAwgTunnelMetaMap() {
-	const byId = new Map();
-	const byName = new Map();
-	const byIface = new Map();
-	for (const t of MOCK_AWG_TUNNELS) {
-		if (t.id) byId.set(String(t.id).toLowerCase(), t);
-		if (t.name) byName.set(String(t.name).toLowerCase(), t);
-		if (t.interfaceName) byIface.set(String(t.interfaceName).toLowerCase(), t);
-	}
-	return { byId, byName, byIface };
-}
-
-function enrichMonitoringMatrixAwgTunnels(tunnels) {
-	if (!Array.isArray(tunnels) || tunnels.length === 0) return;
-	const meta = buildAwgTunnelMetaMap();
-	let anyMatched = false;
-	for (let i = 0; i < tunnels.length; i++) {
-		const row = tunnels[i];
-		if (!row || typeof row !== 'object') continue;
-		const idKey = row.id ? String(row.id).toLowerCase() : '';
-		const nameKey = row.name ? String(row.name).toLowerCase() : '';
-		const ifaceKey = row.ifaceName ? String(row.ifaceName).toLowerCase() : '';
-		const match =
-			(idKey && meta.byId.get(idKey)) ||
-			(nameKey && meta.byName.get(nameKey)) ||
-			(ifaceKey && meta.byIface.get(ifaceKey));
-		if (!match) continue;
-		anyMatched = true;
-		row.source = 'awg';
-		row.backend = match.backend;
-		row.awgVersion = match.awgVersion;
-		row.defaultRoute = !!match.defaultRoute;
-		row.ifaceName = row.ifaceName || match.interfaceName || '';
-	}
-	// Prism mock often returns a single generic tunnel row; force a representative AWG row.
-	if (!anyMatched && tunnels[0] && typeof tunnels[0] === 'object') {
-		const first = tunnels[0];
-		first.source = 'awg';
-		first.backend = 'nativewg';
-		first.awgVersion = 'awg2.0';
-		first.defaultRoute = true;
-	}
 }
 
 const TRAFFIC_PERIOD_MS = {
@@ -1382,14 +1421,14 @@ function tickAwgTraffic() {
 		traffic.rxBytes +=
 			traffic.rxStep +
 			Math.round(Math.sin(traffic.tick / 3) * profile.waveRx * 0.25) +
-			Math.floor(Math.random() * profile.jitterRx) +
+			Math.floor(rand() * profile.jitterRx) +
 			(burst ? profile.burstRx : 0);
 		traffic.txBytes +=
 			traffic.txStep +
 			Math.round(Math.cos(traffic.tick / 4) * profile.waveTx * 0.25) +
-			Math.floor(Math.random() * profile.jitterTx) +
+			Math.floor(rand() * profile.jitterTx) +
 			(burst ? profile.burstTx : 0);
-		traffic.lastHandshake = new Date(Date.now() - (20_000 + Math.floor(Math.random() * 70_000))).toISOString();
+		traffic.lastHandshake = new Date(Date.now() - (20_000 + Math.floor(rand() * 70_000))).toISOString();
 		events.push({
 			id: traffic.eventId,
 			rxBytes: traffic.rxBytes,
@@ -1418,12 +1457,12 @@ function tickSingboxTraffic() {
 		traffic.download +=
 			traffic.downloadStep +
 			Math.round(Math.sin(traffic.tick / 3.2) * profile.waveRx * 0.35) +
-			Math.floor(Math.random() * profile.jitterRx) +
+			Math.floor(rand() * profile.jitterRx) +
 			(burst ? profile.burstRx : 0);
 		traffic.upload +=
 			traffic.uploadStep +
 			Math.round(Math.cos(traffic.tick / 4.1) * profile.waveTx * 0.35) +
-			Math.floor(Math.random() * profile.jitterTx) +
+			Math.floor(rand() * profile.jitterTx) +
 			(burst ? profile.burstTx : 0);
 		return {
 			tag: traffic.tag,
@@ -1454,8 +1493,8 @@ function tickSubscriptionTraffic() {
 		const baseUp = 8_000_000 + (hash % 7) * 1_500_000;
 		const waveDown = Math.round(Math.sin(phase / 12) * profile.waveRx * 0.4);
 		const waveUp = Math.round(Math.cos(phase / 15) * profile.waveTx * 0.4);
-		const jitterDown = Math.floor(Math.random() * Math.max(1, Math.floor(profile.jitterRx * 0.8)));
-		const jitterUp = Math.floor(Math.random() * Math.max(1, Math.floor(profile.jitterTx * 0.8)));
+		const jitterDown = Math.floor(rand() * Math.max(1, Math.floor(profile.jitterRx * 0.8)));
+		const jitterUp = Math.floor(rand() * Math.max(1, Math.floor(profile.jitterTx * 0.8)));
 
 		events.push({
 			tag: activeTag,
@@ -1480,8 +1519,8 @@ function buildSingboxTrafficEvent() {
 
 /** Clamp mock latency to 10..600 ms (0 = timeout). */
 function mockDelayJitter(base, spread = 70) {
-	if (Math.random() < 0.05) return 0;
-	const jitter = Math.round((Math.random() - 0.5) * spread);
+	if (rand() < 0.05) return 0;
+	const jitter = Math.round((rand() - 0.5) * spread);
 	return Math.max(10, Math.min(600, base + jitter));
 }
 
@@ -1953,6 +1992,134 @@ let mockSBSettings = {
 	fakeipPool6: '3f80::/10',
 	fakeipMtu: 1500,
 	fakeipSourcePreserve: true,
+};
+
+// ── Config editor (config.d slots) mock state ─────────────────────
+// user-слот 90-user.json: applied-содержимое + опциональный черновик,
+// мутируется PUT/apply/discard/enable, чтобы draft-цикл работал в dev-mock.
+const MOCK_USER_SLOT_CONTENT = JSON.stringify(
+	{
+		outbounds: [
+			{
+				tag: 'my-proxy',
+				type: 'shadowsocks',
+				server: '198.51.100.10',
+				server_port: 8388,
+				method: '2022-blake3-aes-128-gcm',
+				password: 'c2VjcmV0LWtleQ==',
+			},
+		],
+		route: {
+			rules: [{ domain_suffix: ['example.org'], outbound: 'my-proxy' }],
+		},
+	},
+	null,
+	2,
+);
+
+let mockConfigEditor = {
+	userActive: MOCK_USER_SLOT_CONTENT,
+	userDraft: null,
+	userEnabled: true,
+};
+
+// Реалистичное содержимое системных слотов для read-only просмотра.
+const MOCK_SYSTEM_SLOT_CONTENT = {
+	base: {
+		filename: '00-base.json',
+		content: JSON.stringify(
+			{
+				log: { level: 'info', timestamp: true },
+				dns: {
+					servers: [
+						{ tag: 'cf', address: '1.1.1.1', detour: 'direct' },
+						{ tag: 'local', address: '192.168.1.1', detour: 'direct' },
+					],
+					rules: [{ outbound: 'any', server: 'local' }],
+					final: 'cf',
+					strategy: 'ipv4_only',
+				},
+				outbounds: [
+					{ tag: 'direct', type: 'direct' },
+					{ tag: 'block', type: 'block' },
+				],
+				route: { final: 'direct', auto_detect_interface: true },
+				experimental: {
+					clash_api: { external_controller: '127.0.0.1:9090', external_ui: 'ui' },
+					cache_file: { enabled: true, path: '/opt/etc/sing-box/cache.db' },
+				},
+			},
+			null,
+			2,
+		),
+	},
+	dns: {
+		filename: '05-dns.json',
+		content: JSON.stringify(
+			{
+				dns: {
+					servers: [{ tag: 'doh-quad9', address: 'https://9.9.9.9/dns-query', detour: 'direct' }],
+				},
+			},
+			null,
+			2,
+		),
+	},
+	router: {
+		filename: '10-router.json',
+		content: JSON.stringify(
+			{
+				inbounds: [{ tag: 'tproxy-in', type: 'tproxy', listen: '::', listen_port: 51272, sniff: true }],
+				route: {
+					rules: [
+						{ action: 'sniff' },
+						{ protocol: 'dns', action: 'hijack-dns' },
+						{ rule_set: ['geoip-ru'], outbound: 'direct' },
+					],
+					rule_set: [
+						{ tag: 'geoip-ru', type: 'remote', format: 'binary', url: 'https://example/ru.srs' },
+					],
+				},
+			},
+			null,
+			2,
+		),
+	},
+	tunnels: {
+		filename: '20-tunnels.json',
+		content: JSON.stringify(
+			{
+				outbounds: [
+					{ tag: 'awg-tunnel-1', type: 'wireguard', server: '203.0.113.7', server_port: 51820 },
+				],
+			},
+			null,
+			2,
+		),
+	},
+	deviceproxy: {
+		filename: '30-deviceproxy.json',
+		content: JSON.stringify(
+			{
+				inbounds: [{ tag: 'device-proxy-in', type: 'mixed', listen: '0.0.0.0', listen_port: 1099 }],
+			},
+			null,
+			2,
+		),
+	},
+	subscriptions: {
+		filename: '40-subscriptions.json',
+		content: JSON.stringify(
+			{
+				outbounds: [
+					{ tag: 'sub-ru', type: 'vless', server: 'ru.example.net', server_port: 443 },
+					{ tag: 'sub-eu', type: 'vless', server: 'eu.example.net', server_port: 443 },
+				],
+			},
+			null,
+			2,
+		),
+	},
 };
 
 // DHCP pools projected as fakeip "segments" (Task 2.1/2.2). Persistent
@@ -2693,6 +2860,9 @@ const mockSingboxRules = [
 	{ ip_is_private: true, outbound: 'direct' },
 	{ action: 'route', domain_suffix: ['youtube.com', 'ytimg.com'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-openai'], outbound: 'sub-demo0001' },
+	// Composite «Все AI сервисы» (#450): added + used → its catalog tile is
+	// «добавлено», and member presets (anthropic/gemini/...) get the Layers mark.
+	{ action: 'route', rule_set: ['geosite-category-ai-!cn'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['inline-neo-demo'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-google'], outbound: 'sub-demo0001' },
 	{ action: 'route', rule_set: ['geosite-discord'], outbound: 'manual-eu' },
@@ -2709,6 +2879,13 @@ const mockSingboxRules = [
 
 const mockSingboxRuleSets = [
 	{ tag: 'geosite-cn', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-cn.srs', update_interval: '24h', download_detour: 'direct' },
+	// #450 catalog badges: composite tag from internal/presets/defaults.json
+	// («Все AI сервисы») — added + referenced by a rule above → members get
+	// the «в Все AI сервисы» member mark in the rule-set catalog.
+	{ tag: 'geosite-category-ai-!cn', type: 'remote', format: 'binary', url: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ai-!cn.srs', update_interval: '24h', download_detour: 'direct' },
+	// #450: added but NOT referenced by any route/DNS rule → the Telegram
+	// catalog tile renders the «добавлено, без правил» state.
+	{ tag: 'geosite-telegram', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-telegram.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-youtube', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-youtube.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-openai', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-openai.srs', update_interval: '24h', download_detour: 'direct' },
 	{ tag: 'geosite-discord', type: 'remote', format: 'binary', url: 'https://cdn.example.com/geosite-discord.srs', update_interval: '24h', download_detour: 'direct' },
@@ -2854,6 +3031,76 @@ function createInitialMockManagedAscByServer() {
 }
 
 let mockManagedAscByServer = createInitialMockManagedAscByServer();
+
+// ── FreeTurn — конфиг клиент/сервер + процессы. Prism отдаёт на freeturn-
+// эндпоинты пустые 200 (в swagger нет examples), поэтому мокаем здесь. ──────
+const MOCK_FREETURN_OBF_KEY = '64c1a9deadbeef77aa5510c3e2b4f6d8a1b2c3d4e5f60718293a4b5c6d7e8fe2';
+
+function createInitialMockFreeturn() {
+	return {
+		binaryPresent: true,
+		client: {
+			// Клиент «работает 2ч14м» на момент старта мока.
+			running: true,
+			pid: 12844,
+			startedAt: new Date(Date.now() - (2 * 60 + 14) * 60000).toISOString(),
+		},
+		server: { running: false, pid: 13207, startedAt: null },
+		config: {
+			client: {
+				enabled: true,
+				listen: '127.0.0.1:9000',
+				peer: 'vinvanvlad.com:56000',
+				provider: 'vk',
+				links: 'https://vk.ru/call/join/hFa2abc,https://vk.ru/call/join/x91kdef',
+				streams: 8,
+				transport: 'tcp',
+				mode: 'udp',
+				bond: false,
+				obfProfile: 'rtpopus2',
+				obfKey: MOCK_FREETURN_OBF_KEY,
+				streamsPerCred: 4,
+				browser: 'chrome',
+				manualCaptcha: false,
+				dnsMode: 'auto',
+				clientId: '',
+				debug: false,
+			},
+			server: {
+				enabled: false,
+				listen: '0.0.0.0:56000',
+				connect: '127.0.0.1:51820',
+				mode: 'udp',
+				obfProfile: 'rtpopus2',
+				obfKey: MOCK_FREETURN_OBF_KEY,
+				clientsFile: '',
+				debug: false,
+			},
+		},
+	};
+}
+
+let mockFreeturn = createInitialMockFreeturn();
+
+function mockFreeturnProcessStatus(kind) {
+	const proc = mockFreeturn[kind];
+	const cfg = mockFreeturn.config[kind];
+	const endpoint = kind === 'client' ? cfg.peer : cfg.listen;
+	return {
+		running: proc.running,
+		...(proc.running ? { pid: proc.pid, startedAt: proc.startedAt } : {}),
+		...(proc.running
+			? {
+					log:
+						'12:41:02 [info] turn pool ready: 8 streams\n' +
+						`12:41:03 [info] tunnel up ${endpoint}\n` +
+						'12:41:07 [info] keepalive ok · rtt 14ms',
+				}
+			: { log: '12:12:44 [info] process stopped' }),
+		binary: `/opt/bin/freeturn-${kind}`,
+		binaryPresent: mockFreeturn.binaryPresent,
+	};
+}
 
 const MOCK_KEENETIC_PROFILES = {
 	'5.0': {
@@ -3179,12 +3426,12 @@ function maybeInjectDownloadFault(req, res, path) {
 	if (!downloadFaultsEnabled) return false;
 	const route = DOWNLOAD_FAULT_ROUTES.find((r) => r.method === req.method && r.path === path);
 	if (!route) return false;
-	if (Math.random() >= downloadFaultProbability) return false;
+	if (rand() >= downloadFaultProbability) return false;
 
 	// Drain any request body so keep-alive sockets don't stall.
 	if (req.method !== 'GET' && req.method !== 'HEAD') req.resume();
 
-	const message = DOWNLOAD_FAULT_MESSAGES[Math.floor(Math.random() * DOWNLOAD_FAULT_MESSAGES.length)];
+	const message = DOWNLOAD_FAULT_MESSAGES[Math.floor(rand() * DOWNLOAD_FAULT_MESSAGES.length)];
 	if (route.style === 'updateInfo') {
 		send(res, 200, {
 			success: true,
@@ -3392,9 +3639,10 @@ function buildDownloadOutbounds() {
 }
 
 function buildConnectionsTunnelSummary(stats) {
-	const directCount = Math.max(0, Number(stats?.direct) || 0);
 	const tunnels = {
-		'': { name: 'Direct', interface: 'eth3', count: directCount },
+		'@direct': { name: 'Direct', interface: 'eth3', count: Math.max(0, Number(stats?.direct) || 0) },
+		'@singbox': { name: 'sing-box', interface: '', count: Math.max(0, Number(stats?.singbox) || 0) },
+		'@local': { name: 'Локально', interface: '', count: Math.max(0, Number(stats?.local) || 0) },
 	};
 
 	for (const tunnel of MOCK_AWG_TUNNELS) {
@@ -3711,6 +3959,7 @@ PersistentKeepalive = 25
 }
 
 const server = http.createServer(async (req, res) => {
+	if (MOCK_DELAY_MS > 0) await new Promise((r) => setTimeout(r, MOCK_DELAY_MS));
 	const url = new URL(req.url, `http://${req.headers.host}`);
 	const path = url.pathname;
 
@@ -4128,6 +4377,21 @@ const server = http.createServer(async (req, res) => {
 		return;
 	}
 
+	if (req.method === 'DELETE' && path === '/connections') {
+		const q = url.searchParams;
+		const idx = MOCK_CONNECTIONS_POOL.findIndex(
+			(c) =>
+				c.src === q.get('src') &&
+				c.dst === q.get('dst') &&
+				String(c.srcPort) === q.get('srcPort') &&
+				String(c.dstPort) === q.get('dstPort') &&
+				c.protocol === (q.get('protocol') || '').toLowerCase(),
+		);
+		if (idx >= 0) MOCK_CONNECTIONS_POOL.splice(idx, 1);
+		send(res, 200, { success: true, data: { ok: true } });
+		return;
+	}
+
 	if (req.method === 'GET' && path === '/events') {
 		res.writeHead(200, {
 			'Content-Type': 'text/event-stream',
@@ -4340,7 +4604,7 @@ const server = http.createServer(async (req, res) => {
 					let h = 0;
 					for (let i = 0; i < tag.length; i++) h = ((h << 5) - h + tag.charCodeAt(i)) | 0;
 					const base = Math.abs(h) % 370 + 30;
-					const jitter = Math.floor(Math.random() * 40) - 20;
+					const jitter = Math.floor(rand() * 40) - 20;
 					delays[tag] = Math.max(1, base + jitter);
 				}
 				send(res, 200, { success: true, data: { delays } });
@@ -4351,6 +4615,135 @@ const server = http.createServer(async (req, res) => {
 					error: { code: 'INVALID_REQUEST', message: String(e) },
 				});
 			}
+		});
+		return;
+	}
+
+	// Inbounds mirror (feature-inbounds-visibility): rich fixture instead of
+	// Prism's "string" placeholders — covers every source group and all three
+	// idle reasons so the read-only mirror UI is smoke-testable.
+	// Mode-aware, как реальный бэкенд: переключение режима паркует слот
+	// неактивного движка в disabled/ (fakeip_enable.go), поэтому в tproxy
+	// отдаём tproxy-движок + QoS, в fakeip-tun — tun из слота fakeip
+	// (тот в UI дедуплицируется карточкой TunInboundCard); подписки/туннели/
+	// device-proxy режимонезависимы.
+	if (req.method === 'GET' && path === '/singbox/inbounds') {
+		const routingMode = mockSBSettings.routingMode || 'tproxy';
+		const engineInbounds =
+			routingMode === 'fakeip-tun'
+				? [
+						{
+							tag: 'tun-in',
+							type: 'tun',
+							listen: '',
+							listenPort: 0,
+							slot: 'fakeip',
+							source: 'engine',
+							ownerLabel: 'sing-box',
+							idle: false,
+							idleReason: '',
+						},
+					]
+				: [
+						{
+							tag: 'tproxy-in',
+							type: 'tproxy',
+							listen: '::',
+							listenPort: 51272,
+							slot: 'router',
+							source: 'engine',
+							ownerLabel: 'sing-box',
+							idle: false,
+							idleReason: '',
+						},
+						{
+							tag: 'qos-tproxy-in',
+							type: 'tproxy',
+							listen: '::',
+							listenPort: 51280,
+							slot: 'qos-routes',
+							source: 'qos',
+							ownerLabel: 'QoS',
+							idle: false,
+							idleReason: '',
+						},
+					];
+		send(res, 200, {
+			success: true,
+			data: {
+				inbounds: [
+					...engineInbounds,
+					{
+						tag: 'device-proxy-in',
+						type: 'mixed',
+						listen: '0.0.0.0',
+						listenPort: 1099,
+						slot: 'deviceproxy',
+						source: 'deviceproxy',
+						ownerLabel: 'Прокси',
+						idle: false,
+						idleReason: '',
+					},
+					{
+						tag: 'sub-ru-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11021,
+						slot: 'subscriptions',
+						source: 'subscription',
+						ownerLabel: 'Sing subscription RU',
+						idle: false,
+						idleReason: '',
+					},
+					{
+						tag: 'sub-alexray-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11022,
+						slot: 'subscriptions',
+						source: 'subscription',
+						ownerLabel: 'AleXRAY (SUB)',
+						idle: true,
+						idleReason: 'ndms_proxy_disabled',
+					},
+					{
+						tag: 'group-eu-selector-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11031,
+						slot: 'subscriptions',
+						source: 'group',
+						ownerLabel: 'EU Selector',
+						idle: true,
+						idleReason: 'no_route_rule',
+					},
+					{
+						tag: 'Kto-VLESS-kto-po-drova-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11011,
+						slot: 'tunnels',
+						source: 'tunnel',
+						ownerLabel: 'Kto-VLESS-kto-po-drova',
+						idle: false,
+						idleReason: '',
+					},
+					{
+						tag: 'hysteria-sg-off-in',
+						type: 'mixed',
+						listen: '127.0.0.1',
+						listenPort: 11015,
+						slot: 'tunnels',
+						source: 'tunnel',
+						ownerLabel: 'hysteria-sg-off',
+						idle: true,
+						idleReason: 'ndms_proxy_missing',
+					},
+				],
+				warnings: [
+					'слот 55-fakeip.json не прочитан: unexpected end of JSON input',
+				],
+			},
 		});
 		return;
 	}
@@ -4396,6 +4789,150 @@ const server = http.createServer(async (req, res) => {
 		send(res, 200, {
 			success: true,
 			data: { json: JSON.stringify(merged, null, 2) },
+		});
+		return;
+	}
+
+	// ── Config editor (config.d slots, feature-user-config-editor) ──────
+	// Prism отдаёт "string"-плейсхолдеры из swagger — вместо них живая
+	// фикстура: список слотов с бейджами, содержимое base/user, draft-цикл
+	// PUT → check → apply/discard и enable-переключатель. Проверка (check)
+	// возвращает ok:false с двумя ошибками, если в конфиге встречается тег
+	// "bad-tag" — маркер для скриншотов ошибок; конфиг с "final" даёт
+	// ok:true + warning (жёлтый блок предупреждений).
+	if (req.method === 'GET' && path === '/singbox/config/slots') {
+		const userEffective = mockConfigEditor.userDraft ?? mockConfigEditor.userActive;
+		send(res, 200, {
+			success: true,
+			data: {
+				slots: [
+					{ slot: 'base', filename: '00-base.json', ownership: 'system', enabled: true, hasDraft: false, size: 1487, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'dns', filename: '05-dns.json', ownership: 'system', enabled: true, hasDraft: false, size: 612, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'router', filename: '10-router.json', ownership: 'system', enabled: true, hasDraft: true, size: 3961, mtime: '2026-07-06T08:03:41Z' },
+					{ slot: 'tunnels', filename: '20-tunnels.json', ownership: 'system', enabled: true, hasDraft: false, size: 2210, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'deviceproxy', filename: '30-deviceproxy.json', ownership: 'system', enabled: true, hasDraft: false, size: 344, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'subscriptions', filename: '40-subscriptions.json', ownership: 'system', enabled: false, hasDraft: false, size: 5133, mtime: '2026-07-04T11:32:19Z' },
+					{
+						slot: 'user',
+						filename: '90-user.json',
+						ownership: 'user',
+						enabled: mockConfigEditor.userEnabled,
+						hasDraft: mockConfigEditor.userDraft !== null,
+						size: Buffer.byteLength(userEffective),
+						mtime: '2026-07-06T09:12:55Z',
+					},
+				],
+			},
+		});
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/singbox/config/slot') {
+		const name = url.searchParams.get('name') || '';
+		if (name === 'user') {
+			send(res, 200, {
+				success: true,
+				data: {
+					slot: 'user',
+					filename: '90-user.json',
+					content: mockConfigEditor.userDraft ?? mockConfigEditor.userActive,
+					state: mockConfigEditor.userEnabled ? 'active' : 'disabled',
+					hasDraft: mockConfigEditor.userDraft !== null,
+				},
+			});
+			return;
+		}
+		const system = MOCK_SYSTEM_SLOT_CONTENT[name];
+		if (!system) {
+			send(res, 404, { success: false, error: { code: 'SLOT_NOT_FOUND', message: `slot ${name} not found` } });
+			return;
+		}
+		send(res, 200, {
+			success: true,
+			data: {
+				slot: name,
+				filename: system.filename,
+				content: system.content,
+				state: name === 'subscriptions' ? 'disabled' : 'active',
+				hasDraft: name === 'router',
+			},
+		});
+		return;
+	}
+
+	if (req.method === 'PUT' && path === '/singbox/config/user') {
+		readRequestText(req).then((raw) => {
+			mockConfigEditor.userDraft = raw;
+			console.log(`[mock-proxy] user slot draft saved (${raw.length} bytes)`);
+			send(res, 200, { success: true, data: {} });
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/check') {
+		readRequestText(req).then((raw) => {
+			const subject = raw || mockConfigEditor.userDraft;
+			if (subject === null || subject === undefined) {
+				send(res, 409, { success: false, error: { code: 'NO_DRAFT', message: 'нет черновика для проверки' } });
+				return;
+			}
+			if (subject.includes('bad-tag')) {
+				send(res, 200, {
+					success: true,
+					data: {
+						ok: false,
+						// kind'ы выровнены с бэкендом (orchestrator.ValidationError.Kind).
+						errors: [
+							{ slot: 'user', kind: 'duplicate-outbound', tag: 'direct', inRule: '', message: 'тег outbound уже занят слотом 00-base.json' },
+							{ slot: 'user', kind: 'unknown-outbound', tag: 'bad-tag', inRule: 'route.rules[0]', message: 'правило ссылается на несуществующий outbound' },
+						],
+					},
+				});
+				return;
+			}
+			// Маркер "warn-final" — advisory-предупреждение (ok:true + warnings),
+			// как route-final-conflict у бэкенда.
+			if (subject.includes('"final"')) {
+				send(res, 200, {
+					success: true,
+					data: {
+						ok: true,
+						errors: [],
+						warnings: [
+							{ slot: 'user', kind: 'route-final-conflict', tag: '', inRule: 'route.final', message: 'route.final задан несколькими слотами; sing-box оставит первый и молча проигнорирует остальные' },
+						],
+					},
+				});
+				return;
+			}
+			send(res, 200, { success: true, data: { ok: true, errors: [] } });
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/apply') {
+		if (mockConfigEditor.userDraft !== null) {
+			mockConfigEditor.userActive = mockConfigEditor.userDraft;
+			mockConfigEditor.userDraft = null;
+		}
+		mockConfigEditor.userEnabled = true;
+		console.log('[mock-proxy] user slot draft applied');
+		send(res, 200, { success: true, data: { ok: true } });
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/discard') {
+		mockConfigEditor.userDraft = null;
+		console.log('[mock-proxy] user slot draft discarded');
+		send(res, 200, { success: true, data: {} });
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/singbox/config/user/enable') {
+		readJsonBody(req, {}).then((body) => {
+			mockConfigEditor.userEnabled = body.enabled !== false;
+			console.log(`[mock-proxy] user slot enabled=${mockConfigEditor.userEnabled}`);
+			send(res, 200, { success: true, data: {} });
 		});
 		return;
 	}
@@ -4635,6 +5172,21 @@ const server = http.createServer(async (req, res) => {
 			success: true,
 			data: MOCK_SINGBOX_TUNNELS.map((t) => ({ ...t })),
 		});
+		return;
+	}
+
+	// Одиночный туннель — канонический путь (#520). Без хендлера запрос
+	// провалился бы в prism, который отвечает примером из swagger
+	// ({tag:'proxy-01', outbound:{}}), и list-based фолбэк клиента
+	// никогда бы не отработал.
+	if (req.method === 'GET' && path === '/singbox/tunnels/get') {
+		const tag = url.searchParams.get('tag') || '';
+		const t = MOCK_SINGBOX_TUNNELS.find((x) => x.tag === tag);
+		if (!t) {
+			send(res, 404, { error: true, message: `tunnel not found: ${tag}`, code: 'NOT_FOUND' });
+			return;
+		}
+		send(res, 200, { success: true, data: { tag: t.tag, outbound: mockOutboundFromTunnel(t) } });
 		return;
 	}
 
@@ -5431,6 +5983,9 @@ const server = http.createServer(async (req, res) => {
 				enabled: mockEngineRunning,
 				installed: true,
 				running: mockEngineRunning,
+				// Interception path live (chains + PREROUTING jumps). Only meaningful
+				// in tproxy mode; fakeip-tun drives its own badge via routingMode.
+				active: mockEngineRunning && routingMode === 'tproxy',
 				version: '1.13.11',
 				configValid: true,
 				netfilterAvailable: true,
@@ -5724,7 +6279,8 @@ const server = http.createServer(async (req, res) => {
 		let now = sub.activeMember || '';
 		if (sub.mode === 'urltest' && sub.memberTags && sub.memberTags.length > 0) {
 			// Rotate every 15 seconds — visible auto-switching for testing.
-			const idx = Math.floor(Date.now() / 15000) % sub.memberTags.length;
+			// (в детерминированном режиме — фиксированный первый член)
+			const idx = DETERMINISTIC ? 0 : Math.floor(Date.now() / 15000) % sub.memberTags.length;
 			now = sub.memberTags[idx];
 		}
 		send(res, 200, { success: true, data: { now } });
@@ -6041,9 +6597,9 @@ const server = http.createServer(async (req, res) => {
 			return;
 		}
 		const base = AWG_BASE_LATENCY[id];
-		const jitter = Math.floor(Math.random() * 25) - 12;
+		const jitter = Math.floor(rand() * 25) - 12;
 		const latency =
-			base !== null ? Math.max(10, Math.min(300, base + jitter)) : 42 + Math.floor(Math.random() * 40);
+			base !== null ? Math.max(10, Math.min(300, base + jitter)) : 42 + Math.floor(rand() * 40);
 		send(res, 200, {
 			success: true,
 			data: { connected: true, latency, httpCode: 204 },
@@ -6059,7 +6615,7 @@ const server = http.createServer(async (req, res) => {
 			send(res, 200, {
 				success: true,
 				data: up
-					? { connected: true, latency: 38 + Math.floor(Math.random() * 20) }
+					? { connected: true, latency: 38 + Math.floor(rand() * 20) }
 					: { connected: false, reason: 'interface down' },
 			});
 		}, 800);
@@ -6105,7 +6661,7 @@ const server = http.createServer(async (req, res) => {
 		const totalSeconds = 5;
 		const iv = setInterval(() => {
 			second++;
-			const bw = baseBw + Math.floor((Math.random() - 0.5) * 2_000_000);
+			const bw = baseBw + Math.floor((rand() - 0.5) * 2_000_000);
 			const bytes = Math.floor(bw);
 			sent += bytes;
 			res.write(`event: interval\ndata: ${JSON.stringify({ second, bandwidth: bw })}\n\n`);
@@ -6523,6 +7079,102 @@ const server = http.createServer(async (req, res) => {
 
 	// ── end fakeip config CRUD ─────────────────────────────────────────────────
 
+	// ── FreeTurn ───────────────────────────────────────────────────────────────
+
+	if (req.method === 'GET' && path === '/freeturn/config') {
+		sendData(res, mockFreeturn.config);
+		return;
+	}
+
+	if (
+		req.method === 'PUT' &&
+		(path === '/freeturn/client/config' || path === '/freeturn/server/config')
+	) {
+		const kind = path === '/freeturn/client/config' ? 'client' : 'server';
+		readRequestText(req).then((raw) => {
+			try {
+				mockFreeturn.config[kind] = { ...mockFreeturn.config[kind], ...JSON.parse(raw || '{}') };
+				sendData(res, mockFreeturn.config[kind]);
+			} catch (e) {
+				sendInvalidRequest(res, e);
+			}
+		});
+		return;
+	}
+
+	if (req.method === 'GET' && path === '/freeturn/status') {
+		sendData(res, {
+			client: mockFreeturnProcessStatus('client'),
+			server: mockFreeturnProcessStatus('server'),
+			installAvailable: true,
+			installVersion: '1.8.0',
+			installing: false,
+		});
+		return;
+	}
+
+	{
+		const m = req.method === 'POST' && /^\/freeturn\/(client|server)\/(start|stop)$/.exec(path);
+		if (m) {
+			const [, kind, action] = m;
+			const proc = mockFreeturn[kind];
+			proc.running = action === 'start';
+			proc.startedAt = proc.running ? new Date().toISOString() : null;
+			sendData(res, { message: `freeturn ${kind}: ${action} (mock)` });
+			return;
+		}
+	}
+
+	if (req.method === 'POST' && path === '/freeturn/server/link') {
+		readRequestText(req).then((raw) => {
+			try {
+				const body = raw ? JSON.parse(raw) : {};
+				const srv = mockFreeturn.config.server;
+				const port = Number(srv.listen.split(':').pop()) || 56000;
+				const peer = `203.0.113.10:${port}`;
+				const payload = {
+					v: 1,
+					provider: body.provider || 'vk',
+					peer,
+					obf: srv.obfProfile,
+					...(srv.obfKey ? { key: srv.obfKey } : {}),
+					mtu: body.mtu || 1376,
+					...(body.clientId ? { cid: body.clientId } : {}),
+					...(body.name ? { name: body.name } : {}),
+					...(body.wg ? { wg: body.wg } : {}),
+				};
+				const link = 'freeturn://' + Buffer.from(JSON.stringify(payload)).toString('base64');
+				sendData(res, { link, peer, ...(body.clientId ? { clientId: body.clientId } : {}) });
+			} catch (e) {
+				sendInvalidRequest(res, e);
+			}
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/freeturn/link/decode') {
+		readRequestText(req).then((raw) => {
+			try {
+				const { link } = JSON.parse(raw || '{}');
+				const m = /^freeturn:\/\/(.+)$/.exec(String(link ?? '').trim());
+				if (!m) throw new Error('ожидается ссылка вида freeturn://…');
+				const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+				sendData(res, JSON.parse(Buffer.from(b64, 'base64').toString('utf8')));
+			} catch (e) {
+				sendInvalidRequest(res, e);
+			}
+		});
+		return;
+	}
+
+	if (req.method === 'POST' && path === '/freeturn/install') {
+		mockFreeturn.binaryPresent = true;
+		sendData(res, { message: 'freeturn установлен (mock)' });
+		return;
+	}
+
+	// ── end FreeTurn ───────────────────────────────────────────────────────────
+
 	// Pass-through for everything else (including /events SSE).
 	const upstream = new URL(UPSTREAM);
 	const proxyReq = http.request(
@@ -6586,7 +7238,7 @@ function makeMockSnapshot() {
 	const outbounds = ['vless-1', 'urltest:auto', 'DIRECT'];
 	const rules = ['DOMAIN-SUFFIX', 'RULE-SET', 'GEOIP'];
 	const networks = ['tcp', 'tcp', 'tcp', 'udp'];
-	const conns = Array.from({ length: 6 + Math.floor(Math.random() * 4) }, (_, i) => {
+	const conns = Array.from({ length: 6 + Math.floor(rand() * 4) }, (_, i) => {
 		const out = outbounds[i % outbounds.length];
 		return {
 			id: `mock-${i}-${Date.now()}`,
@@ -6599,8 +7251,8 @@ function makeMockSnapshot() {
 				destinationPort: '443',
 				host: hosts[i % hosts.length],
 			},
-			upload: 1024 * (50 + Math.floor(Math.random() * 5000)),
-			download: 1024 * (200 + Math.floor(Math.random() * 50000)),
+			upload: 1024 * (50 + Math.floor(rand() * 5000)),
+			download: 1024 * (200 + Math.floor(rand() * 50000)),
 			start: new Date(Date.now() - (60 + i * 30) * 1000).toISOString(),
 			chains: [out],
 			rule: rules[i % rules.length],

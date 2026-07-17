@@ -125,7 +125,7 @@
     </Button>
   </WizardStep>
 
-  <SbRouterServiceCatalogModal />
+  <SbRouterServiceCatalogModal existingRuleSetTags={$ruleSets.map((r) => r.tag)} />
 </div>
 
 <style>

@@ -11,8 +11,8 @@ import (
 
 // StaticNATEntry is one row from /show/rc/ip/static.
 type StaticNATEntry struct {
-	Interface    string `json:"interface"`
-	ToInterface  string `json:"to-interface"`
+	Interface   string `json:"interface"`
+	ToInterface string `json:"to-interface"`
 }
 
 const staticNATTTL = 30 * time.Second

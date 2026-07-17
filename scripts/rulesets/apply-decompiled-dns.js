@@ -99,7 +99,7 @@ function findDecompiledForPreset(preset) {
 
 	for (const rs of sb.ruleSets) {
 		if (rs.tag) tries.add(path.join('sagernet', `${rs.tag}.json`));
-		if (rs.url?.includes('vernette')) {
+		if (rs.url?.includes('hoaxisr')) {
 			const base = path.basename(rs.url, '.srs');
 			tries.add(path.join('vernette', `${base}.json`));
 			tries.add(`${base}.json`);

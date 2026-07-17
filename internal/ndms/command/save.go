@@ -28,7 +28,9 @@ type PostSaveInvalidator interface {
 
 // savePayload is the NDMS command for "persist running-config to flash".
 // Matches the exact shape Keenetic's own web UI uses:
-//   {"system":{"configuration":{"save":{}}}}
+//
+//	{"system":{"configuration":{"save":{}}}}
+//
 // (This is `system configuration save` in ndmc CLI form.)
 // The previous shorthand {"save": true} was not a valid RCI path and
 // silently no-oped on OS5 — changes survived the session but certain
@@ -76,14 +78,18 @@ const (
 // debounce    — delay before firing Save after the last Request().
 // maxWait     — hard ceiling from first Request() in the current batch.
 // settleDelay — pause after a successful save before invalidating the
-//               RunningConfig cache. NDMS publishes running-config
-//               asynchronously after writing flash, so reads issued
-//               immediately after save would still see the old view.
-//               Pass 0 to disable settle entirely (skip both sleep and
-//               invalidate).
+//
+//	RunningConfig cache. NDMS publishes running-config
+//	asynchronously after writing flash, so reads issued
+//	immediately after save would still see the old view.
+//	Pass 0 to disable settle entirely (skip both sleep and
+//	invalidate).
+//
 // invalidator — cache surface invalidated after settle. Pass nil to
-//               disable settle (sleep is still skipped). Typically
-//               wired to query.Queries.RunningConfig.
+//
+//	disable settle (sleep is still skipped). Typically
+//	wired to query.Queries.RunningConfig.
+//
 // Retries: 3 attempts 5 seconds apart after a failed fire.
 func NewSaveCoordinator(
 	poster Poster,

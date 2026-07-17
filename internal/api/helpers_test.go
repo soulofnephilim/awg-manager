@@ -99,6 +99,25 @@ func TestParseJSON_Malformed(t *testing.T) {
 	}
 }
 
+func TestDecodeBody_EmptyBodyRejected(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(""))
+	var got parsePayload
+	if err := decodeBody(req, &got); err == nil {
+		t.Fatal("decodeBody(empty) = nil error, want empty-body error")
+	}
+}
+
+func TestDecodeBody_Valid(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"ok"}`))
+	var got parsePayload
+	if err := decodeBody(req, &got); err != nil {
+		t.Fatalf("decodeBody error = %v, want nil", err)
+	}
+	if got.Name != "ok" {
+		t.Fatalf("Name = %q, want %q", got.Name, "ok")
+	}
+}
+
 func TestParseJSON_OversizedBody(t *testing.T) {
 	body := strings.Repeat("x", maxBodySize+1)
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))

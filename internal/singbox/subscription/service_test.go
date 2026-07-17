@@ -42,6 +42,9 @@ type fakeMutator struct {
 	clashActiveByTag map[string]string // selectorTag → live active member
 	declaredTags     []string          // DeclaredOutboundTags result; nil = no-op (no pruning)
 	bodies           map[string][]byte // tag → последний JSON из AddOutbound/UpdateOutbound
+	reloads          int               // сколько раз вызывался Reload (батч-коммит)
+	rollbacks        int               // сколько раз вызывался Rollback (сброс батча)
+	reloadErr        error             // если задан, Reload возвращает эту ошибку
 }
 
 func (m *fakeMutator) reset() {
@@ -171,9 +174,15 @@ func (f *fakeMutator) RemoveProxy(_ context.Context, idx int) error {
 	f.removedProxies = append(f.removedProxies, idx)
 	return nil
 }
-func (f *fakeMutator) Reload(ctx context.Context) error { return nil }
-func (f *fakeMutator) Rollback()                        {}
-func (f *fakeMutator) DeclaredOutboundTags() []string   { return f.declaredTags }
+func (f *fakeMutator) Reload(ctx context.Context) error {
+	if f.reloadErr != nil {
+		return f.reloadErr
+	}
+	f.reloads++
+	return nil
+}
+func (f *fakeMutator) Rollback()                      { f.rollbacks++ }
+func (f *fakeMutator) DeclaredOutboundTags() []string { return f.declaredTags }
 func (f *fakeMutator) SelectClashProxy(selectorTag, memberTag string) error {
 	f.selectedSelector = append(f.selectedSelector, selectorTag+"→"+memberTag)
 	return nil
@@ -1873,5 +1882,67 @@ func TestAddManualMember_ExactRepeatRejected(t *testing.T) {
 		"vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=a.sni#dup")
 	if !errors.Is(err, ErrMemberDuplicate) {
 		t.Fatalf("exact repeat must be ErrMemberDuplicate, got %v", err)
+	}
+}
+
+// TestCreate_InlineMieruClientJSON: вставка канонического mieru client
+// config JSON (экспорт панелей, формат mieru apply config) как inline-тела
+// подписки материализует членов — TCP и UDP outbound одного профиля.
+func TestCreate_InlineMieruClientJSON(t *testing.T) {
+	svc, mut := newTestService(t)
+	inline := `{
+		"profiles": [
+			{
+				"profileName": "default",
+				"user": { "name": "baozi", "password": "manlianpenfen" },
+				"servers": [
+					{
+						"ipAddress": "12.34.56.78",
+						"portBindings": [
+							{ "port": 6666, "protocol": "TCP" },
+							{ "portRange": "9998-9999", "protocol": "TCP" },
+							{ "port": 6489, "protocol": "UDP" }
+						]
+					}
+				],
+				"mtu": 1400,
+				"multiplexing": { "level": "MULTIPLEXING_HIGH" }
+			}
+		],
+		"activeProfile": "default",
+		"rpcPort": 8964,
+		"socks5Port": 1080,
+		"loggingLevel": "INFO"
+	}`
+	sub, err := svc.Create(context.Background(), CreateInput{Label: "mieru-panel", Inline: inline, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sub.Members) != 2 {
+		t.Fatalf("members=%d want 2 (TCP+UDP)", len(sub.Members))
+	}
+	for _, m := range sub.Members {
+		if m.Protocol != "mieru" {
+			t.Errorf("member %s protocol=%q want mieru", m.Tag, m.Protocol)
+		}
+		if m.Server != "12.34.56.78" {
+			t.Errorf("member %s server=%q", m.Tag, m.Server)
+		}
+		if !mut.addedOutbound(m.Tag) {
+			t.Errorf("member %s not materialized", m.Tag)
+		}
+	}
+}
+
+// TestCreate_InlineUnrecognizedJSON: JSON без outbounds и без profiles —
+// точная ошибка формата, упоминающая оба поддерживаемых JSON-варианта.
+func TestCreate_InlineUnrecognizedJSON(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, err := svc.Create(context.Background(), CreateInput{Label: "bad", Inline: `{"foo": 1}`, Enabled: true})
+	if err == nil {
+		t.Fatal("unrecognized JSON must fail create")
+	}
+	if !strings.Contains(err.Error(), "mieru client config") || !strings.Contains(err.Error(), "sing-box config") {
+		t.Fatalf("error must mention both supported JSON formats, got: %v", err)
 	}
 }

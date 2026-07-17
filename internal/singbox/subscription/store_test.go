@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +48,44 @@ func TestStore_CreateGetList(t *testing.T) {
 	all := s.List()
 	if len(all) != 1 {
 		t.Errorf("List len=%d want 1", len(all))
+	}
+}
+
+// #525: s.data — map, без сортировки порядок List менялся на каждый вызов и
+// карточки подписок в UI перепрыгивали на каждом поллинге. Порядок обязан
+// быть детерминированным: label без учёта регистра, tie-break по ID.
+func TestStore_ListDeterministicOrder(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	for _, label := range []string{"zeta", "Alpha", "mid", "alpha"} {
+		if _, err := s.Create(CreateInput{Label: label, URL: "https://x/" + label, Enabled: true}); err != nil {
+			t.Fatalf("Create %q: %v", label, err)
+		}
+	}
+
+	first := s.List()
+	wantLabels := []string{"mid", "zeta"}
+	gotTail := []string{first[2].Label, first[3].Label}
+	if gotTail[0] != wantLabels[0] || gotTail[1] != wantLabels[1] {
+		t.Errorf("order tail = %v, want %v (labels sorted case-insensitively)", gotTail, wantLabels)
+	}
+	// "Alpha" и "alpha" равны без регистра — их взаимный порядок фиксирует ID.
+	if strings.ToLower(first[0].Label) != "alpha" || strings.ToLower(first[1].Label) != "alpha" {
+		t.Fatalf("first two must be the alphas, got %q %q", first[0].Label, first[1].Label)
+	}
+	if first[0].ID >= first[1].ID {
+		t.Errorf("equal labels must tie-break by ID ascending: %q >= %q", first[0].ID, first[1].ID)
+	}
+
+	// Стабильность между вызовами (до фикса map-итерация давала новый порядок).
+	for range 5 {
+		again := s.List()
+		for i := range first {
+			if again[i].ID != first[i].ID {
+				t.Fatalf("List order changed between calls: pos %d %q != %q", i, again[i].ID, first[i].ID)
+			}
+		}
 	}
 }
 

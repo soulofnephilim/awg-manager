@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 	sysiptables "github.com/hoaxisr/awg-manager/internal/sys/iptables"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
@@ -32,6 +35,15 @@ const (
 	RoutingTable  = 100
 	ChainName     = "AWGM-TPROXY"
 	RedirectChain = "AWGM-REDIRECT"
+	// BlackholeChain is the fail-closed DROP chain (mangle). It is engaged
+	// ONLY while sing-box is dead AND the PREROUTING interception jumps were
+	// wiped (e.g. an NDMS firewall reload): without it, policy-marked traffic
+	// would fall through to the normal Keenetic routing table and LEAK to WAN
+	// unencrypted, even though the user expects it to go through proxy/AWG.
+	// The chain carries the SAME LAN/router/WAN RETURN exclusions as the
+	// interception chains, then a terminal DROP, and is removed the moment the
+	// engine recovers. Traffic is dropped, never leaked.
+	BlackholeChain = "AWGM-BLACKHOLE"
 	// DNSRescueTag identifies our short-circuit REDIRECT rules in nat
 	// PREROUTING that bypass NDMS's _NDM_DNS_FLT_REDIR catch-all
 	// (which would unconditionally REDIRECT DNS to :53, where
@@ -71,9 +83,14 @@ const (
 // Mutable in tests via t.Cleanup so they can redirect into a tmp dir.
 // Production code reads these at call time.
 var (
-	netfilterHookPath  = "/opt/etc/ndm/netfilter.d/50-awgm-tproxy.sh"
-	netfilterRulesPath = "/opt/etc/awg-manager/singbox/router-netfilter.rules"
+	netfilterHookPath      = "/opt/etc/ndm/netfilter.d/50-awgm-tproxy.sh"
+	netfilterRulesPath     = "/opt/etc/awg-manager/singbox/router-netfilter.rules"
+	netfilterBlackholePath = "/opt/etc/awg-manager/singbox/router-blackhole.rules"
 )
+
+// selectiveSetName is the ipset name used for selective bypass — aliased
+// from the selective sub-package so the name has exactly one definition.
+const selectiveSetName = selective.SetName
 
 func kernelModuleName() string { return "xt_TPROXY" }
 
@@ -194,6 +211,104 @@ func IsTProxyTargetAvailable(ctx context.Context) bool {
 	return ok
 }
 
+// EnsureXtDscpModule best-effort loads xt_dscp so the QoS `-m dscp` dispatch
+// rules can be accepted at iptables-restore COMMIT time. Same soft-fail
+// contract as EnsureCommentModule: an absent .ko (possibly built-in kernel
+// support) returns nil and lets iptables-restore surface the real verdict.
+func EnsureXtDscpModule(ctx context.Context) error {
+	err := ensureKernelModuleFn(ctx, "xt_dscp")
+	if errors.Is(err, ErrNetfilterComponentMissing) {
+		return nil
+	}
+	return err
+}
+
+var (
+	xtDscpMu        sync.Mutex
+	xtDscpModuleOK  bool
+	xtDscpMatchOK   bool
+	xtDscpCheckedAt time.Time
+	// xtDscpAvailabilityFn is the indirection point tests use to count/stub
+	// raw probes; production always runs the real XtDscpAvailability.
+	xtDscpAvailabilityFn = XtDscpAvailability
+)
+
+// xtDscpNegativeTTL bounds how long a NEGATIVE xt_dscp probe result is
+// served from cache. The probe execs `iptables -m dscp -h` — running it on
+// every reconcile tick forever while the module stays missing is pure waste,
+// but installing the missing piece must still be picked up without a daemon
+// restart, hence the re-probe after the TTL. Positive results are cached
+// forever (availability never degrades within one daemon lifetime).
+const xtDscpNegativeTTL = 10 * time.Minute
+
+// XtDscpAvailability probes the two independent halves of `-m dscp` support
+// separately so status/diagnostics can tell the failure causes apart:
+//
+//   - moduleOK: the xt_dscp KERNEL module is loaded (/proc/modules) or its
+//     .ko exists at the standard /lib/modules/<uname -r>/xt_dscp.ko path —
+//     the exact pattern ensureKernelModule targets. Keenetic ships the .ko
+//     there even on 4.9-ndm kernels. (Some third-party setups also carry
+//     modules under /opt/lib/modules or /opt/lib/system-modules/<uname -r>
+//     — XKeen issue #94 — but AWGM's whole module stack, xt_TPROXY
+//     included, keys on the single standard path; keep parity here.)
+//   - matchOK: the iptables USERSPACE extension parses `-m dscp` (runtime
+//     `iptables -m dscp -h` probe, mirroring IsTProxyTargetAvailable). This
+//     is the realistic gap on some Entware arches — the kernel module can be
+//     present while the iptables build lacks the extension.
+func XtDscpAvailability(ctx context.Context) (moduleOK, matchOK bool) {
+	moduleOK = isModuleLoaded("xt_dscp")
+	if !moduleOK {
+		if kernel := osdetect.KernelRelease(); kernel != "" {
+			_, err := os.Stat(filepath.Join("/lib/modules", kernel, "xt_dscp.ko"))
+			moduleOK = err == nil
+		}
+	}
+	res, err := sysexec.Run(ctx, sysiptables.Binary, "-m", "dscp", "-h")
+	matchOK = err == nil && res != nil &&
+		strings.Contains(strings.ToLower(res.Stdout+res.Stderr), "dscp")
+	return moduleOK, matchOK
+}
+
+// cachedXtDscpAvailability returns the (moduleOK, matchOK) pair through the
+// probe cache: a fully-positive result is cached forever, anything else for
+// xtDscpNegativeTTL (see the const above). All availability consumers
+// (IsXtDscpAvailable, GetStatus diagnostics) go through this so a missing
+// module costs at most one `iptables -m dscp -h` exec per TTL window instead
+// of one per reconcile tick / status poll.
+func cachedXtDscpAvailability(ctx context.Context) (moduleOK, matchOK bool) {
+	xtDscpMu.Lock()
+	if xtDscpModuleOK && xtDscpMatchOK {
+		xtDscpMu.Unlock()
+		return true, true
+	}
+	if !xtDscpCheckedAt.IsZero() && time.Since(xtDscpCheckedAt) < xtDscpNegativeTTL {
+		m, x := xtDscpModuleOK, xtDscpMatchOK
+		xtDscpMu.Unlock()
+		return m, x
+	}
+	probe := xtDscpAvailabilityFn
+	xtDscpMu.Unlock()
+
+	m, x := probe(ctx)
+	xtDscpMu.Lock()
+	xtDscpModuleOK, xtDscpMatchOK = m, x
+	xtDscpCheckedAt = time.Now()
+	xtDscpMu.Unlock()
+	return m, x
+}
+
+// IsXtDscpAvailable reports whether DSCP matching is usable end-to-end: BOTH
+// the kernel module (loaded or .ko on disk) AND the iptables extension must
+// pass. Positive results are cached forever (availability never degrades
+// within one daemon lifetime); negative results are cached for
+// xtDscpNegativeTTL and then re-probed so installing the missing piece is
+// picked up without a restart. Surfaced to the UI as the status field
+// `xtDscpAvailable`.
+func IsXtDscpAvailable(ctx context.Context) bool {
+	moduleOK, matchOK := cachedXtDscpAvailability(ctx)
+	return moduleOK && matchOK
+}
+
 type RestoreInputSpec struct {
 	// PolicyMark is the NDMS-assigned mark (hex, e.g. "0xffffaaa") that
 	// NDMS sets on connections from devices bound to the chosen access
@@ -223,16 +338,16 @@ type RestoreInputSpec struct {
 	// router).
 	LANBridges []LANBridgeDNSRedir
 
-	// BypassUDPPorts lists UDP destination ports that should RETURN from
+	// BypassUDPPorts lists UDP destination ports/ranges that should RETURN from
 	// AWGM-TPROXY before the catch-all TPROXY rule — they bypass sing-box
 	// entirely and route as if no policy were active.
-	BypassUDPPorts []int
+	BypassUDPPorts []PortRange
 
-	// BypassTCPPorts lists TCP destination ports that should RETURN from
+	// BypassTCPPorts lists TCP destination ports/ranges that should RETURN from
 	// AWGM-REDIRECT before the catch-all REDIRECT rule.
 	// Note: port 79 (NDMS admin) is always excluded by a hardcoded rule;
 	// including 79 here produces a harmless duplicate RETURN rule.
-	BypassTCPPorts []int
+	BypassTCPPorts []PortRange
 
 	// BypassCIDRs — пользовательские IPv4 IP/CIDR назначения, чей трафик
 	// целиком (включая DNS/53) идёт мимо sing-box: ранний `-j RETURN` в начале
@@ -245,6 +360,35 @@ type RestoreInputSpec struct {
 	// чей ingress-трафик помечается policy-меткой в mangle PREROUTING до
 	// connmark-jump'а. Пусто / MatchAll / пустой PolicyMark = no-op.
 	IngressInterfaces []string
+
+	// SelectiveIPSet, when true, inserts an iptables -m set guard rule in
+	// both AWGM-TPROXY (mangle) and AWGM-REDIRECT (nat) chains so that
+	// only traffic whose destination IP is listed in AWGM-SELECTIVE reaches
+	// sing-box. All other traffic gets an early RETURN and bypasses sing-box
+	// entirely (going straight to WAN). The guard is placed after user bypass
+	// RETURN rules (port/CIDR exclusions) but before the catch-all TPROXY /
+	// REDIRECT rule, so explicit bypass rules still take precedence.
+	// Only meaningful when the xt_set kernel module is loaded.
+	SelectiveIPSet bool
+
+	// QoSClasses lists the active DSCP QoS classes (issue #371). Each entry
+	// yields one `-m dscp --dscp N` dispatch rule per chain (mangle UDP
+	// TPROXY --on-port TProxyPort, nat TCP REDIRECT --to-ports RedirectPort)
+	// inserted immediately before the catch-all — see the emission sites in
+	// buildRestoreInput for the full ordering rationale. Empty = feature off.
+	// Requires the xt_dscp kernel module (preloaded by the netfilter.d hook
+	// and EnsureRouterNetfilterModules).
+	QoSClasses []QoSClassSpec
+}
+
+// QoSClassSpec is the iptables projection of one active QoS class: the DSCP
+// codepoint to match and the per-class sing-box listen ports to dispatch to.
+// Ports come from QoSClassPorts so iptables and inbound generation share one
+// source of truth. Comparable — reconcile change-detection uses slices.Equal.
+type QoSClassSpec struct {
+	DSCP         int
+	TProxyPort   int
+	RedirectPort int
 }
 
 var bypassCIDRs = []string{
@@ -296,6 +440,52 @@ func emitPreroutingJump(b *strings.Builder, chain string, spec RestoreInputSpec)
 	}
 }
 
+// buildBlackholeRestoreInput renders the mangle-only *AWGM-BLACKHOLE* blob:
+// the SAME LAN/router/WAN RETURN exclusions as the interception chain, then a
+// terminal DROP, entered from PREROUTING by the identical policy selector
+// (emitPreroutingJump). So the set it drops is exactly the set that would have
+// entered AWGM-TPROXY — nothing local is caught, and no policy traffic escapes.
+// mangle (not nat) so every packet of a flow is matched while the tunnel is
+// down, not only the first packet of a new conntrack.
+func buildBlackholeRestoreInput(spec RestoreInputSpec) string {
+	var b strings.Builder
+	b.WriteString("*mangle\n")
+	fmt.Fprintf(&b, ":%s - [0:0]\n", BlackholeChain)
+	// User bypass first — an explicitly excluded subnet must never be dropped.
+	emitUserBypassReturns(&b, BlackholeChain, spec.BypassCIDRs)
+	// User bypass ports (BOTH protocols): traffic the user deliberately keeps off
+	// the proxy (STUN/VoIP/WireGuard/games) must go direct, not be dropped. The
+	// blackhole matches every protocol (connmark on the jump, no -p filter), so it
+	// must honour the TCP ports too — even though real TCP interception lives in
+	// the nat chain, the fail-closed DROP here is the one place TCP policy traffic
+	// is dropped while the engine is down.
+	for _, pr := range spec.BypassUDPPorts {
+		fmt.Fprintf(&b, "-A %s -p udp --dport %s -j RETURN\n", BlackholeChain, pr.String())
+	}
+	for _, pr := range spec.BypassTCPPorts {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport %s -j RETURN\n", BlackholeChain, pr.String())
+	}
+	// Selective mode: only destinations in AWGM-SELECTIVE are proxied; everything
+	// else is SUPPOSED to go direct to WAN. Mirror the interception guard so the
+	// blackhole drops ONLY the selective subset — without it a dead engine would
+	// blackhole the user's entire (mostly non-selective) traffic, taking policy
+	// devices fully offline, which is worse than the fail-open it replaces.
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n", BlackholeChain, selectiveSetName)
+	}
+	// LAN/loopback/CGNAT/multicast + router-owned WAN IPs: reused verbatim from
+	// the interception chain so the exclusion set cannot drift and the blackhole
+	// can never over-block router-local, LAN-to-LAN, or management traffic.
+	emitBypassReturns(&b, BlackholeChain, spec.WANIPs)
+	// Everything else that belongs to the policy: drop it (fail-closed).
+	fmt.Fprintf(&b, "-A %s -j DROP\n", BlackholeChain)
+	// Same PREROUTING selector as the real interception jump (connmark policy
+	// filter, or MatchAll), so exactly the policy traffic is diverted here.
+	emitPreroutingJump(&b, BlackholeChain, spec)
+	b.WriteString("COMMIT\n")
+	return b.String()
+}
+
 func buildRestoreInput(spec RestoreInputSpec) string {
 	var b strings.Builder
 
@@ -333,17 +523,46 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 
 	// Bypass ports: RETURN first — before DNS intercept and catch-all so that
 	// any explicitly excluded port skips sing-box entirely (including port 53).
-	for _, port := range spec.BypassUDPPorts {
-		fmt.Fprintf(&b, "-A %s -p udp --dport %d -j RETURN\n", ChainName, port)
+	for _, pr := range spec.BypassUDPPorts {
+		fmt.Fprintf(&b, "-A %s -p udp --dport %s -j RETURN\n", ChainName, pr.String())
 	}
 
 	// set_chain_rules: DNS first (when INTERCEPT_DNS_ENABLE=1)
 	fmt.Fprintf(&b, "-A %s -p udp --dport 53 -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
 		ChainName, TPROXYPort, Fwmark)
 
+	// Selective-bypass guard: only traffic to IPs in AWGM-SELECTIVE reaches
+	// sing-box; everything else returns to PREROUTING and goes to WAN.
+	// Placed after DNS intercept so DNS still reaches sing-box regardless
+	// of ipset membership (DNS must always be intercepted for hijack-dns).
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
+			ChainName, selectiveSetName)
+	}
+
 	// set_chain_rules: bypass set. SKeen uses one ipset rule; we render
 	// the same destinations as discrete CIDR rules (semantically equal).
 	emitBypassReturns(&b, ChainName, spec.WANIPs)
+
+	// QoS-by-DSCP dispatch (issue #371): per-class TPROXY onto the class
+	// port, immediately BEFORE the catch-all. Ordering rationale:
+	//   - AFTER the DNS intercept: UDP/53 must keep landing on the MAIN
+	//     tproxy port regardless of DSCP marks — hijack-dns lives there, so
+	//     DNS handling never depends on the managed QoS route rules (the nat
+	//     chain mirrors this with its own TCP/53 carve-out before the class
+	//     rules).
+	//   - AFTER user/builtin bypass RETURNs and WAN-IP exclusions: an
+	//     explicit bypass always wins; DSCP marks must not re-capture
+	//     traffic the user excluded (or loop router-WAN-IP traffic back in).
+	//   - AFTER the selective guard: in selective mode only ipset-listed
+	//     destinations enter sing-box at all; QoS classifies within that
+	//     scope, it does not widen it.
+	//   - BEFORE the catch-all: otherwise the unconditional TPROXY eats the
+	//     packet first and the class rule is dead.
+	for _, q := range spec.QoSClasses {
+		fmt.Fprintf(&b, "-A %s -p udp -m dscp --dscp %d -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
+			ChainName, q.DSCP, q.TProxyPort, Fwmark)
+	}
 
 	// add_tproxy_rules: catch-all TPROXY for UDP.
 	fmt.Fprintf(&b, "-A %s -p udp -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
@@ -372,8 +591,15 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	// ---- *nat table: TCP via REDIRECT ----
 	// Literal port of `add_redirect_rules` from reference/SKeen/skeen.sh
 	// (hybrid mode, nat table). SKeen's nat chain has ONLY the bypass set
-	// + catch-all `-p tcp -j REDIRECT`; there is no DNS-specific TCP rule
-	// because the catch-all already covers TCP/53.
+	// + catch-all `-p tcp -j REDIRECT`; without selective bypass the
+	// catch-all already covers TCP/53. WITH the selective guard the
+	// catch-all is no longer unconditional, so TCP/53 gets its own
+	// intercept before the guard (see below) — otherwise a truncated-UDP
+	// retry or DNS-over-TCP to a resolver outside the set escapes
+	// hijack-dns and leaks real IPs of proxied domains. The QoS DSCP
+	// dispatch needs the same carve-out (a class REDIRECT would otherwise
+	// swallow marked TCP/53 onto a class port), emitted with the class
+	// rules below when the selective intercept isn't already present.
 	b.WriteString("*nat\n")
 	fmt.Fprintf(&b, ":%s - [0:0]\n", RedirectChain)
 
@@ -384,8 +610,41 @@ func buildRestoreInput(spec RestoreInputSpec) string {
 	fmt.Fprintf(&b, "-A %s -p tcp --dport 79 -j RETURN\n", RedirectChain)
 
 	// Bypass ports: RETURN before catch-all TCP REDIRECT.
-	for _, port := range spec.BypassTCPPorts {
-		fmt.Fprintf(&b, "-A %s -p tcp --dport %d -j RETURN\n", RedirectChain, port)
+	for _, pr := range spec.BypassTCPPorts {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport %s -j RETURN\n", RedirectChain, pr.String())
+	}
+
+	// Selective-bypass guard for TCP: mirrors the mangle guard above.
+	// TCP/53 is intercepted FIRST (mirroring the mangle UDP/53 rule and
+	// honoring the same "DNS must always reach hijack-dns" invariant):
+	// resolver IPs are typically NOT in AWGM-SELECTIVE, so without this
+	// rule the guard would RETURN DNS-over-TCP straight to the upstream.
+	if spec.SelectiveIPSet {
+		fmt.Fprintf(&b, "-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d\n",
+			RedirectChain, RedirectPort)
+		fmt.Fprintf(&b, "-A %s -m set ! --match-set %s dst -j RETURN\n",
+			RedirectChain, selectiveSetName)
+	}
+
+	// QoS-by-DSCP dispatch for TCP — mirrors the mangle block above (same
+	// ordering rationale: after bypasses and the selective guard, before the
+	// catch-all). DNS carve-out first: without it, DSCP-marked DNS-over-TCP
+	// (or a truncated-UDP retry) would land on a CLASS redirect inbound and
+	// only get hijacked if the managed route rules happened to order right —
+	// intercepting TCP/53 onto the MAIN redirect port here kills that whole
+	// leak class at the netfilter level, exactly like the mangle chain's
+	// unconditional UDP/53 intercept above the UDP class rules. Skipped when
+	// the selective guard already emitted the identical intercept earlier in
+	// this chain.
+	if len(spec.QoSClasses) > 0 {
+		if !spec.SelectiveIPSet {
+			fmt.Fprintf(&b, "-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d\n",
+				RedirectChain, RedirectPort)
+		}
+		for _, q := range spec.QoSClasses {
+			fmt.Fprintf(&b, "-A %s -p tcp -m dscp --dscp %d -j REDIRECT --to-ports %d\n",
+				RedirectChain, q.DSCP, q.RedirectPort)
+		}
 	}
 
 	// add_redirect_rules: catch-all REDIRECT for TCP.
@@ -436,13 +695,15 @@ type runOutFn func(ctx context.Context, args ...string) (string, error)
 type persistFn func(input string) error
 
 type IPTables struct {
-	restoreNoflush restoreNoflushFn
-	runIPTables    runFn
-	runIPTablesOut runOutFn
-	runIP          runFn
-	persistRules   persistFn
-	persistHook    func() error
-	cleanupHook    func()
+	restoreNoflush   restoreNoflushFn
+	runIPTables      runFn
+	runIPTablesOut   runOutFn
+	runIP            runFn
+	persistRules     persistFn
+	persistHook      func() error
+	cleanupHook      func()
+	persistBlackhole persistFn
+	cleanupBlackhole func()
 }
 
 func NewIPTables() *IPTables {
@@ -454,10 +715,44 @@ func NewIPTables() *IPTables {
 			result, err := sysexec.Run(ctx, "ip", args...)
 			return sysexec.FormatError(result, err)
 		},
-		persistRules: writeNetfilterRulesFile,
-		persistHook:  writeNetfilterHook,
-		cleanupHook:  removeNetfilterRulesFile,
+		persistRules:     writeNetfilterRulesFile,
+		persistHook:      writeNetfilterHook,
+		cleanupHook:      removeNetfilterRulesFile,
+		persistBlackhole: writeNetfilterBlackholeRulesFile,
+		cleanupBlackhole: removeNetfilterBlackholeRulesFile,
 	}
+}
+
+// InstallBlackhole engages the fail-closed DROP chain: scrub any stale jump,
+// persist the blackhole rules (so the netfilter.d hook can re-assert it after
+// an NDMS reload while the engine is still dead), then restore it via
+// iptables-restore --noflush. It reuses the same hook it.persistHook already
+// wrote — only the blackhole rules file is blackhole-specific. No fwmark/ip
+// rule: the blackhole only drops, it never delivers to a table. Idempotent.
+func (it *IPTables) InstallBlackhole(ctx context.Context, spec RestoreInputSpec) error {
+	it.removeSourceHooksFromTable(ctx, "mangle", BlackholeChain)
+	input := buildBlackholeRestoreInput(spec)
+	if it.persistBlackhole != nil {
+		if err := it.persistBlackhole(input); err != nil {
+			return fmt.Errorf("write blackhole rules: %w", err)
+		}
+	}
+	if err := it.restoreNoflush(ctx, input); err != nil {
+		return fmt.Errorf("iptables-restore blackhole: %w", err)
+	}
+	return nil
+}
+
+// RemoveBlackhole tears down the fail-closed DROP chain: delete the rules file
+// (so the hook stops re-asserting it), scrub the PREROUTING jump, then flush +
+// delete the chain. Idempotent — safe to call when no blackhole is present.
+func (it *IPTables) RemoveBlackhole(ctx context.Context) {
+	if it.cleanupBlackhole != nil {
+		it.cleanupBlackhole()
+	}
+	it.removeSourceHooksFromTable(ctx, "mangle", BlackholeChain)
+	_ = it.runIPTables(ctx, "-t", "mangle", "-F", BlackholeChain)
+	_ = it.runIPTables(ctx, "-t", "mangle", "-X", BlackholeChain)
 }
 
 // drainFwmarkRules deletes every `ip rule` for our fwmark/table, looping until
@@ -524,87 +819,116 @@ func (it *IPTables) Install(ctx context.Context, spec RestoreInputSpec) error {
 	return nil
 }
 
+// Both files are consumed by OTHER software at arbitrary times (NDMS executes
+// the hook on every firewall reload; the hook feeds the rules file to
+// iptables-restore), so they must never be observable half-written — use the
+// fsync'ed temp-file+rename writer, not a truncate-in-place WriteFile.
 func writeNetfilterRulesFile(input string) error {
-	if err := os.MkdirAll(filepath.Dir(netfilterRulesPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(netfilterRulesPath, []byte(input), 0644)
+	return storage.AtomicWritePerm(netfilterRulesPath, []byte(input), 0644)
+}
+
+func writeNetfilterBlackholeRulesFile(input string) error {
+	return storage.AtomicWritePerm(netfilterBlackholePath, []byte(input), 0644)
+}
+
+// removeNetfilterBlackholeRulesFile deletes the persisted blackhole rules so
+// the netfilter.d hook stops re-asserting the fail-closed DROP on the next NDMS
+// reload. Called when the engine recovers (blackhole removed). Idempotent.
+func removeNetfilterBlackholeRulesFile() {
+	_ = os.Remove(netfilterBlackholePath)
 }
 
 func writeNetfilterHook() error {
-	if err := os.MkdirAll(filepath.Dir(netfilterHookPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(netfilterHookPath, []byte(netfilterHookScript()), 0755)
+	return storage.AtomicWritePerm(netfilterHookPath, []byte(netfilterHookScript()), 0755)
 }
 
 // netfilterHookScript renders the netfilter.d hook with all placeholders
 // substituted. Pure (no I/O) so a test can validate the generated shell with
 // `sh -n`.
 //
-// Scrub block before restore: when NDMS reloads only one table (e.g. nat) but
-// leaves mangle intact, restoring --noflush would append a SECOND PREROUTING
-// jump on top of the surviving one. The `-[jg]` regex covers both legacy `-j`
-// and current `-g` syntax so the upgrade path doesn't leave duplicates around.
+// Two mutually-exclusive paths, chosen by whether sing-box is alive:
+//
+//   - ALIVE: real interception governs. Scrub any lingering fail-closed
+//     blackhole, then restore the AWGM chains if NDMS wiped their PREROUTING
+//     jumps. Scrub-before-restore: when NDMS reloads only one table (e.g. nat)
+//     but leaves mangle intact, restoring --noflush would append a SECOND
+//     jump on top of the surviving one. The `-[jg]` regex covers both legacy
+//     `-j` and current `-g` syntax so upgrades don't leave duplicates.
+//   - DEAD: fail-closed. Re-assert the blackhole DROP (if its rules file exists
+//     and the jump was wiped) so policy traffic can NEVER reach WAN while the
+//     engine is down — the old hook simply exited here, leaving a leak window
+//     until the next reconcile tick.
 func netfilterHookScript() string {
 	return fmt.Sprintf(`#!/bin/sh
 [ "$type" = "ip6tables" ] && exit 0
 case "$table" in mangle|nat) ;; *) exit 0 ;; esac
-[ -f %[1]q ] || exit 0
-pidof sing-box >/dev/null 2>&1 || exit 0
-# Best-effort kernel module preload. Absent .ko or built-in modules are
-# silently skipped — iptables-restore will surface the final verdict anyway.
+# Best-effort kernel module preload (both paths need these). Absent .ko or
+# built-in modules are silently skipped — iptables-restore surfaces the verdict.
 KREL="$(uname -r)"
-for mod in xt_TPROXY xt_comment xt_mark xt_connmark xt_conntrack xt_pkttype; do
+for mod in xt_TPROXY xt_comment xt_mark xt_connmark xt_conntrack xt_pkttype xt_dscp; do
   grep -q "^${mod} " /proc/modules 2>/dev/null && continue
   [ -f "/lib/modules/${KREL}/${mod}.ko" ] && insmod "/lib/modules/${KREL}/${mod}.ko" 2>/dev/null || true
 done
-# A chain is "ok" only if it EXISTS and PREROUTING actually jumps into it.
-# NDMS rebuilds PREROUTING and wipes our AWGM PREROUTING jumps while leaving
-# the custom chains intact; gating on chain existence alone would skip the
-# restore in exactly that case, leaving interception silently dead.
-mangle_ok=0; nat_ok=0
-/opt/sbin/iptables -w -t mangle -nL %[2]s >/dev/null 2>&1 \
-  && /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[2]s($| )' \
-  && mangle_ok=1
-/opt/sbin/iptables -w -t nat -nL %[6]s >/dev/null 2>&1 \
-  && /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[6]s($| )' \
-  && nat_ok=1
-if [ "$mangle_ok" -eq 0 ] || [ "$nat_ok" -eq 0 ]; then
+if pidof sing-box >/dev/null 2>&1; then
+  # sing-box ALIVE — real interception governs. Drop any lingering fail-closed
+  # blackhole first so a stale DROP never sits in front of the interception jump.
   /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
-    | grep -E -- '-[jg] %[2]s($| )' \
+    | grep -E -- '-[jg] %[11]s($| )' \
     | sed 's/-A PREROUTING/-D PREROUTING/' \
     | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
-  /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
-    | grep -E -- '-[jg] %[6]s($| )' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
-  # Scrub DNS-RESCUE direct PREROUTING rules in nat (identified by
-  # comment tag, not by jump target — these are -j REDIRECT rules,
-  # not chain jumps). Same drop-and-restore approach as above, just
-  # matched via the iptables-save comment serialisation.
-  /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
-    | grep -E -- '--comment "?%[7]s' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
-  # Legacy DNS-NOPOLICY MARK rules in mangle (dead code from earlier
-  # AWGM builds). Always scrub so upgrades don't leave dangling rules
-  # accumulating across NDMS reloads.
-  /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
-    | grep -E -- '--comment "?%[8]s' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
-  # Ingress-scope MARK/CONNMARK rules in mangle (comment-tagged).
-  /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
-    | grep -E -- '--comment "?%[9]s' \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
-    | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
-  /opt/sbin/iptables-restore --noflush < %[1]q
-  /opt/sbin/ip rule add fwmark 0x%[3]x table %[4]d priority %[5]d 2>/dev/null || true
-  /opt/sbin/ip route add local 0.0.0.0/0 dev lo table %[4]d 2>/dev/null || true
-  logger -t awgm-tproxy "netfilter.d: restored AWGM chains after NDMS reload"
+  /opt/sbin/iptables -w -t mangle -F %[11]s 2>/dev/null
+  /opt/sbin/iptables -w -t mangle -X %[11]s 2>/dev/null
+  [ -f %[1]q ] || exit 0
+  # A chain is "ok" only if it EXISTS and PREROUTING actually jumps into it.
+  # NDMS rebuilds PREROUTING and wipes our AWGM jumps while leaving the custom
+  # chains intact; gating on chain existence alone would skip the restore.
+  mangle_ok=0; nat_ok=0
+  /opt/sbin/iptables -w -t mangle -nL %[2]s >/dev/null 2>&1 \
+    && /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[2]s($| )' \
+    && mangle_ok=1
+  /opt/sbin/iptables -w -t nat -nL %[6]s >/dev/null 2>&1 \
+    && /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[6]s($| )' \
+    && nat_ok=1
+  if [ "$mangle_ok" -eq 0 ] || [ "$nat_ok" -eq 0 ]; then
+    /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
+      | grep -E -- '-[jg] %[2]s($| )' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
+    /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
+      | grep -E -- '-[jg] %[6]s($| )' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
+    # Scrub DNS-RESCUE direct PREROUTING rules in nat (comment-tagged -j REDIRECT).
+    /opt/sbin/iptables -w -t nat -S PREROUTING 2>/dev/null \
+      | grep -E -- '--comment "?%[7]s' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t nat $line 2>/dev/null; done
+    # Legacy DNS-NOPOLICY MARK rules in mangle (dead code from earlier builds).
+    /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
+      | grep -E -- '--comment "?%[8]s' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
+    # Ingress-scope MARK/CONNMARK rules in mangle (comment-tagged).
+    /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null \
+      | grep -E -- '--comment "?%[9]s' \
+      | sed 's/-A PREROUTING/-D PREROUTING/' \
+      | while IFS= read -r line; do /opt/sbin/iptables -w -t mangle $line 2>/dev/null; done
+    /opt/sbin/iptables-restore --noflush < %[1]q
+    /opt/sbin/ip rule add fwmark 0x%[3]x table %[4]d priority %[5]d 2>/dev/null || true
+    /opt/sbin/ip route add local 0.0.0.0/0 dev lo table %[4]d 2>/dev/null || true
+    logger -t awgm-tproxy "netfilter.d: restored AWGM chains after NDMS reload"
+  fi
+else
+  # sing-box DEAD — fail-closed. Re-assert the blackhole DROP if its rules file
+  # exists and the PREROUTING jump was wiped, so policy traffic cannot leak to
+  # WAN while the engine is down.
+  [ -f %[10]q ] || exit 0
+  if ! /opt/sbin/iptables -w -t mangle -S PREROUTING 2>/dev/null | grep -qE -- '-[jg] %[11]s($| )'; then
+    /opt/sbin/iptables-restore --noflush < %[10]q
+    logger -t awgm-tproxy "netfilter.d: re-asserted fail-closed blackhole (sing-box down)"
+  fi
 fi
-`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain, DNSRescueTag, DNSNoPolicyTag, IngressTag)
+`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain, DNSRescueTag, DNSNoPolicyTag, IngressTag, netfilterBlackholePath, BlackholeChain)
 }
 
 // removeNetfilterRulesFile deletes the persisted rules file so the
@@ -629,6 +953,10 @@ func (it *IPTables) Uninstall(ctx context.Context) error {
 	if it.cleanupHook != nil {
 		it.cleanupHook()
 	}
+	// Also tear down the fail-closed blackhole if one lingers (engine died,
+	// blackhole engaged, then the user disabled the router): delete its rules
+	// file, scrub the jump, drop the chain.
+	it.RemoveBlackhole(ctx)
 	it.removeSourceHooks(ctx)
 	_ = it.runIPTables(ctx, "-t", "mangle", "-F", ChainName)
 	_ = it.runIPTables(ctx, "-t", "mangle", "-X", ChainName)
@@ -711,7 +1039,7 @@ func (it *IPTables) removeSourceHooksFromTable(ctx context.Context, table, chain
 
 // EnsureRouterNetfilterModules best-effort preloads the remaining xt_*
 // modules that our iptables rules reference but that TPROXY preflight
-// does not cover: comment, mark, connmark, conntrack, pkttype.
+// does not cover: comment, mark, connmark, conntrack, pkttype, dscp.
 // ErrNetfilterComponentMissing (module absent or built-in) is silently
 // skipped. All other insmod errors are collected and returned without
 // blocking — a hard failure here would prevent a working install on
@@ -725,6 +1053,7 @@ func EnsureRouterNetfilterModules(ctx context.Context) []error {
 		"xt_connmark",
 		"xt_conntrack",
 		"xt_pkttype",
+		"xt_dscp",
 	} {
 		err := ensureKernelModuleFn(ctx, name)
 		if err == nil || errors.Is(err, ErrNetfilterComponentMissing) {

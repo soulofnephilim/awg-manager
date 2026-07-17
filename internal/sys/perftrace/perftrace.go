@@ -1,7 +1,8 @@
-// Package perftrace — временный helper для performance diagnostics.
+// Package perftrace — helper для performance diagnostics.
 //
-// Используется через defer в hot-path функциях для записи времени
-// выполнения в app-log. Удалить после анализа perf-сессии 2026-05-23.
+// Используется через defer в hot-path функциях (singbox.Operator:
+// GetStatus/ListTunnels/AddTunnels/applyConfig и др.) для записи времени
+// выполнения в app-log на debug-уровне.
 package perftrace
 
 import (

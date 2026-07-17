@@ -22,7 +22,8 @@ export type Section =
 	| 'monitoring'
 	| 'diagnostics'
 	| 'settings'
-	| 'terminal';
+	| 'terminal'
+	| 'freeturn';
 
 export type RoutingSubTab =
 	| 'accessPolicies'
@@ -44,6 +45,7 @@ const SECTION_MIN_LEVEL: Record<Section, UsageLevel> = {
 	subscriptions: 'advanced',
 	monitoring: 'advanced',
 	terminal: 'advanced',
+	freeturn: 'advanced',
 };
 
 const ROUTING_SUBTAB_MIN_LEVEL: Record<RoutingSubTab, UsageLevel> = {
@@ -61,8 +63,14 @@ const LEVEL_RANK: Record<UsageLevel, number> = { basic: 0, advanced: 1, expert: 
 /** Блок «Внешний вид» / цветовая схема — не ниже «Расширенного». */
 export const APPEARANCE_SETTINGS_MIN_LEVEL: UsageLevel = 'advanced';
 
+/** Режим дашборда на странице туннелей (#142) — не ниже «Расширенного». */
+export const TUNNEL_DASHBOARD_MIN_LEVEL: UsageLevel = 'advanced';
+
 /** Переключатель stable/develop — только на «Продвинутом». */
 export const UPDATE_CHANNEL_MIN_LEVEL: UsageLevel = 'expert';
+
+/** Блок «Автоматическая установка» обновлений — только на «Продвинутом». */
+export const AUTO_INSTALL_MIN_LEVEL: UsageLevel = 'expert';
 
 /** Подробности маршрута служебных загрузок: "через Direct (WAN)", route labels и transport hints. */
 export const DOWNLOAD_ROUTE_DETAILS_MIN_LEVEL: UsageLevel = 'expert';
@@ -75,8 +83,16 @@ export function isAppearanceSettingsVisible(level: UsageLevel): boolean {
 	return isUsageLevelAtLeast(level, APPEARANCE_SETTINGS_MIN_LEVEL);
 }
 
+export function isTunnelDashboardAvailable(level: UsageLevel): boolean {
+	return isUsageLevelAtLeast(level, TUNNEL_DASHBOARD_MIN_LEVEL);
+}
+
 export function isUpdateChannelSwitchVisible(level: UsageLevel): boolean {
 	return isUsageLevelAtLeast(level, UPDATE_CHANNEL_MIN_LEVEL);
+}
+
+export function isAutoInstallSettingsVisible(level: UsageLevel): boolean {
+	return isUsageLevelAtLeast(level, AUTO_INSTALL_MIN_LEVEL);
 }
 
 export function areDownloadRouteDetailsVisible(level: UsageLevel): boolean {
@@ -103,6 +119,7 @@ export function pathToSection(pathname: string): Section | null {
 	if (pathname.startsWith('/diagnostics') || pathname.startsWith('/logs')) return 'diagnostics';
 	if (pathname.startsWith('/settings')) return 'settings';
 	if (pathname.startsWith('/terminal')) return 'terminal';
+	if (pathname.startsWith('/freeturn')) return 'freeturn';
 	return null;
 }
 
@@ -117,4 +134,5 @@ export const SECTION_LABELS: Record<Section, string> = {
 	diagnostics: 'Инструменты',
 	settings: 'Настройки',
 	terminal: 'Терминал',
+	freeturn: 'FreeTurn',
 };

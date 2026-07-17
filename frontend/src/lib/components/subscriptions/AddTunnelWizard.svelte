@@ -14,8 +14,10 @@
 	import HeadersTextarea from './HeadersTextarea.svelte';
 	import ShareLinksTextarea from './ShareLinksTextarea.svelte';
 	import SubscriptionImportPreview from './SubscriptionImportPreview.svelte';
+	import RoutingImportDropZone from '$lib/components/routing/RoutingImportDropZone.svelte';
 	import { DEFAULT_PRESET, parseHeadersText } from './headersParser';
 	import {
+		appendImportedFileText,
 		mergePastedShareList,
 		normalizeSpaceSeparatedShareLinks,
 	} from '$lib/utils/shareLinkListInput';
@@ -163,6 +165,41 @@
 		});
 	}
 
+	// Загрузка файла в textarea импорта: share-link'и, Clash YAML, sing-box
+	// JSON или mieru JSON (экспорт панелей, формат mieru apply config). Пустое
+	// поле заменяем содержимым файла, непустое — дописываем с новой строки.
+	async function onImportFile(file: File, get: () => string, set: (v: string) => void): Promise<void> {
+		// Кап тела запроса на бэкенде — 1 МБ (http.MaxBytesReader): больший
+		// файл упал бы только на submit с невнятным 413.
+		if (file.size > 1 << 20) {
+			error = `Файл «${file.name}» больше 1 МБ — превышает лимит импорта`;
+			return;
+		}
+		try {
+			const text = await file.text();
+			if (!text.trim()) {
+				error = `Файл «${file.name}» пуст`;
+				return;
+			}
+			const merged = appendImportedFileText(get(), text);
+			if (merged.error) {
+				error = merged.error;
+				return;
+			}
+			set(merged.text);
+			error = '';
+		} catch {
+			error = `Не удалось прочитать файл «${file.name}»`;
+		}
+	}
+
+	// «Один сервер» понимает только share-ссылки и mieru JSON; Clash YAML и
+	// sing-box JSON принимает лишь ветка «Группа серверов» (inline-подписка).
+	const IMPORT_FILE_ACCEPT_SINGLE = '.json,.txt';
+	const IMPORT_FILE_DROP_TITLE_SINGLE = 'или перетащите .json / .txt файл сюда';
+	const IMPORT_FILE_ACCEPT = '.json,.txt,.yaml,.yml';
+	const IMPORT_FILE_DROP_TITLE = 'или перетащите .json / .txt / .yaml файл сюда';
+
 	const titleByKind: Record<WizardKind | 'choose', string> = {
 		choose: 'Добавить',
 		single: 'Один сервер',
@@ -203,9 +240,19 @@
 		previewing = true;
 		error = '';
 		try {
-			previewMembers = await api.previewSubscription({
+			const members = await api.previewSubscription({
 				url,
 				headers: parseHeadersText(headersText),
+			});
+			// Дедуп по key обязателен: список рендерится keyed each'ем по
+			// member.key, и дубликат ключа роняет рендер (each_key_duplicate) —
+			// модалка замирает на «Загрузка...» (issue #428). Бэкенд уже
+			// дедуплицирует, это страховка от старых бэкендов и иных источников.
+			const seen = new Set<string>();
+			previewMembers = (members ?? []).filter((m) => {
+				if (seen.has(m.key)) return false;
+				seen.add(m.key);
+				return true;
 			});
 			excludedKeys = new Set();
 			urlStep = 'preview';
@@ -322,7 +369,9 @@
 				Поддерживаются <code>vless://</code>, <code>hy2://</code>,
 				<code>trojan://</code>, <code>ss://</code>, <code>hysteria2://</code>,
 				<code>mieru://</code>, <code>mierus://</code>,
-				<code>naive+http://</code>, <code>naive+https://</code>.
+				<code>naive+http://</code>, <code>naive+https://</code>,
+				а также JSON-конфиг mieru целиком (экспорт панелей, формат
+				<code>mieru apply config</code>).
 				Список через пробел при вставке разбивается на строки автоматически.
 			</p>
 			{#if !singboxInstalled}
@@ -336,6 +385,11 @@
 				rows={6}
 				disabled={!singboxInstalled || submitting}
 				onpaste={(e) => onShareListPaste(e, () => singleLinks, (v) => (singleLinks = v))}
+			/>
+			<RoutingImportDropZone
+				dropTitle={IMPORT_FILE_DROP_TITLE_SINGLE}
+				accept={IMPORT_FILE_ACCEPT_SINGLE}
+				onfile={(f) => void onImportFile(f, () => singleLinks, (v) => (singleLinks = v))}
 			/>
 			{#if error}<div class="err">{error}</div>{/if}
 			{#if singleResult && singleResult.errors.length > 0}
@@ -417,12 +471,18 @@
 						onpaste={(e) => onShareListPaste(e, () => inlineText, (v) => (inlineText = v))}
 					/>
 					<span class="hint">
-						Поддерживаются share-link'и, Clash YAML и sing-box JSON.
+						Поддерживаются share-link'и, Clash YAML, sing-box JSON и
+						JSON-конфиг mieru (экспорт панелей, формат mieru apply config).
 						Список ссылок через пробел при вставке разбивается на строки.
 						Авто-обновления нет — список замораживается на момент создания,
 						редактируется во вкладке «Серверы».
 					</span>
 				</label>
+				<RoutingImportDropZone
+					dropTitle={IMPORT_FILE_DROP_TITLE}
+					accept={IMPORT_FILE_ACCEPT}
+					onfile={(f) => void onImportFile(f, () => inlineText, (v) => (inlineText = v))}
+				/>
 			{/if}
 
 			<div class="row">

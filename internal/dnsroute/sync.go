@@ -95,9 +95,10 @@ type rciRouteOp struct {
 	Iface  string `json:"interface"`
 	Auto   bool   `json:"auto,omitempty"`
 	Reject bool   `json:"reject,omitempty"`
-	// Disabled — if true, the route is created/updated as enabled first
-	// (UpsertRoutes has no `disable` field), and the reconciler fetches
-	// its freshly-assigned index post-upsert to issue a SetDisabled call.
+	// Disabled — desired disable state. UpsertRoutes has no `disable` field
+	// and NDMS preserves an existing route's flag on re-upsert, so applyDiff
+	// re-fetches indexes post-upsert and settles the flag with SetDisabled
+	// in BOTH directions (set on new-disabled, clear on re-enabled).
 	Disabled bool `json:"-"`
 }
 
@@ -263,7 +264,7 @@ func buildTargetState(data *StoreData, failedTunnels map[string]struct{}) target
 				ts.routes = append(ts.routes, targetRoute{
 					group:    groupName,
 					iface:    rt.Interface,
-					fallback: fallback,
+					fallback: materializedFallback(fallback),
 					disabled: routeDisabled,
 				})
 			}
@@ -271,6 +272,19 @@ func buildTargetState(data *StoreData, failedTunnels map[string]struct{}) target
 	}
 
 	return ts
+}
+
+// materializedFallback collapses a stored fallback value to what NDMS can
+// actually distinguish. UpsertRoutes sends auto:true unconditionally, so
+// "auto" and "" are indistinguishable in router state — only "reject" is a
+// separate shape. Comparing the raw stored value made routes with fallback
+// "auto" mismatch current state forever: every reconcile re-upserted them and
+// the cheap SetDisabled toggle path was unreachable (#489).
+func materializedFallback(f string) string {
+	if f == "reject" {
+		return "reject"
+	}
+	return ""
 }
 
 // chunkWithFirstBudget splits items into chunks of at most maxPerChunk, where
@@ -570,18 +584,15 @@ func (s *ServiceImpl) applyDiff(ctx context.Context, diff rciDiff) error {
 	}
 
 	// Phase 5a: re-fetch router state so newly-created routes get their
-	// freshly-assigned indexes, needed for disable toggles below.
-	var needPostFetch bool
-	for _, ro := range diff.routeUpserts {
-		if ro.Disabled {
-			needPostFetch = true
-			break
-		}
-	}
-
+	// freshly-assigned indexes, needed for disable toggles below. Runs after
+	// ANY upsert (not only Disabled=true ones): NDMS preserves the existing
+	// `disable` flag when an existing route is re-upserted (verified on
+	// 5.1.1), so a route being re-enabled via the upsert path must have its
+	// flag explicitly cleared here — otherwise it stays paused in firmware
+	// while the UI shows it enabled (#489).
 	postDisables := append([]rciRouteDisable{}, diff.routeDisables...)
 
-	if needPostFetch {
+	if len(diff.routeUpserts) > 0 {
 		s.queries.DNSProxy.InvalidateAll()
 		fresh, err := s.queries.DNSProxy.List(ctx)
 		if err != nil {
@@ -589,25 +600,28 @@ func (s *ServiceImpl) applyDiff(ctx context.Context, diff rciDiff) error {
 			// Non-fatal: the next reconcile will catch up.
 		} else {
 			indexByKey := make(map[string]string, len(fresh))
+			disabledByKey := make(map[string]bool, len(fresh))
 			for _, r := range fresh {
 				if r.Index == "" {
 					continue
 				}
-				indexByKey[r.Group+"|"+r.Interface] = r.Index
+				key := r.Group + "|" + r.Interface
+				indexByKey[key] = r.Index
+				disabledByKey[key] = r.Disabled
 			}
 			for _, ro := range diff.routeUpserts {
-				if !ro.Disabled {
-					continue
-				}
 				key := ro.Group + "|" + ro.Iface
 				idx, ok := indexByKey[key]
 				if !ok || idx == "" {
 					s.logError("applyDiff", "", fmt.Sprintf("Phase5a: no index for %s", key), "route not in post-upsert show")
 					continue
 				}
+				if disabledByKey[key] == ro.Disabled {
+					continue // router already in the desired state
+				}
 				postDisables = append(postDisables, rciRouteDisable{
 					Index:    idx,
-					Disabled: true,
+					Disabled: ro.Disabled,
 					Group:    ro.Group,
 					Iface:    ro.Iface,
 				})

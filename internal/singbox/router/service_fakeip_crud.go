@@ -110,6 +110,14 @@ func (s *ServiceImpl) FakeIPMoveRule(ctx context.Context, from, to int) error {
 	return s.fakeipWithConfig(ctx, "rules", func(c *RouterConfig) error { return c.MoveRule(from, to) })
 }
 
+// FakeIPBulkSetRuleOutbound is the fakeip-tun (SlotFakeIP) counterpart of
+// BulkSetRuleOutbound — same validation, routed through fakeipWithConfig.
+func (s *ServiceImpl) FakeIPBulkSetRuleOutbound(ctx context.Context, indices []int, outbound string) error {
+	return s.fakeipWithConfig(ctx, "rules", func(c *RouterConfig) error {
+		return bulkSetRuleOutbound(c, indices, outbound, func(t string) bool { return s.isKnownOutboundTag(ctx, t, c) })
+	})
+}
+
 // --- Route final ---
 
 // FakeIPSetRouteFinal sets route.final on the fakeip config slot.
@@ -164,6 +172,14 @@ func (s *ServiceImpl) FakeIPUpdateRuleSet(ctx context.Context, tag string, rs Ru
 	return s.fakeipWithConfig(ctx, "rulesets", func(c *RouterConfig) error { return c.UpdateRuleSet(tag, rs) })
 }
 
+// FakeIPBulkSetRuleSetDetour is the fakeip-tun (SlotFakeIP) counterpart of
+// BulkSetRuleSetDetour — same validation, routed through fakeipWithConfig.
+func (s *ServiceImpl) FakeIPBulkSetRuleSetDetour(ctx context.Context, tags []string, detour string) error {
+	return s.fakeipWithConfig(ctx, "rulesets", func(c *RouterConfig) error {
+		return bulkSetRuleSetDetour(c, tags, detour, func(t string) bool { return s.isKnownOutboundTag(ctx, t, c) })
+	})
+}
+
 func (s *ServiceImpl) FakeIPDeleteRuleSet(ctx context.Context, tag string, force bool) error {
 	inlineTag := tag
 	if base, ok := inlineTagFromSRSTag(tag); ok {
@@ -206,7 +222,12 @@ func (s *ServiceImpl) FakeIPAddCompositeOutbound(ctx context.Context, o Outbound
 			return err
 		}
 	}
-	return s.fakeipWithConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.AddCompositeOutbound(o) })
+	return s.fakeipWithConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
+			return err
+		}
+		return c.AddCompositeOutbound(o)
+	})
 }
 
 func (s *ServiceImpl) FakeIPUpdateCompositeOutbound(ctx context.Context, tag string, o Outbound) error {
@@ -215,7 +236,36 @@ func (s *ServiceImpl) FakeIPUpdateCompositeOutbound(ctx context.Context, tag str
 			return err
 		}
 	}
-	return s.fakeipWithConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.UpdateCompositeOutbound(tag, o) })
+	return s.fakeipWithConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
+			return err
+		}
+		return c.UpdateCompositeOutbound(tag, o)
+	})
+}
+
+// validateCompositeMembers отклоняет selector/urltest с member-тегами,
+// которых нет ни в одном каталоге (слотовые выходы, subscription-композиты,
+// AWG-теги, sing-box туннели, builtins). Молча сохранённый мёртвый член
+// валит enable fakeip-tun кросс-слот валидацией с откатом в «Выключен»,
+// не объясняя пользователю, что чинить (#567).
+func (s *ServiceImpl) validateCompositeMembers(ctx context.Context, o Outbound, c *RouterConfig) error {
+	switch strings.ToLower(o.Type) {
+	case "selector", "urltest":
+	default:
+		return nil
+	}
+	var unknown []string
+	for _, m := range o.Outbounds {
+		if m == o.Tag || s.isKnownOutboundTag(ctx, m, c) {
+			continue
+		}
+		unknown = append(unknown, m)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s — такие выходы больше не существуют (туннель пересоздан или переименован), выберите членов заново", ErrCompositeMemberUnknown, strings.Join(unknown, ", "))
 }
 
 func (s *ServiceImpl) FakeIPDeleteCompositeOutbound(ctx context.Context, tag string, force bool) error {
@@ -254,6 +304,7 @@ type FakeIPConfigService interface {
 	FakeIPUpdateRule(ctx context.Context, index int, r Rule) error
 	FakeIPDeleteRule(ctx context.Context, index int) error
 	FakeIPMoveRule(ctx context.Context, from, to int) error
+	FakeIPBulkSetRuleOutbound(ctx context.Context, indices []int, outbound string) error
 
 	// Route final
 	FakeIPSetRouteFinal(ctx context.Context, tag string) error
@@ -263,6 +314,7 @@ type FakeIPConfigService interface {
 	FakeIPAddRuleSet(ctx context.Context, rs RuleSet) error
 	FakeIPUpdateRuleSet(ctx context.Context, tag string, rs RuleSet) error
 	FakeIPDeleteRuleSet(ctx context.Context, tag string, force bool) error
+	FakeIPBulkSetRuleSetDetour(ctx context.Context, tags []string, detour string) error
 
 	// Composite outbounds
 	FakeIPListCompositeOutbounds(ctx context.Context) ([]CompositeOutboundView, error)

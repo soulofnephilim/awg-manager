@@ -216,8 +216,8 @@ func TestEnsureBaseConfig_FullSkeleton(t *testing.T) {
 	if bs["tag"] != "dns-bootstrap" || bs["type"] != "udp" || bs["server"] != "1.1.1.1" {
 		t.Errorf("bootstrap: %#v", bs)
 	}
-	if dns["final"] != "dns-bootstrap" {
-		t.Errorf("dns.final: want dns-bootstrap, got %v", dns["final"])
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should be absent (owned by 20-router.json), got %v", dns["final"])
 	}
 }
 
@@ -239,11 +239,11 @@ func TestEnsureBaseConfig_Idempotent(t *testing.T) {
 	if string(first) != string(second) {
 		t.Errorf("ensureBaseConfig not idempotent: first=%s second=%s", first, second)
 	}
-	// Default desired sing-box level is trace (when not explicitly provided).
+	// Default desired sing-box level is info (when not explicitly provided).
 	var m map[string]any
 	_ = json.Unmarshal(second, &m)
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level must be patched to trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level must be patched to info, got %v", m["log"])
 	}
 }
 
@@ -267,9 +267,9 @@ func TestEnsureBaseConfig_PatchesStaleClashPort(t *testing.T) {
 	if clash["external_controller"] != "127.0.0.1:9099" {
 		t.Errorf("expected port 9099, got %v", clash["external_controller"])
 	}
-	// Desired level defaults to trace.
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	// Desired level defaults to info.
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 	if m["dns"].(map[string]any)["final"] != "my-dns" {
 		t.Errorf("dns.final lost: %v", m["dns"])
@@ -302,8 +302,8 @@ func TestEnsureBaseConfig_NoClashApiBlockUntouched(t *testing.T) {
 	if _, has := m["experimental"]; has {
 		t.Errorf("experimental block must NOT be re-added, got %s", raw)
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 	route, ok := m["route"].(map[string]any)
 	if !ok {
@@ -318,7 +318,7 @@ func TestEnsureBaseConfig_PatchesStaleLogLevel(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config.d")
 	_ = os.MkdirAll(configDir, 0755)
-	stale := `{"log":{"level":"info","timestamp":true},"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
+	stale := `{"log":{"level":"debug","timestamp":true},"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
 	basePath := filepath.Join(configDir, "00-base.json")
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
@@ -329,8 +329,8 @@ func TestEnsureBaseConfig_PatchesStaleLogLevel(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level should be heal-patched to trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level should be heal-patched to info, got %v", m["log"])
 	}
 }
 
@@ -338,7 +338,9 @@ func TestEnsureBaseConfig_DefaultDesiredLevelOverridesDebug(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config.d")
 	_ = os.MkdirAll(configDir, 0755)
-	// User-chosen debug — heal must NOT reduce verbosity.
+	// ensureBaseConfig force-syncs log.level to the desired default; the
+	// settings-driven wiring (NewOperator + SingboxLogLevel) preserves an
+	// explicit user choice, this legacy path always applies the default.
 	custom := `{"log":{"level":"debug","timestamp":true},"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
 	basePath := filepath.Join(configDir, "00-base.json")
 	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
@@ -348,8 +350,8 @@ func TestEnsureBaseConfig_DefaultDesiredLevelOverridesDebug(t *testing.T) {
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 }
 
@@ -564,7 +566,7 @@ func TestEnsureBaseConfig_MaterialisesMissingRouteBlock(t *testing.T) {
 	if m["dns"].(map[string]any)["strategy"] != "prefer_ipv4" {
 		t.Errorf("dns.strategy must be migrated ipv4_only→prefer_ipv4: %v", m["dns"])
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
+	if m["log"].(map[string]any)["level"] != "info" {
 		t.Errorf("log.level lost: %v", m["log"])
 	}
 }
@@ -660,7 +662,7 @@ func TestHandleStderrLine_StartedClearsLastError(t *testing.T) {
 func TestOperator_HandleExit_RedactsLastError(t *testing.T) {
 	op := &Operator{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
-	op.handleExit(errors.New("exit for node.example.org: 203.0.113.77"), "")
+	op.handleExit(errors.New("exit for node.example.org: 203.0.113.77"), "", false)
 	last := op.LastError()
 	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
 		t.Fatalf("raw sensitive value leaked from err: %q", last)
@@ -669,7 +671,7 @@ func TestOperator_HandleExit_RedactsLastError(t *testing.T) {
 		t.Fatalf("redacted values missing from err: %q", last)
 	}
 
-	op.handleExit(errors.New("exit"), "stderr for node.example.org: 203.0.113.77")
+	op.handleExit(errors.New("exit"), "stderr for node.example.org: 203.0.113.77", false)
 	last = op.LastError()
 	if strings.Contains(last, "node.example.org") || strings.Contains(last, "203.0.113.77") {
 		t.Fatalf("raw sensitive value leaked from stderrTail: %q", last)
@@ -737,8 +739,8 @@ func TestEnsureBaseConfig_PatchesRelativeCachePath(t *testing.T) {
 	if cf["path"] != defaultCacheDBPath {
 		t.Errorf("expected %s, got %v", defaultCacheDBPath, cf["path"])
 	}
-	if m["log"].(map[string]any)["level"] != "trace" {
-		t.Errorf("log.level want trace, got %v", m["log"])
+	if m["log"].(map[string]any)["level"] != "info" {
+		t.Errorf("log.level want info, got %v", m["log"])
 	}
 }
 
@@ -1555,6 +1557,9 @@ func TestListTunnels_Running_NDMSDisabled_UsesClash(t *testing.T) {
 			op.configPath = configDir
 			op.pidPath = pidPath
 			op.proc = NewProcess(op.binary, configDir, pidPath)
+			// The pid file holds the test process's own PID to fake "running";
+			// bypass the /proc cmdline identity check which would reject it.
+			op.proc.matchBinaryFn = func(int) bool { return true }
 
 			var srvAddr string
 			if tc.clashHandler != nil {
@@ -1878,6 +1883,204 @@ func TestRemoveFinalFromBase_MalformedJSON_NoOp(t *testing.T) {
 	}
 }
 
+// --- freshBaseConfig DNS (#445) ---
+
+func TestFreshBaseConfig_OmitsDNSFinal_KeepsStrategy(t *testing.T) {
+	cfg := freshBaseConfig()
+	dns, ok := cfg["dns"].(map[string]any)
+	if !ok {
+		t.Fatalf("dns block missing/wrong type: %v", cfg["dns"])
+	}
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final must be omitted (owned by 20-router.json), got %v", dns["final"])
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy must stay prefer_ipv4 (router-disabled default), got %v", dns["strategy"])
+	}
+	servers, _ := dns["servers"].([]any)
+	if len(servers) != 1 {
+		t.Fatalf("dns.servers: want 1 bootstrap server, got %v", dns["servers"])
+	}
+	first, _ := servers[0].(map[string]any)
+	if first["tag"] != "dns-bootstrap" {
+		t.Errorf("first dns server tag: want dns-bootstrap, got %v", first["tag"])
+	}
+}
+
+// --- removeDNSFinalFromBase tests (#445) ---
+
+func TestRemoveDNSFinalFromBase_DropsFinal_KeepsStrategyWhenRouterAbsent(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4","servers":[{"tag":"dns-bootstrap","type":"udp","server":"1.1.1.1"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No 20-router.json → strategy strip is gated off.
+	removeDNSFinalFromBase(basePath)
+
+	raw, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should be stripped unconditionally")
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy must survive when router slot absent, got %v", dns["strategy"])
+	}
+	// Other dns keys intact.
+	if _, has := dns["servers"]; !has {
+		t.Errorf("dns.servers unexpectedly removed")
+	}
+}
+
+func TestRemoveDNSFinalFromBase_StripsStrategyWhenRouterOwnsIt(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4","servers":[{"tag":"dns-bootstrap","type":"udp","server":"1.1.1.1"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+	// Router slot sets a non-empty strategy → base strategy strip is enabled.
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"),
+		[]byte(`{"dns":{"final":"dns-direct","strategy":"ipv4_only","servers":[{"tag":"dns-direct","type":"udp","server":"8.8.8.8"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
+	raw, _ := os.ReadFile(basePath)
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should be stripped")
+	}
+	if _, has := dns["strategy"]; has {
+		t.Errorf("dns.strategy should be stripped when router owns it, got %v", dns["strategy"])
+	}
+}
+
+func TestRemoveDNSFinalFromBase_RouterStrategyEmpty_KeepsBaseStrategy(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4"}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+	// Router slot exists but strategy is empty → base keeps its strategy.
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"),
+		[]byte(`{"dns":{"final":"dns-direct","strategy":"","servers":[{"tag":"dns-direct","type":"udp","server":"8.8.8.8"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
+	raw, _ := os.ReadFile(basePath)
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should still be stripped")
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy must survive when router strategy empty, got %v", dns["strategy"])
+	}
+}
+
+func TestRemoveDNSFinalFromBase_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	if err := os.WriteFile(basePath,
+		[]byte(`{"dns":{"strategy":"prefer_ipv4","servers":[{"tag":"dns-bootstrap","type":"udp","server":"1.1.1.1"}]}}`),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+	removeDNSFinalFromBase(basePath) // second call: no-op
+
+	raw, _ := os.ReadFile(basePath)
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := m["dns"].(map[string]any)
+	if _, has := dns["final"]; has {
+		t.Errorf("dns.final should remain absent")
+	}
+	if dns["strategy"] != "prefer_ipv4" {
+		t.Errorf("dns.strategy should be untouched, got %v", dns["strategy"])
+	}
+}
+
+func TestRemoveDNSFinalFromBase_NoDNSSection_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	original := `{"log":{"level":"trace"},"outbounds":[{"type":"direct","tag":"direct"}]}`
+	if err := os.WriteFile(basePath, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
+	raw, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("file became invalid JSON: %v", err)
+	}
+	if _, has := m["outbounds"]; !has {
+		t.Errorf("outbounds lost")
+	}
+}
+
+func TestRemoveDNSFinalFromBase_MissingFile_NoPanic(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+
+	removeDNSFinalFromBase(basePath)
+
+	if _, err := os.Stat(basePath); !os.IsNotExist(err) {
+		t.Errorf("file should not be created when missing")
+	}
+}
+
+func TestRemoveDNSFinalFromBase_MalformedJSON_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "00-base.json")
+	garbage := `{this is not json`
+	if err := os.WriteFile(basePath, []byte(garbage), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeDNSFinalFromBase(basePath)
+
+	raw, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != garbage {
+		t.Errorf("malformed file mutated: got %q, want %q", string(raw), garbage)
+	}
+}
+
 func TestOperator_Install_NoSpace_ReturnsNil(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "sing-box") // не существует
@@ -1943,5 +2146,52 @@ func TestOperator_Update_SameVersionSameSHA_NoOp(t *testing.T) {
 	// Бинарь не тронут — Update вернулся через MatchesRequired до gate'а.
 	if _, err := os.Stat(binary); err != nil {
 		t.Fatalf("binary disappeared: %v", err)
+	}
+}
+
+// TestParseTunnelLinksInput covers the whole-body detection step of
+// AddTunnels: канонический mieru client config JSON (экспорт панелей)
+// парсится целиком, а не построчно; обычные share-link'и идут прежним
+// line-split путём. Full AddTunnels integration requires a live sing-box
+// binary — see TestNextFreeListenPortSlot comment above.
+func TestParseTunnelLinksInput(t *testing.T) {
+	mieruJSON := `{
+		"profiles": [
+			{
+				"profileName": "default",
+				"user": { "name": "baozi", "password": "manlianpenfen" },
+				"servers": [
+					{
+						"ipAddress": "12.34.56.78",
+						"portBindings": [
+							{ "port": 6666, "protocol": "TCP" },
+							{ "port": 6489, "protocol": "UDP" }
+						]
+					}
+				]
+			}
+		],
+		"activeProfile": "default"
+	}`
+	res := parseTunnelLinksInput(mieruJSON)
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors: %+v", res.Errors)
+	}
+	if len(res.Outbounds) != 2 {
+		t.Fatalf("outbounds=%d want 2 (TCP+UDP)", len(res.Outbounds))
+	}
+	for _, p := range res.Outbounds {
+		if p.Protocol != "mieru" || p.Server != "12.34.56.78" {
+			t.Fatalf("unexpected outbound: %+v", p)
+		}
+	}
+
+	// Обычные share-link'и — прежний построчный путь.
+	res = parseTunnelLinksInput("vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=h#A\ntrojan://p@h.example:444?security=tls&sni=h#B")
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors: %+v", res.Errors)
+	}
+	if len(res.Outbounds) != 2 {
+		t.Fatalf("outbounds=%d want 2", len(res.Outbounds))
 	}
 }

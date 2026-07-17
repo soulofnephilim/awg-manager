@@ -129,6 +129,35 @@ func TestBuildTargetState(t *testing.T) {
 		}
 	})
 
+	// #489: "auto" не материализуется на роутере отдельно от "" (UpsertRoutes
+	// всегда шлёт auto:true), поэтому target обязан нормализовать его в "" —
+	// иначе shape-сравнение с current (умеет только ""/"reject") никогда не
+	// сходится и каждый reconcile гонит upsert вместо дешёвого toggle.
+	t.Run("fallback auto normalized to empty, reject preserved", func(t *testing.T) {
+		data := &StoreData{Lists: []DomainList{
+			{
+				ID: "list_1", Name: "foo", Enabled: true,
+				Domains: []string{"a.com"},
+				Routes:  []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1", Fallback: "auto"}},
+			},
+			{
+				ID: "list_2", Name: "bar", Enabled: true,
+				Domains: []string{"b.com"},
+				Routes:  []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1", Fallback: "reject"}},
+			},
+		}}
+		ts := buildTargetState(data, nil)
+		if len(ts.routes) != 2 {
+			t.Fatalf("expected 2 routes, got %d", len(ts.routes))
+		}
+		if ts.routes[0].fallback != "" {
+			t.Errorf("fallback auto must normalize to \"\", got %q", ts.routes[0].fallback)
+		}
+		if ts.routes[1].fallback != "reject" {
+			t.Errorf("fallback reject must be preserved, got %q", ts.routes[1].fallback)
+		}
+	})
+
 	t.Run("single list single chunk", func(t *testing.T) {
 		data := &StoreData{Lists: []DomainList{
 			{
@@ -301,7 +330,9 @@ func TestBuildTargetState_SkipsFailedTunnel(t *testing.T) {
 			Domains: []string{"a.com"},
 			Routes: []RouteTarget{
 				{Interface: "Wireguard0", TunnelID: "tun0"},
-				{Interface: "Wireguard1", TunnelID: "tun1", Fallback: "auto"},
+				// "reject" (а не "auto"): "auto" нормализуется в "" (#489), и
+				// наследование fallback стало бы неотличимо от его отсутствия.
+				{Interface: "Wireguard1", TunnelID: "tun1", Fallback: "reject"},
 			},
 		}},
 	}
@@ -315,8 +346,8 @@ func TestBuildTargetState_SkipsFailedTunnel(t *testing.T) {
 	if ts.routes[0].iface != "Wireguard1" {
 		t.Errorf("expected Wireguard1, got %s", ts.routes[0].iface)
 	}
-	if ts.routes[0].fallback != "auto" {
-		t.Errorf("expected fallback 'auto', got %q", ts.routes[0].fallback)
+	if ts.routes[0].fallback != "reject" {
+		t.Errorf("expected fallback 'reject', got %q", ts.routes[0].fallback)
 	}
 }
 
@@ -575,6 +606,34 @@ func TestComputeDiff(t *testing.T) {
 		// Routes unchanged
 		if len(diff.routeUpserts) != 0 {
 			t.Errorf("routes unchanged, should have 0 upserts, got %d", len(diff.routeUpserts))
+		}
+	})
+
+	// #489: включение/выключение списка при неизменном shape обязано идти
+	// через дешёвый disable-toggle по index, а не через upsert — NDMS при
+	// upsert существующего маршрута сохраняет его флаг disable (проверено на
+	// 5.1.1), т.е. upsert НЕ включает маршрут обратно.
+	t.Run("disabled flip alone yields toggle, not upsert", func(t *testing.T) {
+		current := currentState{
+			groups: map[string]currentGroupData{
+				"test_p1": {includes: []string{"a.com"}},
+			},
+			routes: []currentRoute{{group: "test_p1", iface: "OpkgTun0", index: "idx1", disabled: true}},
+		}
+		target := targetState{
+			groups: []targetGroup{{name: "test_p1", includes: []string{"a.com"}}},
+			routes: []targetRoute{{group: "test_p1", iface: "OpkgTun0", disabled: false}},
+		}
+		diff := computeDiff(current, target)
+		if len(diff.routeUpserts) != 0 {
+			t.Errorf("expected 0 upserts, got %+v", diff.routeUpserts)
+		}
+		if len(diff.routeDisables) != 1 {
+			t.Fatalf("expected 1 disable toggle, got %+v", diff.routeDisables)
+		}
+		rd := diff.routeDisables[0]
+		if rd.Index != "idx1" || rd.Disabled {
+			t.Errorf("toggle = %+v, want index=idx1 disabled=false", rd)
 		}
 	})
 

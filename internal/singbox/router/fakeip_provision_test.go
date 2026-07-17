@@ -20,6 +20,9 @@ func (fakeOpkgTunProvisioner) SetAddress(context.Context, string, string, string
 	return nil
 }
 func (fakeOpkgTunProvisioner) SetIPv6Address(context.Context, string, string) error { return nil }
+func (fakeOpkgTunProvisioner) ClearAddress(context.Context, string) error           { return nil }
+func (fakeOpkgTunProvisioner) SetPermitAllACL(context.Context, string) error        { return nil }
+func (fakeOpkgTunProvisioner) RemovePermitAllACL(context.Context, string) error     { return nil }
 func (fakeOpkgTunProvisioner) ClearIPv6Address(context.Context, string) error       { return nil }
 func (fakeOpkgTunProvisioner) SetMTU(context.Context, string, int) error            { return nil }
 func (fakeOpkgTunProvisioner) InterfaceUp(context.Context, string) error            { return nil }

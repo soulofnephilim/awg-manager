@@ -131,6 +131,10 @@ type Scheduler struct {
 	probeTimeout time.Duration
 	workerLimit  int
 	history      *History
+	// transitions классифицирует self-пробы по туннелям: в журнал попадают
+	// только переходы ok→fail (Warn) и восстановления (Info) — сами пробы
+	// каждые 60 секунд журнал не трогают.
+	transitions *logging.TransitionTracker
 
 	mu       sync.RWMutex
 	lastSnap Snapshot
@@ -147,6 +151,7 @@ func NewScheduler(deps SchedulerDeps, history *History) *Scheduler {
 		probeTimeout: 5 * time.Second,
 		workerLimit:  10,
 		history:      history,
+		transitions:  logging.NewTransitionTracker(),
 		stopCh:       make(chan struct{}),
 	}
 }
@@ -253,6 +258,12 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 
 	cells := make([]Cell, 0, len(targets)*len(tunnels))
 	var cellsMu sync.Mutex
+	// Наблюдаемые в этом проходе туннели: серии переходов живут только у
+	// них — туннель с disabled/handshake-методом или без self-цели
+	// забывается (после включения проверки первый отказ снова даст Warn,
+	// а не «повтор»; та же семантика, что у connectivity-трекера).
+	probed := make(map[string]bool, len(tunnels))
+	var probedMu sync.Mutex
 
 	sem := make(chan struct{}, s.workerLimit)
 	var wg sync.WaitGroup
@@ -279,6 +290,11 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 
 				latency, ok := s.runProbeCell(ctx, t, tn, self)
 				now := time.Now()
+
+				probedMu.Lock()
+				probed[tn.ID] = true
+				probedMu.Unlock()
+				s.logProbeTransition(tn, t, ok)
 
 				sample := Sample{TS: now, OK: ok}
 				if ok {
@@ -324,9 +340,32 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 		keepIDs[t.ID] = true
 	}
 	s.history.PruneTunnels(keepIDs)
+	s.transitions.Retain(probed)
 
 	if s.deps.Bus != nil {
 		s.deps.Bus.Publish("monitoring:matrix-update", snap)
+	}
+}
+
+// logProbeTransition пишет в журнал только смену состояния self-пробы:
+// недостижимость — Warn, восстановление — Info с длиной серии. Пробы
+// выполняются раз в минуту на туннель; стабильное состояние журнал
+// не трогает.
+func (s *Scheduler) logProbeTransition(tn Tunnel, t Target, ok bool) {
+	if s.deps.Log == nil {
+		return
+	}
+	name := tn.Name
+	if name == "" {
+		name = tn.ID
+	}
+	switch obs := s.transitions.Observe(tn.ID, ok); obs.Kind {
+	case logging.TransitionNowFailing:
+		s.deps.Log.AppLog(logging.LevelWarn, logging.GroupSystem, logging.SubMonitoring,
+			"probe", name, fmt.Sprintf("monitoring probe unreachable: %s", t.Host))
+	case logging.TransitionRecovered:
+		s.deps.Log.AppLog(logging.LevelInfo, logging.GroupSystem, logging.SubMonitoring,
+			"probe", name, fmt.Sprintf("monitoring probe reachable again (%s) after %d failed cycles", t.Host, obs.Failures))
 	}
 }
 
@@ -521,8 +560,8 @@ func (s *Scheduler) collectTunnels(ctx context.Context) []Tunnel {
 					IfaceName: sbt.InterfaceName,
 					// PingcheckTarget / SelfTarget left empty — sing-box
 					// tunnels don't have a per-tunnel restart pingcheck;
-					// matrix row uses BaseTargets only, augmented later
-					// with Clash data.
+					// connectivity targets come from EffectiveTargets,
+					// augmented later with Clash data.
 					Source:       "singbox",
 					SingboxTag:   sbt.Tag,
 					Subscription: sbt.Subscription,

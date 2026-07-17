@@ -59,6 +59,19 @@ function createFakeipTransitionStore() {
 	 */
 	function applyTransition(data: SingboxRouterTransitionData): void {
 		store.update((prev) => {
+			// HTTP may fail (fail()) before any SSE arrives, or SSE may reconnect
+			// late with a real transitionId while the placeholder id is still ''.
+			// Never regress a terminal transition back to a spinning state.
+			if (prev?.done) {
+				const sameTransition =
+					prev.transitionId === data.transitionId ||
+					prev.transitionId === '' ||
+					data.transitionId === '';
+				if (!sameTransition || !(data.done ?? false)) {
+					return prev;
+				}
+			}
+
 			const fresh = prev === null || prev.transitionId !== data.transitionId;
 			const base: FakeIPTransitionState = fresh
 				? {
@@ -115,11 +128,22 @@ function createFakeipTransitionStore() {
 		});
 	}
 
+	function completeSuccess(finalState: FakeIPMode): void {
+		store.update((prev) => {
+			if (prev === null || prev.done) return prev;
+			let steps = prev.steps;
+			steps = upsertStep(steps, { step: 'provision', status: 'done' });
+			steps = upsertStep(steps, { step: 'readiness', status: 'done' });
+			steps = upsertStep(steps, { step: 'ready', status: 'done' });
+			return { ...prev, steps, done: true, finalState };
+		});
+	}
+
 	function reset(): void {
 		store.set(null);
 	}
 
-	return { subscribe: store.subscribe, applyTransition, begin, fail, reset };
+	return { subscribe: store.subscribe, applyTransition, begin, fail, completeSuccess, reset };
 }
 
 export const fakeipTransition = createFakeipTransitionStore();

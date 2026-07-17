@@ -220,7 +220,12 @@ func TestReconcileFakeIPTun_ReprovisionsWhenGone(t *testing.T) {
 // routes re-added, DNS re-advertised.
 // ---------------------------------------------------------------------------
 
-func TestReconcileFakeIPTun_DriftHealRestartsDeadSingbox(t *testing.T) {
+// Единственный рестарт-авторитет — watchdog. fakeip drift-heal при мёртвом
+// движке НЕ спавнит сам (раньше звал AutoRestartIfCrashed, #456): только
+// гарантирует, что слот включён, и продолжает best-effort heal маршрутов.
+// Fail-closed при этом врождён fakeip: pool-маршруты ведут на OpkgTun, чей
+// читатель (sing-box) мёртв → трафик к пулу дропается, не течёт в WAN.
+func TestReconcileFakeIPTun_DriftHealNoRestartByReconcile(t *testing.T) {
 	h := newFakeIPEnableHarness(t, "")
 
 	// Provision with sing-box running so Enable succeeds.
@@ -230,39 +235,20 @@ func TestReconcileFakeIPTun_DriftHealRestartsDeadSingbox(t *testing.T) {
 	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
 	h.log.calls = nil
 
-	// Now model a DEAD sing-box that comes back up after the restart: IsRunning
-	// returns false on the first call (the drift-heal liveness check) then true
-	// (waitForSingbox readiness).
 	sb := h.svc.deps.Singbox.(*fakeSingbox)
-	calls := 0
-	sb.isRunningFn = func() (bool, int) {
-		calls++
-		if calls == 1 {
-			return false, 0
-		}
-		return true, 1234
-	}
+	sb.isRunningFn = func() (bool, int) { return false, 0 } // мёртв весь тест
 
-	// Track the orchestrator restart: SetEnabled(SlotFakeIP,true) is the restart.
-	// The real orch records it via the slot's enabled file; assert via behaviour —
-	// after the heal, routes were re-added.
 	all, _ := h.store.Load()
 	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
 	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
 		t.Fatalf("reconcileFakeIPTun: %v", err)
 	}
 
-	if calls < 1 {
-		t.Fatalf("IsRunning was never probed (restart path not taken)")
+	// Drift-heal must NOT respawn — that is the watchdog's job now.
+	if sb.startCalls != 0 {
+		t.Errorf("drift-heal must NOT restart (watchdog is the sole authority): startCalls = %d, want 0", sb.startCalls)
 	}
-	// The drift-heal MUST directly (re)spawn the dead process: SetEnabled is a
-	// no-op for an already-enabled slot (Orch != nil here), so only an explicit
-	// Singbox.Start() actually revives it. Assert the spawn happened exactly once.
-	if sb.startCalls != 1 {
-		t.Errorf("Singbox.Start calls = %d, want 1 (drift-heal must respawn the dead process)", sb.startCalls)
-	}
-	// Routes re-added because the live route probe is unstubbed here → reads
-	// /proc/net/route → opkgtun0 route absent → drift detected → re-add fires.
+	// Route heal still runs best-effort even with the engine down.
 	if !h.log.has("AddRoute:198.18.0.0:255.254.0.0:OpkgTun0") {
 		t.Errorf("drift-heal must re-add v4 pool route when absent, got %v", h.log.calls)
 	}
@@ -357,10 +343,16 @@ func TestReconcileFakeIPTun_NoMutationWhenNoDrift(t *testing.T) {
 	// drift-reconcile sees no route drift.
 	stubFakeIPPoolRoutePresent(t, func(string, netip.Prefix) bool { return true })
 
-	h.log.calls = nil // observe only the reconcile tick from here.
-
 	all, _ := h.store.Load()
 	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+
+	// ПЕРВЫЙ тик после старта процесса одноразово ассертит permit-ACL
+	// (upgrade-путь) — это единственная допустимая мутация, и только раз.
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("reconcileFakeIPTun (first tick): %v", err)
+	}
+
+	h.log.calls = nil // steady state — со ВТОРОГО тика.
 	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
 		t.Fatalf("reconcileFakeIPTun: %v", err)
 	}
@@ -493,5 +485,28 @@ func TestReconcileFakeIPTun_RevivalEnablesSlotFakeIPNotSlotRouter(t *testing.T) 
 	// SlotRouter must remain DISABLED — revival must NOT toggle the tproxy slot.
 	if slotEnabled(t, h.svc, orchestrator.SlotRouter) {
 		t.Error("SlotRouter must remain DISABLED after fakeip-reconcile revival — tproxy slot must not be touched")
+	}
+}
+
+// Запаркованный слот 21 при ЖИВОМ процессе (provisioned + живой iface) —
+// drift-heal обязан вернуть слот в merged-конфиг (ревью #523: раньше слот
+// чинился только при мёртвом sing-box, при живом merged-конфиг оставался
+// без tun-in навсегда).
+func TestReconcileFakeIPTun_ParkedSlotAliveEngine_RepromotesSlot(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	captureDrain(t)
+	provisionForDisable(t, h) // Enabled=true персистнут, live index 0
+
+	if err := h.svc.deps.Orch.SetEnabledSilent(orchestrator.SlotFakeIP, false); err != nil {
+		t.Fatal(err)
+	}
+	all, _ := h.store.Load()
+	sr, _ := NormalizeSingboxRouterSettings(all.SingboxRouter)
+	if err := h.svc.reconcileFakeIPTun(context.Background(), sr); err != nil {
+		t.Fatalf("reconcileFakeIPTun: %v", err)
+	}
+	st, ok := h.svc.slotSnapshot(orchestrator.SlotFakeIP)
+	if !ok || !st.Enabled {
+		t.Fatal("parked fakeip slot must be re-promoted by drift-heal while the engine is alive")
 	}
 }

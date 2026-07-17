@@ -155,7 +155,7 @@ type integrationSingbox struct {
 	dir string
 }
 
-func (s *integrationSingbox) Reload() error                              { return nil }
+func (s *integrationSingbox) Reload() error                             { return nil }
 func (s *integrationSingbox) IsRunning() (bool, int)                    { return false, 0 }
 func (s *integrationSingbox) Start() error                              { return nil }
 func (s *integrationSingbox) ClearManualStop() error                    { return nil }
@@ -163,6 +163,10 @@ func (s *integrationSingbox) ValidateConfigDir(_ context.Context) error { return
 func (s *integrationSingbox) ConfigDir() string                         { return s.dir }
 func (s *integrationSingbox) Binary() string                            { return "" }
 func (s *integrationSingbox) LastError() string                         { return "" }
+func (s *integrationSingbox) AutoRestartIfCrashed(_ context.Context) (bool, bool, error) {
+	return false, false, nil // integration env: никаких сайд-эффектов от reconcile
+}
+func (s *integrationSingbox) CrashStats() (int, string, time.Time) { return 0, "", time.Time{} }
 
 // noopWANIPCollector is a test double that returns no WAN IPs. Wired
 // into router.Deps so NewService doesn't fall back to the production

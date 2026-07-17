@@ -9,17 +9,30 @@ var (
 	ErrOutboundReferenced        = errors.New("outbound is referenced by one or more rules")
 	ErrInvalidMatchers           = errors.New("rule must have at least one matcher")
 	ErrRuleIndexOutOfRange       = errors.New("rule index out of range")
-	ErrRuleSetTagConflict        = errors.New("rule set with this tag already exists")
-	ErrRuleSetNotFound           = errors.New("rule set not found")
-	ErrDatRuleSetForbidden       = errors.New("dat rule set token is invalid")
-	ErrOutboundTagConflict       = errors.New("outbound with this tag already exists")
-	ErrOutboundNotFound          = errors.New("outbound not found")
-	ErrDNSServerTagConflict      = errors.New("dns server with this tag already exists")
-	ErrDNSServerReferenced       = errors.New("dns server is referenced by one or more dns rules or used as final/default")
-	ErrDNSServerNotFound         = errors.New("dns server not found")
-	ErrDNSRuleIndexOutOfRange    = errors.New("dns rule index out of range")
-	ErrDNSServerIndexOutOfRange  = errors.New("dns server index out of range")
-	ErrDNSInvalidServer          = errors.New("dns rule references unknown server tag")
+	// ErrBulkEmptyIndices / ErrBulkEmptyTags reject an empty selection passed
+	// to a bulk rule/ruleset mutation (nothing to do — client error). Mapped
+	// to 400 by the API.
+	ErrBulkEmptyIndices = errors.New("empty indices")
+	ErrBulkEmptyTags    = errors.New("empty tags")
+	// ErrBulkInvalidSelection rejects a non-empty bulk selection that is
+	// itself invalid (duplicate index/tag, a rule that isn't a route rule,
+	// an unknown outbound tag, or a rule set that isn't type=remote) — a
+	// client error just like the empty-selection cases above. Mapped to 400
+	// by the API.
+	ErrBulkInvalidSelection = errors.New("invalid bulk selection")
+	ErrRuleSetTagConflict   = errors.New("rule set with this tag already exists")
+	ErrRuleSetNotFound      = errors.New("rule set not found")
+	ErrDatRuleSetForbidden  = errors.New("dat rule set token is invalid")
+	ErrOutboundTagConflict  = errors.New("outbound with this tag already exists")
+	// ErrCompositeMemberUnknown — член selector/urltest ссылается на несуществующий выход (#567).
+	ErrCompositeMemberUnknown   = errors.New("неизвестный член композита")
+	ErrOutboundNotFound         = errors.New("outbound not found")
+	ErrDNSServerTagConflict     = errors.New("dns server with this tag already exists")
+	ErrDNSServerReferenced      = errors.New("dns server is referenced by one or more dns rules or used as final/default")
+	ErrDNSServerNotFound        = errors.New("dns server not found")
+	ErrDNSRuleIndexOutOfRange   = errors.New("dns rule index out of range")
+	ErrDNSServerIndexOutOfRange = errors.New("dns server index out of range")
+	ErrDNSInvalidServer         = errors.New("dns rule references unknown server tag")
 
 	ErrPolicyNotConfigured = errors.New("router policy not configured (settings.policyName is empty)")
 	ErrPolicyMissing       = errors.New("policy has no fwmark in NDMS (deleted or has no permitted interface)")
@@ -35,4 +48,24 @@ var (
 	// an engine-locked field (the fakeip/real DNS servers, dns.final,
 	// default_domain_resolver, or the hijack-dns rule). Surfaced as 4xx.
 	ErrFakeIPLockedField = errors.New("fakeip-tun config field is engine-locked")
+
+	// ErrFakeIPRealServerInvalid rejects an edit of the "real" DNS server whose
+	// new upstream is not a plain IP address (the fakeip topology resolves every
+	// domain through "real" itself, so a domain upstream could never bootstrap).
+	// Mapped to 400 by the API.
+	ErrFakeIPRealServerInvalid = errors.New("upstream of dns server \"real\" must be an IP address")
+
+	// ErrQoSClassesInvalid wraps every QoS-class validation failure from
+	// NormalizeSingboxRouterSettings (DSCP out of 0-63, duplicate DSCP,
+	// class limit exceeded, empty outbound, name too long) and the
+	// UpdateSettings outbound-existence check so the API can map them to
+	// 400 with the detailed Russian message intact.
+	ErrQoSClassesInvalid = errors.New("некорректные классы QoS")
+
+	// ErrReservedInboundTag rejects user route rules whose inbound matcher
+	// references the reserved tproxy-qos-*/redirect-qos-* namespace. The
+	// managed QoS rules live in 18-qos-routes.json and merge BEFORE the user
+	// slot, so such a user rule could never match — it would only sit in the
+	// UI as an inert, confusing shadow rule. Mapped to 400 by the API.
+	ErrReservedInboundTag = errors.New("теги qos-* зарезервированы для QoS-классов")
 )

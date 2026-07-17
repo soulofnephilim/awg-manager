@@ -18,6 +18,10 @@ type Status struct {
 	NetfilterAvailable     bool   `json:"netfilterAvailable"`
 	NetfilterComponentName string `json:"netfilterComponentName,omitempty"`
 	TProxyTargetAvailable  bool   `json:"tproxyTargetAvailable"`
+	// XtDscpAvailable reports whether iptables `-m dscp` matching is usable
+	// (xt_dscp kernel module loaded/on-disk AND iptables extension present).
+	// The QoS-DSCP settings UI keys its "supported" state on this field.
+	XtDscpAvailable        bool   `json:"xtDscpAvailable"`
 	PolicyName             string `json:"policyName"`
 	PolicyMark             string `json:"policyMark,omitempty"`
 	PolicyExists           bool   `json:"policyExists"`
@@ -44,6 +48,16 @@ type Status struct {
 	// LastError is the last sing-box fatal/exit reason, populated only when
 	// the engine is enabled but not active (СБОЙ). Empty otherwise.
 	LastError string `json:"lastError,omitempty"`
+	// CrashCount — падения sing-box за последнее backoff-окно (10 мин).
+	// UI показывает «Падений за 10 мин: N» в панели движка (issue #456).
+	CrashCount int `json:"crashCount,omitempty"`
+	// LastCrashReason — причина последнего падения в окне (например,
+	// распознанный OOM-kill); пусто, когда падений в окне нет.
+	LastCrashReason string `json:"lastCrashReason,omitempty"`
+	// RestartSuppressedUntil — RFC3339-время, до которого авто-перезапуск
+	// приостановлен анти-crash-loop backoff'ом; пусто, когда не подавлен.
+	// Ручной «Перезапустить» не подавляется и сбрасывает паузу.
+	RestartSuppressedUntil string `json:"restartSuppressedUntil,omitempty"`
 }
 
 type Issue struct {
@@ -66,11 +80,17 @@ type Rule struct {
 	Mode         string   `json:"mode,omitempty"`
 	Rules        []Rule   `json:"rules,omitempty"`
 	DomainSuffix []string `json:"domain_suffix,omitempty"`
+	Domain       []string `json:"domain,omitempty"`
 	IPCIDR       []string `json:"ip_cidr,omitempty"`
 	SourceIPCIDR []string `json:"source_ip_cidr,omitempty"`
 	Port         []int    `json:"port,omitempty"`
 	RuleSet      []string `json:"rule_set,omitempty"`
 	Protocol     string   `json:"protocol,omitempty"`
+	// Inbound matches the sing-box listener tag the connection entered
+	// through (native sing-box route-rule field). Managed QoS-DSCP rules use
+	// it to bind a per-class inbound pair (tproxy-qos-N / redirect-qos-N) to
+	// the class outbound; user rules may use it too.
+	Inbound []string `json:"inbound,omitempty"`
 	// IPIsPrivate, when set, matches packets whose destination is an
 	// RFC1918/loopback/link-local/CGNAT/multicast address. Pointer so
 	// the zero value (unset) stays out of JSON — `{"ip_is_private":false}`
@@ -81,9 +101,34 @@ type Rule struct {
 	// transparent listener on every router LAN IP; a side-effect packet
 	// that slips into sing-box from there gets routed `direct` instead
 	// of ending up at `final: proxy` and being silently dropped.
-	IPIsPrivate *bool  `json:"ip_is_private,omitempty"`
-	Action      string `json:"action,omitempty"`
-	Outbound    string `json:"outbound,omitempty"`
+	IPIsPrivate *bool `json:"ip_is_private,omitempty"`
+	// Network matches the connection L4 protocol ("tcp" | "udp"). The system
+	// route-options rule uses it to scope the udp_timeout override to UDP.
+	Network  string `json:"network,omitempty"`
+	Action   string `json:"action,omitempty"`
+	Outbound string `json:"outbound,omitempty"`
+	// UDPTimeout carries the `udp_timeout` route option for an
+	// `action:"route-options"` rule. sing-box otherwise applies short
+	// per-protocol idle timeouts to sniffed UDP (STUN/DNS 10s, QUIC/DTLS 30s)
+	// that ignore the inbound udp_timeout; a route-options rule raising it to the
+	// inbound value keeps games/VoIP sessions alive. A route rule action carries
+	// no outbound, so this and Action are the only fields it sets.
+	UDPTimeout string `json:"udp_timeout,omitempty"`
+	// AwgmManaged marks auto-generated route rules owned by AWG Manager.
+	// "selective-ip" rules map resolved domain IPs to proxy outbounds for
+	// selective TPROXY mode; they are replaced on each ipset rebuild.
+	AwgmManaged string `json:"awgm_managed,omitempty"`
+}
+
+// ActionIsRoute reports whether the rule's action is "route" in sing-box
+// semantics: an EMPTY action is route too (sing-box defaults it). Readers
+// must use this instead of comparing Action == "route" — a rule persisted
+// without the field (API callers omit it; the frontend always sends it) is
+// executed by sing-box but was invisible to strict comparisons: the fakeip
+// loop-safety gate skipped its CIDR tun-routes and the dangling-outbound
+// issue detector skipped its warning (стенд-находка #534-расследования).
+func (r Rule) ActionIsRoute() bool {
+	return r.Action == "" || r.Action == "route"
 }
 
 // UnmarshalJSON implements json.Unmarshaler for Rule. It accepts both

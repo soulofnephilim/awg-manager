@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms/command"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -224,6 +225,7 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateServerRequest
 	}
 
 	s.log.Info("managed server updated", "interface", server.InterfaceName, "address", req.Address, "port", req.ListenPort)
+	s.appLog.Info("update", server.InterfaceName, fmt.Sprintf("Managed server updated on %s", server.InterfaceName))
 	return nil
 }
 
@@ -624,16 +626,26 @@ func resolveLANSegmentsPlan(addr, mask string, segments []string, bridges []quer
 // access. Empty segments = teardown (unbind+remove best-effort, errors logged only).
 func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface, addr, mask string, segments []string) error {
 	acl := "AWGM_" + iface
+	commandsWired := s.commands != nil && s.commands.Interfaces != nil
 
 	if len(segments) == 0 {
-		if err := s.rciAccessGroup(ctx, iface, acl, false); err != nil {
+		// Teardown best-effort: без подключённых команд снимать нечем (тестовые
+		// литералы Service / деградация) — прежнее поведение сохраняем.
+		if !commandsWired {
+			return nil
+		}
+		if err := s.commands.Interfaces.ACLUnbind(ctx, iface, acl); err != nil {
 			s.log.Debug("unbind ACL (teardown)", "error", err, "iface", iface)
 		}
-		if err := s.rciAclRemove(ctx, acl); err != nil {
+		if err := s.commands.Interfaces.ACLRemove(ctx, acl); err != nil {
 			s.log.Debug("remove ACL (teardown)", "error", err, "iface", iface)
 		}
 		return nil
 	}
+	if !commandsWired {
+		return fmt.Errorf("ndms commands not wired")
+	}
+	aclCmd := s.commands.Interfaces
 
 	// Preflight — собрать план до единой мутации на роутере.
 	if s.queries == nil || s.queries.Interfaces == nil {
@@ -650,18 +662,21 @@ func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface, addr, mask str
 
 	// Apply — destroy → rebuild. unbind/remove best-effort (ACL может ещё не
 	// существовать), но больше не глушим молча.
-	if err := s.rciAccessGroup(ctx, iface, acl, false); err != nil {
+	if err := aclCmd.ACLUnbind(ctx, iface, acl); err != nil {
 		s.log.Debug("unbind ACL before rebuild", "error", err, "iface", iface)
 	}
-	if err := s.rciAclRemove(ctx, acl); err != nil {
+	if err := aclCmd.ACLRemove(ctx, acl); err != nil {
 		s.log.Debug("remove ACL before rebuild", "error", err, "iface", iface)
 	}
 	for i, r := range plan {
-		if err := s.rciAclPermit(ctx, acl, r.srcSub, r.srcMask, r.dstSub, r.dstMask); err != nil {
+		// Дубль толерируем (как SetPermitAllACL): best-effort remove выше мог
+		// транзиентно не удалить старый идентичный список — состояние роутера
+		// уже совпадает с планом, падать не за что (ревью).
+		if err := aclCmd.ACLPermitIP(ctx, acl, r.srcSub, r.srcMask, r.dstSub, r.dstMask); err != nil && !command.IsACLDuplicate(err) {
 			return fmt.Errorf("permit %s: %w", segments[i], err)
 		}
 	}
-	return s.rciAccessGroup(ctx, iface, acl, true)
+	return aclCmd.ACLBind(ctx, iface, acl)
 }
 
 // ListLANSegments returns the router's LAN bridge catalog for the UI picker.
@@ -707,5 +722,10 @@ func (s *Service) SetLANSegments(ctx context.Context, id string, segments []stri
 		return fmt.Errorf("save to storage: %w", err)
 	}
 	s.log.Info("managed server LAN segments changed", "interface", server.InterfaceName, "segments", segments)
+	segs := strings.Join(segments, ", ")
+	if segs == "" {
+		segs = "none"
+	}
+	s.appLog.Info("lan-segments", server.InterfaceName, "LAN segments changed: "+segs)
 	return nil
 }

@@ -4,11 +4,14 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SideDrawer, Toggle, Button, Badge, StatusDot } from '$lib/components/ui';
-  import { api } from '$lib/api/client';
+  import { SideDrawer, Toggle, Button, Badge, StatusDot, Modal } from '$lib/components/ui';
+  import { api, ApiGatewayError } from '$lib/api/client';
   import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
   import { modeSwitch, modeSwitchBusy } from '$lib/stores/modeSwitch';
   import { singboxStatus } from '$lib/stores/singbox';
+  import { singboxMemory } from '$lib/stores/singboxMemory';
+  import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
+  import { formatBytes, formatByteRate } from '$lib/utils/format';
   import { systemInfo } from '$lib/stores/system';
   import { notifications } from '$lib/stores/notifications';
   import { drawerOpen, closeDrawer } from './drawerStore';
@@ -18,14 +21,21 @@
   import PortChipsInput from './PortChipsInput.svelte';
   import SubnetChipsInput from './SubnetChipsInput.svelte';
   import TrafficSourceSettings from './TrafficSourceSettings.svelte';
+  import SelectiveIpsetSnapshot from './SelectiveIpsetSnapshot.svelte';
+  import QosSettingsCard from './QosSettingsCard.svelte';
   import { deriveDeps, deriveIssues } from './drawerData';
+  import { formatSuppressedUntil, CRASH_WORDS } from './crashInfo';
   import { mergeAndSaveSettings, BYPASS_PRESETS } from './settingsActions';
   import { resolveWanAuto, planToggleAutoDetect, planSelectWanInterface, type WanAutoOverride } from './wanMode';
-  import { pluralize, RULE_WORDS } from '$lib/utils/pluralize';
+  import { pluralize, pluralForm, RULE_WORDS } from '$lib/utils/pluralize';
+  import { selectiveBypass } from '$lib/stores/selectiveBypass';
   import type { SingboxRouterSettings, SingboxRouterWANInterface } from '$lib/types';
+
+  const { status: selectiveBypassStatus } = selectiveBypass;
 
   const status = singboxRouterStore.status;
   const storeSettings = singboxRouterStore.settings;
+  const storeOptions = singboxRouterStore.options;
 
   let open = $derived($drawerOpen);
   let s = $derived($status);
@@ -86,6 +96,30 @@
     'muted' as const,
   );
 
+  // ── Падения движка (#456): счётчик за окно backoff'а, причина последнего
+  // падения и пауза авто-перезапуска. Блок виден, пока падения не выйдут из
+  // 10-минутного окна; escape hatch — кнопка «Перезапустить» в футере.
+  let crashCount = $derived(s?.crashCount ?? 0);
+  let crashSuppressedLabel = $derived(formatSuppressedUntil(s?.restartSuppressedUntil));
+  let showCrashInfo = $derived(crashCount > 0 || crashSuppressedLabel !== null);
+
+  // ── Ресурсы: живая память (SSE singbox:memory, Go-рантайм по Clash API) и
+  // агрегатный трафик (кумулятивные totals Clash, singbox:traffic-totals).
+  // Секция видна только при работающем TProxy-перехвате: в режиме FakeIP или
+  // после остановки движка SSE замолкает и сторы держат протухшие числа
+  // (окно до ближайшего тика watchdog'а ~30 с — принятая задержка статуса).
+  let resourcesVisible = $derived(engineActive && $settings?.routingMode === 'tproxy');
+  let liveStats = $derived($singboxTrafficLive);
+  let memoryLabel = $derived($singboxMemory > 0 ? formatBytes($singboxMemory) : '—');
+  let rateLabel = $derived(
+    liveStats.rate.hasRate
+      ? `↓ ${formatByteRate(liveStats.rate.downloadRate)} · ↑ ${formatByteRate(liveStats.rate.uploadRate)}`
+      : '—',
+  );
+  let sessionLabel = $derived(
+    `↓ ${formatBytes(liveStats.totals.downloadBytes)} · ↑ ${formatBytes(liveStats.totals.uploadBytes)}`,
+  );
+
   onMount(async () => {
     void singboxRouterStore.loadAll();
     try {
@@ -93,6 +127,7 @@
     } catch (_e) {
       // ignore
     }
+    void loadSelectiveStatus();
   });
 
   // ── Engine control ──
@@ -152,6 +187,90 @@
     { value: '1h0m0s', label: '1 час' },
     { value: '3h0m0s', label: '3 часа' },
   ];
+
+  // ── Selective bypass ──
+  let selectiveInstalling = $state(false);
+  let rebuilding = $state(false);
+  let snapshotOpen = $state(false);
+
+  let routeFinal = $derived(s?.final || 'direct');
+  let selectiveFinalOk = $derived(routeFinal === 'direct');
+
+  let selectiveStatus = $derived($selectiveBypassStatus);
+  let selectiveStatusLoaded = $derived(selectiveStatus !== null);
+  // Пересборка в процессе: локальный флаг покрывает HTTP round-trip (202),
+  // status.rebuilding — фон после ответа и «страница открыта во время пересборки».
+  // Сбрасывается по SSE selective-status с rebuilding: false.
+  let rebuildInFlight = $derived(rebuilding || (selectiveStatus?.rebuilding ?? false));
+  let selectiveIpsetOk = $derived(selectiveStatus?.available ?? false);
+  let selectiveSnapshot = $derived(selectiveStatus?.snapshot ?? null);
+  let hasSnapshot = $derived(
+    !!selectiveSnapshot
+      && ((selectiveSnapshot.entryCount ?? 0) > 0
+        || (selectiveSnapshot.domainMatcherCount ?? selectiveSnapshot.domainResults?.length ?? 0) > 0
+        || (selectiveSnapshot.staticCidrCount ?? selectiveSnapshot.staticCidrs?.length ?? 0) > 0),
+  );
+
+  async function loadSelectiveStatus() {
+    try {
+      const status = await api.singboxRouterSelectiveStatus();
+      selectiveBypass.applyStatus(status);
+    } catch (_e) { /* ignore */ }
+  }
+
+  async function installSelectiveDeps() {
+    selectiveInstalling = true;
+    try {
+      const status = await api.singboxRouterSelectiveInstallDeps();
+      selectiveBypass.applyStatus(status);
+    } catch (e) {
+      notifications.error('Не удалось установить ipset: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      selectiveInstalling = false;
+    }
+  }
+
+  async function triggerRebuild() {
+    rebuilding = true;
+    selectiveBypass.resetProgress();
+    selectiveBypass.requestModal();
+    const epochBefore = selectiveBypass.statusEpoch();
+    try {
+      // 202 Accepted = «запущено», не «завершено»: статус приходит с
+      // rebuilding: true, а завершение доскажут SSE-события
+      // selective-progress / selective-status (модалка закрывается по ним).
+      const status = await api.singboxRouterSelectiveRebuild();
+      // Мгновенно упавшая пересборка публикует терминальный SSE
+      // selective-status РАНЬШЕ, чем разрешится 202 — не затираем более
+      // свежее состояние устаревшим телом ответа (иначе кнопка залипает
+      // в «Пересборка…»).
+      if (selectiveBypass.statusEpoch() === epochBefore) {
+        selectiveBypass.applyStatus(status);
+      }
+    } catch (e) {
+      if (e instanceof ApiGatewayError) {
+        // Шлюз (nginx) не дождался ответа, но пересборка продолжается на
+        // сервере — без тоста об ошибке, прогресс доедет по SSE.
+        console.warn('selective rebuild: gateway error, rebuild continues in background', e);
+      } else if ((e as { body?: { code?: string } })?.body?.code === 'OPERATION_IN_PROGRESS') {
+        // 409: сейчас применяется конфигурация sing-box — честный тост
+        // вместо сырого «занято: …».
+        notifications.error('Пересборка недоступна: применяется конфигурация sing-box. Повторите позже.');
+      } else {
+        notifications.error('Не удалось пересобрать ipset: ' + (e instanceof Error ? e.message : String(e)));
+      }
+    } finally {
+      rebuilding = false;
+    }
+  }
+
+  function toggleSelectiveBypass(checked: boolean) {
+    if (checked && !selectiveFinalOk) {
+      notifications.error('Селективный перехват требует route.final = direct');
+      return;
+    }
+    void applyPatch({ selectiveBypass: checked });
+  }
 </script>
 
 <SideDrawer {open} onClose={closeDrawer} title="Движок sing-box" width={420}>
@@ -175,7 +294,50 @@
           <span class="engine-version">{sbVersionLabel}</span>
         </div>
       </div>
+
+      {#if showCrashInfo}
+        <div class="crash-info">
+          <!-- FIX-D: при crashCount 0 (например, серия неудачных стартов до
+               grace-периода без записанных падений) строка счётчика скрыта —
+               «Падений: 0» рядом с активным подавлением только путает. -->
+          {#if crashCount > 0}
+            <div class="crash-line">
+              <span class="crash-label">Падений за 10 мин</span>
+              <span class="crash-value">{crashCount}</span>
+            </div>
+          {/if}
+          {#if s?.lastCrashReason}
+            <p class="crash-reason">Причина: {s.lastCrashReason}</p>
+          {/if}
+          {#if crashSuppressedLabel}
+            <p class="crash-suppressed">
+              Автоперезапуск приостановлен до {crashSuppressedLabel}{#if crashCount > 0}&nbsp;({crashCount}
+              {pluralForm(crashCount, CRASH_WORDS)} за 10 мин){/if}.
+              Кнопка «Перезапустить» ниже запускает движок немедленно.
+            </p>
+          {/if}
+        </div>
+      {/if}
     </section>
+
+    <!-- Ресурсы: живая память и трафик движка -->
+    {#if resourcesVisible}
+      <section class="sec">
+        <div class="sec-cap">Ресурсы</div>
+        <div class="stat-line" title="Память Go-рантайма sing-box по данным Clash API; фактический RSS процесса выше">
+          <span class="stat-label">Память sing-box</span>
+          <span class="stat-value">{memoryLabel}</span>
+        </div>
+        <div class="stat-line">
+          <span class="stat-label">Скорость</span>
+          <span class="stat-value">{rateLabel}</span>
+        </div>
+        <div class="stat-line">
+          <span class="stat-label">За сессию</span>
+          <span class="stat-value">{sessionLabel}</span>
+        </div>
+      </section>
+    {/if}
 
     <!-- Зависимости -->
     <section class="sec">
@@ -251,9 +413,111 @@
         <p class="hint">Как долго sing-box держит UDP-сессии активными. Увеличьте если игры или другие UDP-приложения обрываются каждые несколько минут.</p>
       </section>
 
-      <!-- Исключения портов -->
+      <!-- Селективный перехват -->
       <section class="sec">
-        <div class="sec-cap">Исключения портов</div>
+        <div class="sec-cap">Селективный перехват</div>
+
+        <div class="field-row">
+          <span>Только трафик из правил</span>
+          <Toggle
+            checked={cfg.selectiveBypass ?? false}
+            disabled={!selectiveFinalOk || (selectiveStatusLoaded && !selectiveIpsetOk)}
+            onchange={toggleSelectiveBypass}
+          />
+        </div>
+
+        {#if !selectiveFinalOk}
+          <p class="hint selective-warn">
+            Несовместимо с route.final = «{routeFinal}»: при catch-all проксировании весь трафик идёт через sing-box,
+            селективный ipset не имеет смысла. Установите final в «direct» в разделе маршрутизации.
+          </p>
+        {:else if !selectiveStatusLoaded}
+          <!-- Статус ещё грузится — показываем описание, toggle активен -->
+          <p class="hint">
+            При включении в sing-box попадает только трафик к целевым IP из правил маршрутизации (proxy).
+            Весь остальной трафик полностью обходит sing-box — не только VPN, а сам движок — и идёт напрямую в WAN.
+            Так соединения стабильнее и предсказуемее: игры, стриминг и локальный трафик не проходят через прокси-цепочку.
+          </p>
+        {:else if !selectiveIpsetOk}
+          <!-- ipset не установлен -->
+          <p class="hint selective-warn">
+            Требуется пакет <code class="mono">ipset</code> — он не установлен на роутере.
+          </p>
+          <Button
+            variant="ghost"
+            size="sm"
+            fullWidth
+            loading={selectiveInstalling}
+            onclick={installSelectiveDeps}
+          >
+            {selectiveInstalling ? 'Установка…' : 'Установить ipset'}
+          </Button>
+        {:else if cfg.selectiveBypass}
+          <!-- Включено и доступно — показываем статистику всегда -->
+          <p class="hint">
+            В sing-box попадает только трафик к IP из правил proxy; остальное полностью обходит движок
+            и уходит в WAN напрямую — стабильнее для игр, стриминга и локального трафика.
+          </p>
+          <div class="selective-stats">
+            <div class="stat-line">
+              <span class="stat-label">Записей в ipset</span>
+              <span class="stat-value">{selectiveStatus?.entryCount ?? 0}</span>
+            </div>
+            <div class="stat-line">
+              <span class="stat-label">Последняя пересборка</span>
+              <span class="stat-value">
+                {selectiveStatus?.lastRebuild
+                  ? new Date(selectiveStatus.lastRebuild).toLocaleString()
+                  : '—'}
+              </span>
+            </div>
+          </div>
+
+          {#if selectiveStatus?.lastError}
+            <p class="hint selective-warn">Ошибка пересборки: {selectiveStatus.lastError}</p>
+          {/if}
+
+          <p class="hint">
+            После смены правил нажмите «Применить» — ipset пересоберётся автоматически.
+            Уже открытые соединения (вкладки браузера) могут идти по старому пути, пока не закроются —
+            откройте сайт в новой вкладке для проверки.
+          </p>
+          <p class="hint">
+            Подробный лог резолва: <a class="logs-link" href="/diagnostics?tab=logs">Диагностика → Журнал</a>,
+            группа «Маршрутизация», подгруппа «Селективный ipset».
+          </p>
+
+          {#if hasSnapshot}
+            <Button variant="ghost" size="sm" fullWidth onclick={() => (snapshotOpen = true)}>
+              Содержимое ipset (домены → IP)
+            </Button>
+          {/if}
+
+          <Button variant="ghost" size="sm" fullWidth loading={rebuildInFlight} onclick={triggerRebuild}>
+            {rebuildInFlight ? 'Пересборка…' : 'Пересобрать ipset'}
+          </Button>
+        {:else}
+          <!-- Доступно, но выключено -->
+          <p class="hint">
+            При включении в sing-box попадает только трафик к целевым IP из правил маршрутизации (proxy).
+            Весь остальной трафик полностью обходит sing-box — не только VPN, а сам движок — и идёт напрямую в WAN.
+            Так соединения стабильнее и предсказуемее: игры, стриминг и локальный трафик не проходят через прокси-цепочку.
+          </p>
+        {/if}
+      </section>
+
+      <!-- QoS-маршрутизация (DSCP): onPatch возвращает Promise — карточка
+           сериализует свои PUT-ы и ресинкается со стором после дренажа очереди. -->
+      <QosSettingsCard
+        {cfg}
+        status={s}
+        outboundOptions={$storeOptions}
+        onPatch={(patch) => applyPatch(patch)}
+      />
+
+      <!-- Исключения: порт-пресеты + IP-пресеты (keendns) + ручные порты/подсети -->
+      <section class="sec">
+        <div class="sec-cap">Исключения</div>
         <div class="chips">
           {#each BYPASS_PRESETS as p (p.id)}
             {@const active = (cfg.bypassPresets ?? []).includes(p.id)}
@@ -267,7 +531,7 @@
           <label class="lbl" for="ed-ports-input">Доп. порты</label>
           <PortChipsInput inputId="ed-ports-input" value={cfg.bypassExtraPorts ?? ''} onChange={(v) => void applyPatch({ bypassExtraPorts: v })} />
         </div>
-        <p class="hint">Эти порты пойдут мимо sing-box (прямо в WAN). Полезно для L2TP/NTP/SMB не ломая LAN-сервисы.</p>
+        <p class="hint">Эти порты пойдут мимо sing-box (прямо в WAN). Полезно для L2TP/NTP/SMB не ломая LAN-сервисы. Поддерживаются одиночные порты (<code class="mono">443 TCP</code>) и диапазоны (<code class="mono">5000-5500 UDP</code>).</p>
         <div class="field">
           <label class="lbl" for="ed-subnets-input">Доп. подсети</label>
           <SubnetChipsInput inputId="ed-subnets-input" value={cfg.bypassExtraSubnets ?? ''} onChange={(v) => void applyPatch({ bypassExtraSubnets: v })} />
@@ -293,6 +557,17 @@
     </div>
   {/snippet}
 </SideDrawer>
+
+<Modal
+  open={snapshotOpen}
+  title="Содержимое ipset"
+  size="lg"
+  onclose={() => (snapshotOpen = false)}
+>
+  {#if selectiveSnapshot}
+    <SelectiveIpsetSnapshot snapshot={selectiveSnapshot} />
+  {/if}
+</Modal>
 
 <style>
   .sections { display: flex; flex-direction: column; }
@@ -393,6 +668,8 @@
   .udp-timeout-row { display: flex; gap: 6px; }
   .udp-timeout-row .inp { flex: 1; }
   .hint { margin: 0; font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
+  .logs-link { color: var(--accent); text-decoration: none; }
+  .logs-link:hover { text-decoration: underline; }
   .chips { display: flex; flex-direction: column; gap: 6px; }
   .chip {
     text-align: left; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-tertiary);
@@ -412,4 +689,75 @@
   }
   .save-status { align-self: flex-end; font-size: 11px; color: var(--text-muted); }
   .save-status.err { color: var(--color-error, #dc2626); }
+  code.mono {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 3px;
+    color: var(--text-secondary);
+  }
+  .selective-warn {
+    color: var(--color-warning, #dab856);
+  }
+  .crash-info {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--color-warning, #dab856);
+  }
+  .crash-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .crash-label { color: var(--text-muted); }
+  .crash-value {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+  .crash-reason {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .crash-suppressed {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--color-warning, #dab856);
+    line-height: 1.4;
+  }
+  .selective-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+  }
+  .stat-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .stat-label { color: var(--text-muted); }
+  .stat-value {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    text-align: right;
+  }
 </style>

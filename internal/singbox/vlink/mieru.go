@@ -81,6 +81,12 @@ func parseMieruSimple(input string) ([]ParsedOutbound, error) {
 	if len(ports) == 0 {
 		return nil, errors.New("mierus: missing port")
 	}
+	if len(protocols) == 1 && len(ports) > 1 {
+		// Некоторые панели кладут один protocol на все port'ы (issue #516).
+		for len(protocols) < len(ports) {
+			protocols = append(protocols, protocols[0])
+		}
+	}
 	if len(ports) != len(protocols) {
 		return nil, errors.New("mierus: mismatched number of port and protocol parameters")
 	}

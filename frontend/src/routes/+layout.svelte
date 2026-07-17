@@ -6,6 +6,17 @@
 	import { page } from '$app/stores';
 	import { theme } from '$lib/stores/theme';
 	import { compactLayout, isCompactLayoutActive } from '$lib/stores/compactLayout';
+	import {
+		tunnelDashboardLayout,
+		tunnelDashboardMode,
+		tunnelDashboardView,
+	} from '$lib/stores/tunnelDashboardMode';
+	import {
+		tunnelDashboardGroupMode,
+		tunnelDashboardManualOrder,
+		tunnelDashboardOrderMode,
+		tunnelDashboardTags,
+	} from '$lib/stores/tunnelDashboardPrefs';
 	import { settingsSectionIconMode } from '$lib/stores/settingsSectionIconMode';
 	import { serviceLetterIcons } from '$lib/stores/serviceLetterIcons';
 	import { auth, isAuthenticated, isLoading } from '$lib/stores/auth';
@@ -23,7 +34,7 @@
 	import { systemInfo } from '$lib/stores/system';
 	import { subscriptionsStore } from '$lib/stores/subscriptions';
 	import { feedTraffic } from '$lib/stores/traffic';
-	import { applyTraffic as singboxApplyTraffic, applyDelay as singboxApplyDelay } from '$lib/stores/singbox';
+	import { applyTraffic as singboxApplyTraffic, applyTrafficTotals as singboxApplyTrafficTotals, applyDelay as singboxApplyDelay } from '$lib/stores/singbox';
 	import { applySingboxMemory } from '$lib/stores/singboxMemory';
 	import { singboxRouter } from '$lib/stores/singboxRouter';
 	import { fakeipTransition } from '$lib/stores/fakeipTransition';
@@ -33,6 +44,7 @@
 	import { loadPresetCatalog } from '$lib/stores/presets';
 	import { donateModalOpen, openDonateModal, closeDonateModal } from '$lib/stores/donateModal';
 	import { outboundReferenced } from '$lib/stores/outboundReferenced';
+	import { selectiveBypass } from '$lib/stores/selectiveBypass';
 	import TunnelReferencedModal from '$lib/components/tunnels/TunnelReferencedModal.svelte';
 	import { TriangleAlert } from 'lucide-svelte';
 	import DevelopFeedbackFab from '$lib/components/layout/DevelopFeedbackFab.svelte';
@@ -176,6 +188,7 @@
 					feedTraffic(t.tag, t.download, t.upload);
 				}
 			},
+			onSingboxTrafficTotals: singboxApplyTrafficTotals,
 			onSingboxDelay: (data) => singboxApplyDelay(data.tag, data.delay),
 			onSingboxMemory: applySingboxMemory,
 
@@ -237,6 +250,10 @@
 			onSingboxRouterRules: singboxRouter.applyRules,
 			onSingboxRouterRuleSets: singboxRouter.applyRuleSets,
 			onSingboxRouterOutbounds: singboxRouter.applyOutbounds,
+
+			// Selective-bypass rebuild progress and status.
+			onSingboxRouterSelectiveProgress: (data) => selectiveBypass.applyProgress(data),
+			onSingboxRouterSelectiveStatus: (data) => selectiveBypass.applyStatus(data),
 		});
 	}
 
@@ -361,6 +378,13 @@
 		compactLayout.init();
 		settingsSectionIconMode.init();
 		serviceLetterIcons.init();
+		tunnelDashboardMode.init();
+		tunnelDashboardLayout.init();
+		tunnelDashboardView.init();
+		tunnelDashboardOrderMode.init();
+		tunnelDashboardManualOrder.init();
+		tunnelDashboardGroupMode.init();
+		tunnelDashboardTags.init();
 		await auth.checkStatus();
 	});
 
@@ -445,18 +469,22 @@
 		size="sm"
 		onclose={closeDonateModal}
 	>
+		<p class="donate-intro">
+			Если у вас есть лишние шекели, вам понравилось как вам не отвечают на вопросы и вы готовы
+			самостоятельно решать проблемы, а еще вы оценили подход — «ни дня без нового бага», то:
+		</p>
+		<p class="donate-intro">
+			Вы можете поделиться богатством и дать возможность родить новые проблемы там, где еще вчера
+			все было хорошо:
+		</p>
 		<div class="donate-wallets">
 			<div class="donate-wallet">
 				<span class="donate-wallet-label">USDT / ETH</span>
 				<code class="donate-wallet-addr">0x7eae43b82157f2e4ea233eddf5d9ce19a1064f04</code>
 			</div>
 			<div class="donate-wallet">
-				<span class="donate-wallet-label">USDT ERC20</span>
-				<code class="donate-wallet-addr">0x35eC46d51f06DAf2DDbfA2a1b9B28a360643fEa8</code>
-			</div>
-			<div class="donate-wallet">
-				<span class="donate-wallet-label">USDT / TRC20</span>
-				<code class="donate-wallet-addr">TEpJh2p9j3fp6MigyqGvq1gC5D3CsxBeJw</code>
+				<span class="donate-wallet-label">USDT / Tron</span>
+				<code class="donate-wallet-addr">TDisGwxj2AopFzT2VQ9JwY6QDyjChUP5EA</code>
 			</div>
 			<div class="donate-wallet">
 				<span class="donate-wallet-label">Boosty</span>
@@ -465,6 +493,10 @@
 			<div class="donate-wallet">
 				<span class="donate-wallet-label">ЮMoney</span>
 				<a class="donate-wallet-link" href="https://yoomoney.ru/fundraise/1GF36UHR07L.260312" target="_blank" rel="noopener">yoomoney.ru/fundraise</a>
+			</div>
+			<div class="donate-wallet">
+				<span class="donate-wallet-label">Или любая сумма</span>
+				<a class="donate-wallet-link" href="https://yoomoney.ru/to/4100119477098112/0" target="_blank" rel="noopener">yoomoney.ru/to/4100119477098112</a>
 			</div>
 		</div>
 	</Modal>
@@ -560,6 +592,12 @@
 		color: var(--text-tertiary);
 		font-size: 0.8125rem;
 		margin: 0;
+	}
+
+	.donate-intro {
+		font-size: 0.8125rem;
+		color: var(--text-secondary);
+		margin: 0 0 0.75rem;
 	}
 
 	.donate-wallets {

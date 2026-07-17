@@ -1,0 +1,1567 @@
+package router
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
+	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
+	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
+	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/tunnel"
+)
+
+// xtDscpUsable reports whether iptables `-m dscp` matching is usable,
+// honouring the test seam (Deps.XtDscpProbe) when set. Availability changes
+// are logged on TRANSITIONS only (available↔unavailable), never per call —
+// the reconcile loop hits this every tick and a missing optional module must
+// not spam two Warn lines per tick forever (negative probe results are
+// additionally TTL-cached inside IsXtDscpAvailable).
+func (s *ServiceImpl) xtDscpUsable(ctx context.Context) bool {
+	ok := false
+	if s.deps.XtDscpProbe != nil {
+		ok = s.deps.XtDscpProbe(ctx)
+	} else {
+		ok = IsXtDscpAvailable(ctx)
+	}
+	state := int32(2)
+	if ok {
+		state = 1
+	}
+	if prev := s.xtDscpState.Swap(state); prev != state {
+		switch {
+		case !ok:
+			s.appLog.Warn("qos-dscp", "", "xt_dscp недоступен — классы QoS пропущены (см. статус xtDscpAvailable)")
+		case prev == 2:
+			s.appLog.Info("qos-dscp", "", "xt_dscp снова доступен — классы QoS будут применены")
+		}
+	}
+	return ok
+}
+
+// prepareNetfilter runs the common netfilter preflight: xt_TPROXY module
+// load and TPROXY target availability check. It is shared by Enable and
+// reconcileInstalled so both paths run identical validation. Tests can
+// override it via deps.NetfilterPreflight to avoid real syscalls.
+func (s *ServiceImpl) prepareNetfilter(ctx context.Context) error {
+	if s.deps.NetfilterPreflight != nil {
+		return s.deps.NetfilterPreflight(ctx)
+	}
+
+	if err := EnsureTProxyModule(ctx); err != nil {
+		return err
+	}
+
+	if !IsTProxyTargetAvailable(ctx) {
+		return fmt.Errorf("iptables TPROXY target unavailable — kernel module loaded but iptables extension missing")
+	}
+
+	// Best-effort preload of all remaining router netfilter modules.
+	// TPROXY is already handled above as fatal; the rest are soft.
+	// This mirrors the full matcher/target set bisect-combo.sh warms up:
+	// xt_comment, xt_mark, xt_connmark, xt_conntrack, xt_pkttype.
+	if errs := EnsureRouterNetfilterModules(ctx); len(errs) > 0 {
+		for _, err := range errs {
+			s.appLog.Warn("ensure-netfilter", "", err.Error())
+		}
+	}
+
+	return nil
+}
+
+// waitForSingbox polls until sing-box is BOTH process-alive and actually
+// listening on the router inbound sockets (TCP RedirectPort + UDP
+// TPROXYPort), or the deadline expires. Used by Enable after SetEnabled
+// triggers the orchestrator's debounced cold-start so iptables redirects
+// don't land on a TPROXY port that nothing is listening on yet.
+//
+// PID-alive alone is not enough (issue #354): the router config reaches
+// sing-box via the orchestrator's debounced (250ms) reload, so an
+// already-running process keeps serving the OLD inbound set for a moment,
+// and a freshly started one binds inbounds only at the end of startup
+// (after config parse + rule-set load — seconds on mipsel). Gating on the
+// same socket probe GetStatus uses means the status emitted at the end of
+// Enable reflects a truly active interception path instead of a transient
+// «СБОЙ».
+//
+// Returns ctx.Err on cancellation, or a timeout error after the deadline;
+// callers can treat the timeout as soft (proceed with iptables and accept
+// the brief race) or hard at their discretion.
+// fakeIPIfaceName builds the KERNEL interface name for a fakeip-tun OpkgTun from
+// its allocated index (e.g. index 3 → "opkgtun3"). Use this ONLY where the
+// kernel sees the iface: the sing-box tun inbound interface_name, the
+// "ip addr flush dev <iface>" exec, /sys/class/net/<iface>/carrier, the
+// /proc/net/route iface match, and the /sys index scan. For NDMS RCI calls use
+// fakeIPNDMSName instead — NDMS rejects the lowercase kernel name.
+func fakeIPIfaceName(index int) string {
+	return tunnel.NewNames("awg" + strconv.Itoa(index)).IfaceName
+}
+
+// fakeIPNDMSName builds the NDMS RCI interface name for a fakeip-tun OpkgTun from
+// its allocated index (e.g. index 3 → "OpkgTun3"). This mirrors
+// tunnel.Names.NDMSName (CamelCase "OpkgTun%s"); the kernel name is its lowercase
+// (strings.ToLower → fakeIPIfaceName). NDMS REQUIRES this CamelCase form for every
+// RCI interface op (create/delete, address/mtu, up/down) and StaticRouteSpec
+// Interface — passing the lowercase kernel name yields
+// "unsupported interface type: \"opkgtun\"" (stand-verified). Use fakeIPIfaceName
+// only for the kernel-facing sites (sing-box config, ip exec, /sys, /proc).
+func fakeIPNDMSName(index int) string {
+	return tunnel.NewNames("awg" + strconv.Itoa(index)).NDMSName
+}
+
+// ReapOrphanedFakeIPTun removes a fakeip-tun OpkgTun left provisioned by a crash
+// or incomplete teardown when the router is no longer in fakeip-tun mode. It runs
+// at startup (wired in cmd/awg-manager) and on every Reconcile tick — so a
+// runtime orphan (failed disable delete) heals within a tick instead of waiting
+// for a reboot. Safe on a tick: Reconcile holds transitionMu (excludes a live
+// mode-switch mid-flip), and this function takes s.mu (excludes a concurrent
+// Enable creating the iface it is about to judge). Idempotent and best-effort:
+// reaps by persisted state (Index), plus a description-based scan
+// (reapFakeIPOrphansByDescription) that catches OpkgTuns whose persist was
+// lost — a persist-less orphan is exactly the state that triggers the ndm
+// nginx-reload loop (see teardownOpkgTun), so it must not survive.
+//
+// It ALSO sweeps a stale v4 drain reject route for the configured pool in
+// non-fakeip mode — the safety net for a disable drain interrupted by a
+// restart (the async drain goroutine does not survive one) or an async-remove
+// that didn't match the route (Fix 1).
+//
+// INVARIANT (relied on by this reap): Enable(fakeip-tun) MUST persist the index
+// via SetFakeIPState BEFORE CreateOpkgTun (and roll back its own partial work on
+// failure), so persisted state is a reliable superset of live ifaces. A crash
+// mid-Enable that still slips a persist-less orphan through is caught by the
+// description-scan fallback.
+func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
+	// s.mu serialises the reap against Enable/Disable: without it the scan can
+	// list a freshly created OpkgTun of a concurrent Enable while its `owned`
+	// snapshot predates that Enable's persist — and delete the live iface.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	settings, err := s.deps.Settings.Load()
+	if err != nil {
+		return err
+	}
+	sr, _ := NormalizeSingboxRouterSettings(settings.SingboxRouter)
+	// Single source for the persisted NDMS name: the drain sweep, the
+	// persist-based reap and the scan's owned-exclusion all key off it.
+	owned := ""
+	if st := settings.FakeIP; st != nil && st.Provisioned {
+		owned = fakeIPNDMSName(st.Index)
+	}
+
+	// Description-scan fallback: remove persist-less fakeip orphans in EVERY
+	// mode. The currently-persisted iface is excluded — in fakeip-tun mode the
+	// active Enable/Reconcile own it, in other modes the persist-based reap
+	// below handles it with its persist-clearing semantics. Best-effort.
+	s.reapFakeIPOrphansByDescription(ctx, owned)
+
+	if sr.RoutingMode == "fakeip-tun" {
+		return nil // active mode owns the iface; Enable/Reconcile manage it
+	}
+
+	// Safety net for the disable drain (Fix 1): the async drain goroutine that
+	// removes the v4 reject route does NOT survive a daemon restart (no
+	// persisted pending-drain). So in NON-fakeip mode best-effort remove a
+	// stale drain reject route for the CONFIGURED pool. Derive net/mask exactly
+	// as disableFakeIPTun does (Masked → splitCIDR). NDMS no:true on a
+	// non-existent route is idempotent. The reject route is a kill-switch FLAG
+	// on the pool→OpkgTun route (stand-verified), so its NDMS form is
+	// interface-bound and only addressable via the persisted name; persist-less
+	// orphans get their route swept inside the description scan instead.
+	if s.deps.StaticRoutes != nil && owned != "" {
+		if poolNet, poolMask, derr := poolV4NetMask(s.deps.FakeIPTun.Inet4Range); derr == nil {
+			if err := s.deps.StaticRoutes.RemoveStaticRoute(ctx, StaticRouteSpec{
+				Network: poolNet, Mask: poolMask, Interface: owned, Comment: fakeIPDrainComment,
+			}); err != nil {
+				s.appLog.Warn("fakeip-reap", owned, "sweep stale drain reject route: "+err.Error())
+			}
+		}
+	}
+
+	if owned == "" {
+		return nil // nothing persisted to reap
+	}
+	if s.deps.OpkgTun == nil {
+		// No provisioner (degraded/test): we can't confirm the iface is gone, so
+		// KEEP the persist — clearing it would convert a tracked orphan into an
+		// un-reapable persist-less one. The index isn't leaked: the allocator is
+		// live-sourced (reads /sys + NDMS), so a still-live iface stays occupied.
+		// A future boot with a real provisioner reaps it.
+		return nil
+	}
+	if err := s.teardownOpkgTun(ctx, owned, "fakeip-reap"); err != nil {
+		// Keep the persist on failure: the next tick/boot retries the reap
+		// rather than leaking the orphan forever. teardownOpkgTun has already
+		// cleared the addresses, so the leftover cannot loop ndm's nginx.
+		return fmt.Errorf("reap opkgtun %s: %w", owned, err)
+	}
+	s.appLog.Info("fakeip-reap", owned, "removed orphaned fakeip OpkgTun (mode != fakeip-tun)")
+	// Clear persist ONLY after a confirmed delete success (NDMS returns nil even
+	// when the iface was already gone, i.e. idempotent), so the index frees.
+	return s.deps.Settings.SetFakeIPState(nil)
+}
+
+// reapFakeIPOrphansByDescription removes NDMS OpkgTun interfaces stamped with
+// the fakeip description that no persist tracks (crash mid-Enable rollback,
+// failed disable delete after the mandatory persist clear, downgrade). owned is
+// the currently-persisted NDMS name ("" when not provisioned) — it is excluded,
+// its owner is either the active fakeip mode or the persist-based reap.
+// Entirely best-effort; a failed teardown retries on the next tick/boot.
+func (s *ServiceImpl) reapFakeIPOrphansByDescription(ctx context.Context, owned string) {
+	if s.deps.OpkgTunScan == nil || s.deps.OpkgTun == nil {
+		return
+	}
+	ids, err := s.deps.OpkgTunScan(ctx, fakeIPTunDescription)
+	if err != nil {
+		s.appLog.Warn("fakeip-reap", "", "scan opkgtuns by description: "+err.Error())
+		return
+	}
+	for _, id := range ids {
+		if id == owned {
+			continue
+		}
+		// The pool route (possibly renewed to a reject kill-switch by a failed
+		// disable) is interface-bound and SURVIVES the iface deletion
+		// (stand-verified, see fakeip_disable) — remove it first, while the
+		// orphan's name still addresses it, or the pool prefix stays
+		// reject-routed with no owner. Best-effort with the CONFIGURED pool:
+		// the orphan's own pool is unknowable without its persist.
+		if s.deps.StaticRoutes != nil {
+			if poolNet, poolMask, derr := poolV4NetMask(s.deps.FakeIPTun.Inet4Range); derr == nil {
+				if err := s.deps.StaticRoutes.RemoveStaticRoute(ctx, StaticRouteSpec{
+					Network: poolNet, Mask: poolMask, Interface: id, Comment: fakeIPDrainComment,
+				}); err != nil {
+					s.appLog.Warn("fakeip-reap", id, "remove pool route: "+err.Error())
+				}
+			}
+		}
+		if err := s.teardownOpkgTun(ctx, id, "fakeip-reap"); err != nil {
+			continue // logged by teardownOpkgTun; retried next tick/boot
+		}
+		s.appLog.Info("fakeip-reap", id, "removed persist-less orphaned fakeip OpkgTun")
+	}
+}
+
+// fakeIPReadyInputs derives the inputs the fakeip-tun readiness probes need
+// from loaded settings + the static FakeIPTun params: the tun iface name (from
+// the allocated OpkgTun index), the tun-side DNS address (the other /30 host,
+// where sing-box's DNS server listens), and the fakeip v4 pool prefix. ok is
+// false when fakeip is not provisioned or any field is unparseable, so callers
+// can fail-closed without a fakeip branch firing on tproxy state.
+func (s *ServiceImpl) fakeIPReadyInputs() (iface, dnsAddr string, fakeipNet netip.Prefix, ok bool) {
+	if s.deps.Settings == nil {
+		return "", "", netip.Prefix{}, false
+	}
+	settings, err := s.deps.Settings.Load()
+	if err != nil || settings == nil || settings.FakeIP == nil || !settings.FakeIP.Provisioned {
+		return "", "", netip.Prefix{}, false
+	}
+	iface = fakeIPIfaceName(settings.FakeIP.Index)
+	dnsAddr, err = DeriveTunDNS(s.deps.FakeIPTun.TunAddr4)
+	if err != nil {
+		return "", "", netip.Prefix{}, false
+	}
+	fakeipNet, err = netip.ParsePrefix(s.deps.FakeIPTun.Inet4Range)
+	if err != nil || !fakeipNet.Addr().Is4() {
+		return "", "", netip.Prefix{}, false
+	}
+	return iface, dnsAddr, fakeipNet, true
+}
+
+func (s *ServiceImpl) waitForSingbox(ctx context.Context, timeout time.Duration) error {
+	if s.deps.Singbox == nil {
+		return nil
+	}
+
+	// Mode-aware readiness: read the mode INTERNALLY (the signature has test
+	// callers and must not change). fakeip-tun has no inbound sockets, so the
+	// tproxy socket probe never turns true for it — gate instead on process +
+	// tun carrier (carrier=1 = sing-box attached the gvisor tun stack, the
+	// structural "config is live" signal). The live .2→fakeip DNS answer is NO
+	// longer in this gate (it tripped on resolv.conf attempts:1, stand-verified
+	// 2026-06-15) — it is now a best-effort confirm after readiness in
+	// enableFakeIPTun. See singboxReady for the full rationale.
+	fakeIP := false
+	if s.deps.Settings != nil {
+		if settings, err := s.deps.Settings.Load(); err == nil && settings != nil {
+			fakeIP = settings.SingboxRouter.RoutingMode == "fakeip-tun"
+		}
+	}
+
+	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	lastHeartbeat := time.Time{}
+	const pollInterval = 100 * time.Millisecond
+	for {
+		if s.singboxReady(ctx, fakeIP) {
+			return nil
+		}
+		if fn := s.transitionReadinessProgress; fn != nil && time.Since(lastHeartbeat) >= 2*time.Second {
+			elapsed := time.Since(start).Round(time.Second)
+			running, _ := s.deps.Singbox.IsRunning()
+			msg := fmt.Sprintf("запуск sing-box… %s", elapsed)
+			if running {
+				msg = fmt.Sprintf("sing-box работает, ожидаем inbounds… %s", elapsed)
+			}
+			fn(msg)
+			lastHeartbeat = time.Now()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sing-box did not come up within %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// singboxReady reports whether sing-box is up for the active mode. tproxy:
+// process + both inbound sockets bound. fakeip-tun: process + tun carrier.
+//
+// For fakeip-tun, carrier=1 IS the structural readiness signal: it means
+// sing-box created and attached the gvisor tun stack from the fakeip config —
+// the analog of "inbound socket bound" for tproxy, and it is fast and reliable.
+//
+// The live .2→fakeip DNS probe was DEMOTED out of this hard gate (stand-verified
+// 2026-06-15): the Go resolver (net.Resolver{PreferGo:true}) HONORS the router's
+// /etc/resolv.conf `options timeout:1 attempts:1`, so it does a single ~1s-bounded
+// attempt with no retry. In the first seconds after sing-box starts the fakeip
+// round-trip to .2 is occasionally slower than that, so the probe returned false
+// on every poll and waitForSingbox timed out at 60s — falsely failing Enable even
+// though sing-box was fully up (carrier=1) and fakeip worked. The DNS check now
+// runs ONCE as a best-effort, logged confirmation AFTER readiness (see
+// enableFakeIPTun), never as a flaky gate. ctx is unused now that the live DNS
+// probe is out of the gate; kept on the signature for the tproxy/test callers.
+func (s *ServiceImpl) singboxReady(_ context.Context, fakeIP bool) bool {
+	running, _ := s.deps.Singbox.IsRunning()
+	if !running {
+		return false
+	}
+	if !fakeIP {
+		// HARD gate (issue #221): only the procfs socket probe proves the
+		// router-slot TPROXY/REDIRECT inbounds actually bound. A healthy
+		// Clash API is NOT equivalent — the process can be up and serving
+		// Clash while the router inbounds failed to bind (port taken,
+		// rejected hot-reload), and installing iptables in that state
+		// blackholes all policy traffic including DNS:53.
+		return singboxListeningProbe()
+	}
+	// Only iface is needed for the carrier gate; dnsAddr/fakeipNet (which the
+	// demoted DNS probe used) are derived later in enableFakeIPTun for the
+	// best-effort confirm.
+	iface, _, _, ok := s.fakeIPReadyInputs()
+	if !ok {
+		return false
+	}
+	return tunReadyProbe(iface)
+}
+
+func cleanValidateError(err error) string {
+	msg := err.Error()
+	msg = strings.ReplaceAll(msg, "\x1b[31m", "")
+	msg = strings.ReplaceAll(msg, "\x1b[0m", "")
+	if idx := strings.Index(msg, "FATAL"); idx >= 0 {
+		msg = msg[idx+len("FATAL"):]
+	}
+	msg = strings.TrimSpace(msg)
+	if idx := strings.Index(msg, ": exit status"); idx > 0 {
+		msg = msg[:idx]
+	}
+	if idx := strings.Index(msg, "decode config at "); idx >= 0 {
+		tail := msg[idx+len("decode config at "):]
+		if j := strings.Index(tail, ": "); j > 0 {
+			tail = tail[j+2:]
+		}
+		msg = "конфиг недопустим: " + tail
+	}
+	return strings.TrimSpace(msg)
+}
+
+// Enable is the USER-INITIATED router enable (HTTP handler + SwitchRoutingMode).
+// It clears the sticky master-stop intent — an explicit enable is an explicit
+// intent to run sing-box, which must override a prior master-Stop — then runs
+// the idempotent provisioning. Drift-heal (Reconcile / reconcileFakeIPTun) must
+// NOT clear the intent (the watchdog must respect a user's manual stop and not
+// resurrect the daemon on drift), so it calls enableLocked(ctx, false) instead.
+func (s *ServiceImpl) Enable(ctx context.Context) error {
+	return s.enableLocked(ctx, true)
+}
+
+// enableLocked provisions the router under s.mu. clearManualStop gates the
+// sticky-intent clear: true for user-initiated Enable, false for drift-heal
+// reuse (Reconcile / reconcileFakeIPTun) which must honour a prior master-Stop.
+func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Validate settings first — fail fast with a meaningful error before
+	// attempting any kernel / iptables operations.
+	settings, err := s.deps.Settings.Load()
+	if err != nil {
+		return err
+	}
+	sr, err := NormalizeSingboxRouterSettings(settings.SingboxRouter)
+	if err != nil {
+		return fmt.Errorf("router settings: %w", err)
+	}
+
+	// Explicit enable = explicit intent to run sing-box. Clear any sticky
+	// manual-stop so the orchestrator cold-start (triggered by SetEnabled below)
+	// isn't suppressed by shouldRun()=!IsManuallyStopped — otherwise Enable waits
+	// the full boot window and fails with a misleading readiness timeout
+	// (stand-found 2026-06-15, applies to BOTH tproxy and fakeip-tun). Gated to
+	// user-initiated Enable: a drift-heal reconcile (clearManualStop=false) must
+	// NOT wipe a user's master-Stop. The nil guard keeps test wirings that omit
+	// Singbox working.
+	if clearManualStop && s.deps.Singbox != nil {
+		if err := s.deps.Singbox.ClearManualStop(); err != nil {
+			return fmt.Errorf("clear manual-stop intent: %w", err)
+		}
+	}
+
+	// fakeip-tun has an entirely separate provisioning path (OpkgTun + tun +
+	// fakeip DNS + pool/CIDR routes) with its own rollback. The tproxy body
+	// below stays byte-for-byte unchanged for RoutingMode=="tproxy".
+	if sr.RoutingMode == "fakeip-tun" {
+		sr.Enabled = true
+		return s.enableFakeIPTun(ctx, settings, sr)
+	}
+
+	policyMode := sr.DeviceMode == "" || sr.DeviceMode == "policy"
+	mark := ""
+	if policyMode {
+		if sr.PolicyName == "" {
+			return ErrPolicyNotConfigured
+		}
+		mark, err = s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName)
+		if err != nil && !errors.Is(err, query.ErrPolicyMarkNotFound) {
+			// Транзиентная ошибка чтения (RCI недоступен) — не «политика
+			// отсутствует»: наверх уходит настоящая причина, а не ложный
+			// ErrPolicyMissing (ревью #523).
+			return fmt.Errorf("policy %q mark: %w", sr.PolicyName, err)
+		}
+		if err != nil || mark == "" {
+			return fmt.Errorf("policy %q: %w", sr.PolicyName, ErrPolicyMissing)
+		}
+	}
+
+	if err := s.prepareNetfilter(ctx); err != nil {
+		return err
+	}
+
+	sr.Enabled = true
+
+	cfg, err := s.loadAppliedRouterConfig()
+	if err != nil {
+		return err
+	}
+	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, sr.UDPTimeout)
+	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds)
+	cfg.EnsureSystemRules(sr.SnifferEnabled)
+	// Neutralize sing-box's short per-protocol UDP timeouts (QUIC/DTLS 30s,
+	// STUN/DNS 10s) applied on sniff/port inference — they ignore the inbound
+	// udp_timeout and drop games/VoIP early. Raise them to the effective inbound
+	// value via a route-options rule. Placed after the system prefix, before user
+	// rules, so it runs ahead of any final `route` action.
+	cfg.EnsureUDPTimeoutRule(resolveUDPTimeout(sr.UDPTimeout))
+	// QoS-by-DSCP (issue #371): per-class inbound pairs, derived from the
+	// same settings snapshot the iptables spec below uses so ports/classes
+	// cannot drift between the two. The managed route rules live in their
+	// own slot (18-qos-routes.json) and are synced after the config write
+	// below — see qos_routes.go for why they must not live in 20-router.json.
+	qosClasses := activeQoSClasses(sr.QoSClasses)
+	cfg.Inbounds, _ = ensureQoSInbounds(cfg.Inbounds, qosClasses, sr.UDPTimeout)
+	// Settings was already loaded above; revalidate here in case the
+	// store is corrupted or hand-edited around a schema migration. We
+	// fail Enable rather than apply a half-broken config — the user
+	// sees a clean error in the UI and can fix it.
+	if err := ValidateSingboxRouterSettings(sr); err != nil {
+		return fmt.Errorf("router settings: %w", err)
+	}
+	cfg.EnsureRouteWAN(sr.WANAutoDetect, sr.WANInterface)
+
+	// Promote SlotRouter to active FIRST so persistConfigDirect's
+	// orch.Save targets the active path (it keys on the slot's enabled
+	// flag). SetEnabled also triggers the orchestrator's debounced cold-
+	// start — sing-box will read the active config we are about to write.
+	// Legacy fallback (tests) keeps the explicit Start call.
+	if s.deps.Orch != nil {
+		if err := s.deps.Orch.SetEnabled(orchestrator.SlotRouter, true); err != nil {
+			return fmt.Errorf("orchestrator enable router: %w", err)
+		}
+	} else {
+		if running, _ := s.deps.Singbox.IsRunning(); !running {
+			if err := s.deps.Singbox.Start(); err != nil {
+				return fmt.Errorf("sing-box start: %w", err)
+			}
+		}
+	}
+	// Direct write — no staging. Byte-equal short-circuit makes boot
+	// recovery (Reconcile→Enable with iptables gone but active config
+	// already on disk) a no-op write, which is what kills the phantom
+	// "Несохранённые правки" banner that used to follow every reboot.
+	if err := s.persistConfigDirect(ctx, cfg); err != nil {
+		return err
+	}
+	// Managed QoS route rules → 18-qos-routes.json. Runs AFTER the router
+	// slot write so outbound resolution sees the applied config; the
+	// orchestratorApplyNow below covers both slots in one reload.
+	if _, err := s.syncQoSRoutesSlot(ctx, qosClasses); err != nil {
+		return fmt.Errorf("sync qos routes slot: %w", err)
+	}
+	// Слот 20 снова активен — зависимые продюсеры (device-proxy) должны
+	// перегенерировать свои слоты (вернуть ссылки на композиты) ДО reload.
+	s.notifyRoutingSlotsChanged()
+	if err := s.orchestratorApplyNow(); err != nil {
+		return fmt.Errorf("orchestrator reload after enable: %w", err)
+	}
+
+	// Wait for sing-box to be listening before iptables start redirecting
+	// traffic to its TPROXY/REDIRECT ports. HARD fail (issue #221): if
+	// sing-box never comes up — most commonly because a slot config is
+	// rejected by `sing-box check` at load time — installing the AWGM-TPROXY
+	// rule still redirects DNS:53 to 127.0.0.1:<proxy_port>, where nothing
+	// is listening, and the router loses DNS until the user manually stops
+	// awg-manager. The earlier "brief packet-drop blip vs no routing"
+	// trade-off is wrong: a failed sing-box start turns the blip into a
+	// permanent outage.
+	//
+	// Same env-var contract as singbox.maxSingboxBootWait — clamped to a
+	// 60s floor (bootWaitWithFloor). Import-cycle (integration_test in parent
+	// already pulls router) blocks reusing the parent helper directly.
+	bootWait := bootWaitWithFloor()
+	if err := s.waitForSingbox(ctx, bootWait); err != nil {
+		return fmt.Errorf("%w: waited %s (%v)", ErrSingboxNotReady, bootWait, err)
+	}
+
+	// Collect WAN IPs BEFORE Install: the router's own public-IP
+	// addresses on default-route interfaces become RETURN rules in
+	// AWGM-TPROXY/AWGM-REDIRECT, preventing LAN-to-router-WAN-IP
+	// traffic from looping back into sing-box. A collector failure
+	// is fatal — installing without the exclusions would silently
+	// expose the loop edge case to users.
+	wanIPs, err := s.deps.WANIPCollector.Collect(ctx)
+	if err != nil {
+		return fmt.Errorf("collect WAN IPs: %w", err)
+	}
+
+	// Discover LAN bridges that NDMS knows how to REDIRECT DNS for
+	// (i.e. has _NDM_HOTSPOT_DNSREDIR rules on). DNS-NOPOLICY rules
+	// re-mark mark=0 DNS up to one of those marks so the existing
+	// REDIRECT picks it up and forwards to the per-policy ndnproxy.
+	// We pass our policy mark so the picker avoids it — re-marking
+	// default DNS up to the sing-box mark would route it via Policy1's
+	// (permit-less) table and DNS would never resolve. Empty result =
+	// no qualifying bridges = skip the DNS-NOPOLICY logic entirely.
+	var lanBridges []LANBridgeDNSRedir
+	if policyMode {
+		lanBridges, _ = DiscoverLANBridges(ctx, mark)
+		if len(lanBridges) == 0 {
+			s.appLog.Warn("discover-lan-bridges", "", "no NDMS hotspot LAN bridges, DNS fallback skipped")
+		}
+	}
+
+	var ingress []string
+	if policyMode {
+		ingress = s.resolveIngressInterfaces(ctx, sr.IngressInterfaces)
+	}
+
+	bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
+	bypassSubnets, _ := resolveBypassCIDRs(sr.BypassPresets, sr.BypassExtraSubnets)
+
+	// Pre-create the AWGM-SELECTIVE ipset (empty) before iptables-restore
+	// when selective bypass is enabled. iptables-restore fails immediately
+	// if the set referenced in -m set --match-set doesn't exist yet.
+	if sr.SelectiveBypass {
+		if err := ensureSelectiveSetExists(ctx); err != nil {
+			s.appLog.Warn("selective", "", fmt.Sprintf("pre-create ipset failed: %v", err))
+		}
+	}
+
+	// QoS iptables dispatch — graceful degradation: when xt_dscp support is
+	// missing the DSCP rules are skipped (feature-off) with a warning, NEVER
+	// failing Enable — otherwise a missing optional module would take down
+	// the whole interception path at iptables-restore COMMIT (XKeen shipped
+	// the same policy). EnsureXtDscpModule first: prepareNetfilter already
+	// tried, this is the belt-and-suspenders retry closest to Install.
+	qosSpecs := qosIPTablesSpecs(qosClasses)
+	if len(qosSpecs) > 0 {
+		if err := EnsureXtDscpModule(ctx); err != nil {
+			s.appLog.Warn("ensure-xt-dscp", "", err.Error())
+		}
+		if !s.xtDscpUsable(ctx) {
+			s.appLog.Warn("qos-dscp", "", "xt_dscp недоступен — классы QoS пропущены (см. статус xtDscpAvailable)")
+			qosSpecs = nil
+		}
+	}
+
+	if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
+		PolicyMark:        mark,
+		MatchAll:          !policyMode,
+		WANIPs:            wanIPs,
+		LANBridges:        lanBridges,
+		BypassUDPPorts:    bypassUDP,
+		BypassTCPPorts:    bypassTCP,
+		BypassCIDRs:       bypassSubnets,
+		IngressInterfaces: ingress,
+		SelectiveIPSet:    sr.SelectiveBypass,
+		QoSClasses:        qosSpecs,
+	}); err != nil {
+		// Stop sing-box from listening on the now-orphan TPROXY port,
+		// but DO NOT corrupt the persisted user config. With orchestrator
+		// wired we just park the slot back under disabled/ — sing-box
+		// stops seeing it on next reload, the file's content (including
+		// tproxy-in) is preserved verbatim. Without the orchestrator
+		// (legacy fallback) the only recourse is to strip the inbound.
+		if s.deps.Orch != nil {
+			_ = s.deps.Orch.SetEnabled(orchestrator.SlotRouter, false)
+			// The QoS overlay references qos-* inbounds that just got
+			// parked with the router slot — park it too.
+			_ = s.disableQoSRoutesSlot()
+			// Слот 20 снова выключен — device-proxy должен деградировать
+			// ссылки на композиты до дефолт-членов до ближайшего reload.
+			s.notifyRoutingSlotsChanged()
+		} else {
+			cfg.Inbounds = filterTProxyInbound(cfg.Inbounds)
+			_ = s.persistConfigDirect(ctx, cfg)
+		}
+		return fmt.Errorf("iptables install: %w", err)
+	}
+	s.currentMark = mark
+	s.currentWANIPs = wanIPs
+	s.currentLANBridges = lanBridges
+	s.currentBypassPresets = sr.BypassPresets
+	s.currentBypassExtraPorts = sr.BypassExtraPorts
+	s.currentBypassExtraSubnets = sr.BypassExtraSubnets
+	s.currentIngress = ingress
+	s.currentSelectiveBypass = sr.SelectiveBypass
+	s.currentQoSClasses = qosSpecs
+	s.netfilterStateKnown = true
+
+	settings.SingboxRouter = sr
+	if err := s.deps.Settings.Save(settings); err != nil {
+		return err
+	}
+
+	// Populate the freshly-created (empty) AWGM-SELECTIVE set right away.
+	// Without this, everything between Enable and the first reconcile-driven
+	// rebuild (startup delay + tick, minutes) matches nothing in the guard
+	// and "proxied" traffic leaves via WAN in the clear.
+	if sr.SelectiveBypass {
+		s.triggerSelectiveRebuild(ctx)
+	}
+
+	s.emitStatus(ctx)
+	return nil
+}
+
+func filterTProxyInbound(in []Inbound) []Inbound {
+	out := make([]Inbound, 0, len(in))
+	for _, i := range in {
+		if i.Tag != "tproxy-in" {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// healTProxyInbound checks the persisted router config and brings the two
+// UDP-timeout carriers to spec: the tproxy-in inbound (re-added if missing,
+// udp_timeout re-applied on drift) AND the system route-options rule that
+// raises sing-box's short sniff timeouts (#469). Both drift the same way —
+// the user changes the setting while the engine is running (UpdateSettings →
+// Reconcile lands here). The rule used to be regenerated only by Enable, so
+// a changed timeout stayed stale in the config until the engine was toggled
+// off/on (#554). Idempotent.
+func (s *ServiceImpl) healTProxyInbound(ctx context.Context, udpTimeout string) error {
+	// APPLIED config, not the effective (pending-first) view: heal writes to
+	// active/, so reading a user's staged draft here would materialize the
+	// draft into the live config BYPASSING ApplyDraft validation (and leave
+	// the stale pending banner hanging over an already-applied config).
+	cfg, err := s.loadAppliedRouterConfig()
+	if err != nil {
+		return err
+	}
+	// Cheap steady-state guard: both carriers already at the desired timeout →
+	// skip the marshal/write entirely (this runs on every reconcile tick).
+	effective := resolveUDPTimeout(udpTimeout)
+	inboundOK := false
+	for _, in := range cfg.Inbounds {
+		if in.Tag == "tproxy-in" {
+			inboundOK = in.UDPTimeout == effective
+			break
+		}
+	}
+	ruleOK := false
+	for _, r := range cfg.Route.Rules {
+		if isSystemUDPTimeoutRule(r) {
+			ruleOK = r.UDPTimeout == effective
+			break
+		}
+	}
+	if inboundOK && ruleOK {
+		return nil
+	}
+	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, udpTimeout)
+	cfg.EnsureUDPTimeoutRule(effective)
+	// System self-heal — direct write, no staging UI.
+	return s.persistConfigDirect(ctx, cfg)
+}
+
+// ensureTProxyInbound enforces the SKeen-style split: tproxy-in
+// handles UDP only, redirect-in handles TCP. TPROXY for TCP relies on
+// `-m socket --transparent` to deliver established-connection packets
+// to sing-box's accept()ed transparent socket, but that match
+// evaluates to 0 on Keenetic 4.9-ndm-5 — established TCP packets fall
+// through to the listener and get RST. NAT REDIRECT sidesteps the
+// problem: conntrack records the DNAT for SYN, established packets
+// are auto-translated.
+//
+// Both inbounds bind to 0.0.0.0 because iptables REDIRECT rewrites
+// the packet destination to the *primary IP of the inbound interface*
+// (e.g. 10.10.10.1 on br0), NOT to 127.0.0.1. A listener on 127.0.0.1
+// would never see redirected packets — kernel emits RST. SKeen uses
+// "::" for the same reason.
+const inboundListen = "0.0.0.0"
+
+// DefaultUDPTimeout is the fallback UDP session timeout when the user has not
+// configured a custom value. It matches sing-box's built-in C.UDPTimeout (5m):
+// fakeip's tun-in previously carried no udp_timeout and thus ran at the engine's
+// 5m, so defaulting to 5m here keeps unconfigured sessions no shorter than
+// before while still letting the user raise it. Shorter values dropped games /
+// VoIP that go quiet mid-session.
+const DefaultUDPTimeout = "5m0s"
+
+// resolveUDPTimeout returns the effective UDP timeout string: the user value
+// when non-empty, otherwise DefaultUDPTimeout.
+func resolveUDPTimeout(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return DefaultUDPTimeout
+}
+
+func ensureTProxyInbound(in []Inbound, udpTimeout string) []Inbound {
+	effective := resolveUDPTimeout(udpTimeout)
+	hasTProxy := false
+	hasRedirect := false
+	for i := range in {
+		switch in[i].Tag {
+		case "tproxy-in":
+			hasTProxy = true
+			// Force UDP-only on existing entry. Older configs had no
+			// `network` field which means TCP+UDP — that's the broken
+			// behaviour we're moving away from.
+			if in[i].Network != "udp" {
+				in[i].Network = "udp"
+			}
+			if !in[i].UDPFragment {
+				in[i].UDPFragment = true
+			}
+			// Always apply the effective timeout — user may have changed it.
+			in[i].UDPTimeout = effective
+			// tcp_fast_open is meaningless on a UDP-only inbound.
+			if in[i].TCPFastOpen {
+				in[i].TCPFastOpen = false
+			}
+			// Strip RoutingMark — see history note below.
+			if in[i].RoutingMark != 0 {
+				in[i].RoutingMark = 0
+			}
+			if in[i].Listen != inboundListen {
+				in[i].Listen = inboundListen
+			}
+		case "redirect-in":
+			hasRedirect = true
+			if !in[i].TCPFastOpen {
+				in[i].TCPFastOpen = true
+			}
+			if in[i].Listen != inboundListen {
+				in[i].Listen = inboundListen
+			}
+		}
+	}
+	out := in
+	if !hasTProxy {
+		out = append([]Inbound{{
+			Type:        "tproxy",
+			Tag:         "tproxy-in",
+			Listen:      inboundListen,
+			ListenPort:  TPROXYPort,
+			Network:     "udp",
+			UDPFragment: true,
+			UDPTimeout:  effective,
+		}}, out...)
+	}
+	if !hasRedirect {
+		out = append([]Inbound{{
+			Type:        "redirect",
+			Tag:         "redirect-in",
+			Listen:      inboundListen,
+			ListenPort:  RedirectPort,
+			TCPFastOpen: true,
+		}}, out...)
+	}
+	return out
+}
+
+func (s *ServiceImpl) emitStatus(ctx context.Context) {
+	if s.deps.Events == nil {
+		return
+	}
+	status, _ := s.GetStatus(ctx)
+	s.deps.Events.Publish("singbox-router:status", status)
+}
+
+func (s *ServiceImpl) emitStagingEvent(reason string) {
+	if s.deps.Bus == nil {
+		return
+	}
+	s.deps.Bus.Publish("resource:invalidated", map[string]any{
+		"resource": "singbox.router.staging",
+		"reason":   reason,
+	})
+}
+
+func (s *ServiceImpl) emitRulesEvent() {
+	if s.deps.Bus == nil {
+		return
+	}
+	s.deps.Bus.Publish("resource:invalidated", map[string]any{
+		"resource": "singbox.router.rules",
+	})
+}
+
+func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
+	settings, _ := s.deps.Settings.Load()
+	sr := storage.SingboxRouterSettings{}
+	if settings != nil {
+		sr, _ = NormalizeSingboxRouterSettings(settings.SingboxRouter)
+	}
+	cfg, _ := s.loadRouterConfigForMode(sr.RoutingMode)
+	if cfg == nil {
+		cfg = NewEmptyConfig()
+	}
+	awgCount := 0
+	compCount := len(cfg.CompositeOutbounds())
+
+	policyExists := false
+	policyMark := ""
+	deviceCount := 0
+	if sr.PolicyName != "" && s.deps.Policies != nil {
+		if mark, err := s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName); err == nil && mark != "" {
+			policyExists = true
+			policyMark = mark
+		}
+		if devices, err := s.deps.Policies.ListDevicesForPolicy(ctx, sr.PolicyName); err == nil {
+			for _, d := range devices {
+				if d.Bound {
+					deviceCount++
+				}
+			}
+		}
+	}
+
+	// One -S probe per table yields both chain existence and jump presence.
+	// A probe error is treated as "unknown" — installed/jumps stay false but
+	// the badge self-corrects on the next status read (no side effect here,
+	// unlike the reconcile path which must not reinstall on a transient error).
+	installed, jumps, _ := s.deps.IPTables.Probe(ctx)
+	// Active = interception path truly live, computed per routing mode.
+	var active bool
+	if sr.RoutingMode == "fakeip-tun" {
+		// fakeip-tun has no iptables jumps and no inbound sockets. Steady-state
+		// liveness = process up + tun carrier + the fakeip pool auto-route
+		// present (the honest structural check — the fakeip equivalent of
+		// "TPROXY jumps present"). No live DNS query here: that would add
+		// per-poll latency, and the route-presence check is enough once Enable
+		// has finished wiring routes (waitForSingbox already gated on live DNS).
+		running, _ := s.deps.Singbox.IsRunning()
+		if iface, _, fakeipNet, ok := s.fakeIPReadyInputs(); ok {
+			active = running && tunReadyProbe(iface) && fakeIPPoolRoutePresent(iface, fakeipNet)
+		}
+	} else {
+		// tproxy: chains + PREROUTING jumps + sing-box listening on both inbound sockets.
+		active = jumps && singboxListeningProbe()
+	}
+	// Surface the captured sing-box fatal reason only when the engine is
+	// meant to be up but isn't (СБОЙ). lastError is cleared by the operator
+	// on a successful (re)start, so a healthy engine reports empty.
+	lastError := ""
+	if sr.Enabled && !active && s.deps.Singbox != nil {
+		lastError = s.deps.Singbox.LastError()
+	}
+	// Crash observability (#456): счётчик недавних падений, причина
+	// последнего и пауза авто-перезапуска. Заполняется всегда (omitempty
+	// прячет нули) — UI показывает блок и после восстановления, пока
+	// падения не выйдут из окна.
+	crashCount := 0
+	lastCrashReason := ""
+	restartSuppressedUntil := ""
+	var suppressedUntil time.Time
+	if s.deps.Singbox != nil {
+		n, reason, until := s.deps.Singbox.CrashStats()
+		crashCount = n
+		lastCrashReason = reason
+		if !until.IsZero() {
+			suppressedUntil = until
+			restartSuppressedUntil = until.Format(time.RFC3339)
+		}
+	}
+	issues := s.computeIssues(cfg)
+	// Мёртвый движок при живом перехвате (#456 FIX-B): PREROUTING-джампы
+	// стоят, а процесс не работает — весь policy-трафик (включая hijacked
+	// DNS:53) уходит в мёртвый порт до конца backoff-паузы. computeIssues
+	// видит только конфиг, поэтому этот runtime-issue собирается здесь, где
+	// уже есть probe и crash-статистика. Только tproxy: у fakeip-tun нет
+	// iptables-перехвата.
+	if sr.Enabled && sr.RoutingMode != "fakeip-tun" && jumps && s.deps.Singbox != nil {
+		if running, _ := s.deps.Singbox.IsRunning(); !running {
+			msg := "Движок остановлен, но перехват трафика активен — трафик политик не ходит."
+			if !suppressedUntil.IsZero() {
+				msg += fmt.Sprintf(" Автоперезапуск приостановлен до %s (падений за 10 мин: %d).",
+					suppressedUntil.Local().Format("15:04"), crashCount)
+			} else {
+				msg += " Автоперезапуск: при следующей проверке (до 30 с)."
+			}
+			issues = append(issues, Issue{
+				Severity: "error",
+				Kind:     "engine-dead-interception",
+				Message:  msg,
+			})
+		}
+	}
+	// Эксперт-редактор (90-user.json): если последний reload пропущен из-за
+	// провала кросс-слот валидации по вине пользовательского слота, движок
+	// продолжает работать на старом конфиге, а сам файл оркестратор
+	// намеренно не чинит (prune пропускает user-слот). computeIssues видит
+	// только конфиг роутера, поэтому runtime-issue собирается здесь из
+	// orchestrator.LastReloadValidation — по паттерну #456.
+	if s.deps.Orch != nil {
+		if v := s.deps.Orch.LastReloadValidation(); v != nil {
+			for _, ve := range v.Errors {
+				if ve.Slot != orchestrator.SlotUser || ve.Severity == orchestrator.SeverityWarning {
+					continue
+				}
+				var msg string
+				switch {
+				case strings.HasPrefix(ve.Kind, "unknown-") && ve.Tag != "":
+					msg = fmt.Sprintf("Пользовательский конфиг (90-user.json) ссылается на несуществующий тег %q — правьте в редакторе конфигурации", ve.Tag)
+				case ve.Tag != "":
+					msg = fmt.Sprintf("Пользовательский конфиг (90-user.json): %s %q — правьте в редакторе конфигурации", ve.Kind, ve.Tag)
+				default:
+					msg = fmt.Sprintf("Пользовательский конфиг (90-user.json): %s — правьте в редакторе конфигурации", ve.Message)
+				}
+				issues = append(issues, Issue{
+					Severity: "error",
+					Kind:     "user-slot-validation",
+					Tag:      ve.Tag,
+					Message:  msg,
+				})
+			}
+		}
+	}
+	// QoS-DSCP support: xtDscpAvailable is always reported (the UI keys the
+	// feature's "supported" state on it). When classes are actually
+	// configured but the support probe fails, additionally surface an issue
+	// that distinguishes the two causes (kernel module vs iptables
+	// extension) so diagnostics can tell them apart. The detailed check on
+	// the failure path is served from the same TTL-bounded probe cache as
+	// the availability flag, so status polling never execs iptables per poll.
+	qosActive := activeQoSClasses(sr.QoSClasses)
+	// A class whose outbound no longer resolves is skipped at emit time
+	// (syncQoSRoutesSlot) — surface WHY the class is inert so the user can
+	// re-point or disable it.
+	if sr.RoutingMode != "fakeip-tun" {
+		for _, c := range qosActive {
+			if !s.isKnownOutboundTag(ctx, c.Outbound, cfg) {
+				issues = append(issues, Issue{
+					Severity: "warning",
+					Kind:     "qos-outbound-missing",
+					Tag:      c.Outbound,
+					Message:  fmt.Sprintf("класс QoS (DSCP %d) ссылается на несуществующий outbound %q — класс не применяется", c.DSCP, c.Outbound),
+				})
+			}
+		}
+	}
+	xtDscpAvailable := s.xtDscpUsable(ctx)
+	if !xtDscpAvailable && sr.RoutingMode != "fakeip-tun" && len(qosActive) > 0 {
+		moduleOK, matchOK := cachedXtDscpAvailability(ctx)
+		var msg string
+		switch {
+		case !moduleOK && !matchOK:
+			msg = "QoS DSCP: модуль ядра xt_dscp не найден и расширение iptables «dscp» недоступно — классы QoS не будут применены"
+		case !moduleOK:
+			msg = "QoS DSCP: модуль ядра xt_dscp не найден (/lib/modules) — классы QoS не будут применены"
+		default:
+			msg = "QoS DSCP: расширение iptables «dscp» недоступно — классы QoS не будут применены"
+		}
+		issues = append(issues, Issue{Severity: "warning", Kind: "qos-xt-dscp", Message: msg})
+	}
+	// fakeip-tun active iface: surface the provisioned kernel iface name
+	// ("opkgtun<idx>") so the UI can show it in the engine-settings panel. Only
+	// when in fakeip-tun mode AND actually provisioned (persisted FakeIPState);
+	// empty otherwise.
+	var fakeIPIface string
+	fakeIPDns := ""
+	fakeIPTunAddr := ""
+	if sr.RoutingMode == "fakeip-tun" && settings != nil &&
+		settings.FakeIP != nil && settings.FakeIP.Provisioned {
+		fakeIPIface = fakeIPIfaceName(settings.FakeIP.Index)
+		if d, derr := DeriveTunDNS(s.deps.FakeIPTun.TunAddr4); derr == nil {
+			fakeIPDns = d
+		}
+		if addr, _, aerr := splitCIDRToAddrMask(s.deps.FakeIPTun.TunAddr4); aerr == nil {
+			fakeIPTunAddr = addr
+		}
+	}
+	return Status{
+		Enabled:                sr.Enabled,
+		Installed:              installed,
+		Active:                 active,
+		NetfilterAvailable:     IsNetfilterAvailable(),
+		NetfilterComponentName: "Модули ядра подсистемы сетевой фильтрации",
+		TProxyTargetAvailable:  IsTProxyTargetAvailable(ctx),
+		XtDscpAvailable:        xtDscpAvailable,
+		PolicyName:             sr.PolicyName,
+		PolicyMark:             policyMark,
+		PolicyExists:           policyExists,
+		DeviceMode:             sr.DeviceMode,
+		SnifferEnabled:         sr.SnifferEnabled,
+		DeviceCount:            deviceCount,
+		RuleCount:              len(cfg.Route.Rules),
+		RuleSetCount:           len(cfg.Route.RuleSet),
+		OutboundAWGCount:       awgCount,
+		OutboundCompositeCount: compCount,
+		Final:                  cfg.Route.Final,
+		FakeIPIface:            fakeIPIface,
+		FakeIPDns:              fakeIPDns,
+		FakeIPTunAddr:          fakeIPTunAddr,
+		Issues:                 issues,
+		LastError:              lastError,
+		CrashCount:             crashCount,
+		LastCrashReason:        lastCrashReason,
+		RestartSuppressedUntil: restartSuppressedUntil,
+	}, nil
+}
+
+func (s *ServiceImpl) Disable(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Каждый teardown — в журнал: выключение бывает не только по кнопке
+	// (fail-safe при удалённой политике, drift-heal), и без записи причину
+	// «тумблер сам выключился» не восстановить (issue #523).
+	s.appLog.Info("disable", "", "выключение движка маршрутизации")
+
+	// fakeip-tun teardown is an entirely separate path (no iptables; opkgtun +
+	// pool/CIDR routes + a fail-closed drain). Dispatch by mode before the
+	// tproxy body so the tproxy path below stays byte-for-byte unchanged for
+	// RoutingMode=="tproxy".
+	dispatchSettings, err := s.deps.Settings.Load()
+	if err != nil {
+		return err
+	}
+	// Dispatch on the RAW persisted RoutingMode, NOT the normalized value: a
+	// Normalize error (corrupt/hand-edited settings) would otherwise mis-route a
+	// fakeip-tun teardown into the tproxy body, orphaning the opkgtun/routes.
+	// A raw string compare keeps the fakeip branch independent of normalize.
+	if dispatchSettings.SingboxRouter.RoutingMode == "fakeip-tun" {
+		return s.disableFakeIPTun(ctx, dispatchSettings)
+	}
+
+	if err := s.deps.IPTables.Uninstall(ctx); err != nil {
+		s.appLog.Warn("uninstall", "", err.Error())
+	}
+	s.currentMark = ""
+	s.currentWANIPs = nil
+	s.currentLANBridges = nil
+	s.currentBypassPresets = nil
+	s.currentBypassExtraPorts = ""
+	s.currentBypassExtraSubnets = ""
+	s.currentIngress = nil
+	// Reset selective tracking too: after Uninstall the guard rules are gone,
+	// so the "currently applied" selective state is false. Leaving this stale
+	// made tproxy→off→tproxy re-enables skip the rebuild (selectiveChanged
+	// stayed false) and run with a permanently empty set.
+	s.currentSelectiveBypass = false
+	s.currentQoSClasses = nil
+	s.netfilterStateKnown = false
+	// Uninstall already tore down the fail-closed blackhole (if any); clear the
+	// tracking flag so a later reconcile doesn't try to remove it again.
+	s.blackholeActive = false
+
+	if s.deps.Orch != nil {
+		// Move 20-router.json under disabled/ — sing-box's non-recursive
+		// -C config.d does not see it after the next reload, so the
+		// tproxy inbound, route rules, DNS rules and composite outbounds
+		// all disappear from the merged config in one atomic rename.
+		if err := s.deps.Orch.SetEnabled(orchestrator.SlotRouter, false); err != nil {
+			s.appLog.Warn("orch-disable", "", err.Error())
+		}
+		// Park the QoS routes overlay with it: its rules reference qos-*
+		// inbound tags that only exist while 20-router.json is active.
+		if err := s.disableQoSRoutesSlot(); err != nil {
+			s.appLog.Warn("orch-disable", "qos-routes", err.Error())
+		}
+		// Композиты из 20-router.json только что пропали из merged-конфига.
+		// Синхронно даём device-proxy перегенерировать слот 30 (деградация
+		// до default-члена композита) — SetEnabled выше взвёл 250ms debounce,
+		// и один коалесцированный reload увидит уже корректный файл вместо
+		// того, чтобы prune молча вырезал vpn/vpn2 из селекторов (issue #465).
+		s.notifyRoutingSlotsChanged()
+	} else {
+		// Legacy fallback: strip the tproxy inbound in place so
+		// the running sing-box stops accepting on the TPROXY port
+		// after the persistConfigDirect reload.
+		cfg, err := s.loadAppliedRouterConfig()
+		if err == nil && cfg != nil {
+			filtered := make([]Inbound, 0, len(cfg.Inbounds))
+			for _, in := range cfg.Inbounds {
+				if in.Tag != "tproxy-in" {
+					filtered = append(filtered, in)
+				}
+			}
+			cfg.Inbounds = filtered
+			_ = s.persistConfigDirect(ctx, cfg)
+		}
+	}
+
+	settings, err := s.deps.Settings.Load()
+	if err != nil {
+		return err
+	}
+	settings.SingboxRouter.Enabled = false
+	if err := s.deps.Settings.Save(settings); err != nil {
+		return err
+	}
+
+	s.emitStatus(ctx)
+	return nil
+}
+
+func (s *ServiceImpl) Reconcile(ctx context.Context) error {
+	// A routing-mode switch (SwitchRoutingMode) holds transitionMu across its
+	// Disable→persist→Enable sequence, during which the persisted state is
+	// transiently half-flipped. Reconcile is a periodic heal — if a switch is in
+	// flight, skip this tick rather than act on the in-between state and race the
+	// switch's own (possibly rolling-back) Enable/Disable. TryLock: never block the
+	// scheduler; just defer the heal one tick.
+	if !s.transitionMu.TryLock() {
+		return nil
+	}
+	defer s.transitionMu.Unlock()
+
+	// Периодический reap fakeip-сирот: runtime-сирота (провал delete при
+	// disable) лечится в течение тика, а не ждёт перезагрузки роутера. Дёшево
+	// в steady-state: скан читает кэш InterfaceStore, NDMS-вызовы идут только
+	// когда есть что реапать. transitionMu уже взят (mode-switch исключён);
+	// s.mu берёт сам reap. Ошибка — не повод ронять reconcile.
+	if err := s.ReapOrphanedFakeIPTun(ctx); err != nil {
+		s.appLog.Warn("fakeip-reap", "", err.Error())
+	}
+
+	settings, err := s.deps.Settings.Load()
+	if err != nil {
+		return err
+	}
+	sr, err := NormalizeSingboxRouterSettings(settings.SingboxRouter)
+	if err != nil {
+		return err
+	}
+	// fakeip-tun installs NO iptables, so the tproxy switch below (keyed on
+	// IPTables.IsInstalled/HasAnyInstalled) would always read "not installed"
+	// and route every tick to Enable. Dispatch by mode FIRST so the tproxy
+	// switch stays byte-for-byte unchanged for RoutingMode=="tproxy".
+	if sr.RoutingMode == "fakeip-tun" {
+		return s.reconcileFakeIPTun(ctx, sr)
+	}
+	installedComplete := s.deps.IPTables.IsInstalled(ctx)
+	installedAny := s.deps.IPTables.HasAnyInstalled(ctx)
+	// Запаркованный слот 20 при живых цепочках — тоже дрейф (issue #523):
+	// rollback провального Enable паркует слот, а netfilter.d-hook
+	// восстанавливает перехват из rules-файла. reconcileInstalled видел
+	// installed=true, считал engineDown и вечно ждал watchdog, которому
+	// нечего чинить — процесс жив, просто в конфиге нет tproxy-in. Лечится
+	// полным Enable: перепромоут слота + переустановка iptables.
+	//
+	// Гейт на живой процесс: при мёртвом sing-box Enable потратил бы до 60с
+	// на waitForSingbox и отложил бы fail-closed blackhole — вместо этого
+	// идём в reconcileInstalled (DROP сразу), watchdog оживляет процесс, и
+	// следующий тик при живом движке перепромоутит слот.
+	engineUp := true
+	if s.deps.Singbox != nil {
+		engineUp, _ = s.deps.Singbox.IsRunning()
+	}
+	routerSlotParked := s.deps.Orch != nil && !s.routerSlotEnabled()
+	switch {
+	case sr.Enabled && (!installedComplete || (routerSlotParked && engineUp)):
+		// Drift-heal, NOT user-initiated: must honour a prior master-Stop, so
+		// do not clear the sticky intent (clearManualStop=false).
+		return s.enableLocked(ctx, false)
+	case !sr.Enabled && installedAny:
+		return s.Disable(ctx)
+	case sr.Enabled && installedComplete:
+		return s.reconcileInstalled(ctx, sr)
+	}
+	return nil
+}
+
+// routerSlotEnabled reports whether 20-router.json currently lives in
+// config.d/ AND the file exists (Present) — «включён» флаг при отсутствующем
+// файле даёт тот же тупик (в конфиге нет tproxy-in), а enableLocked его
+// лечит, переписав файл. Caller guarantees deps.Orch != nil. Unregistered
+// slot reads as parked — Reconcile then routes to Enable, whose SetEnabled
+// surfaces the real error.
+func (s *ServiceImpl) routerSlotEnabled() bool {
+	st, ok := s.slotSnapshot(orchestrator.SlotRouter)
+	return ok && st.Enabled && st.Present
+}
+
+// slotSnapshot returns the orchestrator state of one slot. Caller guarantees
+// deps.Orch != nil.
+func (s *ServiceImpl) slotSnapshot(slot orchestrator.Slot) (orchestrator.SlotState, bool) {
+	for _, st := range s.deps.Orch.Snapshot() {
+		if st.Slot == slot {
+			return st, true
+		}
+	}
+	return orchestrator.SlotState{}, false
+}
+
+// reconcileInstalled handles the "Enabled && installed" branch:
+// detect mark or WAN-IP changes and re-Install. Extracted from Reconcile
+// to keep the decision tree testable without stubbing IsInstalled.
+func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.SingboxRouterSettings) error {
+	sr, err := NormalizeSingboxRouterSettings(sr)
+	if err != nil {
+		return err
+	}
+	// Единственный рестарт-авторитет sing-box — watchdog (Operator.Reconcile,
+	// свой независимый 30s-тик). Router-reconcile больше НЕ рестартит движок
+	// сам: раньше это был второй независимый авторитет (#456), и вся
+	// токен-машинерия backoff'а существовала только чтобы примирить гонку двух
+	// рестартёров. Здесь лишь фиксируем факт смерти движка: engineDown ниже
+	// (а) включит fail-closed blackhole вместо перехвата в мёртвый порт,
+	// (б) погасит heal PREROUTING-джампов. Движок поднимет watchdog своим тиком;
+	// следующий reconcile-тик при живом движке восстановит перехват и снимет
+	// blackhole. Fail-closed держится blackhole'ом всё время, пока движок мёртв.
+	//
+	// «Готов» = process + оба inbound-сокета ПРИВЯЗАНЫ (singboxReady, hard-gate
+	// #221), а не просто IsRunning. Процесс может быть жив, но inbound не
+	// привязался (порт занят, отклонённый hot-reload) — тогда установка iptables
+	// REDIRECT/TPROXY в непривязанный сокет заблэкхолила бы весь policy-трафик,
+	// включая DNS:53. Поэтому up-but-unbound трактуем как engineDown: ставим
+	// fail-closed blackhole и НЕ ставим реальный перехват, пока сокеты не встанут.
+	engineReady := true
+	if s.deps.Singbox != nil {
+		engineReady = s.singboxReady(ctx, false)
+	}
+	engineDown := !engineReady
+	if sr.SelectiveBypass {
+		if err := s.validateSelectiveBypassAgainstApplied(sr); err != nil {
+			if errors.Is(err, errSelectiveIncompatible) {
+				// Definitive conflict with the APPLIED config — self-heal by
+				// persisting the disable so the guard doesn't blackhole traffic.
+				s.appLog.Warn("selective", "", err.Error()+"; disabling selective bypass")
+				settings, loadErr := s.deps.Settings.Load()
+				if loadErr == nil {
+					settings.SingboxRouter.SelectiveBypass = false
+					if saveErr := s.deps.Settings.Save(settings); saveErr != nil {
+						s.appLog.Warn("selective", "", "failed to persist selective bypass disable: "+saveErr.Error())
+					}
+				}
+				sr.SelectiveBypass = false
+			} else {
+				// Could not check (transient I/O, torn state during apply) —
+				// keep the user's setting and retry on the next tick. Flipping
+				// persisted settings on a read hiccup is not self-healing.
+				s.appLog.Warn("selective", "", err.Error()+"; keeping selective bypass, will re-validate")
+			}
+		}
+	}
+	policyMode := sr.DeviceMode == "" || sr.DeviceMode == "policy"
+	mark := ""
+	if policyMode {
+		mark, err = s.deps.Policies.GetPolicyMark(ctx, sr.PolicyName)
+		if err != nil && !errors.Is(err, query.ErrPolicyMarkNotFound) {
+			// Транзиентная ошибка чтения метки (RCI недоступен/медленный —
+			// ранняя загрузка, shutdown-гонка при перезагрузке): это НЕ
+			// «политика удалена». Раньше здесь срабатывал fail-safe disable —
+			// молча и без авто-восстановления гасил движок (issue #523).
+			// Оставляем состояние как есть, ретрай на следующем тике.
+			return fmt.Errorf("policy %q mark: %w", sr.PolicyName, err)
+		}
+		if err != nil || mark == "" {
+			// NDMS ответил, а политики/метки нет — политика действительно
+			// удалена. Fail-safe disable, no auto-recovery; причина — в журнал.
+			s.appLog.Warn("reconcile", sr.PolicyName,
+				"политика не найдена в NDMS — движок маршрутизации выключается (fail-safe)")
+			return s.Disable(ctx)
+		}
+	}
+	wanIPs, err := s.deps.WANIPCollector.Collect(ctx)
+	if err != nil {
+		return fmt.Errorf("collect WAN IPs: %w", err)
+	}
+
+	markChanged := mark != s.currentMark
+	wanIPsChanged := !slices.Equal(s.currentWANIPs, wanIPs)
+	var lanBridges []LANBridgeDNSRedir
+	if policyMode {
+		lanBridges, _ = DiscoverLANBridges(ctx, mark)
+	}
+	lanBridgesChanged := !equalLANBridges(s.currentLANBridges, lanBridges)
+	var ingress []string
+	if policyMode {
+		ingress = s.resolveIngressInterfaces(ctx, sr.IngressInterfaces)
+	}
+	ingressChanged := !slices.Equal(s.currentIngress, ingress)
+	bypassPresetsChanged := !slices.Equal(s.currentBypassPresets, sr.BypassPresets)
+	bypassExtraChanged := s.currentBypassExtraPorts != sr.BypassExtraPorts
+	bypassSubnetsChanged := s.currentBypassExtraSubnets != sr.BypassExtraSubnets
+
+	// Selective-bypass change detection.
+	selectiveChanged := s.currentSelectiveBypass != sr.SelectiveBypass
+
+	// QoS-DSCP change detection: only the iptables-relevant projection
+	// (DSCP + ports). An outbound-only change does not need an iptables
+	// re-Install — the healQoSConfig call below converges the sing-box side.
+	// Graceful degradation happens HERE, before change detection: when
+	// xt_dscp support is missing the desired dispatch set degrades to empty
+	// (feature-off; xtDscpUsable logs availability transitions) — gating
+	// later would leave desired≠installed forever and re-Install on every
+	// tick. When the module/extension shows up, the (TTL-bounded) probe
+	// flips and qosChanged triggers one re-Install with rules.
+	qosClasses := activeQoSClasses(sr.QoSClasses)
+	qosSpecs := qosIPTablesSpecs(qosClasses)
+	if len(qosSpecs) > 0 {
+		if err := EnsureXtDscpModule(ctx); err != nil {
+			s.appLog.Warn("ensure-xt-dscp", "", err.Error())
+		}
+		if !s.xtDscpUsable(ctx) {
+			qosSpecs = nil
+		}
+	}
+	qosChanged := !slices.Equal(s.currentQoSClasses, qosSpecs)
+
+	// Self-heal the sing-box side BEFORE any iptables change — same safe
+	// order as Enable (config → wait → Install). Installing new per-class
+	// dispatch ports first would blackhole class traffic onto ports nothing
+	// listens on until the debounced reload lands.
+	//
+	// healTProxyInbound: a previous Install rollback or upgrade hop may have
+	// left 20-router.json without the tproxy-in inbound — re-add it
+	// idempotently so sing-box keeps listening on TPROXYPort.
+	if err := s.healTProxyInbound(ctx, sr.UDPTimeout); err != nil {
+		s.appLog.Warn("heal-tproxy", "", err.Error())
+	}
+	// healQoSConfig: per-class inbound pairs (20-router.json) + managed route
+	// rules (18-qos-routes.json). Converges class add/remove/disable and
+	// outbound edits applied through UpdateSettings→Reconcile, and cleans
+	// stale qos-* artifacts. No-op (no write, no reload) when converged.
+	qosHealed := false
+	if healed, err := s.healQoSConfig(ctx, sr); err != nil {
+		s.appLog.Warn("heal-qos", "", err.Error())
+	} else {
+		qosHealed = healed
+	}
+	// The heal rewrote the QoS sing-box config AND the iptables port set is
+	// about to change: wait for sing-box to come back up on its inbounds
+	// before Install redirects traffic to the new per-class ports. Soft
+	// deadline — on timeout we proceed and accept the brief race rather
+	// than blocking the reconcile loop behind a dead engine forever.
+	if qosHealed && qosChanged {
+		if err := s.waitForSingbox(ctx, qosReloadWait); err != nil {
+			s.appLog.Warn("qos-dscp", "", fmt.Sprintf("sing-box not ready after QoS config heal: %v — installing anyway", err))
+		}
+	}
+
+	// After a daemon restart or upgrade the old awg-manager process died
+	// with no chance to run Uninstall, so stale AWGM chains, ip rules
+	// and ip routes may remain from the old process. netfilterStateKnown
+	// starts false on every fresh ServiceImpl, so the very first
+	// reconcileInstalled after startup always forces a full re-install
+	// regardless of what IsInstalled reports.
+	forceInitialSync := !s.netfilterStateKnown
+	// Self-heal: chains can survive while PREROUTING jumps get wiped (NDMS
+	// rebuilds PREROUTING on reconfig), leaving the engine "installed" but
+	// intercepting nothing. The netfilter.d hook restores them immediately on
+	// the NDMS reload; this is the slower secondary net. On a probe error treat
+	// the state as unknown and DO NOT reinstall — a transient `-S` failure
+	// during an NDMS reload must not trigger a needless rebuild.
+	_, jumps, probeErr := s.deps.IPTables.Probe(ctx)
+	jumpsMissing := probeErr == nil && !jumps
+	// wantBlackhole: движок мёртв И PREROUTING-джампы снесены (NDMS перестроил
+	// firewall). Раньше здесь перехват просто не восстанавливался в мёртвый порт
+	// (FIX-B), НО при снесённых джампах это означало fail-OPEN: policy-трафик
+	// уходил в обычный роутинг Keenetic → в WAN мимо proxy/AWG. Теперь ставим
+	// явный fail-closed blackhole — DROP policy-трафика (с теми же RETURN-
+	// исключениями LAN/router/WAN, что и у перехвата), чтобы гарантированно НЕ
+	// течь в WAN, пока движок не вернётся. Снимается ниже, когда движок оживёт.
+	wantBlackhole := jumpsMissing && engineDown
+	if wantBlackhole {
+		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
+		bypassSubnets, _ := resolveBypassCIDRs(sr.BypassPresets, sr.BypassExtraSubnets)
+		// Selective guard references the AWGM-SELECTIVE ipset; ensure it exists so
+		// iptables-restore of the blackhole doesn't fail with "Set ... doesn't
+		// exist" (same pre-create the real Install path does below).
+		if sr.SelectiveBypass {
+			if e := ensureSelectiveSetExists(ctx); e != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("pre-create ipset for blackhole: %v", e))
+			}
+		}
+		// Mirror the real interception spec's exclusions (bypass ports + selective
+		// guard) so the blackhole drops EXACTLY what would have been proxied — not
+		// the user's non-selective traffic and not their bypass ports.
+		blackholeSpec := RestoreInputSpec{
+			PolicyMark:     mark,
+			MatchAll:       !policyMode,
+			WANIPs:         wanIPs,
+			BypassCIDRs:    bypassSubnets,
+			BypassUDPPorts: bypassUDP,
+			BypassTCPPorts: bypassTCP,
+			SelectiveIPSet: sr.SelectiveBypass,
+		}
+		s.mu.Lock()
+		err := s.deps.IPTables.InstallBlackhole(ctx, blackholeSpec)
+		if err == nil {
+			s.blackholeActive = true
+		}
+		s.mu.Unlock()
+		if err != nil {
+			s.appLog.Warn("reconcile", "", "не удалось поставить fail-closed blackhole: "+err.Error())
+		} else {
+			s.appLog.Warn("reconcile", "", "движок не работает, PREROUTING jumps снесены — включён fail-closed blackhole (policy-трафик дропается, не течёт в WAN)")
+		}
+		// Реальный перехват в мёртвый порт всё равно не восстанавливаем.
+		jumpsMissing = false
+	}
+	needsInstall := forceInitialSync || jumpsMissing || markChanged || wanIPsChanged || lanBridgesChanged || ingressChanged || bypassPresetsChanged || bypassExtraChanged || bypassSubnetsChanged || selectiveChanged || qosChanged
+
+	// Движок не готов интерсептить (мёртв или inbound-сокеты не привязаны) —
+	// НЕ ставим iptables ни по какому триггеру (#221): REDIRECT/TPROXY в
+	// непривязанный сокет заблэкхолил бы весь policy-трафик, включая DNS:53.
+	// Fail-closed уже держит blackhole (при снесённых джампах) или перехват в
+	// мёртвый порт (при целых). Установку откладываем до готовности — следующий
+	// reconcile-тик поставит iptables, когда сокеты встанут.
+	if needsInstall && engineDown {
+		s.appLog.Warn("reconcile", "", "движок не готов (inbound-сокеты не привязаны) — откладываем установку iptables до готовности")
+		needsInstall = false
+	}
+
+	if needsInstall {
+		if forceInitialSync {
+			s.appLog.Info("reconcile", "", "first after daemon start — reinstalling netfilter rules")
+		} else if jumpsMissing {
+			s.appLog.Warn("reconcile", "", "PREROUTING jumps missing while chains present — reinstalling to restore interception")
+		}
+
+		if err := s.prepareNetfilter(ctx); err != nil {
+			return err
+		}
+
+		// If selective-bypass is enabled, the ipset MUST exist before
+		// iptables-restore runs — iptables-restore fails with "Set
+		// AWGM-SELECTIVE doesn't exist" if the set was never created.
+		// Create it empty now; it will be populated by the async rebuild
+		// triggered below. An empty set means no traffic is selectively
+		// intercepted yet, which is safe: the engine will fill it shortly.
+		if sr.SelectiveBypass {
+			if err := ensureSelectiveSetExists(ctx); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("pre-create ipset failed: %v", err))
+				// Don't abort — if xt_set is missing, iptables-restore will
+				// surface a clear error; if ipset isn't installed but SelectiveBypass
+				// was somehow set, same. Proceed and let Install fail gracefully.
+			}
+		}
+
+		bypassUDP, bypassTCP, _ := resolveBypassPorts(sr.BypassPresets, sr.BypassExtraPorts)
+		bypassSubnets, _ := resolveBypassCIDRs(sr.BypassPresets, sr.BypassExtraSubnets)
+		s.mu.Lock()
+		if err := s.deps.IPTables.Install(ctx, RestoreInputSpec{
+			PolicyMark:        mark,
+			MatchAll:          !policyMode,
+			WANIPs:            wanIPs,
+			LANBridges:        lanBridges,
+			BypassUDPPorts:    bypassUDP,
+			BypassTCPPorts:    bypassTCP,
+			BypassCIDRs:       bypassSubnets,
+			IngressInterfaces: ingress,
+			SelectiveIPSet:    sr.SelectiveBypass,
+			QoSClasses:        qosSpecs,
+		}); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.currentMark = mark
+		s.currentWANIPs = wanIPs
+		s.currentLANBridges = lanBridges
+		s.currentBypassPresets = sr.BypassPresets
+		s.currentBypassExtraPorts = sr.BypassExtraPorts
+		s.currentBypassExtraSubnets = sr.BypassExtraSubnets
+		s.currentIngress = ingress
+		s.currentSelectiveBypass = sr.SelectiveBypass
+		s.currentQoSClasses = qosSpecs
+		s.netfilterStateKnown = true
+		s.mu.Unlock()
+
+		// If selective mode is being disabled, destroy the ipset so it
+		// doesn't linger in kernel memory.
+		if !sr.SelectiveBypass {
+			if err := destroySelectiveSet(ctx); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("destroy ipset after disable: %v", err))
+			}
+			if err := s.disableSelectiveRoutesSlot(); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("disable selective routes slot: %v", err))
+			}
+			if _, err := s.stripLegacySelectiveRulesFromRouter(ctx); err != nil {
+				s.appLog.Warn("selective", "", fmt.Sprintf("strip legacy selective rules: %v", err))
+			}
+		}
+	}
+
+	// Снимаем fail-closed blackhole ТОЛЬКО когда движок жив И probe успешен —
+	// тогда реальный перехват гарантированно на месте (steady state с целыми
+	// jumps, либо только что переустановлен выше; при ошибке Install был ранний
+	// return). Делаем ПОСЛЕ реального Install, чтобы не было окна утечки между
+	// снятием blackhole и восстановлением перехвата. Критично: на probe-ОШИБКЕ
+	// (jumpsMissing→false из-за !nil err) или мёртвом движке blackhole СОХРАНЯЕМ,
+	// иначе транзиентная -S ошибка во время NDMS-reload снесла бы DROP при живой
+	// утечке и удалила бы rules-файл, обездвижив и netfilter.d-хук. Идемпотентно.
+	if !engineDown && probeErr == nil {
+		s.mu.Lock()
+		if s.blackholeActive {
+			s.deps.IPTables.RemoveBlackhole(ctx)
+			s.blackholeActive = false
+			s.mu.Unlock()
+			s.appLog.Info("reconcile", "", "движок восстановлен — fail-closed blackhole снят")
+		} else {
+			s.mu.Unlock()
+		}
+	}
+
+	// Selective-bypass: rebuild on first Enable, when toggled on, or on daemon
+	// start only if the ipset was never populated yet. Rule changes trigger
+	// rebuild explicitly via staging Apply (frontend) — no periodic refresh.
+	if sr.SelectiveBypass && s.deps.SelectiveBuilder != nil {
+		configDir := ""
+		if s.deps.Singbox != nil {
+			configDir = s.deps.Singbox.ConfigDir()
+		}
+		needsInitialBuild := selective.NeedsPopulation(ctx, configDir)
+		if selectiveChanged || (forceInitialSync && needsInitialBuild) {
+			s.triggerSelectiveRebuild(ctx)
+		}
+	}
+	return nil
+}

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
@@ -31,6 +33,23 @@ type Service struct {
 	ndms    ndmsClient
 	lister  DNSListLister
 	appLog  *logging.ScopedLogger
+
+	// ifaceAddrs перечисляет локальные адреса kernel-интерфейса.
+	// Поле, а не прямой вызов net.InterfaceByName — для юнит-тестов.
+	ifaceAddrs func(name string) ([]net.Addr, error)
+
+	// sbMarkProvider отдаёт PolicyMark sb-router-политики (hex-строка
+	// вида "0xffffaaa"), когда tproxy-движок активен. nil = не подключён.
+	sbMarkProvider func(ctx context.Context) (string, bool)
+
+	markMu      sync.Mutex
+	markCached  uint32
+	markOK      bool
+	markFetched time.Time
+
+	rulesMu      sync.Mutex
+	rulesCached  map[string][]RuleHit
+	rulesFetched time.Time
 }
 
 // NewService creates a new connections service.
@@ -44,7 +63,43 @@ func NewService(catalog routing.Catalog, ndmsClient ndmsClient, lister DNSListLi
 		ndms:    ndmsClient,
 		lister:  lister,
 		appLog:  logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubConnections),
+		ifaceAddrs: func(name string) ([]net.Addr, error) {
+			ifi, err := net.InterfaceByName(name)
+			if err != nil {
+				return nil, err
+			}
+			return ifi.Addrs()
+		},
 	}
+}
+
+// SetSingboxMarkProvider wires the sb-router policy-mark source used to
+// attribute tproxy-intercepted flows (no ifw in conntrack).
+func (s *Service) SetSingboxMarkProvider(fn func(ctx context.Context) (string, bool)) {
+	s.sbMarkProvider = fn
+}
+
+const markTTL = 60 * time.Second
+
+// singboxMark returns the numeric sb-router connmark, cached for markTTL.
+func (s *Service) singboxMark(ctx context.Context) (uint32, bool) {
+	if s.sbMarkProvider == nil {
+		return 0, false
+	}
+	s.markMu.Lock()
+	defer s.markMu.Unlock()
+	if time.Since(s.markFetched) < markTTL {
+		return s.markCached, s.markOK
+	}
+	s.markFetched = time.Now()
+	s.markCached, s.markOK = 0, false
+	if raw, ok := s.sbMarkProvider(ctx); ok {
+		hex := strings.TrimPrefix(strings.ToLower(raw), "0x")
+		if v, err := strconv.ParseUint(hex, 16, 32); err == nil {
+			s.markCached, s.markOK = uint32(v), true
+		}
+	}
+	return s.markCached, s.markOK
 }
 
 // List reads conntrack, resolves tunnels and client names, filters, and paginates.
@@ -87,42 +142,30 @@ func (s *Service) List(ctx context.Context, params ListParams) (*ListResponse, e
 	// return without rule attribution.
 	ipRules := s.fetchIPRules(ctx)
 
-	// 5. Enrich connections
+	// 5. Enrich connections. Записи без ifw НЕ отбрасываются — классифицируются.
+	localIPs := s.tunnelLocalIPs(tunnelByIface)
+	wanIPs := s.wanLocalIPs(s.wanIfaces(ctx))
+	sbMark, sbMarkOK := s.singboxMark(ctx)
+
 	conns := make([]Connection, 0, len(rawConns))
 	for _, rc := range rawConns {
-		// Skip router-local traffic without outgoing interface
-		if rc.ifw == 0 {
-			continue
-		}
+		c := s.classify(rc, ifMap, tunnelByIface, localIPs, wanIPs, sbMark, sbMarkOK)
 
-		c := rc.Connection
-		c.Interface = ifMap[rc.ifw]
-
-		// Resolve tunnel
-		if info, ok := tunnelByIface[c.Interface]; ok {
-			c.TunnelID = info.id
-			c.TunnelName = info.name
-		} else if c.Interface != "" {
-			c.TunnelName = fmt.Sprintf("Direct (%s)", c.Interface)
-		} else {
-			c.TunnelName = "Direct"
-		}
-
-		// Resolve client name
 		if c.ClientMAC != "" {
 			c.ClientName = clientNames[strings.ToLower(c.ClientMAC)]
 		}
-
-		// Attach DNS-route rule attribution by destination IP.
 		if rules, ok := ipRules[c.Dst]; ok {
 			c.Rules = rules
 		}
-
 		conns = append(conns, c)
 	}
 
 	// 6. Compute stats (over ALL connections, before filtering)
 	stats, tunnelSummary := computeStats(conns)
+
+	byTunnel := computeBuckets(conns, tunnelBucketKey)
+	byClient := computeBuckets(conns, clientBucketKey)
+	byDst := computeBuckets(conns, dstBucketKey)
 
 	// 6.5. Ensure all running tunnels appear in the summary even with 0 connections.
 	for iface, ti := range tunnelByIface {
@@ -165,6 +208,9 @@ func (s *Service) List(ctx context.Context, params ListParams) (*ListResponse, e
 	return &ListResponse{
 		Stats:       stats,
 		Tunnels:     tunnelSummary,
+		ByTunnel:    byTunnel,
+		ByClient:    byClient,
+		ByDst:       byDst,
 		Connections: page,
 		Pagination: PaginationInfo{
 			Total:    total,
@@ -203,6 +249,114 @@ func (s *Service) buildTunnelMap(ctx context.Context) map[string]tunnelInfo {
 	return result
 }
 
+// localIPHit — атрибуция локального IP к туннелю и его kernel-интерфейсу.
+type localIPHit struct {
+	iface string
+	info  tunnelInfo
+}
+
+// tunnelLocalIPs maps each running tunnel's local interface IPs to the
+// tunnel — the attribution signal for conntrack entries without ifw:
+// src ∈ map — эгресс, привязанный к туннелю; reply-dst ∈ map — SNAT-выход.
+func (s *Service) tunnelLocalIPs(tunnelByIface map[string]tunnelInfo) map[string]localIPHit {
+	out := make(map[string]localIPHit)
+	for iface, ti := range tunnelByIface {
+		addrs, err := s.ifaceAddrs(iface)
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok || ipn.IP == nil {
+				continue
+			}
+			out[ipn.IP.String()] = localIPHit{iface: iface, info: ti}
+		}
+	}
+	return out
+}
+
+// wanIfaces returns kernel iface names of WAN catalog entries (buildTunnelMap
+// их пропускает). Нужны, чтобы форвардный SNAT-трафик в WAN без ifw
+// классифицировался как direct, а не «Локально».
+func (s *Service) wanIfaces(ctx context.Context) []string {
+	var out []string
+	for _, e := range s.catalog.ListAll(ctx) {
+		if e.Type != "wan" {
+			continue
+		}
+		if iface, running := s.catalog.GetKernelIface(ctx, e.ID); running && iface != "" {
+			out = append(out, iface)
+		}
+	}
+	return out
+}
+
+// wanLocalIPs maps local IPs of WAN interfaces to the iface name.
+func (s *Service) wanLocalIPs(ifaces []string) map[string]string {
+	out := make(map[string]string)
+	for _, iface := range ifaces {
+		addrs, err := s.ifaceAddrs(iface)
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok && ipn.IP != nil {
+				out[ipn.IP.String()] = iface
+			}
+		}
+	}
+	return out
+}
+
+// classify enriches one raw conntrack entry with route attribution.
+// Записи без ifw НЕ отбрасываются (fix: невидимые sing-box/nwg потоки):
+// они классифицируются по локальным IP туннелей/WAN и connmark sb-router.
+func (s *Service) classify(rc rawConn, ifMap map[int]string,
+	tunnelByIface map[string]tunnelInfo, localIPs map[string]localIPHit,
+	wanIPs map[string]string, sbMark uint32, sbMarkOK bool) Connection {
+
+	c := rc.Connection
+	if rc.ifw != 0 {
+		c.Interface = ifMap[rc.ifw]
+		if info, ok := tunnelByIface[c.Interface]; ok {
+			c.TunnelID, c.TunnelName, c.RouteClass = info.id, info.name, "tunnel"
+		} else if c.Interface != "" {
+			c.TunnelName = fmt.Sprintf("Direct (%s)", c.Interface)
+			c.RouteClass = "direct"
+		} else {
+			c.TunnelName = "Direct"
+			c.RouteClass = "direct"
+		}
+		return c
+	}
+	if hit, ok := localIPs[c.Src]; ok {
+		c.Interface = hit.iface
+		c.TunnelID, c.TunnelName, c.RouteClass = hit.info.id, hit.info.name, "tunnel"
+		return c
+	}
+	if hit, ok := localIPs[rc.replyDst]; ok {
+		c.Interface = hit.iface
+		c.TunnelID, c.TunnelName, c.RouteClass = hit.info.id, hit.info.name, "tunnel"
+		return c
+	}
+	// Форвардный SNAT в WAN без ifw — это трафик клиента напрямую, не «Локально».
+	if iface, ok := wanIPs[rc.replyDst]; ok {
+		c.Interface = iface
+		c.TunnelName = fmt.Sprintf("Direct (%s)", iface)
+		c.RouteClass = "direct"
+		return c
+	}
+	if sbMarkOK && rc.mark == sbMark {
+		c.TunnelName = "sing-box"
+		c.RouteClass = "singbox"
+		return c
+	}
+	c.TunnelName = "Локально"
+	c.RouteClass = "local"
+	return c
+}
+
 // resolveClientNames queries NDMS hotspot for MAC → device name mapping.
 func (s *Service) resolveClientNames(ctx context.Context) map[string]string {
 	result := make(map[string]string)
@@ -236,11 +390,29 @@ func (s *Service) resolveClientNames(ctx context.Context) map[string]string {
 	return result
 }
 
+// ipRulesTTL bounds how often the NDMS object-group runtime is re-fetched.
+// The /show/object-group/fqdn response is large (сотни KB) и стоит ndm ~1s
+// на сериализацию; перечитывание на каждый List доминировало в CPU-профиле
+// (стенд 2026-07-16: ~40% под опросом страницы соединений). Атрибуция
+// меняется только когда DNS-правила резолвят новые IP — лёгкая несвежесть
+// бейджей незаметна.
+const ipRulesTTL = 30 * time.Second
+
 // fetchIPRules queries the NDMS object-group runtime cache and returns
-// a map from destination IP to matched DNS-route rule hits. Best-effort:
-// any error returns an empty map without surfacing the error to the caller —
-// the connections list still works without rule attribution.
+// a map from destination IP to matched DNS-route rule hits, served from a
+// TTL cache (mirrors singboxMark: мьютекс держится на время фетча — второй
+// конкурентный List ждёт и получает кэш, а не дублирует 730KB-запрос;
+// ошибка negative-кэшируется на тот же TTL). Best-effort: любая ошибка
+// даёт пустую карту — список соединений работает без атрибуции правил.
+// Возвращаемая карта разделяется между вызовами — НЕ мутировать.
 func (s *Service) fetchIPRules(ctx context.Context) map[string][]RuleHit {
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
+	if time.Since(s.rulesFetched) < ipRulesTTL {
+		return s.rulesCached
+	}
+	s.rulesFetched = time.Now()
+	s.rulesCached = nil
 	var groups []runtimeGroup
 	err := s.ndms.GetStream(ctx, "/show/object-group/fqdn", func(r io.Reader) error {
 		var parseErr error
@@ -251,7 +423,8 @@ func (s *Service) fetchIPRules(ctx context.Context) map[string][]RuleHit {
 		s.appLog.Warn("fetch-rules", "ndms.object-group/fqdn", err.Error())
 		return nil
 	}
-	return buildIPRuleMap(ctx, groups, s.lister)
+	s.rulesCached = buildIPRuleMap(ctx, groups, s.lister)
+	return s.rulesCached
 }
 
 // computeStats calculates aggregate statistics and per-tunnel counts.
@@ -271,13 +444,21 @@ func computeStats(conns []Connection) (ConnectionStats, map[string]TunnelConnect
 			stats.Protocols.ICMP++
 		}
 
-		if c.TunnelID != "" {
+		switch c.RouteClass {
+		case "tunnel":
 			stats.Tunneled++
-		} else {
+		case "singbox":
+			stats.Singbox++
+		case "local":
+			stats.Local++
+		default:
 			stats.Direct++
 		}
 
-		key := c.TunnelID // "" for direct
+		key := c.TunnelID
+		if key == "" {
+			key = "@" + c.RouteClass // "@direct" / "@singbox" / "@local"
+		}
 		info := tunnels[key]
 		info.Count++
 		if info.Name == "" {
@@ -302,13 +483,26 @@ func applyFilters(conns []Connection, params ListParams) []Connection {
 		case "all":
 			// pass
 		case "direct":
-			if c.TunnelID != "" {
+			if c.RouteClass != "direct" {
+				continue
+			}
+		case "singbox":
+			if c.RouteClass != "singbox" {
+				continue
+			}
+		case "local":
+			if c.RouteClass != "local" {
 				continue
 			}
 		default:
 			if c.TunnelID != params.Tunnel {
 				continue
 			}
+		}
+
+		// State filter (точное совпадение; "all"/"" = любое).
+		if params.State != "" && params.State != "all" && c.State != params.State {
+			continue
 		}
 
 		// Protocol filter

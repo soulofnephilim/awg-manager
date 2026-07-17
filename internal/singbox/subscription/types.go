@@ -7,9 +7,9 @@ import "time"
 // re-parsing the raw outbound JSON each time.
 type MemberInfo struct {
 	Tag       string `json:"tag"`
-	Label     string `json:"label,omitempty"`     // human-readable name from Clash "name", empty for share-links
-	Protocol  string `json:"protocol"`            // "vless" | "trojan" | "shadowsocks" | "hysteria2" | "naive"
-	Server    string `json:"server"`              // host
+	Label     string `json:"label,omitempty"` // human-readable name from Clash "name", empty for share-links
+	Protocol  string `json:"protocol"`        // "vless" | "trojan" | "shadowsocks" | "hysteria2" | "naive"
+	Server    string `json:"server"`          // host
 	Port      uint16 `json:"port"`
 	SNI       string `json:"sni,omitempty"`
 	Transport string `json:"transport,omitempty"` // "tcp" | "ws" | "grpc" | "http" — empty if N/A
@@ -54,30 +54,33 @@ func DefaultURLTestConfig() URLTestConfig {
 // subscription is either URL-backed (Inline == "") or inline (URL == "");
 // IsInline is the canonical predicate.
 type Subscription struct {
-	ID           string           `json:"id"`                  // uuid
-	Label        string           `json:"label"`               // user-facing
-	URL          string           `json:"url"`                 // subscription URL ("" when inline)
-	Inline       string           `json:"inline,omitempty"`    // raw paste of share-links / clash YAML / sing-box JSON
-	Headers      []Header         `json:"headers"`             // custom HTTP headers for fetch (URL-backed only)
-	RefreshHours int              `json:"refreshHours"`        // 0 = manual only; ignored for inline
-	LastFetched  time.Time        `json:"lastFetched"`
-	LastError    string           `json:"lastError,omitempty"`
-	SelectorTag  string           `json:"selectorTag"`           // "sub-<id-short>"
-	InboundTag   string           `json:"inboundTag"`            // "sub-<id-short>-in"
-	ListenPort   uint16           `json:"listenPort"`            // localhost port for the mixed inbound
-	ProxyIndex   int              `json:"proxyIndex"`            // NDMS ProxyN index, -1 if not yet allocated
-	MemberTags   []string         `json:"memberTags"`            // every member outbound tag (kept for back-compat)
-	Members      []MemberInfo     `json:"members,omitempty"`     // per-member parsed metadata
-	OrphanTags        []string               `json:"orphanTags"`                  // tags missing on last refresh
-	RejectedMembers   []RejectedMember       `json:"rejectedMembers,omitempty"`   // parsed but not in sing-box / invalid
-	InfoItems         []SubscriptionInfoItem `json:"infoItems,omitempty"`         // provider banners (max 4)
-	DismissedInfoIDs  []string               `json:"dismissedInfoIds,omitempty"`  // hidden on refresh (user removed from UI)
-	ActiveMember      string                 `json:"activeMember,omitempty"`      // currently-active selector member tag
-	ExcludedTags    []string     `json:"excludedTags,omitempty"`    // полные стабильные теги, исключённые пользователем (источник правды)
-	ExcludedMembers []MemberInfo `json:"excludedMembers,omitempty"` // display-метаданные исключённых (обновляются при refresh)
-	Enabled      bool             `json:"enabled"`
-	Mode         SubscriptionMode `json:"mode,omitempty"`        // "" treated as ModeSelector for back-compat
-	URLTest      *URLTestConfig   `json:"urlTest,omitempty"`     // populated when Mode == ModeURLTest
+	ID               string                 `json:"id"`               // uuid
+	Label            string                 `json:"label"`            // user-facing
+	URL              string                 `json:"url"`              // subscription URL ("" when inline)
+	Inline           string                 `json:"inline,omitempty"` // raw paste of share-links / clash YAML / sing-box JSON
+	Headers          []Header               `json:"headers"`          // custom HTTP headers for fetch (URL-backed only)
+	RefreshHours     int                    `json:"refreshHours"`     // 0 = manual only; ignored for inline
+	LastFetched      time.Time              `json:"lastFetched"`
+	LastError        string                 `json:"lastError,omitempty"`
+	SelectorTag      string                 `json:"selectorTag"`                // "sub-<id-short>"
+	InboundTag       string                 `json:"inboundTag"`                 // "sub-<id-short>-in"
+	ListenPort       uint16                 `json:"listenPort"`                 // localhost port for the mixed inbound
+	ProxyIndex       int                    `json:"proxyIndex"`                 // NDMS ProxyN index, -1 if not yet allocated
+	MemberTags       []string               `json:"memberTags"`                 // every member outbound tag (kept for back-compat)
+	Members          []MemberInfo           `json:"members,omitempty"`          // per-member parsed metadata
+	OrphanTags       []string               `json:"orphanTags"`                 // tags missing on last refresh
+	RejectedMembers  []RejectedMember       `json:"rejectedMembers,omitempty"`  // parsed but not in sing-box / invalid
+	InfoItems        []SubscriptionInfoItem `json:"infoItems,omitempty"`        // provider banners (max 4)
+	DismissedInfoIDs []string               `json:"dismissedInfoIds,omitempty"` // hidden on refresh (user removed from UI)
+	ActiveMember     string                 `json:"activeMember,omitempty"`     // currently-active selector member tag
+	ExcludedTags     []string               `json:"excludedTags,omitempty"`     // полные стабильные теги, исключённые пользователем (источник правды)
+	ExcludedMembers  []MemberInfo           `json:"excludedMembers,omitempty"`  // display-метаданные исключённых (обновляются при refresh)
+	FilterInclude    string                 `json:"filterInclude,omitempty"`    // regex (Go RE2): оставить только серверы с совпадающим именем; "" = без фильтра
+	FilterExclude    string                 `json:"filterExclude,omitempty"`    // regex (Go RE2): скрыть серверы с совпадающим именем; "" = без фильтра
+	FilteredMembers  []MemberInfo           `json:"filteredMembers,omitempty"`  // display-метаданные скрытых фильтром (перестраиваются при refresh)
+	Enabled          bool                   `json:"enabled"`
+	Mode             SubscriptionMode       `json:"mode,omitempty"`    // "" treated as ModeSelector for back-compat
+	URLTest          *URLTestConfig         `json:"urlTest,omitempty"` // populated when Mode == ModeURLTest
 }
 
 // IsInline reports whether the subscription's content is paste-supplied
@@ -128,26 +131,30 @@ type Header struct {
 // CreateInput is the input to Service.Create. Exactly one of URL or
 // Inline must be set; setting both or neither is rejected.
 type CreateInput struct {
-	Label        string
-	URL          string
-	Inline       string
-	Headers      []Header
-	RefreshHours int
-	Enabled      bool
-	Mode         SubscriptionMode // "" = ModeSelector
-	URLTest      *URLTestConfig   // ignored when Mode != ModeURLTest; defaults applied otherwise
-	ExcludedKeys []string         // суффиксы тегов из превью (suffixOf, узкий или расширенный) для исключения на первичном refresh
+	Label         string
+	URL           string
+	Inline        string
+	Headers       []Header
+	RefreshHours  int
+	Enabled       bool
+	Mode          SubscriptionMode // "" = ModeSelector
+	URLTest       *URLTestConfig   // ignored when Mode != ModeURLTest; defaults applied otherwise
+	ExcludedKeys  []string         // суффиксы тегов из превью (suffixOf, узкий или расширенный) для исключения на первичном refresh
+	FilterInclude string           // regex-фильтр «включать только» (валидируется в Service.Create)
+	FilterExclude string           // regex-фильтр «исключать» (валидируется в Service.Create)
 }
 
 // UpdatePatch is partial update; nil pointers mean "leave as-is".
 type UpdatePatch struct {
-	Label        *string
-	URL          *string
-	Headers      *[]Header
-	RefreshHours *int
-	Enabled      *bool
-	Mode         *SubscriptionMode
-	URLTest      *URLTestConfig // overwrites stored URLTest when non-nil
+	Label         *string
+	URL           *string
+	Headers       *[]Header
+	RefreshHours  *int
+	Enabled       *bool
+	Mode          *SubscriptionMode
+	URLTest       *URLTestConfig // overwrites stored URLTest when non-nil
+	FilterInclude *string        // regex-фильтр «включать только»; "" = снять фильтр
+	FilterExclude *string        // regex-фильтр «исключать»; "" = снять фильтр
 }
 
 // RefreshResult is the outcome of a single refresh cycle.

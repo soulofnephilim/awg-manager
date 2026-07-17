@@ -603,6 +603,31 @@ func TestMigrateToV23SetsStableChannel(t *testing.T) {
 	}
 }
 
+func TestMigrateToV28RemapsTraceToInfo(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"trace", "info"}, // v21-stamped default, not a user choice
+		{"debug", "debug"},
+		{"warn", "warn"},
+		{"info", "info"},
+		{"", ""}, // left for downstream defaulting
+	}
+	for _, tc := range cases {
+		var s Settings
+		s.SchemaVersion = 27
+		s.Logging.SingboxLogLevel = tc.in
+		(&SettingsStore{}).migrateToV28(&s)
+		if s.Logging.SingboxLogLevel != tc.want {
+			t.Errorf("migrateToV28(%q) SingboxLogLevel = %q, want %q", tc.in, s.Logging.SingboxLogLevel, tc.want)
+		}
+		if s.SchemaVersion != 28 {
+			t.Errorf("SchemaVersion = %d, want 28", s.SchemaVersion)
+		}
+	}
+}
+
 func TestSettingsStore_SetSingboxCreateNDMSProxy_PersistsAtomic(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewSettingsStore(tmpDir)
@@ -735,8 +760,8 @@ func TestMigrateToV27_SetsRoutingModeTproxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if s.SchemaVersion != 27 {
-		t.Fatalf("schema = %d, want 27", s.SchemaVersion)
+	if s.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema = %d, want %d", s.SchemaVersion, CurrentSchemaVersion)
 	}
 	if s.SingboxRouter.RoutingMode != "tproxy" {
 		t.Fatalf("routingMode = %q, want tproxy", s.SingboxRouter.RoutingMode)
@@ -757,8 +782,8 @@ func TestMigrateToV27_PreservesExistingMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if s.SchemaVersion != 27 {
-		t.Fatalf("schema = %d, want 27", s.SchemaVersion)
+	if s.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema = %d, want %d", s.SchemaVersion, CurrentSchemaVersion)
 	}
 	if s.SingboxRouter.RoutingMode != "fakeip-tun" {
 		t.Fatalf("existing routingMode must be preserved, got %q", s.SingboxRouter.RoutingMode)

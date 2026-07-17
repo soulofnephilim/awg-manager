@@ -20,7 +20,7 @@ func TestCleanCrossSlotUnknownRefs(t *testing.T) {
 	}
 	res := orchestrator.ValidationResult{Errors: []orchestrator.ValidationError{
 		{Slot: orchestrator.SlotSubscriptions, Kind: "unknown-outbound", Tag: "gone", InRule: `outbounds[2="g"].outbounds[2]`},
-		{Slot: "router", Kind: "unknown-outbound", Tag: "other"},          // different slot — not ours to clean
+		{Slot: "router", Kind: "unknown-outbound", Tag: "other"},                      // different slot — not ours to clean
 		{Slot: orchestrator.SlotSubscriptions, Kind: "duplicate-outbound", Tag: "s1"}, // wrong kind — ignore
 	}}
 

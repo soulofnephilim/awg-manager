@@ -46,7 +46,11 @@
 
 	const infoItems = $derived(subscription.infoItems ?? []);
 	const rejectedMembers = $derived(subscription.rejectedMembers ?? []);
+	const filteredMembers = $derived(subscription.filteredMembers ?? []);
 	const isUrlSub = $derived(!subscription.isInline);
+	// Скрытые фильтром — свёрнутый read-only блок (вернуть сервер можно
+	// только изменив фильтр в настройках).
+	let filteredOpen = $state(false);
 
 	async function removeInfoItem(itemId: string): Promise<void> {
 		if (!itemId || removingInfoId) return;
@@ -679,6 +683,38 @@
 	</section>
 {/if}
 
+{#if filteredMembers.length > 0}
+	<section class="filtered">
+		<button
+			type="button"
+			class="filtered-toggle"
+			aria-expanded={filteredOpen}
+			onclick={() => (filteredOpen = !filteredOpen)}
+		>
+			<span class="lbl">Скрыто фильтром ({filteredMembers.length})</span>
+			<span class="filtered-chevron" class:open={filteredOpen} aria-hidden="true">▸</span>
+		</button>
+		{#if filteredOpen}
+			<div class="hint">
+				Эти серверы скрыты regex-фильтром подписки и не участвуют в выборе.
+				Чтобы вернуть сервер, измените фильтр в настройках.
+			</div>
+			<div class="grid">
+				{#each filteredMembers as member (member.tag)}
+					<div class="filtered-card">
+						<div class="filtered-main">
+							<div class="filtered-title">{member.label || `${member.server}:${member.port}`}</div>
+							<div class="filtered-meta mono">
+								{member.protocol} · {member.server}:{member.port}
+							</div>
+						</div>
+					</div>
+				{/each}
+			</div>
+		{/if}
+	</section>
+{/if}
+
 {#if subscription.orphanTags.length > 0}
 	<section class="orphans">
 		<div class="orphans-head">
@@ -911,6 +947,62 @@
 		font-size: 0.75rem;
 		color: var(--color-text-muted);
 		margin-top: 0.25rem;
+	}
+	.filtered {
+		margin-top: 1.5rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--color-border);
+	}
+	.filtered-toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0;
+		margin-bottom: 0.6rem;
+		border: none;
+		background: transparent;
+		cursor: pointer;
+		font: inherit;
+	}
+	.filtered-toggle .lbl {
+		color: var(--color-text-muted);
+	}
+	.filtered-chevron {
+		display: inline-block;
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		transition: transform 120ms ease;
+	}
+	.filtered-chevron.open {
+		transform: rotate(90deg);
+	}
+	.filtered-card {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.6rem;
+		padding: 12px 14px;
+		border: 1px dashed var(--color-border);
+		border-radius: 10px;
+		opacity: 0.75;
+	}
+	.filtered-main {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+	.filtered-title {
+		font-size: 0.88rem;
+		color: var(--color-text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.filtered-meta {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		margin-top: 0.25rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.orphans {
 		margin-top: 1.5rem;

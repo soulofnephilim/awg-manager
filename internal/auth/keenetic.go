@@ -9,13 +9,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/sys/netif"
 )
 
 const (
@@ -48,7 +48,7 @@ func NewKeeneticClient() *KeeneticClient {
 // resolveAddr detects router IP (br0) and HTTP port (RCI) once.
 func (c *KeeneticClient) resolveAddr() {
 	c.routerAddrOnce.Do(func() {
-		ip := getBr0IP()
+		ip := netif.FirstIPv4("br0")
 		if ip == "" {
 			ip = "192.168.1.1"
 		}
@@ -90,28 +90,6 @@ func getHTTPPort() int {
 	return 80
 }
 
-// getBr0IP returns the first IPv4 address of br0 interface.
-func getBr0IP() string {
-	iface, err := net.InterfaceByName("br0")
-	if err != nil {
-		return ""
-	}
-
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return ""
-	}
-
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok {
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
-				return ip4.String()
-			}
-		}
-	}
-	return ""
-}
-
 // Authenticate verifies credentials against Keenetic router.
 // Returns nil on success, error on failure.
 func (c *KeeneticClient) Authenticate(ctx context.Context, login, password string) error {
@@ -131,9 +109,6 @@ func (c *KeeneticClient) Authenticate(ctx context.Context, login, password strin
 	// Step 2: Calculate hashed password
 	// Formula: sha256(challenge + md5(login + ":" + realm + ":" + password))
 	hashedPassword := c.hashPassword(login, password, realm, challenge)
-
-	// Debug: log auth attempt
-	fmt.Printf("[AUTH DEBUG] URL: %s, login: %s, challenge: %s, realm: %s\n", authURL, login, challenge, realm)
 
 	// Step 3: POST /auth with credentials (include cookies from GET)
 	if err := c.postAuth(ctx, authURL, login, hashedPassword, cookies); err != nil {
@@ -228,8 +203,6 @@ func (c *KeeneticClient) postAuth(ctx context.Context, authURL, login, hashedPas
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("[AUTH DEBUG] POST %s response status: %d\n", authURL, resp.StatusCode)
-
 	if resp.StatusCode == http.StatusUnauthorized {
 		return ErrInvalidCredentials
 	}
@@ -239,4 +212,3 @@ func (c *KeeneticClient) postAuth(ctx context.Context, authURL, login, hashedPas
 
 	return nil
 }
-

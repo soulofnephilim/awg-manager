@@ -252,6 +252,14 @@ func evaluateRule(input InspectInput, parsedIP net.IP, rule Rule, env *inspectEn
 		out.Conditions = append(out.Conditions, fmt.Sprintf("source_ip_cidr: %s (пропущено — нет источника)", strings.Join(rule.SourceIPCIDR, ", ")))
 	}
 
+	// Inbound (listener tag) is likewise unknowable for a manual probe —
+	// record it but never count it as a hit, so managed QoS-DSCP rules
+	// (inbound-only matchers) don't sweep every inspected query into their
+	// class outbound.
+	if len(rule.Inbound) > 0 {
+		out.Conditions = append(out.Conditions, fmt.Sprintf("inbound: %s (пропущено — вход недоступен для ручной проверки)", strings.Join(rule.Inbound, ", ")))
+	}
+
 	// Track each matcher's outcome. AND across present matchers.
 	type partial struct{ present, hit bool }
 	var (

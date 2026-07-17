@@ -7,7 +7,7 @@ import (
 )
 
 func TestSessionStore_CreateAndGet(t *testing.T) {
-	store := NewSessionStore()
+	store := NewSessionStore(nil)
 	t.Cleanup(store.Stop)
 
 	token, err := store.Create("admin")
@@ -37,7 +37,7 @@ func TestSessionStore_CreateAndGet(t *testing.T) {
 }
 
 func TestSessionStore_GetUpdatesLastSeen(t *testing.T) {
-	store := NewSessionStore()
+	store := NewSessionStore(nil)
 	t.Cleanup(store.Stop)
 
 	token, err := store.Create("admin")
@@ -60,7 +60,7 @@ func TestSessionStore_GetUpdatesLastSeen(t *testing.T) {
 }
 
 func TestSessionStore_GetMissingReturnsNil(t *testing.T) {
-	store := NewSessionStore()
+	store := NewSessionStore(nil)
 	t.Cleanup(store.Stop)
 
 	if got := store.Get("missing"); got != nil {
@@ -69,7 +69,7 @@ func TestSessionStore_GetMissingReturnsNil(t *testing.T) {
 }
 
 func TestSessionStore_DeleteRemovesSession(t *testing.T) {
-	store := NewSessionStore()
+	store := NewSessionStore(nil)
 	t.Cleanup(store.Stop)
 
 	token, err := store.Create("admin")
@@ -83,14 +83,14 @@ func TestSessionStore_DeleteRemovesSession(t *testing.T) {
 }
 
 func TestSessionStore_ExpiredDeletedOnGet(t *testing.T) {
-	store := NewSessionStore()
+	store := NewSessionStore(nil)
 	t.Cleanup(store.Stop)
 
 	store.mu.Lock()
 	store.sessions["expired"] = &Session{
 		Token:    "expired",
 		Login:    "admin",
-		LastSeen: time.Now().Add(-SessionTTL - time.Second),
+		LastSeen: time.Now().Add(-defaultSessionTTL - time.Second),
 	}
 	store.mu.Unlock()
 
@@ -107,14 +107,14 @@ func TestSessionStore_ExpiredDeletedOnGet(t *testing.T) {
 }
 
 func TestSessionStore_CleanupRemovesExpiredKeepsActive(t *testing.T) {
-	store := NewSessionStore()
+	store := NewSessionStore(nil)
 	t.Cleanup(store.Stop)
 
 	store.mu.Lock()
 	store.sessions["expired"] = &Session{
 		Token:    "expired",
 		Login:    "admin",
-		LastSeen: time.Now().Add(-SessionTTL - time.Second),
+		LastSeen: time.Now().Add(-defaultSessionTTL - time.Second),
 	}
 	store.sessions["active"] = &Session{
 		Token:    "active",
@@ -134,5 +134,92 @@ func TestSessionStore_CleanupRemovesExpiredKeepsActive(t *testing.T) {
 	}
 	if !hasActive {
 		t.Fatal("active session removed by cleanup")
+	}
+}
+
+func TestSessionStore_TTLDefaults(t *testing.T) {
+	t.Run("nil getter", func(t *testing.T) {
+		store := NewSessionStore(nil)
+		t.Cleanup(store.Stop)
+		if got := store.TTL(); got != defaultSessionTTL {
+			t.Fatalf("TTL() = %v, want %v", got, defaultSessionTTL)
+		}
+	})
+	t.Run("non-positive getter falls back", func(t *testing.T) {
+		store := NewSessionStore(func() time.Duration { return 0 })
+		t.Cleanup(store.Stop)
+		if got := store.TTL(); got != defaultSessionTTL {
+			t.Fatalf("TTL() = %v, want %v", got, defaultSessionTTL)
+		}
+	})
+	t.Run("configured getter wins", func(t *testing.T) {
+		store := NewSessionStore(func() time.Duration { return 2 * time.Hour })
+		t.Cleanup(store.Stop)
+		if got := store.TTL(); got != 2*time.Hour {
+			t.Fatalf("TTL() = %v, want 2h", got)
+		}
+	})
+}
+
+// TestSessionStore_LiveTTLShorteningExpiresExistingSessions pins the live
+// semantics: the TTL getter is consulted on every expiry check, so
+// shortening the configured TTL immediately invalidates sessions whose
+// idle time already exceeds the new value.
+func TestSessionStore_LiveTTLShorteningExpiresExistingSessions(t *testing.T) {
+	ttl := 24 * time.Hour
+	store := NewSessionStore(func() time.Duration { return ttl })
+	t.Cleanup(store.Stop)
+
+	token, err := store.Create("admin")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	// Simulate 2h of inactivity.
+	store.mu.Lock()
+	store.sessions[token].LastSeen = time.Now().Add(-2 * time.Hour)
+	store.mu.Unlock()
+
+	if store.Get(token) == nil {
+		t.Fatal("session expired under 24h TTL after 2h idle")
+	}
+	// Re-set idle time (Get refreshed LastSeen), then shorten the TTL.
+	store.mu.Lock()
+	store.sessions[token].LastSeen = time.Now().Add(-2 * time.Hour)
+	store.mu.Unlock()
+	ttl = time.Hour
+
+	if got := store.Get(token); got != nil {
+		t.Fatalf("Get() = %#v, want nil after TTL shortened below idle time", got)
+	}
+}
+
+func TestSessionStore_CleanupUsesLiveTTL(t *testing.T) {
+	ttl := 24 * time.Hour
+	store := NewSessionStore(func() time.Duration { return ttl })
+	t.Cleanup(store.Stop)
+
+	store.mu.Lock()
+	store.sessions["idle2h"] = &Session{
+		Token:    "idle2h",
+		Login:    "admin",
+		LastSeen: time.Now().Add(-2 * time.Hour),
+	}
+	store.mu.Unlock()
+
+	store.cleanup()
+	store.mu.RLock()
+	_, ok := store.sessions["idle2h"]
+	store.mu.RUnlock()
+	if !ok {
+		t.Fatal("session removed by cleanup under 24h TTL")
+	}
+
+	ttl = time.Hour
+	store.cleanup()
+	store.mu.RLock()
+	_, ok = store.sessions["idle2h"]
+	store.mu.RUnlock()
+	if ok {
+		t.Fatal("session survived cleanup after TTL shortened below idle time")
 	}
 }

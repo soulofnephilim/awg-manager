@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 )
@@ -31,9 +32,9 @@ const subscriptionPortMax = 11999
 // slotConfig is the in-memory shape persisted to 40-subscriptions.json.
 // It intentionally omits log/dns/experimental (those are in 00-base.json).
 type slotConfig struct {
-	Inbounds  []any                    `json:"inbounds"`
-	Outbounds []any                    `json:"outbounds"`
-	Route     map[string]any           `json:"route"`
+	Inbounds  []any          `json:"inbounds"`
+	Outbounds []any          `json:"outbounds"`
+	Route     map[string]any `json:"route"`
 }
 
 // ProxyRegistrar is the narrow interface for NDMS ProxyN management. The
@@ -493,13 +494,32 @@ func (a *OperatorAdapter) upsertOutbound(tag string, ob map[string]any) {
 //	  attributes the failing outbound index to a slot (initialize errors
 //	  index the MERGED outbounds array; decode errors index one file).
 //	  When attributed to OUR slot, drop that outbound, cascade reference
-//	  cleanup (selectors / urltests / route rules), retry — bounded by
-//	  initial outbound count.
+//	  cleanup (selectors / urltests / route rules), then drain the
+//	  remaining per-outbound rejects via cheap STANDALONE single-slot
+//	  checks (drainStandaloneRejects, issue #491) before re-checking
+//	  merged — bounded by initial outbound count.
 //
 // Finally orch.Save commits the cleaned bytes and SetEnabled flips the
 // slot on. Dropped outbounds are logged so the user (UI / /logs) sees
 // which servers were skipped and why; the subscription is not rejected
 // wholesale unless every outbound failed.
+// dropLoopMaxDrops / dropLoopBudget ограничивают drainStandaloneRejects
+// (issue #491): каждый отброшенный сервер — один спавн `sing-box check`, и
+// патологический список из сотен мусорных записей не должен держать Create
+// (и per-subscription мьютекс) минутами. Vars, не consts — тесты ужимают.
+var (
+	dropLoopMaxDrops = 64
+	dropLoopBudget   = 90 * time.Second
+)
+
+// dropLoopExhaustedErr — честная ошибка вместо бесконечного «крутится»:
+// подписка с сотнями неподдерживаемых записей прерывается с внятным
+// объяснением и списком уже отброшенного.
+func dropLoopExhaustedErr(dropped []DropReason) error {
+	return fmt.Errorf("%w: подписка содержит слишком много неподдерживаемых серверов — проверка прервана после %d отброшенных. Сузьте подписку фильтрами (filterInclude/filterExclude). Отброшено: %s",
+		ErrValidation, len(dropped), formatDropList(dropped))
+}
+
 func (a *OperatorAdapter) flush() error {
 	dropped := append([]DropReason(nil), a.preFlushDropped...)
 	a.preFlushDropped = nil
@@ -516,8 +536,13 @@ func (a *OperatorAdapter) flush() error {
 		}
 	}
 
-	// Pass 2 — sing-box check with iterative drop. Cap iterations to
-	// initial outbound count so a parser bug cannot loop forever.
+	// Pass 2 — merged sing-box check with iterative drop: cross-slot
+	// classes (duplicate tags vs 90-user, dangling group refs) plus
+	// per-outbound rejects. A clean batch costs exactly one merged check
+	// (#331); when a reject IS attributed to our slot, the remaining bad
+	// entries are drained via cheap standalone checks (issue #491) before
+	// the next merged re-check. Cap iterations to outbound count so a
+	// parser bug cannot loop forever.
 	maxIter := len(a.cfg.Outbounds) + 1
 	xSlotCleaned := map[string]bool{} // cross-slot tags already cleaned — guards against re-reporting a ref we can't actually remove
 	for iter := 0; iter < maxIter; iter++ {
@@ -531,6 +556,18 @@ func (a *OperatorAdapter) flush() error {
 		}
 		if res.Ok() {
 			break
+		}
+		// Ошибки, атрибутированные user-слоту (90-user.json), drop-циклом
+		// не лечатся: конфликтующий outbound живёт в пользовательском слоте,
+		// который пишет только сам пользователь через эксперт-редактор —
+		// удалять оттуда нечего и нельзя. Честно падаем сразу с понятной
+		// причиной вместо непрозрачного «could not isolate outbound» после
+		// исчерпания ретраев.
+		if ve, ok := userSlotBlockingError(res); ok {
+			if strings.HasPrefix(ve.Kind, "duplicate-") {
+				return fmt.Errorf("%w: конфликт с пользовательским слотом 90-user.json: тег %q уже занят — переименуйте outbound в редакторе конфигурации", ErrValidation, ve.Tag)
+			}
+			return fmt.Errorf("%w: конфликт с пользовательским слотом 90-user.json: %s — правьте в редакторе конфигурации", ErrValidation, ve.Error())
 		}
 		idx, ok := subscriptionsOutboundIndex(res)
 		if !ok {
@@ -565,6 +602,12 @@ func (a *OperatorAdapter) flush() error {
 		}
 		reason := strings.TrimSpace(res.Error())
 		dropped = append(dropped, DropReason{Tag: tag, Reason: reason})
+		// Остальные пер-outbound отбраковки собираем дешёвыми standalone-
+		// проверками (issue #491), чтобы не пересобирать merged-снапшот
+		// на каждый мусорный сервер из большой публичной подписки.
+		if err := a.drainStandaloneRejects(&dropped); err != nil {
+			return err
+		}
 	}
 
 	// An empty slot is fatal only for an additive op (Create/Refresh) where
@@ -589,6 +632,56 @@ func (a *OperatorAdapter) flush() error {
 
 	a.lastDropped = dropped
 	return nil
+}
+
+// drainStandaloneRejects — drop-цикл пер-outbound отбраковок поверх
+// STANDALONE-снапшота одного нашего слота (issue #491). Публичные списки
+// share-ссылок регулярно несут десятки записей, которые sing-box
+// отвергает; каждый дроп — один спавн `sing-box check`, и прогон каждого
+// спавна по merged-снапшоту (все слоты копируются и парсятся заново на
+// каждой итерации) превращал Create большой подписки в минуты немого
+// спиннера на MIPS/ARM-роутере. Cross-slot классы ошибок здесь невидимы
+// по построению — merged-цикл в flush() по-прежнему владеет ими: выход по
+// Ok или по неиндексируемой ошибке возвращает управление ему. Budget-cap:
+// патологический список падает с честной ошибкой вместо перемалывания.
+//
+// Известное ограничение: standalone строже merged для outbound с detour
+// на тег ЧУЖОГО слота (возможно только в sb-JSON подписке, вручную
+// сшитой под конкретный router/user-конфиг) — такой outbound здесь
+// отбросится с причиной в LastFilterDrops, хотя merged-проверка его бы
+// приняла. Встроенные парсеры (vlink/mieru/Clash) внешних detour не
+// порождают; отказ не тихий, поэтому осознанно принимаем.
+func (a *OperatorAdapter) drainStandaloneRejects(dropped *[]DropReason) error {
+	deadline := time.Now().Add(dropLoopBudget)
+	for iter := 0; iter < dropLoopMaxDrops; iter++ {
+		data, err := json.MarshalIndent(a.cfg, "", "  ")
+		if err != nil {
+			return fmt.Errorf("subscription adapter: marshal slot: %w", err)
+		}
+		res, err := a.orch.CheckSlotAlone(orchestrator.SlotSubscriptions, data)
+		if err != nil {
+			return fmt.Errorf("subscription adapter: check-slot: %w", err)
+		}
+		if res.Ok() {
+			return nil
+		}
+		idx, ok := subscriptionsOutboundIndex(res)
+		if !ok {
+			// Не индексируемая по outbound ошибка — оставляем merged-циклу,
+			// который различает конфликты с user-слотом и висячие
+			// cross-slot ссылки.
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return dropLoopExhaustedErr(*dropped)
+		}
+		tag, err := dropOutboundAndCleanRefs(&a.cfg, idx)
+		if err != nil {
+			return fmt.Errorf("subscription adapter: drop idx %d: %w", idx, err)
+		}
+		*dropped = append(*dropped, DropReason{Tag: tag, Reason: strings.TrimSpace(res.Error())})
+	}
+	return dropLoopExhaustedErr(*dropped)
 }
 
 // DeclaredOutboundTags returns the outbound tags present in the committed
@@ -631,6 +724,21 @@ func cleanCrossSlotUnknownRefs(cfg *slotConfig, res orchestrator.ValidationResul
 		cleaned = append(cleaned, e.Tag)
 	}
 	return cleaned
+}
+
+// userSlotBlockingError returns the first BLOCKING validation error
+// attributed to the user slot (90-user.json). Advisory-предупреждения
+// (SeverityWarning) пропускаются — они не мешают применению. Типичный
+// случай: подписка материализует outbound с тегом, который пользователь
+// уже объявил в эксперт-редакторе — валидатор сканирует user-слот (90-…)
+// после subscriptions (40-…) и вешает duplicate-outbound на user.
+func userSlotBlockingError(res orchestrator.ValidationResult) (orchestrator.ValidationError, bool) {
+	for _, e := range res.Errors {
+		if e.Slot == orchestrator.SlotUser && e.Severity != orchestrator.SeverityWarning {
+			return e, true
+		}
+	}
+	return orchestrator.ValidationError{}, false
 }
 
 // LastFilterDrops returns the outbounds filtered out of the most recent

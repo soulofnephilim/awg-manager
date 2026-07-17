@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
@@ -38,6 +39,8 @@ func (h *SingboxFakeIPConfigHandler) handleErr(w http.ResponseWriter, action str
 	switch {
 	case errors.Is(err, router.ErrFakeIPLockedField):
 		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "FAKEIP_LOCKED_FIELD")
+	case errors.Is(err, router.ErrFakeIPRealServerInvalid):
+		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "FAKEIP_REAL_SERVER_INVALID")
 	case errors.Is(err, router.ErrRuleSetReferenced),
 		errors.Is(err, router.ErrOutboundReferenced),
 		errors.Is(err, router.ErrRuleSetTagConflict),
@@ -54,6 +57,17 @@ func (h *SingboxFakeIPConfigHandler) handleErr(w http.ResponseWriter, action str
 	case errors.Is(err, router.ErrInvalidMatchers),
 		errors.Is(err, router.ErrDNSInvalidServer):
 		response.Error(w, err.Error(), "INVALID_MATCHERS")
+	case errors.Is(err, router.ErrBulkEmptyIndices),
+		errors.Is(err, router.ErrBulkEmptyTags):
+		// 400: empty selection for a bulk rule/ruleset mutation — nothing to do.
+		response.Error(w, err.Error(), "BULK_EMPTY_SELECTION")
+	case errors.Is(err, router.ErrCompositeMemberUnknown):
+		// 400: member-тег композита не существует ни в одном каталоге (#567).
+		response.Error(w, err.Error(), "COMPOSITE_MEMBER_UNKNOWN")
+	case errors.Is(err, router.ErrBulkInvalidSelection):
+		// 400: non-empty but invalid bulk selection (duplicate index/tag,
+		// non-route rule, unknown outbound tag, non-remote rule set).
+		response.Error(w, err.Error(), "BULK_INVALID_SELECTION")
 	default:
 		response.InternalError(w, err.Error())
 	}
@@ -115,6 +129,7 @@ func (h *SingboxFakeIPConfigHandler) AddDNSServer(w http.ResponseWriter, r *http
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-server-add", s.Tag, "fakeip DNS server added: "+s.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -148,6 +163,7 @@ func (h *SingboxFakeIPConfigHandler) UpdateDNSServer(w http.ResponseWriter, r *h
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-server-update", body.Tag, "fakeip DNS server updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -179,6 +195,7 @@ func (h *SingboxFakeIPConfigHandler) DeleteDNSServer(w http.ResponseWriter, r *h
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-server-delete", body.Tag, "fakeip DNS server deleted: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -209,6 +226,8 @@ func (h *SingboxFakeIPConfigHandler) MoveDNSServer(w http.ResponseWriter, r *htt
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-server-move", strconv.Itoa(body.From),
+		"fakeip DNS server moved from index "+strconv.Itoa(body.From)+" to "+strconv.Itoa(body.To))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -268,6 +287,7 @@ func (h *SingboxFakeIPConfigHandler) AddDNSRule(w http.ResponseWriter, r *http.R
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-rule-add", rule.Server, "fakeip DNS rule added (server: "+rule.Server+")")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -301,6 +321,8 @@ func (h *SingboxFakeIPConfigHandler) UpdateDNSRule(w http.ResponseWriter, r *htt
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-rule-update", strconv.Itoa(body.Index),
+		"fakeip DNS rule updated at index "+strconv.Itoa(body.Index))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -331,6 +353,8 @@ func (h *SingboxFakeIPConfigHandler) DeleteDNSRule(w http.ResponseWriter, r *htt
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-rule-delete", strconv.Itoa(body.Index),
+		"fakeip DNS rule deleted at index "+strconv.Itoa(body.Index))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -361,6 +385,8 @@ func (h *SingboxFakeIPConfigHandler) MoveDNSRule(w http.ResponseWriter, r *http.
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-rule-move", strconv.Itoa(body.From),
+		"fakeip DNS rule moved from index "+strconv.Itoa(body.From)+" to "+strconv.Itoa(body.To))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -419,6 +445,8 @@ func (h *SingboxFakeIPConfigHandler) PutDNSGlobals(w http.ResponseWriter, r *htt
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-dns-globals", body.Final,
+		"fakeip DNS globals updated (final: "+body.Final+", strategy: "+body.Strategy+")")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -478,6 +506,7 @@ func (h *SingboxFakeIPConfigHandler) AddRule(w http.ResponseWriter, r *http.Requ
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-rule-add", rule.Outbound, "fakeip routing rule added (outbound: "+rule.Outbound+")")
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -511,7 +540,42 @@ func (h *SingboxFakeIPConfigHandler) UpdateRule(w http.ResponseWriter, r *http.R
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-rule-update", strconv.Itoa(body.Index),
+		"fakeip routing rule updated at index "+strconv.Itoa(body.Index)+" (outbound: "+body.Rule.Outbound+")")
 	response.Success(w, map[string]bool{"ok": true})
+}
+
+// BulkSetRuleOutbound sets Outbound on every route rule at the given indices
+// in a single write (fakeip-tun slot).
+//
+//	@Summary		Bulk-set outbound on fakeip-config route rules
+//	@Description	Sets Outbound on every route rule at the given indices in a single config write (fakeip-tun slot). Rejects an empty/duplicate index list, an out-of-range index, a non-route rule, or an unknown outbound tag.
+//	@Tags			singbox-fakeip
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxRouterRuleBulkOutboundRequest	true	"Rule indices + new outbound tag"
+//	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/fakeip/config/rules/bulk-outbound [post]
+func (h *SingboxFakeIPConfigHandler) BulkSetRuleOutbound(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body SingboxRouterRuleBulkOutboundRequest
+	if err := decodeBody(r, &body); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	if err := h.svc.FakeIPBulkSetRuleOutbound(r.Context(), body.Indices, body.Outbound); err != nil {
+		h.handleErr(w, "request", err)
+		return
+	}
+	h.log.Info("fakeip-rules-bulk-outbound", body.Outbound,
+		strconv.Itoa(len(body.Indices))+" fakeip routing rule(s) set to outbound "+body.Outbound)
+	response.Success(w, map[string]int{"updated": len(body.Indices)})
 }
 
 // DeleteRule removes the route rule at the given index (fakeip-tun slot).
@@ -543,6 +607,8 @@ func (h *SingboxFakeIPConfigHandler) DeleteRule(w http.ResponseWriter, r *http.R
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-rule-delete", strconv.Itoa(body.Index),
+		"fakeip routing rule deleted at index "+strconv.Itoa(body.Index))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -576,6 +642,8 @@ func (h *SingboxFakeIPConfigHandler) MoveRule(w http.ResponseWriter, r *http.Req
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-rule-move", strconv.Itoa(body.From),
+		"fakeip routing rule moved from index "+strconv.Itoa(body.From)+" to "+strconv.Itoa(body.To))
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -609,6 +677,7 @@ func (h *SingboxFakeIPConfigHandler) SetRouteFinal(w http.ResponseWriter, r *htt
 		h.handleErr(w, "route-final", err)
 		return
 	}
+	h.log.Info("fakeip-route-final", req.Final, "fakeip route.final set to "+req.Final)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -668,6 +737,7 @@ func (h *SingboxFakeIPConfigHandler) AddRuleSet(w http.ResponseWriter, r *http.R
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-ruleset-add", rs.Tag, "fakeip ruleset added: "+rs.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -706,7 +776,41 @@ func (h *SingboxFakeIPConfigHandler) UpdateRuleSet(w http.ResponseWriter, r *htt
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-ruleset-update", body.Tag, "fakeip ruleset updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
+}
+
+// BulkSetRuleSetDetour sets download_detour on every rule set with a tag in
+// the given list, in a single write (fakeip-tun slot).
+//
+//	@Summary		Bulk-set download_detour on fakeip-config rulesets
+//	@Description	Sets download_detour on every rule set with a tag in the given list, in a single config write (fakeip-tun slot). Rejects an empty/duplicate tag list, an unknown tag, a rule set whose type isn't "remote", or an unknown outbound tag (empty detour clears the field and skips the known-tag check).
+//	@Tags			singbox-fakeip
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxRouterRuleSetBulkDetourRequest	true	"Rule set tags + new download_detour"
+//	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/fakeip/config/rulesets/bulk-detour [post]
+func (h *SingboxFakeIPConfigHandler) BulkSetRuleSetDetour(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body SingboxRouterRuleSetBulkDetourRequest
+	if err := decodeBody(r, &body); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	if err := h.svc.FakeIPBulkSetRuleSetDetour(r.Context(), body.Tags, body.DownloadDetour); err != nil {
+		h.handleErr(w, "request", err)
+		return
+	}
+	h.log.Info("fakeip-rulesets-bulk-detour", body.DownloadDetour,
+		strconv.Itoa(len(body.Tags))+" fakeip rule set(s) detour set to "+body.DownloadDetour)
+	response.Success(w, map[string]int{"updated": len(body.Tags)})
 }
 
 // DeleteRuleSet removes the ruleset identified by tag from the fakeip-tun slot.
@@ -740,6 +844,7 @@ func (h *SingboxFakeIPConfigHandler) DeleteRuleSet(w http.ResponseWriter, r *htt
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-ruleset-delete", body.Tag, "fakeip ruleset deleted: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -799,6 +904,7 @@ func (h *SingboxFakeIPConfigHandler) AddOutbound(w http.ResponseWriter, r *http.
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-outbound-add", o.Tag, "fakeip composite outbound added: "+o.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -832,6 +938,7 @@ func (h *SingboxFakeIPConfigHandler) UpdateOutbound(w http.ResponseWriter, r *ht
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-outbound-update", body.Tag, "fakeip composite outbound updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -866,5 +973,6 @@ func (h *SingboxFakeIPConfigHandler) DeleteOutbound(w http.ResponseWriter, r *ht
 		h.handleErr(w, "request", err)
 		return
 	}
+	h.log.Info("fakeip-outbound-delete", body.Tag, "fakeip composite outbound deleted: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
 }

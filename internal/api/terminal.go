@@ -159,9 +159,9 @@ func (h *TerminalHandler) Stop(w http.ResponseWriter, r *http.Request) {
 //
 //	@Summary		Terminal WebSocket
 //	@Tags			terminal
-//	@Produce		json
+//	@Produce		plain
 //	@Security		CookieAuth
-//	@Success		200	{string}	string	"WebSocket upgrade"
+//	@Success		101	{string}	string	"Switching Protocols (WebSocket upgrade)"
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/terminal/ws [get]
@@ -177,8 +177,8 @@ func (h *TerminalHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Accept client WebSocket. Disable compression for transparent binary passthrough.
 	clientConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify:  true, // same-origin, auth already checked by middleware
-		CompressionMode:     websocket.CompressionDisabled,
+		InsecureSkipVerify: true, // same-origin, auth already checked by middleware
+		CompressionMode:    websocket.CompressionDisabled,
 	})
 	if err != nil {
 		return // Accept already wrote HTTP error

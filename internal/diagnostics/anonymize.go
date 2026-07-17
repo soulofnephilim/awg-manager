@@ -398,11 +398,6 @@ func (a *anonymizer) registerFromReport(report *Report) {
 		}
 	}
 
-	// Log entries may contain public IPs, hostnames, MACs or WG keys in target/message fields.
-	for _, entry := range report.Logs {
-		a.registerSensitiveFromLogEntry(entry)
-	}
-
 	// JournalWarnings contains app and sing-box WARN/ERROR entries.
 	// These entries may contain public IPs, hostnames, MACs, or WireGuard public keys.
 	if report.JournalWarnings != nil {

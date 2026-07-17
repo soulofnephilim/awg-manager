@@ -1,7 +1,7 @@
 import type { SingboxRouterDNSRule } from '$lib/types';
 
 export interface DnsMatcherPart {
-	key: 'rule_set' | 'suffix' | 'domain' | 'keyword' | 'regex' | 'query_type';
+	key: 'rule_set' | 'suffix' | 'domain' | 'keyword' | 'regex' | 'query_type' | 'source_ip';
 	value: string;
 }
 
@@ -23,6 +23,13 @@ export function dnsMatcherParts(r: SingboxRouterDNSRule): DnsMatcherPart[] {
 	if (r.domain_keyword?.length) parts.push({ key: 'keyword', value: headWithExtra(r.domain_keyword) });
 	if (r.domain_regex?.length) parts.push({ key: 'regex', value: headWithExtra(r.domain_regex) });
 	if (r.query_type?.length) parts.push({ key: 'query_type', value: r.query_type.join(', ') });
+	// source_ip_cidr is a real DNS matcher backend-side (dnsRuleHasMatcher counts
+	// it). It has no UI input, but a hand-edited source-scoped DNS rule must NOT
+	// be mistaken for a matcher-less catch-all (bug #445 review): counting it here
+	// keeps isCatchAllDnsRule / shadow detection in sync with the backend.
+	if (r.source_ip_cidr?.length) {
+		parts.push({ key: 'source_ip', value: headWithExtra(r.source_ip_cidr) });
+	}
 	return parts;
 }
 

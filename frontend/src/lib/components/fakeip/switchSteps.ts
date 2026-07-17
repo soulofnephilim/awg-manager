@@ -24,6 +24,8 @@ export interface UIStepDef {
 
 export interface UIStep extends UIStepDef {
 	state: UIStepState;
+	/** Live detail from the latest SSE event for this milestone (if any). */
+	liveMessage?: string;
 }
 
 // Ordered milestone progression for the lifecycle. Used to decide whether a
@@ -62,7 +64,7 @@ const ENABLE_STEPS: UIStepDef[] = [
 	{
 		milestone: 'readiness',
 		title: 'Перезапуск sing-box',
-		detail: 'ожидаем Clash API',
+		detail: 'ожидаем inbounds (TPROXY/REDIRECT)',
 	},
 	{
 		milestone: 'ready',
@@ -86,7 +88,7 @@ const DISABLE_STEPS: UIStepDef[] = [
 	{
 		milestone: 'readiness',
 		title: 'Перезапуск sing-box',
-		detail: 'ожидаем Clash API',
+		detail: 'ожидаем inbounds (TPROXY/REDIRECT)',
 	},
 	{
 		milestone: 'ready',
@@ -95,19 +97,18 @@ const DISABLE_STEPS: UIStepDef[] = [
 	},
 ];
 
-// TProxy bring-up (off|fakeip-tun → tproxy).
+// TProxy bring-up (off|fakeip-tun → tproxy). Order matches Enable: sing-box
+// readiness first, then iptables install.
 const TPROXY_ENABLE_STEPS: UIStepDef[] = [
 	{ milestone: 'teardown', title: 'Снят предыдущий режим', detail: 'прежние маршруты/перехват убраны (если были)' },
+	{ milestone: 'readiness', title: 'Перезапуск sing-box', detail: 'ожидаем inbounds (TPROXY/REDIRECT)' },
 	{ milestone: 'provision', title: 'iptables TPROXY установлен', detail: 'jumps + AWGM-цепочки' },
-	{ milestone: 'readiness', title: 'Перезапуск sing-box', detail: 'ожидаем Clash API' },
 	{ milestone: 'ready', title: 'Проверка готовности', detail: 'TPROXY-перехват активен' },
 ];
-
-// TProxy switch-out (tproxy → off).
 const TPROXY_DISABLE_STEPS: UIStepDef[] = [
 	{ milestone: 'teardown', title: 'Снят TPROXY-перехват', detail: 'iptables jumps + цепочки убраны' },
 	{ milestone: 'provision', title: 'sing-box перестроен', detail: 'без перехвата' },
-	{ milestone: 'readiness', title: 'Перезапуск sing-box', detail: 'ожидаем Clash API' },
+	{ milestone: 'readiness', title: 'Перезапуск sing-box', detail: 'ожидаем inbounds (TPROXY/REDIRECT)' },
 	{ milestone: 'ready', title: 'Проверка готовности', detail: 'маршрутизация выключена' },
 ];
 
@@ -148,7 +149,13 @@ export function deriveSteps(
 	// Latest status per milestone (events may repeat current→done in place; the
 	// store already upserts, but be defensive and take the last occurrence).
 	const status = new Map<Milestone, SingboxRouterTransitionStep['status']>();
-	for (const s of received) status.set(s.step, s.status);
+	const messages = new Map<Milestone, string>();
+	for (const s of received) {
+		status.set(s.step, s.status);
+		if (s.message) {
+			messages.set(s.step, s.message);
+		}
+	}
 
 	// Highest milestone rank that has reached `done`.
 	let maxDoneRank = -1;
@@ -176,24 +183,25 @@ export function deriveSteps(
 
 	return defs.map((def): UIStep => {
 		const r = rank(def.milestone);
+		const liveMessage = messages.get(def.milestone);
 
 		const isDone = r <= maxDoneRank;
 		if (isDone) {
-			return { ...def, state: 'done' };
+			return { ...def, state: 'done', liveMessage };
 		}
 
 		if (failed) {
 			if (!errorAssigned) {
 				errorAssigned = true;
-				return { ...def, state: 'error' };
+				return { ...def, state: 'error', liveMessage };
 			}
-			return { ...def, state: 'pending' };
+			return { ...def, state: 'pending', liveMessage };
 		}
 
 		if (r === currentRank) {
-			return { ...def, state: 'current' };
+			return { ...def, state: 'current', liveMessage };
 		}
 
-		return { ...def, state: 'pending' };
+		return { ...def, state: 'pending', liveMessage };
 	});
 }

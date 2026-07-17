@@ -26,16 +26,27 @@ type Service struct {
 
 	// Guard against concurrent upgrades
 	upgrading bool
+
+	// dataDir is where the auto-install marker file lives.
+	dataDir string
+	// singboxUpdater lets the auto-install scheduler drive the managed
+	// sing-box binary. nil when not wired (e.g. plain unit tests) — the
+	// sing-box auto-install path is then simply skipped.
+	singboxUpdater SingboxUpdater
 }
 
-// New creates a new updater service.
-func New(version string, settings *storage.SettingsStore, appLogger logging.AppLogger) *Service {
+// New creates a new updater service. dataDir is used for the auto-install
+// marker file; singboxUpdater may be nil if sing-box auto-install is not
+// wired (the scheduler then only handles awg-manager self-updates).
+func New(version string, settings *storage.SettingsStore, appLogger logging.AppLogger, dataDir string, singboxUpdater SingboxUpdater) *Service {
 	s := &Service{
-		version:  version,
-		appLog:   logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubUpdate),
-		settings: settings,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		version:        version,
+		appLog:         logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubUpdate),
+		settings:       settings,
+		dataDir:        dataDir,
+		singboxUpdater: singboxUpdater,
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	s.downloader = newLoggingDownloader(newDefaultDownloader(), s.appLog)
 	s.changelog = newChangelogFetcher(changelogURLForChannel(channelStable), 10*time.Minute, s.downloader)
@@ -83,15 +94,29 @@ func (s *Service) run() {
 		return
 	}
 
+	// Report the outcome of any auto-install attempt made before this
+	// process started (the in-memory app log does not survive a restart).
+	s.autoInstallRetrospective()
+
 	s.doCheck()
+
+	// One-shot catch-up for a managed sing-box binary that fell behind
+	// while auto-install was enabled (e.g. it was installed after the
+	// last scheduled slot, or awgm was down at the scheduled time).
+	s.autoInstallStartupCatchUp(context.Background())
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
+
+	autoTicker := time.NewTicker(autoInstallTick)
+	defer autoTicker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
 			s.doCheck()
+		case <-autoTicker.C:
+			s.runAutoInstallSlot()
 		case <-s.stop:
 			return
 		}
@@ -181,9 +206,10 @@ func (s *Service) ApplyUpgrade(ctx context.Context) error {
 		return ErrUpgradeInProgress
 	}
 
-	var downloadURL string
+	var downloadURL, wantSHA256 string
 	if s.cached != nil {
 		downloadURL = s.cached.DownloadURL
+		wantSHA256 = s.cached.SHA256
 	}
 	if downloadURL == "" {
 		s.mu.Unlock()
@@ -191,12 +217,22 @@ func (s *Service) ApplyUpgrade(ctx context.Context) error {
 	}
 	s.upgrading = true
 	s.mu.Unlock()
-	if err := upgradeWithDownloader(ctx, downloadURL, s.downloader); err != nil {
+	if err := upgradeWithDownloader(ctx, downloadURL, wantSHA256, s.downloader); err != nil {
 		s.mu.Lock()
 		s.upgrading = false
 		s.mu.Unlock()
 		return err
 	}
+	// On success opkg restarts this daemon, so the flag never needs manual
+	// clearing. But if the detached install fails silently (opkg lock, disk
+	// full), the flag would otherwise stay set forever and every later apply
+	// would return ErrUpgradeInProgress until a manual restart. Give the
+	// install a generous window, then re-allow retries.
+	time.AfterFunc(10*time.Minute, func() {
+		s.mu.Lock()
+		s.upgrading = false
+		s.mu.Unlock()
+	})
 	return nil
 }
 
@@ -209,17 +245,6 @@ func (s *Service) GetChangelog(ctx context.Context, fromVer, toVer string) ([]En
 		return nil, err
 	}
 	return Slice(entries, fromVer, toVer), nil
-}
-
-// GetChangelogSingle fetches the monolithic CHANGELOG.md and returns
-// only the entry that exactly matches version, or nil if there is no
-// such entry.
-func (s *Service) GetChangelogSingle(ctx context.Context, version string) (*Entry, error) {
-	entries, err := s.changelog.Fetch(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return Single(entries, version), nil
 }
 
 // GetChangelogMinor returns all CHANGELOG entries for the same major.minor

@@ -40,6 +40,13 @@ func (a *ndmsLogAdapter) Warnf(format string, args ...any) {
 	a.log.Warn("warn", "", fmt.Sprintf(format, args...))
 }
 
+func (a *ndmsLogAdapter) Debugf(format string, args ...any) {
+	if a == nil || a.log == nil {
+		return
+	}
+	a.log.Debug("debug", "", fmt.Sprintf(format, args...))
+}
+
 func queryLogger(appLog logging.AppLogger) query.Logger {
 	return &ndmsLogAdapter{log: logging.NewScopedLogger(appLog, logging.GroupSystem, "ndms-query")}
 }

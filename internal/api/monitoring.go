@@ -28,18 +28,18 @@ type MonitoringTunnelDTO struct {
 
 // MonitoringCellDTO mirrors frontend MonitoringCell.
 type MonitoringCellDTO struct {
-	TargetID        string  `json:"targetId" example:"target_google"`
-	TunnelID        string  `json:"tunnelId" example:"tun_abc123"`
-	LatencyMs       *int    `json:"latencyMs" swaggertype:"integer" example:"42"`
-	OK              bool    `json:"ok" example:"true"`
+	TargetID         string `json:"targetId" example:"target_google"`
+	TunnelID         string `json:"tunnelId" example:"tun_abc123"`
+	LatencyMs        *int   `json:"latencyMs" swaggertype:"integer" example:"42"`
+	OK               bool   `json:"ok" example:"true"`
 	ActiveForRestart bool   `json:"activeForRestart" example:"false"`
-	IsSelf          bool    `json:"isSelf" example:"false"`
-	Ts              string  `json:"ts" example:"2024-01-15T10:30:00Z"`
+	IsSelf           bool   `json:"isSelf" example:"false"`
+	Ts               string `json:"ts" example:"2024-01-15T10:30:00Z"`
 }
 
 // MonitoringSnapshotResponse is the envelope for GET /monitoring/matrix.
 type MonitoringSnapshotResponse struct {
-	Success bool                  `json:"success" example:"true"`
+	Success bool                   `json:"success" example:"true"`
 	Data    MonitoringSnapshotData `json:"data"`
 }
 

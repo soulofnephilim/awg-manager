@@ -47,6 +47,8 @@
     'access-policy': 'Access policies',
     'client-route': 'Per-client routes',
     'singbox-router': 'Sing-box router',
+    selective: 'Селективный ipset',
+    subscription: 'Подписки',
     deviceproxy: 'Device proxy',
     hrneo: 'HrNeo',
     catalog: 'Каталог',
@@ -68,6 +70,11 @@
     profiling: 'Profiling HTTP',
     rci: 'RCI',
     ndms: 'NDMS',
+    storage: 'Хранилище',
+    monitoring: 'Мониторинг',
+    orchestrator: 'Оркестратор',
+    kmod: 'Модуль ядра',
+    http: 'HTTP-сервер',
   };
 
   export interface BufferBadge {
@@ -88,9 +95,6 @@
     filter: LogsFilter;
     onFilterChange: (filter: LogsFilter) => void;
     bucket: LogBucket;
-    onBucketChange: (bucket: LogBucket) => void;
-    /** Если true — bucket зафиксирован, переключатель app/singbox скрыт. */
-    bucketLocked?: boolean;
     paused: boolean;
     bufferCount: number;
     onTogglePause: () => void;
@@ -117,8 +121,6 @@
     filter = $bindable(),
     onFilterChange,
     bucket,
-    onBucketChange,
-    bucketLocked = false,
     paused,
     bufferCount,
     onTogglePause,
@@ -244,32 +246,6 @@
 
 <div class="toolbar">
   <div class="row row-bucket">
-    {#if !bucketLocked}
-      <span class="bucket-label">Источник</span>
-      <span class="chip-row" role="group" aria-label="Источник логов">
-        <button
-          type="button"
-          class="chip"
-          class:chip-active={bucket === 'app'}
-          aria-pressed={bucket === 'app'}
-          onclick={() => onBucketChange('app')}
-        >
-          Приложение
-        </button>
-        <button
-          type="button"
-          class="chip"
-          class:chip-active={bucket === 'singbox'}
-          aria-pressed={bucket === 'singbox'}
-          onclick={() => onBucketChange('singbox')}
-        >
-          Sing-box
-        </button>
-      </span>
-
-      <span class="divider" aria-hidden="true"></span>
-    {/if}
-
     <span class="live-cell">
       {#if paused}
         <Badge variant="warning" size="sm">PAUSED</Badge>
@@ -500,7 +476,6 @@
     padding: 0.125rem 0.5rem;
   }
 
-  .bucket-label,
   .sub-label {
     color: var(--color-text-muted);
     font-weight: 600;

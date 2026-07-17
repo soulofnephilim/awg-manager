@@ -62,6 +62,28 @@ export function applyTraffic(data: SingboxTraffic[]): void {
 	singboxTraffic.set(m);
 }
 
+// Кумулятивные счётчики Clash за всю жизнь процесса sing-box (включая
+// ЗАКРЫТЫЕ соединения) — монотонны до рестарта движка. Per-tag карта выше
+// пересобирается только из открытых соединений и для агрегатной скорости /
+// объёма «за сессию» непригодна: суммы падают при закрытии соединений и
+// считают каждое звено chain'а.
+export interface SingboxTrafficTotals {
+	downloadBytes: number;
+	uploadBytes: number;
+}
+
+export const singboxTrafficTotals = writable<SingboxTrafficTotals>({
+	downloadBytes: 0,
+	uploadBytes: 0,
+});
+
+export function applyTrafficTotals(data: { downloadTotal: number; uploadTotal: number }): void {
+	singboxTrafficTotals.set({
+		downloadBytes: data.downloadTotal ?? 0,
+		uploadBytes: data.uploadTotal ?? 0,
+	});
+}
+
 export const singboxDelayHistory = writable<Map<string, number[]>>(new Map());
 
 export function applyDelay(tag: string, delay: number): void {

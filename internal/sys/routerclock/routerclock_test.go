@@ -103,3 +103,39 @@ func TestGet_FallsBackToVarTZSource(t *testing.T) {
 		t.Fatalf("unexpected info: %#v", info)
 	}
 }
+
+func TestInstallAsLocal_RouterTZ(t *testing.T) {
+	dir := t.TempDir()
+	tzFile := dir + "/TZ"
+	if err := os.WriteFile(tzFile, []byte("MSK-3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore := setTZCandidatesForTest([]string{tzFile})
+	defer restore()
+
+	prev := time.Local
+	defer func() { time.Local = prev }()
+
+	if !InstallAsLocal() {
+		t.Fatal("InstallAsLocal returned false for a valid router TZ")
+	}
+	_, offset := time.Now().Zone()
+	if offset != 3*3600 {
+		t.Fatalf("time.Local offset = %d, want %d (MSK+3)", offset, 3*3600)
+	}
+}
+
+func TestInstallAsLocal_NoRouterTZ_NoOp(t *testing.T) {
+	restore := setTZCandidatesForTest([]string{"/nonexistent/TZ"})
+	defer restore()
+
+	prev := time.Local
+	defer func() { time.Local = prev }()
+
+	if InstallAsLocal() {
+		t.Fatal("InstallAsLocal returned true with no router TZ file")
+	}
+	if time.Local != prev {
+		t.Fatal("time.Local mutated on no-op path")
+	}
+}

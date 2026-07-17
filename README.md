@@ -30,15 +30,17 @@
 
 ## Установка (стабильная версия)
 
+curl не требуется — установка идёт встроенным busybox wget (полезно на устройствах с малой внутренней памятью):
+
 ```sh
 opkg update && opkg upgrade
-opkg install curl
-curl -sL https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
+wget -qO- http://repo.hoaxisr.ru/install.sh | sh
 ```
 
-Если у вас недоступен GitHub или при выполнении скрипта установки он "зависает", можете воспользоваться зеркалом: 
+Вариант через GitHub (HTTPS): нужен curl, т.к. busybox wget прошивки может не поддерживать HTTPS:
 ```sh
-wget -qO- http://repo.hoaxisr.ru/install.sh | sh
+opkg install curl
+curl -sL https://raw.githubusercontent.com/hoaxisr/awg-manager/master/scripts/install.sh | sh
 ```
 
 После установки веб-интерфейс доступен по адресу роутера и обычно по 2222 порту.
@@ -71,10 +73,20 @@ Telegram: [@awgmanager](https://t.me/awgmanager)
 
 ## Поддержать проект
 
-Если проект оказался полезным, можно поддержать разработку донатом:
+Если у вас есть лишние шекели, вам понравилось как вам не отвечают на вопросы и вы готовы самостоятельно решать проблемы, а еще вы оценили подход — «ни дня без нового бага», то:
 
-**USDT (Tron):** 
-`TDisGwxj2AopFzT2VQ9JwY6QDyjChUP5EA`
+Вы можете поделиться богатством и дать возможность родить новые проблемы там, где еще вчера все было хорошо:
+
+**USDT / ETH:** `0x7eae43b82157f2e4ea233eddf5d9ce19a1064f04`
+
+**USDT / Tron:** `TDisGwxj2AopFzT2VQ9JwY6QDyjChUP5EA`
+
+**Boosty:** https://boosty.to/awgm_hoaxisr/donate
+
+**ЮMoney:** https://yoomoney.ru/fundraise/1GF36UHR07L.260312
+
+**Или любая сумма:** https://yoomoney.ru/to/4100119477098112/0
+
 ---
 
 ## Полезное

@@ -12,9 +12,24 @@ import (
 // Routers with 256MB RAM report ~248MB, so we use 200MB to avoid false positives.
 const LowMemoryThresholdMB = 200
 
+// MidMemoryThresholdMB is the upper bound of the mid-memory GC tier.
+// Keenetic devices with 256MB (~248 reported) and 512MB (~500 reported) RAM
+// fall into 200..700MB and get a tight soft GOMEMLIMIT + GOGC=50; 1GB
+// models report ~950MB+ and land in the high tier (roomy GOMEMLIMIT only,
+// см. #562). 700 leaves a wide margin above real 512MB readings without
+// catching 1GB devices.
+const MidMemoryThresholdMB = 700
+
+// highTierMemLimit — мягкий потолок для >=700MB моделей. До #562 они не
+// тюнились вовсе, и аллокационный шторм (sparse NUL-дыра proc-лога)
+// доезжал до 90%+ ОЗУ роутера прежде чем вмешивался kernel OOM killer.
+// 256MiB — сильно выше идла (~30-60MB) и легитимных пиков selective
+// (~100-150MB): GC-трэша в нормальной работе нет, GOGC не трогаем.
+const highTierMemLimit = "256MiB"
+
 var (
-	totalMemoryMB     int
-	totalMemoryOnce   sync.Once
+	totalMemoryMB   int
+	totalMemoryOnce sync.Once
 )
 
 // GetTotalMemoryMB returns total system RAM in megabytes.
@@ -35,18 +50,37 @@ func IsLowMemoryDevice() bool {
 
 // GetGCEnv returns environment variables for Go GC tuning.
 // If disableMemorySaving is true, returns soft mode (GOGC=100 only).
-// If disableMemorySaving is false (default), applies auto mode for low-memory devices.
-// Returns nil for devices with sufficient RAM (>= 200MB) in auto mode.
+// If disableMemorySaving is false (default), applies the auto tier table.
+// Returns nil only when total memory is unknown.
 func GetGCEnv(disableMemorySaving bool) []string {
 	if disableMemorySaving {
 		return []string{"GOGC=100"}
 	}
+	return gcEnvForTotalMemoryMB(GetTotalMemoryMB())
+}
 
-	if !IsLowMemoryDevice() {
-		return nil
+// gcEnvForTotalMemoryMB is the GC tier table, split from GetGCEnv so it is
+// testable without faking /proc/meminfo.
+//
+// The <200MB tiers are the historical ones (unchanged). The >=700MB tier is
+// a roomy GOMEMLIMIT-only safety net (#562, см. highTierMemLimit). The 200–700MB tier
+// exists because 256–512MB routers previously ran with GOGC=100 and NO
+// GOMEMLIMIT at all: a selective-ipset rebuild over a huge rule list could
+// balloon the heap until the kernel OOM killer fired (observed in the field:
+// anon-rss 311MB on a 512MB device). GOMEMLIMIT=96MiB is a SOFT limit chosen
+// well above the daemon's ~30-60MB idle heap — normal operation never
+// GC-thrashes — while forcing aggressive collection during rebuild spikes
+// instead of unbounded growth. GOGC=50 keeps steady-state growth modest
+// between spikes. Explicit GOGC/GOMEMLIMIT environment variables always win:
+// applyGoMemoryLimits (cmd/awg-manager) skips any knob already present in
+// the environment.
+func gcEnvForTotalMemoryMB(mem int) []string {
+	if mem <= 0 {
+		return nil // память неизвестна — не гадаем
 	}
-
-	mem := GetTotalMemoryMB()
+	if mem >= MidMemoryThresholdMB {
+		return []string{"GOMEMLIMIT=" + highTierMemLimit}
+	}
 
 	var memLimit string
 	switch {
@@ -54,8 +88,10 @@ func GetGCEnv(disableMemorySaving bool) []string {
 		memLimit = "16MiB"
 	case mem < 100:
 		memLimit = "24MiB"
-	default:
+	case mem < LowMemoryThresholdMB:
 		memLimit = "32MiB"
+	default:
+		memLimit = "96MiB"
 	}
 
 	return []string{
@@ -88,4 +124,3 @@ func detectTotalMemory() int {
 	}
 	return 0
 }
-

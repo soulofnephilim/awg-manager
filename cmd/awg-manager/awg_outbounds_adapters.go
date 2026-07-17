@@ -160,7 +160,7 @@ func (a *deviceproxyAWGOutboundsAdapter) ListTags(ctx context.Context) ([]device
 	out := make([]deviceproxy.AWGTagInfo, 0, len(tags))
 	for _, t := range tags {
 		out = append(out, deviceproxy.AWGTagInfo{
-			Tag: t.Tag, Label: t.Label, Kind: t.Kind, Iface: t.Iface,
+			Tag: t.Tag, Label: t.Label, Iface: t.Iface,
 		})
 	}
 	return out, nil

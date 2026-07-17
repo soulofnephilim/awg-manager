@@ -5,10 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
+	"time"
+
+	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 )
+
+// ruleSetDecompileTimeout — потолок одного `sing-box rule-set decompile`.
+// Щедрый: decompile .srs geosite-масштаба на 580МГц MIPS легально занимает
+// минуты. Раньше команда шла через голый exec.Command без контекста и
+// таймаута — зависший decompile переживал и stall guard пересборки, и её
+// 2-часовой предохранитель (RebuildOwnedRun не возвращался, heavyop-гейт и
+// флаг rebuilding залипали навсегда).
+const ruleSetDecompileTimeout = 5 * time.Minute
 
 // Exec/IO seams (mirror ruleSetMatchExec / inlineRuleSetCompileExec) so the
 // network + binary integration is replaced in tests. Production paths call the
@@ -16,8 +26,11 @@ import (
 var ruleSetDownload = func(ctx context.Context, url, format string) (string, error) {
 	return defaultRuleSetDownload(ctx, url, format)
 }
-var ruleSetDecompileExec = func(binary, srsPath string) ([]byte, error) {
-	return defaultRuleSetDecompile(binary, srsPath)
+var ruleSetDecompileExec = func(ctx context.Context, binary, srsPath string) ([]byte, error) {
+	return defaultRuleSetDecompile(ctx, binary, srsPath)
+}
+var ruleSetDecompileToFile = func(ctx context.Context, binary, srsPath string) (string, error) {
+	return defaultRuleSetDecompileToFile(ctx, binary, srsPath)
 }
 
 // remoteCIDRCache is a process-wide on-disk cache for the Tier-2 download path.
@@ -45,27 +58,43 @@ func defaultRuleSetDownload(_ context.Context, url, format string) (string, erro
 	return sharedRemoteCIDRCache().getOrDownload(url, format, nil, "")
 }
 
+// defaultRuleSetDecompileToFile runs sing-box rule-set decompile into a temp JSON
+// file and returns its path. The caller must remove the file when done.
+// Команда подчинена ctx вызывающего (guard-контекст пересборки может её
+// отменить) и ограничена собственным щедрым exec-таймаутом
+// ruleSetDecompileTimeout; sysexec даёт WaitDelay и добивание process group.
+func defaultRuleSetDecompileToFile(ctx context.Context, binary, srsPath string) (string, error) {
+	if binary == "" {
+		return "", fmt.Errorf("no sing-box binary for decompile")
+	}
+	tmp, err := os.CreateTemp("", "awgm-decompile-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create temp: %w", err)
+	}
+	jsonPath := tmp.Name()
+	_ = tmp.Close()
+
+	res, err := sysexec.RunWithOptions(ctx, binary,
+		[]string{"rule-set", "decompile", "--output", jsonPath, srsPath},
+		sysexec.Options{Timeout: ruleSetDecompileTimeout})
+	if err != nil {
+		_ = os.Remove(jsonPath)
+		return "", sysexec.FormatError(res, fmt.Errorf("sing-box decompile: %w", err))
+	}
+	return jsonPath, nil
+}
+
 // defaultRuleSetDecompile runs `sing-box rule-set decompile --output <tmp.json>
 // <srs>` (the genpresets form) and returns the decompiled source JSON bytes.
 // sing-box writes to the --output file rather than stdout, so we point it at a
 // temp file, read it back, and remove it. An empty binary (dev box without
 // sing-box) yields an error the caller logs + skips.
-func defaultRuleSetDecompile(binary, srsPath string) ([]byte, error) {
-	if binary == "" {
-		return nil, fmt.Errorf("no sing-box binary for decompile")
-	}
-	tmp, err := os.CreateTemp("", "awgm-decompile-*.json")
+func defaultRuleSetDecompile(ctx context.Context, binary, srsPath string) ([]byte, error) {
+	jsonPath, err := defaultRuleSetDecompileToFile(ctx, binary, srsPath)
 	if err != nil {
-		return nil, fmt.Errorf("create temp: %w", err)
+		return nil, err
 	}
-	jsonPath := tmp.Name()
-	_ = tmp.Close()
 	defer os.Remove(jsonPath)
-
-	cmd := exec.Command(binary, "rule-set", "decompile", "--output", jsonPath, srsPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("sing-box decompile: %v: %s", err, strings.TrimSpace(string(out)))
-	}
 	return os.ReadFile(jsonPath)
 }
 
@@ -127,7 +156,7 @@ func (s *ServiceImpl) remoteTunCIDRs(ctx context.Context, cfg *RouterConfig) (v4
 		if strings.HasSuffix(path, ".json") || rs.Format == "source" {
 			raw, err = os.ReadFile(path)
 		} else {
-			raw, err = ruleSetDecompileExec(s.singboxBinary(), path)
+			raw, err = ruleSetDecompileExec(ctx, s.singboxBinary(), path)
 		}
 		if err != nil {
 			s.appLog.Warn("fakeip-cidr-remote", rs.Tag, "read/decompile: "+err.Error())

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
@@ -17,6 +18,12 @@ type UpdateInfoData struct {
 	LatestVersion  string `json:"latestVersion,omitempty" example:"2.5.0"`
 	CheckedAt      string `json:"checkedAt" example:"2024-01-15T10:00:00Z"`
 	Checking       bool   `json:"checking" example:"false"`
+	// NextAutoInstallAt/LastAutoInstallAt are computed by the auto-install
+	// scheduler (internal/updater.Service.NextAutoInstallAt), not stored on
+	// the cached UpdateInfo — they are injected into the response in both
+	// the cached and force=true branches of Check (task #559-4, MAJOR-2).
+	NextAutoInstallAt string `json:"nextAutoInstallAt,omitempty" example:"2024-01-16T05:00:00Z"`
+	LastAutoInstallAt string `json:"lastAutoInstallAt,omitempty" example:"2024-01-15T05:00:00Z"`
 }
 
 // UpdateCheckResponse is the envelope for GET /system/update/check.
@@ -60,6 +67,18 @@ type UpdateApplyResponse struct {
 	Data    UpdateApplyData `json:"data"`
 }
 
+// updateCheckResponseData is the actual JSON payload of GET
+// /system/update/check. It copies the cached/fresh UpdateInfo and adds the
+// auto-install schedule fields at the response layer — UpdateInfo itself
+// (internal/updater/types.go) stays untouched because it doubles as the
+// scheduler's on-disk-adjacent cache, which doCheck/CheckNow replace
+// wholesale on every check (task #559-4, MAJOR-2).
+type updateCheckResponseData struct {
+	updater.UpdateInfo
+	NextAutoInstallAt string `json:"nextAutoInstallAt,omitempty"`
+	LastAutoInstallAt string `json:"lastAutoInstallAt,omitempty"`
+}
+
 // UpdateHandler handles update check and apply endpoints.
 type UpdateHandler struct {
 	updater *updater.Service
@@ -101,7 +120,16 @@ func (h *UpdateHandler) Check(w http.ResponseWriter, r *http.Request) {
 		info = h.updater.GetCached()
 	}
 
-	response.Success(w, info)
+	data := updateCheckResponseData{UpdateInfo: *info}
+	next, last := h.updater.NextAutoInstallAt()
+	if !next.IsZero() {
+		data.NextAutoInstallAt = next.Format(time.RFC3339)
+	}
+	if !last.IsZero() {
+		data.LastAutoInstallAt = last.Format(time.RFC3339)
+	}
+
+	response.Success(w, data)
 }
 
 // Apply starts the opkg upgrade process.

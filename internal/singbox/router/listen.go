@@ -187,9 +187,9 @@ var fakeIPPoolRoutePresent = liveFakeIPPoolRoutePresent
 // liveFakeIPPoolRoutePresent parses /proc/net/route and reports whether a v4
 // route for the fakeip pool out the tun iface is installed — the honest
 // structural check for steady-state Active (the fakeip equivalent of "TPROXY
-// jumps present"). /proc/net/route stores Destination and Mask as little-endian
-// hex; a row matches when its iface equals iface and its (destination, mask)
-// equals the pool's network address and prefix mask.
+// jumps present"). /proc/net/route stores Destination and Mask as host-order
+// hex (see parseProcRouteHex); a row matches when its iface equals iface and
+// its (destination, mask) equals the pool's network address and prefix mask.
 //
 // v1 SCOPE: v4 pool route only. The v6 pool auto-route (fc00::/18 → opkgtun) is
 // NOT checked here, so GetStatus.Active can report true while the v6 path is
@@ -278,7 +278,11 @@ func liveFakeIPPoolRoute6Present(iface string, pool netip.Prefix) bool {
 }
 
 // parseProcRouteHex decodes a /proc/net/route Destination/Mask field (8 hex
-// chars, little-endian u32) into a big-endian 4-byte address for comparison.
+// chars) into a big-endian 4-byte address for comparison. The kernel prints
+// these fields with %08X of a __be32, i.e. in HOST byte order — so the value
+// must be decoded with native endianness: on mipsle 10.128.0.0 prints as
+// "0000800A" (swap needed), on big-endian mips as "0A800000" (already in
+// wire order). Hardcoding LittleEndian here broke the check on mips.
 func parseProcRouteHex(s string) ([4]byte, bool) {
 	var out [4]byte
 	if len(s) != 8 {
@@ -288,7 +292,7 @@ func parseProcRouteHex(s string) ([4]byte, bool) {
 	if err != nil {
 		return out, false
 	}
-	v := binary.LittleEndian.Uint32(raw)
+	v := binary.NativeEndian.Uint32(raw)
 	binary.BigEndian.PutUint32(out[:], v)
 	return out, true
 }

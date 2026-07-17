@@ -5,6 +5,7 @@
 	import { Button, Modal } from '$lib/components/ui';
 	import { formatTime } from '$lib/utils/format';
 	import { stripAnsi } from '$lib/utils/ansi';
+	import { triggerSelectiveRebuildIfEnabled } from '$lib/components/sb-router/selectiveRebuildTrigger';
 	import type { RouterStagingValidationError, RouterValidationErrorDTO } from '$lib/types';
 
 	const stagingStore = singboxRouter.staging;
@@ -25,7 +26,8 @@
 		inlineSbCheck = null;
 		try {
 			await api.singboxRouterStagingApply();
-			// success: SSE will flip hasDraft to false and the banner disappears
+			// Rebuild ipset once after Apply (opens progress modal inside trigger).
+			setTimeout(() => void triggerSelectiveRebuildIfEnabled(), 400);
 		} catch (e: unknown) {
 			const err = e as { status?: number; body?: RouterStagingValidationError };
 			if (err.status === 422 && err.body?.validation) {

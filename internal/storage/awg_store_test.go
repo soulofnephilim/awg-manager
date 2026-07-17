@@ -260,11 +260,134 @@ func TestAWGTunnelStoreNextAvailableIDOS4Fallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := store.NextAvailableID()
+	got, err := store.NextAvailableID("kernel")
 	if err != nil {
 		t.Fatalf("NextAvailableID() error = %v", err)
 	}
 	if got != "awgm1" {
 		t.Fatalf("NextAvailableID() = %q, want awgm1", got)
+	}
+}
+
+// awgTunnelsFromIDs builds a tunnel list from IDs; the IDs listed in
+// nativewg get Backend "nativewg", the rest — "kernel".
+func awgTunnelsFromIDs(ids []string, nativewg ...string) []AWGTunnel {
+	nwgSet := make(map[string]bool, len(nativewg))
+	for _, id := range nativewg {
+		nwgSet[id] = true
+	}
+	out := make([]AWGTunnel, 0, len(ids))
+	for _, id := range ids {
+		t := AWGTunnel{ID: id, Name: id, Backend: "kernel"}
+		if nwgSet[id] {
+			t.Backend = "nativewg"
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func TestNextAvailableIDOS5Kernel(t *testing.T) {
+	tests := []struct {
+		name    string
+		tunnels []AWGTunnel
+		want    string
+	}{
+		{"empty store", nil, "awg10"},
+		{"first free", awgTunnelsFromIDs([]string{"awg10", "awg11"}), "awg12"},
+		{"gap reused", awgTunnelsFromIDs([]string{"awg10", "awg12"}), "awg11"},
+		// Легаси NativeWG-туннель на awg12 занимает номер в kernel-диапазоне —
+		// kernel-аллокатор обязан его пропустить (без миграции).
+		{"skips legacy nativewg id", awgTunnelsFromIDs(
+			[]string{"awg10", "awg11", "awg12"}, "awg12"), "awg13"},
+		// NativeWG-туннели нового диапазона (awg20+) kernel-диапазон не съедают.
+		{"ignores nwg range ids", awgTunnelsFromIDs(
+			[]string{"awg20", "awg21"}, "awg20", "awg21"), "awg10"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := nextAvailableID(tt.tunnels, "kernel", true)
+			if err != nil {
+				t.Fatalf("nextAvailableID() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("nextAvailableID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNextAvailableIDOS5KernelExhaustion(t *testing.T) {
+	// awg10..awg16 заняты — прошивочный потолок kernel-AWG (7 туннелей).
+	// Занятость учитывается по ID независимо от backend: легаси NativeWG
+	// на awg16 тоже съедает kernel-слот.
+	ids := []string{"awg10", "awg11", "awg12", "awg13", "awg14", "awg15", "awg16"}
+	for _, legacy := range []string{"", "awg16"} {
+		tunnels := awgTunnelsFromIDs(ids, legacy)
+		_, err := nextAvailableID(tunnels, "kernel", true)
+		if err == nil {
+			t.Fatalf("nextAvailableID() error = nil, want exhaustion (legacy=%q)", legacy)
+		}
+		if err.Error() != "maximum number of tunnels reached (7)" {
+			t.Fatalf("exhaustion message = %q, want byte-identical legacy message", err.Error())
+		}
+	}
+}
+
+func TestNextAvailableIDOS5NativeWG(t *testing.T) {
+	kernelFull := []string{"awg10", "awg11", "awg12", "awg13", "awg14", "awg15", "awg16"}
+	tests := []struct {
+		name    string
+		tunnels []AWGTunnel
+		want    string
+	}{
+		{"empty store", nil, "awg20"},
+		// Сам баг: kernel-диапазон полностью занят, NativeWG всё равно
+		// получает собственный ID awg20 (раньше — ошибка общего лимита 7).
+		{"kernel range full", awgTunnelsFromIDs(kernelFull), "awg20"},
+		{"skips occupied", awgTunnelsFromIDs(
+			[]string{"awg20", "awg21"}, "awg20", "awg21"), "awg22"},
+		{"gap reused", awgTunnelsFromIDs(
+			[]string{"awg20", "awg22"}, "awg20", "awg22"), "awg21"},
+		// Диапазон не ограничен сверху десятью ID: awg20..awg30 заняты → awg31.
+		{"beyond ten ids", awgTunnelsFromIDs([]string{
+			"awg20", "awg21", "awg22", "awg23", "awg24", "awg25",
+			"awg26", "awg27", "awg28", "awg29", "awg30",
+		}), "awg31"},
+		// Легаси NativeWG на awg12 не мешает выдаче нового диапазона.
+		{"legacy nwg id untouched", awgTunnelsFromIDs(
+			[]string{"awg12"}, "awg12"), "awg20"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := nextAvailableID(tt.tunnels, "nativewg", true)
+			if err != nil {
+				t.Fatalf("nextAvailableID() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("nextAvailableID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNextAvailableIDBackendFallbacks(t *testing.T) {
+	// Пустой/неизвестный backend трактуется как kernel (OS5).
+	for _, backend := range []string{"", "kernel", "unknown"} {
+		got, err := nextAvailableID(nil, backend, true)
+		if err != nil {
+			t.Fatalf("nextAvailableID(%q) error = %v", backend, err)
+		}
+		if got != "awg10" {
+			t.Fatalf("nextAvailableID(%q) = %q, want awg10", backend, got)
+		}
+	}
+	// OS4: backend не различается — nativewg тоже получает awgm*.
+	got, err := nextAvailableID(awgTunnelsFromIDs([]string{"awgm0"}), "nativewg", false)
+	if err != nil {
+		t.Fatalf("nextAvailableID(OS4) error = %v", err)
+	}
+	if got != "awgm1" {
+		t.Fatalf("nextAvailableID(OS4, nativewg) = %q, want awgm1", got)
 	}
 }

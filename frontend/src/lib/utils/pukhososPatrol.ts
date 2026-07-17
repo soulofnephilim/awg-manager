@@ -100,14 +100,14 @@ export function createWalkFrameSequencer(): WalkFrameSequencer {
 
 		switch (activeBlock) {
 			case 'priority': {
-				const frame = PUKHOSOS_WALK_PRIORITY_FRAMES[priorityIdx]!;
+				const frame = PUKHOSOS_WALK_PRIORITY_FRAMES[priorityIdx];
 				priorityIdx = (priorityIdx + 1) % PUKHOSOS_WALK_PRIORITY_FRAMES.length;
 				activeBlock = null;
 				return frameToCol(frame);
 			}
 			case 'mini': {
 				const seq = miniJumpToggle ? PUKHOSOS_WALK_MINI_JUMP_B : PUKHOSOS_WALK_MINI_JUMP_A;
-				const frame = seq[seqStep]!;
+				const frame = seq[seqStep];
 				seqStep++;
 				if (seqStep >= seq.length) {
 					miniJumpToggle = !miniJumpToggle;
@@ -116,7 +116,7 @@ export function createWalkFrameSequencer(): WalkFrameSequencer {
 				return frameToCol(frame);
 			}
 			case 'jump': {
-				const frame = PUKHOSOS_WALK_JUMP_SEQUENCE[seqStep]!;
+				const frame = PUKHOSOS_WALK_JUMP_SEQUENCE[seqStep];
 				seqStep++;
 				if (seqStep >= PUKHOSOS_WALK_JUMP_SEQUENCE.length) {
 					activeBlock = null;

@@ -254,26 +254,11 @@
 				«Журнал»-чип по мокапу page-log = sing-box-bucket общего лог-вью
 				приложения. Переиспользуем diagnostics LogsTerminal с lockBucket="singbox"
 				(level-фильтр / subgroup-чипы inbound/outbound/dns/router/runtime / поиск /
-				пауза / очистить — всё внутри; переключатель app/singbox скрыт). Живой
-				блок: при остановленном движке / clash-down — заглушка.
+				пауза / очистить — всё внутри). Журнал — серверный кольцевой буфер,
+				поэтому показывается при ЛЮБОМ состоянии движка: логи падения нужны
+				именно тогда, когда движок мёртв.
 			-->
-			{#if engineState === 'live'}
-				<LogsTerminal lockBucket="singbox" />
-			{:else if engineState === 'clash-down'}
-				<section class="chip-stub">
-					<h2 class="chip-stub-title">{activeChip.label}</h2>
-					<p class="chip-stub-note chip-stub-error">
-						Clash-runtime недоступен — живой журнал sing-box временно не работает.
-					</p>
-				</section>
-			{:else}
-				<section class="chip-stub">
-					<h2 class="chip-stub-title">{activeChip.label}</h2>
-					<p class="chip-stub-note chip-stub-empty">
-						Движок остановлен — живой журнал sing-box недоступен.
-					</p>
-				</section>
-			{/if}
+			<LogsTerminal lockBucket="singbox" storagePrefix="awgm.fakeip" />
 		{:else}
 			<section class="chip-stub">
 				<h2 class="chip-stub-title">{activeChip.label}</h2>

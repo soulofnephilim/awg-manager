@@ -16,7 +16,7 @@ const fakeIPCIDRRouteComment = "awgm fakeip cidr"
 // the same rule proxies them in sing-box, so they never fall to route.final=
 // direct and never loop. reject rules (no Outbound) and direct rules are excluded.
 func isProxyRoute(r Rule) bool {
-	return r.Action == "route" && r.Outbound != "" && r.Outbound != "direct"
+	return r.ActionIsRoute() && r.Outbound != "" && r.Outbound != "direct"
 }
 
 // loopSafeProxyRule reports whether a proxy route-rule's dst CIDRs are safe to
@@ -30,8 +30,10 @@ func isProxyRoute(r Rule) bool {
 func loopSafeProxyRule(r Rule) bool {
 	return isProxyRoute(r) &&
 		r.Type == "" && r.Mode == "" && len(r.Rules) == 0 &&
-		len(r.DomainSuffix) == 0 && len(r.SourceIPCIDR) == 0 &&
-		len(r.Port) == 0 && r.Protocol == "" && r.IPIsPrivate == nil
+		len(r.DomainSuffix) == 0 && len(r.Domain) == 0 && len(r.SourceIPCIDR) == 0 &&
+		len(r.Port) == 0 && r.Protocol == "" && r.IPIsPrivate == nil &&
+		len(r.Inbound) == 0 && r.Network == "" && r.UDPTimeout == "" &&
+		r.AwgmManaged == ""
 }
 
 // cgnat is RFC 6598 shared address space (100.64.0.0/10) — never a valid proxy

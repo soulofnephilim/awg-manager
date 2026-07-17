@@ -140,6 +140,18 @@ func buildIPRuleMap(ctx context.Context, groups []runtimeGroup, lister DNSListLi
 		}
 		for _, e := range g.Entries {
 			for _, ip := range e.IPs {
+				// Один badge на пару (IP, список): NDMS-кэш даёт IP и под
+				// конкретным FQDN, и под parent-записью, и в разных
+				// страницах _pN одного списка — это дубликаты для UI.
+				// При дубликате предпочитаем более специфичный хит
+				// (rules[0].fqdn — отображаемое имя и ключ группировки).
+				if i := listHitIndex(out[ip], ref.id); i >= 0 {
+					h := &out[ip][i]
+					if h.FQDN == h.Pattern && e.FQDN != e.Parent {
+						h.FQDN, h.Pattern = e.FQDN, e.Parent
+					}
+					continue
+				}
 				out[ip] = append(out[ip], RuleHit{
 					ListID:   ref.id,
 					ListName: ref.name,
@@ -150,4 +162,14 @@ func buildIPRuleMap(ctx context.Context, groups []runtimeGroup, lister DNSListLi
 		}
 	}
 	return out
+}
+
+// listHitIndex returns the index of the hit attributing this IP to listID, or -1.
+func listHitIndex(hits []RuleHit, listID string) int {
+	for i, h := range hits {
+		if h.ListID == listID {
+			return i
+		}
+	}
+	return -1
 }

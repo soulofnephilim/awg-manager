@@ -24,7 +24,7 @@ func (m *mockRefreshService) List(ctx context.Context) ([]DomainList, error) { r
 func (m *mockRefreshService) Update(ctx context.Context, list DomainList) (*DomainList, error) {
 	return nil, nil
 }
-func (m *mockRefreshService) Delete(ctx context.Context, id string) error            { return nil }
+func (m *mockRefreshService) Delete(ctx context.Context, id string) error { return nil }
 func (m *mockRefreshService) DeleteBatch(ctx context.Context, ids []string) (int, error) {
 	return 0, nil
 }

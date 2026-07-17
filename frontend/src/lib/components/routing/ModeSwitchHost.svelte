@@ -22,6 +22,6 @@
 
 <SwitchProgress
 	open={$modeSwitch.phase === 'running'}
-	state={$fakeipTransition}
+	transitionState={$fakeipTransition}
 	onClose={() => modeSwitch.closeProgress()}
 />

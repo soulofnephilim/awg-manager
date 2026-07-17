@@ -8,6 +8,13 @@
   import { Button, Badge } from '$lib/components/ui';
   import { ChevronRight, Trash2, Edit3 } from 'lucide-svelte';
   import { api } from '$lib/api/client';
+  import { deviceProxyOutbounds } from '$lib/stores/deviceproxy';
+  import {
+    outboundDegradedText,
+    outboundDisplayLabel,
+    outboundName,
+    outboundNowTag,
+  } from '$lib/utils/deviceProxyOutboundLabel';
   import type {
     DeviceProxyRuntime,
     DeviceProxyInstance,
@@ -89,9 +96,32 @@
     return `${clientListenHost(in_)}:${in_.port}`;
   }
 
+  // Имя outbound'а — НАСТРОЕННЫЙ выбор (конфиг первичен, issue #465):
+  // живой selector.now после выключения движка деградирует и показывать
+  // его как настройку — враньё. «сейчас: X» и «выход недоступен — через Y»
+  // рендерятся отдельными пометками.
+  // Каталог выходов (/api/deviceproxy/outbounds) — тот же, что питает dropdown
+  // «По умолчанию направлять в»: бейджи резолвят сырые теги в те же подписи.
+  const outboundCatalog = $derived($deviceProxyOutbounds.data ?? []);
+
+  function outboundTagFor(in_: DeviceProxyInstance): string {
+    return outboundName({ selectedOutbound: in_.selectedOutbound, runtime: runtimeFor(in_.id) });
+  }
+
   function outboundLabelFor(in_: DeviceProxyInstance): string {
-    const rt = runtimeFor(in_.id);
-    return rt.activeTag || rt.defaultTag || in_.selectedOutbound || '—';
+    return outboundDisplayLabel(outboundTagFor(in_), outboundCatalog);
+  }
+
+  function outboundNowFor(in_: DeviceProxyInstance): string | null {
+    const tag = outboundNowTag({ selectedOutbound: in_.selectedOutbound, runtime: runtimeFor(in_.id) });
+    return tag ? outboundDisplayLabel(tag, outboundCatalog) : null;
+  }
+
+  function outboundDegradedFor(in_: DeviceProxyInstance): string | null {
+    return outboundDegradedText(
+      { selectedOutbound: in_.selectedOutbound, runtime: runtimeFor(in_.id) },
+      outboundCatalog,
+    );
   }
 
   function outboundVariantFor(tag: string): 'accent' | 'muted' {
@@ -105,7 +135,10 @@
   {#if instances.length > 0}
     <div class="proxy-list">
       {#each instances as in_ (in_.id)}
+        {@const outboundTag = outboundTagFor(in_)}
         {@const outboundLabel = outboundLabelFor(in_)}
+        {@const nowTag = outboundNowFor(in_)}
+        {@const degradedText = outboundDegradedFor(in_)}
         <div class="proxy-row">
           <span class="dot" data-tone={toneFor(in_)}></span>
           <button
@@ -128,8 +161,13 @@
                 {/if}
                 <span class="arrow">→</span>
                 <span class="outbound-wrap">
-                  <Badge variant={outboundVariantFor(outboundLabel)} size="sm" mono>{outboundLabel}</Badge>
+                  <Badge variant={outboundVariantFor(outboundTag)} size="sm" mono>{outboundLabel}</Badge>
                 </span>
+                {#if in_.enabled && degradedText}
+                  <span class="degraded" title={`Выход «${outboundLabel}» отсутствует в текущем конфиге (движок выключен)`}>{degradedText}</span>
+                {:else if in_.enabled && nowTag}
+                  <span class="now mono">сейчас: {nowTag}</span>
+                {/if}
               </div>
             </div>
           </button>
@@ -319,6 +357,22 @@
     display: inline-flex;
     max-width: 100%;
     overflow: hidden;
+  }
+  /* Живой selector.now, когда он отличается от настроенного выхода. */
+  .now {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Деградация (#465): настроенный выход недоступен — трафик через fallback. */
+  .degraded {
+    font-size: 11px;
+    color: var(--color-warning, #d97706);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .outbound-wrap :global(.badge) {
     max-width: 100%;

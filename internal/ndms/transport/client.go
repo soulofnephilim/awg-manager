@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
@@ -41,83 +40,14 @@ type Client struct {
 
 	// batcher coalesce'ит read-запросы в один POST. nil = legacy path.
 	batcher *Batcher
-
-	// Perftrace counters (атомарные, безлокные). Дамп раз в минуту через
-	// StartPerfDumper. ВРЕМЕННЫЕ — удалить после perf-анализа сессии 2026-05-23.
-	totalReq     atomic.Uint64
-	totalDurMs   atomic.Uint64
-	slowReqCount atomic.Uint64 // requests > 500ms
 }
 
-// recordPerf инкрементит counters после одного RCI запроса.
-// ВРЕМЕННЫЙ — удалить после perf-анализа.
-func (c *Client) recordPerf(start time.Time, method, path string) {
+// recordSlow debug-логирует RCI запросы дольше 500ms.
+func (c *Client) recordSlow(start time.Time, method, path string) {
 	durMs := time.Since(start).Milliseconds()
-	c.totalReq.Add(1)
-	c.totalDurMs.Add(uint64(durMs))
-	if durMs > 500 {
-		c.slowReqCount.Add(1)
-		if c.appLog != nil {
-			c.appLog.Warn(method, path, fmt.Sprintf("perf: slow rci %dms", durMs))
-		}
+	if durMs > 500 && c.appLog != nil {
+		c.appLog.Debug(method, path, fmt.Sprintf("perf: slow rci %dms", durMs))
 	}
-}
-
-// PerfSnapshot возвращает текущие counters и обнуляет их (для periodic dump).
-// ВРЕМЕННЫЙ — удалить после perf-анализа.
-func (c *Client) PerfSnapshot() (totalReq, totalDurMs, slowReqCount uint64) {
-	return c.totalReq.Swap(0), c.totalDurMs.Swap(0), c.slowReqCount.Swap(0)
-}
-
-// StartPerfDumper запускает горутину, которая раз в minute печатает
-// summary RCI counters в app-log. Останавливается при cancel.
-// ВРЕМЕННАЯ — удалить после perf-анализа.
-func (c *Client) StartPerfDumper(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = time.Minute
-	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				total, durMs, slow := c.PerfSnapshot()
-				if total > 0 {
-					avg := durMs / total
-					if c.appLog != nil {
-						c.appLog.Debug("perf-summary", "rci",
-							fmt.Sprintf("last %s: %d req, avg %dms, slow(>500ms) %d", interval, total, avg, slow))
-					}
-				}
-				if c.batcher != nil {
-					submits, posted, httpCalls, dropped := c.batcher.snapshot()
-					if submits > 0 && c.appLog != nil {
-						// dedupRate — сколько identical-path reads
-						// "схлопнуты" в один. Реальный win батчинга — это
-						// httpCalls << submits (много submits в одном POST).
-						dedupRate := uint64(0)
-						if submits > posted {
-							dedupRate = (submits - posted) * 100 / submits
-						}
-						foldRate := uint64(0)
-						if submits > httpCalls {
-							foldRate = (submits - httpCalls) * 100 / submits
-						}
-						avgBatch := uint64(0)
-						if httpCalls > 0 {
-							avgBatch = posted / httpCalls
-						}
-						c.appLog.Debug("perf-summary", "rci-batcher",
-							fmt.Sprintf("last %s: submits=%d→posted=%d→http=%d (fold=%d%%, dedup=%d%%, avg-batch=%d) dropped-cancelled=%d",
-								interval, submits, posted, httpCalls, foldRate, dedupRate, avgBatch, dropped))
-					}
-				}
-			}
-		}
-	}()
 }
 
 // SetAppLogger wires the UI-visible logger into the client. Optional;
@@ -220,8 +150,8 @@ func (c *Client) PostBatch(ctx context.Context, commands []any) ([]json.RawMessa
 
 func (c *Client) postJSON(ctx context.Context, payload any) (json.RawMessage, error) {
 	start := time.Now()
-	defer c.recordPerf(start, "POST", "/")
-	if err := c.sem.Acquire(ctx); err != nil {
+	defer c.recordSlow(start, "POST", "/")
+	if err := c.sem.acquireWithBackstop(ctx); err != nil {
 		c.appLog.Error("POST", "/", fmt.Sprintf("semaphore: %v", err))
 		return nil, fmt.Errorf("rci POST: %w", err)
 	}
@@ -309,11 +239,11 @@ func bypassBatch(path string) bool {
 
 // getRawDirect — legacy single-GET path. Используется когда Batcher
 // отключён через AWG_NDMS_BATCH=0, либо в Client'ах без batcher'а
-// (тесты через NewWithURL). Сохраняет существующие perf-counters.
+// (тесты через NewWithURL).
 func (c *Client) getRawDirect(ctx context.Context, path string) ([]byte, error) {
 	start := time.Now()
-	defer c.recordPerf(start, "GET", path)
-	if err := c.sem.Acquire(ctx); err != nil {
+	defer c.recordSlow(start, "GET", path)
+	if err := c.sem.acquireWithBackstop(ctx); err != nil {
 		c.appLog.Error("GET", path, fmt.Sprintf("semaphore: %v", err))
 		return nil, fmt.Errorf("rci GET %s: %w", path, err)
 	}
@@ -348,7 +278,7 @@ func (c *Client) getRawDirect(ctx context.Context, path string) ([]byte, error) 
 // Use instead of GetRaw when the caller immediately decodes the body (e.g.
 // json.NewDecoder) and does not need to retain the raw bytes.
 func (c *Client) GetStream(ctx context.Context, path string, fn func(io.Reader) error) error {
-	if err := c.sem.Acquire(ctx); err != nil {
+	if err := c.sem.acquireWithBackstop(ctx); err != nil {
 		c.appLog.Error("GET", path, fmt.Sprintf("semaphore: %v", err))
 		return fmt.Errorf("rci GET %s: %w", path, err)
 	}

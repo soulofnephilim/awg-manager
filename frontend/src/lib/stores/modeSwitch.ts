@@ -7,6 +7,7 @@ import { get, writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 import { fakeipTransition, type FakeIPMode } from '$lib/stores/fakeipTransition';
 import { singboxRouter } from '$lib/stores/singboxRouter';
+import { selectiveBypass } from '$lib/stores/selectiveBypass';
 import type { SingboxRouterStatus, SingboxRouterSettings } from '$lib/types';
 
 export type ModeSwitchPhase = 'idle' | 'confirming' | 'running';
@@ -36,8 +37,71 @@ export function modeSwitchBusy(s: ModeSwitchState): boolean {
 	return s.phase !== 'idle';
 }
 
+/** How often the SSE-loss watchdog re-polls backend status. */
+const WATCHDOG_POLL_MS = 5000;
+/** Hard cap: a switch that reported nothing for this long is declared failed. */
+const WATCHDOG_TIMEOUT_MS = 4 * 60 * 1000;
+
 function createModeSwitch() {
 	const store = writable<ModeSwitchState>({ phase: 'idle', target: 'off', from: 'off' });
+	let watchdog: ReturnType<typeof setInterval> | null = null;
+
+	function stopWatchdog(): void {
+		if (watchdog !== null) {
+			clearInterval(watchdog);
+			watchdog = null;
+		}
+	}
+
+	/**
+	 * SSE-loss fallback. The transition finale normally arrives as a
+	 * `singbox-router:transition` SSE event, but a reconnect can swallow the
+	 * terminal event — without a fallback the modal spins forever. The watchdog
+	 * re-polls backend status and declares success only after TWO consecutive
+	 * polls show the target mode (a single read can catch a transient state
+	 * mid-teardown); after WATCHDOG_TIMEOUT_MS of no finale it fails the modal.
+	 */
+	function startWatchdog(target: FakeIPMode): void {
+		stopWatchdog();
+		const startedAt = Date.now();
+		let confirmations = 0;
+		let polling = false;
+		watchdog = setInterval(async () => {
+			if (polling) return;
+			const t = get(fakeipTransition);
+			if (get(store).phase !== 'running' || t === null || t.done) {
+				stopWatchdog();
+				return;
+			}
+			polling = true;
+			try {
+				await singboxRouter.loadAll();
+			} catch {
+				/* transient fetch failure — retry next tick */
+			} finally {
+				polling = false;
+			}
+			// Re-check after the await: the SSE finale may have landed meanwhile.
+			const fresh = get(fakeipTransition);
+			if (get(store).phase !== 'running' || fresh === null || fresh.done) {
+				stopWatchdog();
+				return;
+			}
+			const mode = currentMode(get(singboxRouter.status), get(singboxRouter.settings));
+			confirmations = mode === target ? confirmations + 1 : 0;
+			if (confirmations >= 2) {
+				fakeipTransition.completeSuccess(target);
+				stopWatchdog();
+				return;
+			}
+			if (Date.now() - startedAt > WATCHDOG_TIMEOUT_MS) {
+				fakeipTransition.fail(
+					'Не получен финальный статус переключения — проверьте состояние роутера и обновите страницу',
+				);
+				stopWatchdog();
+			}
+		}, WATCHDOG_POLL_MS);
+	}
 
 	function request(target: FakeIPMode): void {
 		// One-shot snapshot of `from`. Safe: the busy-guard (modeSwitchBusy) blocks a
@@ -58,19 +122,22 @@ function createModeSwitch() {
 		const { from, target } = get(store);
 		store.update((s) => ({ ...s, phase: 'running' }));
 		fakeipTransition.begin(from, target);
+		selectiveBypass.resetProgress();
 		try {
 			await api.singboxRouterSwitchMode(target);
+			// Переключение асинхронное: прогресс и финал приходят по SSE,
+			// watchdog подстраховывает потерянный терминальный event.
+			startWatchdog(target);
 		} catch (e) {
-			// POST failed: STAY in 'running' — the progress modal surfaces the error
-			// (via fakeipTransition.fail below) and the user dismisses it through
-			// closeProgress → 'idle'. Mirrors the success path's modal lifecycle.
 			fakeipTransition.fail(e instanceof Error ? e.message : 'Не удалось переключить режим');
 		}
 	}
 
 	function closeProgress(): void {
+		stopWatchdog();
 		store.update((s) => ({ ...s, phase: 'idle' }));
 		fakeipTransition.reset();
+		selectiveBypass.resetProgress();
 		void singboxRouter.loadAll();
 	}
 

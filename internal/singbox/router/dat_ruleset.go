@@ -16,12 +16,19 @@ import (
 const (
 	datRuleSetTokenFile = "token"
 	datRuleSetMetaExt   = ".meta.json"
+	// datRuleSetFormatVersion invalidates cached .srs artifacts when the
+	// dat→rule mapping changes. Version 2: typed geosite expansion (issue
+	// #448) — Plain→domain_keyword, Full→domain, RootDomain→suffix+apex.
+	// Old meta.json files lack the field (0 ≠ 2), so datRuleSetCacheValid's
+	// DeepEqual fails and the rule-set is recompiled with the fixed mapping.
+	datRuleSetFormatVersion = 2
 )
 
 type datRuleSetMeta struct {
-	Kind    string                 `json:"kind"`
-	Tags    []string               `json:"tags"`
-	Sources []datRuleSetSourceMeta `json:"sources"`
+	Kind          string                 `json:"kind"`
+	Tags          []string               `json:"tags"`
+	Sources       []datRuleSetSourceMeta `json:"sources"`
+	FormatVersion int                    `json:"formatVersion"`
 }
 
 type datRuleSetSourceMeta struct {
@@ -60,7 +67,7 @@ func (s *ServiceImpl) DatRuleSetURL(_ context.Context, kind string, tags []strin
 	return fmt.Sprintf("http://127.0.0.1:%d/api/singbox/router/rulesets/dat-srs?%s", port, q.Encode()), nil
 }
 
-func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []string, token string) (string, error) {
+func (s *ServiceImpl) DatRuleSetFile(ctx context.Context, kind string, tags []string, token string) (string, error) {
 	kind, tags, err := normalizeDatRuleSetInput(kind, tags)
 	if err != nil {
 		return "", err
@@ -79,10 +86,19 @@ func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []stri
 	s.datRuleSetMu.Lock()
 	defer s.datRuleSetMu.Unlock()
 
+	// Материализация dat→srs состоит из дорогих фаз (разворачивание тегов из
+	// .dat, компиляция srs, публикация файлов), каждая из которых сама по
+	// себе не подчинена контексту — между фазами проверяем ctx, чтобы
+	// отменённая пересборка (stall guard, отмена пользователем) не продолжала
+	// молотить CPU на 580МГц MIPS впустую. Вывод функции при живом ctx
+	// не меняется.
 	allLines := make([]string, 0)
 	sources := make([]datRuleSetSourceMeta, 0, len(tags))
 	for _, tag := range tags {
-		lines, sourcePath, err := s.deps.GeoData.ExpandGeoTag(kind, tag)
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("dat rule-set %s: %w", kind, err)
+		}
+		lines, sourcePath, err := s.deps.GeoData.ExpandGeoTagTyped(kind, tag)
 		if err != nil {
 			return "", err
 		}
@@ -118,14 +134,20 @@ func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []stri
 	srsPath := filepath.Join(dir, base+".srs")
 	metaPath := filepath.Join(dir, base+datRuleSetMetaExt)
 	meta := datRuleSetMeta{
-		Kind:    kind,
-		Tags:    tags,
-		Sources: sources,
+		Kind:          kind,
+		Tags:          tags,
+		Sources:       sources,
+		FormatVersion: datRuleSetFormatVersion,
 	}
 	if datRuleSetCacheValid(srsPath, metaPath, meta) {
 		return srsPath, nil
 	}
 
+	// Фаза разворачивания завершена — перед компиляцией srs ещё раз сверяемся
+	// с контекстом (см. комментарий выше).
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("dat rule-set %s: %w", kind, err)
+	}
 	rules, err := datLinesToRuleSetRules(kind, allLines)
 	if err != nil {
 		return "", err
@@ -133,6 +155,10 @@ func (s *ServiceImpl) DatRuleSetFile(_ context.Context, kind string, tags []stri
 	_, sourceJSON, err := buildInlineRuleSetSource(rules)
 	if err != nil {
 		return "", err
+	}
+	// Перед записью/публикацией json+srs (последняя дорогая фаза).
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("dat rule-set %s: %w", kind, err)
 	}
 	binary := ""
 	if s.deps.Singbox != nil {
@@ -231,13 +257,29 @@ func datLinesToRuleSetRules(kind string, lines []string) ([]map[string]any, erro
 			switch {
 			case strings.HasPrefix(line, "domain_regex:"):
 				regexes = append(regexes, strings.TrimSpace(strings.TrimPrefix(line, "domain_regex:")))
+			case strings.HasPrefix(line, "keyword:"):
+				// typed v2ray Plain — substring semantics
+				keywords = append(keywords, strings.TrimSpace(strings.TrimPrefix(line, "keyword:")))
 			case strings.HasPrefix(line, "domain_keyword:"):
 				keywords = append(keywords, strings.TrimSpace(strings.TrimPrefix(line, "domain_keyword:")))
+			case strings.HasPrefix(line, "full:"):
+				// typed v2ray Full — exact match
+				domains = append(domains, strings.TrimSpace(strings.TrimPrefix(line, "full:")))
 			case strings.HasPrefix(line, "domain:"):
 				domains = append(domains, strings.TrimSpace(strings.TrimPrefix(line, "domain:")))
 			case strings.HasPrefix(line, "suffix:"):
 				suffixes = append(suffixes, strings.TrimSpace(strings.TrimPrefix(line, "suffix:")))
+			case strings.HasPrefix(line, "."):
+				// v2ray RootDomain: sing-box domain_suffix ".x.com" matches
+				// subdomains only, NOT the apex — emit the apex as an exact
+				// domain too, replicating the official geosite→srs converters
+				// (issue #448: "chatgpt.com" itself did not match).
+				suffixes = append(suffixes, line)
+				if apex := strings.TrimSpace(strings.TrimPrefix(line, ".")); apex != "" {
+					domains = append(domains, apex)
+				}
 			default:
+				// bare value (legacy/unknown) — defensive suffix fallback
 				suffixes = append(suffixes, line)
 			}
 		}

@@ -281,6 +281,25 @@ func TestExtractError_MalformedJSON(t *testing.T) {
 	}
 }
 
+func TestExtractError_LargeBodyWithoutStatus_FastPath(t *testing.T) {
+	// Большие success-ответы без поля "status" идут по байтовому fast-path
+	// (без Unmarshal); семантика прежняя — пустая строка.
+	body := []byte(`{"GigabitEthernet0":{"id":"GigabitEthernet0","description":"` +
+		strings.Repeat("x", 4096) + `"}}`)
+	if got := ExtractError(body); got != "" {
+		t.Errorf("ExtractError = %q, want empty", got)
+	}
+}
+
+func TestExtractError_EnvelopeWithSpacing(t *testing.T) {
+	// NDMS печатает JSON с пробелами после двоеточия — precheck по `"status"`
+	// не должен зависеть от форматирования значения.
+	body := []byte(`{"status": "error", "message": "boom"}`)
+	if got := ExtractError(body); got != "boom" {
+		t.Errorf("ExtractError = %q, want %q", got, "boom")
+	}
+}
+
 func TestPost_NDMSError_ReturnsTypedError(t *testing.T) {
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"error","message":"address conflict"}`)

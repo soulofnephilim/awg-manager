@@ -63,6 +63,17 @@ func BuildGroupOutbound(sub Subscription, memberTags []string, defaultTag string
 	return BuildSelector(sub.SelectorTag, memberTags, defaultTag)
 }
 
+// BuildAggregateGroupOutbound — аналог BuildGroupOutbound для сводных групп
+// (#372): диспатчит selector/urltest по EffectiveMode группы. defaultTag не
+// пробрасывается — у группы нет персистентного «активного» члена, selector
+// стартует с первого разрешённого.
+func BuildAggregateGroupOutbound(g AggregateGroup, memberTags []string) json.RawMessage {
+	if g.EffectiveMode() == ModeURLTest {
+		return BuildURLTest(g.Tag, memberTags, g.EffectiveURLTest())
+	}
+	return BuildSelector(g.Tag, memberTags, "")
+}
+
 // BuildMixedInbound emits the SOCKS5/HTTP listener that pairs with the
 // selector. NDMS bridge picks up the listener as a Proxy interface.
 func BuildMixedInbound(inboundTag string, listenPort uint16) json.RawMessage {

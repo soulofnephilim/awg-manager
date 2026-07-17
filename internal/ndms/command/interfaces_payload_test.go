@@ -108,4 +108,3 @@ func TestInterfaceCommandsPayloads_DNS(t *testing.T) {
 		t.Fatalf("ClearDNS: %v", err)
 	}
 }
-

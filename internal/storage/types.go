@@ -10,7 +10,19 @@ type Settings struct {
 	// `Authorization: Bearer <key>` header. Empty disables key-based access
 	// (session is still required when AuthEnabled). Generated client-side
 	// via crypto.randomUUID(); the server treats it as opaque.
-	ApiKey               string            `json:"apiKey,omitempty"`
+	ApiKey string `json:"apiKey,omitempty"`
+	// SessionTtlHours is the auth session lifetime in hours (sliding
+	// window, extended on activity). Valid range 1..720, default 24
+	// (migrateToV29). Read live by the session store, so shortening it
+	// takes effect immediately for existing sessions; the browser cookie
+	// Max-Age of already-issued sessions updates on next login (the
+	// server-side expiry check is authoritative either way).
+	SessionTtlHours int `json:"sessionTtlHours"`
+	// EntwareAuthEnabled allows login with Entware system credentials
+	// (/opt/etc/shadow) verified locally, without the NDMS /auth call
+	// that generates router-side notifications. When the local check
+	// fails for any reason, login falls back to the Keenetic path.
+	EntwareAuthEnabled   bool              `json:"entwareAuthEnabled"`
 	Server               ServerSettings    `json:"server"`
 	PingCheck            PingCheckSettings `json:"pingCheck"`
 	Logging              LoggingSettings   `json:"logging"`
@@ -110,7 +122,8 @@ type SingboxRouterSettings struct {
 	// Only meaningful when WANAutoDetect == false.
 	WANInterface string `json:"wanInterface,omitempty"`
 	// BypassPresets lists named protocol presets to exclude from TPROXY/REDIRECT.
-	// Valid values: "l2tp", "ntp", "netbios-smb". nil/[] = nothing excluded.
+	// Valid values: "l2tp", "ntp", "netbios-smb" (port-based), "keendns"
+	// (destination-IP 78.47.125.180, KeenDNS/CrazeDNS). nil/[] = nothing excluded.
 	BypassPresets []string `json:"bypassPresets,omitempty"`
 	// BypassExtraPorts is a user-supplied comma-separated list of extra port
 	// exclusions in "PORT UDP|TCP" format (e.g. "51820 UDP, 1194 TCP").
@@ -141,11 +154,67 @@ type SingboxRouterSettings struct {
 	FakeIPPool6 string `json:"fakeipPool6,omitempty"`
 	// FakeIPMTU is the tun MTU (default 1500).
 	FakeIPMTU int `json:"fakeipMtu,omitempty"`
-	// UDPTimeout задаёт таймаут UDP-сессий в tproxy-in inbound (формат Go duration,
-	// например "3m0s", "10m0s"). Пустая строка = использовать значение по умолчанию
-	// (DefaultUDPTimeout). Увеличение помогает при работе игр и других UDP-приложений,
-	// которые могут молчать дольше стандартных 3 минут.
+	// FakeIPRealServer is the true upstream resolver the engine-managed "real"
+	// DNS server forwards to (default "1.1.1.1"). Must be a plain IP address —
+	// the fakeip topology resolves every domain through "real" itself, so a
+	// domain upstream could never bootstrap. Captured from a user edit of the
+	// "real" server address in the fakeip DNS panel (issue #487) or set
+	// directly via the settings API.
+	FakeIPRealServer string `json:"fakeipRealServer,omitempty"`
+	// UDPTimeout задаёт таймаут UDP-сессий в tproxy-in / fakeip tun-in inbound
+	// (формат Go duration, например "5m0s", "10m0s"). Пустая строка = значение по
+	// умолчанию (DefaultUDPTimeout, 5m). Увеличение помогает играм и другим
+	// UDP-приложениям, которые могут молчать дольше и терять сессию.
 	UDPTimeout string `json:"udpTimeout,omitempty"`
+	// SelectiveBypass, when true, installs an iptables -m set guard in front
+	// of the TPROXY/REDIRECT catch-all rules so only traffic whose destination
+	// IP is present in the AWGM-SELECTIVE ipset reaches sing-box. All other
+	// traffic bypasses sing-box entirely (RETURN → WAN). The ipset is built
+	// from ip_cidr matchers and resolved domain_suffix/domain entries across
+	// all active router rules and their rule sets. Only meaningful when
+	// RoutingMode == "tproxy" and ipset + xt_set are available on the router.
+	SelectiveBypass bool `json:"selectiveBypass,omitempty"`
+	// QoSClasses lists DSCP-based QoS traffic classes (issue #371). Each
+	// enabled class gets its own iptables `-m dscp` dispatch (mangle TPROXY +
+	// nat REDIRECT), a dedicated pair of sing-box inbounds and a managed route
+	// rule sending the class to Outbound. Only meaningful when RoutingMode ==
+	// "tproxy". Validated by router.NormalizeSingboxRouterSettings: at most 8
+	// classes, DSCP 0-63 unique across classes, Name ≤ 32 chars, Outbound
+	// non-empty. Empty slice = feature off; no schema migration needed (the
+	// zero value is the correct default, same as BypassPresets).
+	QoSClasses []SingboxQoSClass `json:"qosClasses,omitempty"`
+}
+
+// SelectiveActive reports whether селективный перехват реально действует:
+// движок включён, режим tproxy (пустой RoutingMode нормализуется в tproxy)
+// и флаг SelectiveBypass взведён. В режиме fakeip-tun взведённый флаг —
+// валидное «спящее» состояние (router.validateSelectiveBypassSettings) и
+// активности НЕ означает: пересборки ipset и включение слота
+// 19-selective-routes.json на него реагировать не должны (#564).
+func (sr SingboxRouterSettings) SelectiveActive() bool {
+	return sr.Enabled && sr.SelectiveBypass &&
+		(sr.RoutingMode == "" || sr.RoutingMode == "tproxy")
+}
+
+// SingboxQoSClass is one DSCP-based QoS traffic class routed to a dedicated
+// sing-box outbound (issue #371). DSCP is the 6-bit codepoint matched by
+// iptables `-m dscp --dscp N`; Name is a user-facing label; Outbound is the
+// sing-box outbound tag the class routes to; Enabled toggles the class
+// without losing its configuration.
+type SingboxQoSClass struct {
+	DSCP     int    `json:"dscp"`
+	Name     string `json:"name,omitempty"`
+	Outbound string `json:"outbound"`
+	Enabled  bool   `json:"enabled"`
+	// Slot is the persisted 0-based listen-port slot (0..MaxQoSClasses-1)
+	// the class's inbound pair derives from (router.QoSClassPorts). It is
+	// backend-owned: the UI contract stays {dscp,name,outbound,enabled} —
+	// clients PUT classes without slots and router.UpdateSettings
+	// re-associates each incoming class with its stored slot by DSCP (the
+	// unique key), so disabling or removing one class never shifts another
+	// class's ports (a shift would RST/blackhole untouched flows). Brand-new
+	// DSCPs get the first free slot.
+	Slot int `json:"slot"`
 }
 
 // ManagedServer represents the user-created WireGuard server interface.
@@ -189,7 +258,6 @@ type ManagedServer struct {
 
 // ServerInterfaceMeta tracks AWG Manager metadata for built-in/marked servers.
 type ServerInterfaceMeta struct {
-	NATMode      string `json:"natMode,omitempty"`      // full | internet-only | none
 	NATStaticWAN string `json:"natStaticWan,omitempty"` // WAN iface used by ip static
 	// Endpoint is the host (IP or domain) embedded in generated client .conf
 	// files. Empty = resolve WAN IP at generation time.
@@ -217,8 +285,17 @@ type ManagedPeer struct {
 
 // ServerSettings contains HTTP server configuration.
 type ServerSettings struct {
-	Port      int    `json:"port"`
+	Port int `json:"port"`
+	// Interface is the legacy single bind interface. Superseded by
+	// Interfaces (migrateToV30 copies it there); kept populated so a
+	// downgrade to an older release still binds where it used to.
+	// New code must read Interfaces only.
 	Interface string `json:"interface"`
+	// Interfaces lists kernel interface names (e.g. "br0") whose IPv4
+	// addresses the HTTP server binds to (one listener per interface, plus
+	// an always-on 127.0.0.1 listener for the NDMS reverse proxy and health
+	// probes). Empty = bind all interfaces (0.0.0.0).
+	Interfaces []string `json:"interfaces,omitempty"`
 }
 
 // PingCheckSettings contains global ping check configuration.
@@ -241,15 +318,18 @@ type LoggingSettings struct {
 	Enabled           bool   `json:"enabled"`           // default: false
 	MaxAge            int    `json:"maxAge"`            // hours, default: 2 (shared by both buffers)
 	LogLevel          string `json:"logLevel"`          // "warn", "info", "full", "debug"; default: "info"
-	SingboxLogLevel   string `json:"singboxLogLevel"`   // "trace", "debug", "info", "warn", "error", "fatal", "panic"; default: "trace"
+	SingboxLogLevel   string `json:"singboxLogLevel"`   // "trace", "debug", "info", "warn", "error", "fatal", "panic"; default: "info"
 	AppMaxEntries     int    `json:"appMaxEntries"`     // app-bucket buffer cap, default: 5000
 	SingboxMaxEntries int    `json:"singboxMaxEntries"` // singbox-bucket buffer cap, default: 5000
 }
 
 // UpdateSettings contains auto-update configuration.
 type UpdateSettings struct {
-	CheckEnabled bool   `json:"checkEnabled"` // default: true
-	Channel      string `json:"channel"`      // "stable" (default) | "develop"
+	CheckEnabled            bool   `json:"checkEnabled"`            // default: true
+	Channel                 string `json:"channel"`                 // "stable" (default) | "develop"
+	AutoInstallEnabled      bool   `json:"autoInstallEnabled"`      // default: false
+	AutoInstallIntervalDays int    `json:"autoInstallIntervalDays"` // default: 7, valid 1-30
+	AutoInstallTime         string `json:"autoInstallTime"`         // "HH:MM", default: "05:00"
 }
 
 // DNSRouteSettings contains DNS route auto-refresh configuration.

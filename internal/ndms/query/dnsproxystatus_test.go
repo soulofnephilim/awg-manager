@@ -37,4 +37,3 @@ func TestDNSProxyStatusStoreGetterErrorWrapped(t *testing.T) {
 		t.Fatalf("error = %q, want wrapped fetch dns-proxy status", err)
 	}
 }
-

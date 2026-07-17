@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeExec struct {
@@ -428,8 +429,11 @@ func TestWriteNetfilterHookContainsPidofGuard(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	body := string(data)
-	if !strings.Contains(body, "pidof sing-box >/dev/null 2>&1 || exit 0") {
-		t.Errorf("hook missing pidof guard:\n%s", body)
+	// The pidof guard now branches (alive → real interception, dead → fail-closed
+	// blackhole) instead of `|| exit 0`, so interception is only restored for a
+	// live engine while a dead engine still re-asserts the blackhole.
+	if !strings.Contains(body, "if pidof sing-box >/dev/null 2>&1; then") {
+		t.Errorf("hook missing pidof branch guard:\n%s", body)
 	}
 	if !strings.Contains(body, "iptables-restore --noflush") {
 		t.Errorf("hook missing restore line:\n%s", body)
@@ -1094,7 +1098,7 @@ func TestProbe(t *testing.T) {
 func TestBuildRestoreInput_BypassUDPPorts_AddsReturnRules(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassUDPPorts: []int{500, 4500, 1701},
+		BypassUDPPorts: []PortRange{{500, 500}, {4500, 4500}, {1701, 1701}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1109,7 +1113,7 @@ func TestBuildRestoreInput_BypassUDPPorts_AddsReturnRules(t *testing.T) {
 func TestBuildRestoreInput_BypassTCPPorts_AddsReturnRules(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassTCPPorts: []int{139, 445},
+		BypassTCPPorts: []PortRange{{139, 139}, {445, 445}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1134,7 +1138,7 @@ func TestBuildRestoreInput_EmptyBypassPorts_NoExtraReturnRules(t *testing.T) {
 func TestBuildRestoreInput_BypassPortsBeforeCatchAll(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassUDPPorts: []int{500},
+		BypassUDPPorts: []PortRange{{500, 500}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1155,7 +1159,7 @@ func TestBuildRestoreInput_BypassPortsBeforeCatchAll(t *testing.T) {
 func TestBuildRestoreInput_BypassTCPPortsBeforeCatchAll(t *testing.T) {
 	spec := RestoreInputSpec{
 		PolicyMark:     "0xffffaaa",
-		BypassTCPPorts: []int{445},
+		BypassTCPPorts: []PortRange{{445, 445}},
 	}
 	out := buildRestoreInput(spec)
 
@@ -1170,6 +1174,32 @@ func TestBuildRestoreInput_BypassTCPPortsBeforeCatchAll(t *testing.T) {
 	}
 	if bypassIdx > catchAllIdx {
 		t.Errorf("TCP bypass rule appears AFTER catch-all REDIRECT — must be before it")
+	}
+}
+
+func TestBuildRestoreInput_BypassUDPPortRange_AddsReturnRule(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		BypassUDPPorts: []PortRange{{5000, 5500}},
+	}
+	out := buildRestoreInput(spec)
+
+	rule := fmt.Sprintf("-A %s -p udp --dport 5000:5500 -j RETURN", ChainName)
+	if !strings.Contains(out, rule) {
+		t.Errorf("mangle chain missing UDP bypass range rule\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_BypassTCPPortRange_AddsReturnRule(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		BypassTCPPorts: []PortRange{{8000, 9000}},
+	}
+	out := buildRestoreInput(spec)
+
+	rule := fmt.Sprintf("-A %s -p tcp --dport 8000:9000 -j RETURN", RedirectChain)
+	if !strings.Contains(out, rule) {
+		t.Errorf("nat chain missing TCP bypass range rule\ngot:\n%s", out)
 	}
 }
 
@@ -1283,5 +1313,424 @@ func TestBuildRestoreInput_BypassCIDRs(t *testing.T) {
 	}
 	if bypassIdx > dnsIdx {
 		t.Errorf("user bypass (%d) must precede DNS intercept (%d) in mangle", bypassIdx, dnsIdx)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_AddsGuardRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	mangleGuard := fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", ChainName, selectiveSetName)
+	natGuard := fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", RedirectChain, selectiveSetName)
+
+	if !strings.Contains(out, mangleGuard) {
+		t.Errorf("mangle chain missing selective guard rule\ngot:\n%s", out)
+	}
+	if !strings.Contains(out, natGuard) {
+		t.Errorf("nat chain missing selective guard rule\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_Disabled_NoGuardRules(t *testing.T) {
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: false,
+	}
+	out := buildRestoreInput(spec)
+
+	if strings.Contains(out, "--match-set") {
+		t.Errorf("unexpected selective guard rule when SelectiveIPSet=false\ngot:\n%s", out)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_GuardAfterDNS(t *testing.T) {
+	// The selective guard must appear AFTER the DNS intercept rule so that
+	// DNS (port 53) is always intercepted regardless of ipset membership.
+	// This ensures that the hijack-dns action keeps working even when
+	// selective mode is on.
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	dnsIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp --dport 53 -j TPROXY", ChainName))
+	guardIdx := strings.Index(out, fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", ChainName, selectiveSetName))
+	catchAllIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp -j TPROXY", ChainName))
+
+	if dnsIdx == -1 || guardIdx == -1 || catchAllIdx == -1 {
+		t.Fatalf("missing rule(s): dns=%d guard=%d catchAll=%d\n%s", dnsIdx, guardIdx, catchAllIdx, out)
+	}
+	if guardIdx < dnsIdx {
+		t.Errorf("selective guard (%d) must appear AFTER DNS intercept (%d)", guardIdx, dnsIdx)
+	}
+	if guardIdx > catchAllIdx {
+		t.Errorf("selective guard (%d) must appear BEFORE catch-all TPROXY (%d)", guardIdx, catchAllIdx)
+	}
+}
+
+func TestBuildRestoreInput_SelectiveIPSet_NatTCPDNSBeforeGuard(t *testing.T) {
+	// In the nat chain the TCP/53 REDIRECT must appear BEFORE the selective
+	// guard: resolver IPs are typically not in AWGM-SELECTIVE, so a guard-first
+	// order would RETURN DNS-over-TCP (and truncated-UDP retries) straight to
+	// the real upstream, leaking real IPs of proxied domains past hijack-dns.
+	spec := RestoreInputSpec{
+		PolicyMark:     "0xffffaaa",
+		SelectiveIPSet: true,
+	}
+	out := buildRestoreInput(spec)
+
+	dnsIdx := strings.Index(out, fmt.Sprintf("-A %s -p tcp --dport 53 -j REDIRECT", RedirectChain))
+	guardIdx := strings.Index(out, fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", RedirectChain, selectiveSetName))
+
+	if dnsIdx == -1 || guardIdx == -1 {
+		t.Fatalf("missing rule(s): tcpDNS=%d guard=%d\n%s", dnsIdx, guardIdx, out)
+	}
+	if dnsIdx > guardIdx {
+		t.Errorf("nat TCP/53 REDIRECT (%d) must appear BEFORE selective guard (%d)", dnsIdx, guardIdx)
+	}
+}
+
+func TestBuildRestoreInput_NoSelective_NoNatTCPDNSRule(t *testing.T) {
+	// Without the selective guard AND without QoS classes the catch-all
+	// REDIRECT covers TCP/53 — the chain must stay a literal port of SKeen's
+	// add_redirect_rules.
+	spec := RestoreInputSpec{PolicyMark: "0xffffaaa"}
+	out := buildRestoreInput(spec)
+
+	if strings.Contains(out, fmt.Sprintf("-A %s -p tcp --dport 53 -j REDIRECT", RedirectChain)) {
+		t.Errorf("unexpected TCP/53 rule without SelectiveIPSet/QoS\ngot:\n%s", out)
+	}
+}
+
+// ── QoS-by-DSCP dispatch (issue #371) ────────────────────────────────────────
+
+func qosTestSpec() RestoreInputSpec {
+	return RestoreInputSpec{
+		PolicyMark: "0xffffaaa",
+		QoSClasses: []QoSClassSpec{
+			{DSCP: 46, TProxyPort: 51281, RedirectPort: 51301},
+			{DSCP: 26, TProxyPort: 51282, RedirectPort: 51302},
+		},
+	}
+}
+
+func TestBuildRestoreInput_QoSClasses_RulesPresentInBothChains(t *testing.T) {
+	out := buildRestoreInput(qosTestSpec())
+
+	expected := []string{
+		// mangle: UDP TPROXY per class, numeric --dscp, main fwmark reused.
+		"-A AWGM-TPROXY -p udp -m dscp --dscp 46 -j TPROXY --on-port 51281 --on-ip 127.0.0.1 --tproxy-mark 0x1",
+		"-A AWGM-TPROXY -p udp -m dscp --dscp 26 -j TPROXY --on-port 51282 --on-ip 127.0.0.1 --tproxy-mark 0x1",
+		// nat: TCP REDIRECT per class.
+		"-A AWGM-REDIRECT -p tcp -m dscp --dscp 46 -j REDIRECT --to-ports 51301",
+		"-A AWGM-REDIRECT -p tcp -m dscp --dscp 26 -j REDIRECT --to-ports 51302",
+	}
+	for _, line := range expected {
+		if !strings.Contains(out, line) {
+			t.Errorf("missing QoS rule: %q\nin:\n%s", line, out)
+		}
+	}
+}
+
+func TestBuildRestoreInput_QoSClasses_OrderingWithinMangle(t *testing.T) {
+	// Anti-recapture invariant (XKeen PR #81 class of bug): the per-class
+	// TPROXY must be in the SAME chain and STRICTLY BEFORE the catch-all —
+	// both are terminating targets, so class traffic never also traverses
+	// the general path. And it must come AFTER the DNS intercept and AFTER
+	// bypass RETURNs so DNS stays on the main port and bypasses still win.
+	spec := qosTestSpec()
+	spec.BypassCIDRs = []string{"203.0.113.0/24"}
+	spec.BypassUDPPorts = []PortRange{{500, 500}}
+	spec.WANIPs = []string{"198.51.100.7/32"}
+	out := buildRestoreInput(spec)
+
+	qosIdx := strings.Index(out, "-A AWGM-TPROXY -p udp -m dscp --dscp 46")
+	dnsIdx := strings.Index(out, "-A AWGM-TPROXY -p udp --dport 53 -j TPROXY")
+	catchIdx := strings.Index(out, fmt.Sprintf("-A AWGM-TPROXY -p udp -j TPROXY --on-port %d", TPROXYPort))
+	userBypassIdx := strings.Index(out, "-A AWGM-TPROXY -d 203.0.113.0/24 -j RETURN")
+	portBypassIdx := strings.Index(out, "-A AWGM-TPROXY -p udp --dport 500 -j RETURN")
+	wanIdx := strings.Index(out, "-A AWGM-TPROXY -d 198.51.100.7/32 -j RETURN")
+	builtinBypassIdx := strings.Index(out, "-A AWGM-TPROXY -d 192.168.0.0/16 -j RETURN")
+
+	for name, idx := range map[string]int{
+		"qos": qosIdx, "dns": dnsIdx, "catch-all": catchIdx,
+		"user-bypass": userBypassIdx, "port-bypass": portBypassIdx,
+		"wan": wanIdx, "builtin-bypass": builtinBypassIdx,
+	} {
+		if idx == -1 {
+			t.Fatalf("%s rule not found in:\n%s", name, out)
+		}
+	}
+	if qosIdx < dnsIdx {
+		t.Errorf("QoS rule (%d) must come AFTER DNS intercept (%d) — DSCP must not hijack UDP/53", qosIdx, dnsIdx)
+	}
+	for name, idx := range map[string]int{
+		"user CIDR bypass": userBypassIdx,
+		"port bypass":      portBypassIdx,
+		"WAN-IP exclusion": wanIdx,
+		"builtin bypass":   builtinBypassIdx,
+	} {
+		if qosIdx < idx {
+			t.Errorf("QoS rule (%d) must come AFTER %s (%d)", qosIdx, name, idx)
+		}
+	}
+	if qosIdx > catchIdx {
+		t.Errorf("QoS rule (%d) must come BEFORE catch-all TPROXY (%d)", qosIdx, catchIdx)
+	}
+}
+
+func TestBuildRestoreInput_QoSClasses_OrderingWithinNat(t *testing.T) {
+	spec := qosTestSpec()
+	spec.BypassTCPPorts = []PortRange{{445, 445}}
+	spec.WANIPs = []string{"198.51.100.7/32"}
+	out := buildRestoreInput(spec)
+
+	qosIdx := strings.Index(out, "-A AWGM-REDIRECT -p tcp -m dscp --dscp 46")
+	catchIdx := strings.Index(out, fmt.Sprintf("-A AWGM-REDIRECT -p tcp -j REDIRECT --to-ports %d", RedirectPort))
+	portBypassIdx := strings.Index(out, "-A AWGM-REDIRECT -p tcp --dport 445 -j RETURN")
+	adminIdx := strings.Index(out, "-A AWGM-REDIRECT -p tcp --dport 79 -j RETURN")
+	wanIdx := strings.Index(out, "-A AWGM-REDIRECT -d 198.51.100.7/32 -j RETURN")
+
+	for name, idx := range map[string]int{
+		"qos": qosIdx, "catch-all": catchIdx, "port-bypass": portBypassIdx,
+		"admin-bypass": adminIdx, "wan": wanIdx,
+	} {
+		if idx == -1 {
+			t.Fatalf("%s rule not found in:\n%s", name, out)
+		}
+	}
+	for name, idx := range map[string]int{
+		"TCP port bypass":  portBypassIdx,
+		"admin-79 bypass":  adminIdx,
+		"WAN-IP exclusion": wanIdx,
+	} {
+		if qosIdx < idx {
+			t.Errorf("QoS rule (%d) must come AFTER %s (%d)", qosIdx, name, idx)
+		}
+	}
+	if qosIdx > catchIdx {
+		t.Errorf("QoS rule (%d) must come BEFORE catch-all REDIRECT (%d)", qosIdx, catchIdx)
+	}
+}
+
+func TestBuildRestoreInput_QoSClasses_AfterSelectiveGuard(t *testing.T) {
+	// Selective mode narrows what enters sing-box; QoS classifies WITHIN that
+	// scope. Both chains: guard first, then the DSCP dispatch.
+	spec := qosTestSpec()
+	spec.SelectiveIPSet = true
+	out := buildRestoreInput(spec)
+
+	mangleGuardIdx := strings.Index(out, fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", ChainName, selectiveSetName))
+	mangleQoSIdx := strings.Index(out, "-A AWGM-TPROXY -p udp -m dscp --dscp 46")
+	natGuardIdx := strings.Index(out, fmt.Sprintf("-A %s -m set ! --match-set %s dst -j RETURN", RedirectChain, selectiveSetName))
+	natQoSIdx := strings.Index(out, "-A AWGM-REDIRECT -p tcp -m dscp --dscp 46")
+
+	if mangleGuardIdx == -1 || mangleQoSIdx == -1 || natGuardIdx == -1 || natQoSIdx == -1 {
+		t.Fatalf("missing rule(s): mGuard=%d mQoS=%d nGuard=%d nQoS=%d\n%s",
+			mangleGuardIdx, mangleQoSIdx, natGuardIdx, natQoSIdx, out)
+	}
+	if mangleQoSIdx < mangleGuardIdx {
+		t.Errorf("mangle QoS rule (%d) must come AFTER selective guard (%d)", mangleQoSIdx, mangleGuardIdx)
+	}
+	if natQoSIdx < natGuardIdx {
+		t.Errorf("nat QoS rule (%d) must come AFTER selective guard (%d)", natQoSIdx, natGuardIdx)
+	}
+}
+
+func TestBuildRestoreInput_NoQoSClasses_NoDscpRules(t *testing.T) {
+	out := buildRestoreInput(RestoreInputSpec{PolicyMark: "0xffffaaa"})
+	if strings.Contains(out, "-m dscp") {
+		t.Errorf("dscp rules must be absent when QoSClasses is empty:\n%s", out)
+	}
+}
+
+func TestWriteNetfilterHookPreloadsXtDscp(t *testing.T) {
+	body := netfilterHookScript()
+	if !strings.Contains(body, "xt_dscp") {
+		t.Errorf("hook preload loop missing xt_dscp:\n%s", body)
+	}
+}
+
+func TestEnsureXtDscpModule_MissingKoIsNotFatal(t *testing.T) {
+	orig := ensureKernelModuleFn
+	ensureKernelModuleFn = func(_ context.Context, name string) error {
+		if name != "xt_dscp" {
+			t.Errorf("expected module xt_dscp, got %q", name)
+		}
+		return ErrNetfilterComponentMissing
+	}
+	t.Cleanup(func() { ensureKernelModuleFn = orig })
+
+	if err := EnsureXtDscpModule(context.Background()); err != nil {
+		t.Errorf("expected nil when .ko absent (built-in fallback), got %v", err)
+	}
+}
+
+// TestBuildRestoreInput_QoS_NatTCPDNSCarveOutBeforeClassRules guards the
+// DNS carve-out: with QoS classes present, TCP/53 must be REDIRECTed to the
+// MAIN redirect port strictly BEFORE the per-class DSCP rules, so DSCP-marked
+// DNS (UDP is intercepted by the mangle chain, TCP here) always lands on the
+// main inbounds where hijack-dns applies — independent of the managed route
+// rules' ordering.
+func TestBuildRestoreInput_QoS_NatTCPDNSCarveOutBeforeClassRules(t *testing.T) {
+	out := buildRestoreInput(qosTestSpec())
+
+	dnsRule := fmt.Sprintf("-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d", RedirectChain, RedirectPort)
+	dnsIdx := strings.Index(out, dnsRule)
+	qosIdx := strings.Index(out, fmt.Sprintf("-A %s -p tcp -m dscp --dscp 46", RedirectChain))
+	if dnsIdx == -1 {
+		t.Fatalf("TCP/53 carve-out missing with QoS classes present:\n%s", out)
+	}
+	if qosIdx == -1 {
+		t.Fatalf("QoS nat rule missing:\n%s", out)
+	}
+	if dnsIdx > qosIdx {
+		t.Errorf("TCP/53 carve-out (%d) must come BEFORE the per-class DSCP rules (%d)", dnsIdx, qosIdx)
+	}
+	if strings.Count(out, dnsRule) != 1 {
+		t.Errorf("expected exactly one TCP/53 intercept, got %d:\n%s", strings.Count(out, dnsRule), out)
+	}
+
+	// Mangle side: the UDP/53 intercept to the MAIN tproxy port already
+	// precedes the class rules (verified ordering, part of the same DNS
+	// invariant).
+	udpDNSIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp --dport 53 -j TPROXY --on-port %d", ChainName, TPROXYPort))
+	udpQoSIdx := strings.Index(out, fmt.Sprintf("-A %s -p udp -m dscp --dscp 46", ChainName))
+	if udpDNSIdx == -1 || udpQoSIdx == -1 || udpDNSIdx > udpQoSIdx {
+		t.Errorf("mangle UDP/53 intercept (%d) must precede the class rules (%d)", udpDNSIdx, udpQoSIdx)
+	}
+}
+
+// TestBuildRestoreInput_QoSWithSelective_SingleTCPDNSIntercept: the selective
+// guard already emits the identical TCP/53 intercept ahead of the guard; the
+// QoS block must not duplicate it.
+func TestBuildRestoreInput_QoSWithSelective_SingleTCPDNSIntercept(t *testing.T) {
+	spec := qosTestSpec()
+	spec.SelectiveIPSet = true
+	out := buildRestoreInput(spec)
+
+	dnsRule := fmt.Sprintf("-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d", RedirectChain, RedirectPort)
+	if n := strings.Count(out, dnsRule); n != 1 {
+		t.Fatalf("expected exactly one TCP/53 intercept with selective+QoS, got %d:\n%s", n, out)
+	}
+	dnsIdx := strings.Index(out, dnsRule)
+	qosIdx := strings.Index(out, fmt.Sprintf("-A %s -p tcp -m dscp --dscp 46", RedirectChain))
+	if dnsIdx > qosIdx {
+		t.Errorf("TCP/53 intercept (%d) must precede the class rules (%d)", dnsIdx, qosIdx)
+	}
+}
+
+// ── xt_dscp probe cache (FIX-7) ──────────────────────────────────────────────
+
+// resetXtDscpProbeCache clears the package-level probe cache and installs a
+// counting stub; returns the counter.
+func stubXtDscpProbe(t *testing.T, moduleOK, matchOK bool) *int {
+	t.Helper()
+	calls := 0
+	xtDscpMu.Lock()
+	origModule, origMatch, origAt := xtDscpModuleOK, xtDscpMatchOK, xtDscpCheckedAt
+	origFn := xtDscpAvailabilityFn
+	xtDscpModuleOK, xtDscpMatchOK = false, false
+	xtDscpCheckedAt = time.Time{}
+	xtDscpAvailabilityFn = func(_ context.Context) (bool, bool) {
+		calls++
+		return moduleOK, matchOK
+	}
+	xtDscpMu.Unlock()
+	t.Cleanup(func() {
+		xtDscpMu.Lock()
+		xtDscpModuleOK, xtDscpMatchOK, xtDscpCheckedAt = origModule, origMatch, origAt
+		xtDscpAvailabilityFn = origFn
+		xtDscpMu.Unlock()
+	})
+	return &calls
+}
+
+func TestIsXtDscpAvailable_NegativeResultCachedWithTTL(t *testing.T) {
+	calls := stubXtDscpProbe(t, false, false)
+	ctx := context.Background()
+
+	// Many availability checks within the TTL window → exactly ONE raw probe
+	// (previously: one `iptables -m dscp -h` exec per reconcile tick forever).
+	for i := 0; i < 10; i++ {
+		if IsXtDscpAvailable(ctx) {
+			t.Fatal("expected unavailable")
+		}
+	}
+	if *calls != 1 {
+		t.Fatalf("expected 1 raw probe within TTL, got %d", *calls)
+	}
+	// The detailed diagnostics path shares the same cache.
+	if m, x := cachedXtDscpAvailability(ctx); m || x {
+		t.Fatal("expected cached negative detail")
+	}
+	if *calls != 1 {
+		t.Fatalf("detail check must not re-probe within TTL, got %d probes", *calls)
+	}
+
+	// TTL expiry → exactly one re-probe.
+	xtDscpMu.Lock()
+	xtDscpCheckedAt = time.Now().Add(-xtDscpNegativeTTL - time.Minute)
+	xtDscpMu.Unlock()
+	_ = IsXtDscpAvailable(ctx)
+	if *calls != 2 {
+		t.Fatalf("expected re-probe after TTL, got %d probes", *calls)
+	}
+}
+
+func TestIsXtDscpAvailable_PositiveResultCachedForever(t *testing.T) {
+	calls := stubXtDscpProbe(t, true, true)
+	ctx := context.Background()
+	if !IsXtDscpAvailable(ctx) {
+		t.Fatal("expected available")
+	}
+	// Even past the TTL, a positive result never re-probes.
+	xtDscpMu.Lock()
+	xtDscpCheckedAt = time.Now().Add(-2 * xtDscpNegativeTTL)
+	xtDscpMu.Unlock()
+	for i := 0; i < 5; i++ {
+		if !IsXtDscpAvailable(ctx) {
+			t.Fatal("expected available")
+		}
+	}
+	if *calls != 1 {
+		t.Fatalf("positive result must be cached forever, got %d probes", *calls)
+	}
+}
+
+// Issue #490: keendns-пресет (destination-IP) должен долетать до всех трёх
+// цепочек ранним `-d <ip> -j RETURN` — ДО DNS-перехвата в mangle и до
+// catch-all в nat, ровно как ручные bypassExtraSubnets.
+func TestBuildRestoreInput_KeenDNSPresetCIDR(t *testing.T) {
+	cidrs, err := resolveBypassCIDRs([]string{"keendns"}, "")
+	if err != nil {
+		t.Fatalf("resolveBypassCIDRs: %v", err)
+	}
+	spec := RestoreInputSpec{PolicyMark: "0xffffaaa", BypassCIDRs: cidrs}
+
+	out := buildRestoreInput(spec)
+	ret := "-d 78.47.125.180/32 -j RETURN"
+	tproxyRet := "-A " + ChainName + " " + ret
+	redirectRet := "-A " + RedirectChain + " " + ret
+	if !strings.Contains(out, tproxyRet) {
+		t.Errorf("TPROXY chain missing keendns bypass: %s", out)
+	}
+	if !strings.Contains(out, redirectRet) {
+		t.Errorf("REDIRECT chain missing keendns bypass: %s", out)
+	}
+	// RETURN стоит раньше DNS-перехвата — иначе DNS к роутеру на этом IP
+	// всё равно уходил бы в sing-box.
+	dnsIntercept := strings.Index(out, "--dport 53 -j TPROXY")
+	if bypassIdx := strings.Index(out, tproxyRet); dnsIntercept >= 0 && bypassIdx > dnsIntercept {
+		t.Errorf("keendns bypass must precede DNS intercept: bypass@%d, dns@%d", bypassIdx, dnsIntercept)
+	}
+
+	bh := buildBlackholeRestoreInput(spec)
+	if !strings.Contains(bh, "-A "+BlackholeChain+" "+ret) {
+		t.Errorf("blackhole chain missing keendns bypass: %s", bh)
 	}
 }

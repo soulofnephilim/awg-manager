@@ -175,7 +175,7 @@ func (a *singboxRuntimeAdapter) IsRunning() bool {
 	if a == nil || a.op == nil {
 		return false
 	}
-	running, _ := a.op.IsRunningPublic()
+	running, _ := a.op.IsRunning()
 	return running
 }
 

@@ -99,6 +99,18 @@ type SingboxTunnelsResponse struct {
 	Data    []SingboxTunnelDTO `json:"data"`
 }
 
+// SingboxTunnelGetData is the payload for GET /singbox/tunnels/get.
+type SingboxTunnelGetData struct {
+	Tag      string                 `json:"tag" example:"proxy-01"`
+	Outbound map[string]interface{} `json:"outbound"`
+}
+
+// SingboxTunnelGetResponse is the envelope for GET /singbox/tunnels/get.
+type SingboxTunnelGetResponse struct {
+	Success bool                 `json:"success" example:"true"`
+	Data    SingboxTunnelGetData `json:"data"`
+}
+
 // SingboxControlRequest is the body for POST /singbox/control.
 type SingboxControlRequest struct {
 	Action string `json:"action" example:"start" enums:"start,stop,restart"`
@@ -301,6 +313,10 @@ func (h *SingboxHandler) Install(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.op.Install(r.Context()); err != nil {
+		if errors.Is(err, singbox.ErrInstallInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INSTALL_IN_PROGRESS")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -326,6 +342,7 @@ func (h *SingboxHandler) Install(w http.ResponseWriter, r *http.Request) {
 //	@Security		CookieAuth
 //	@Success		200	{object}	SingboxStatusResponse
 //	@Failure		405	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/update [post]
 func (h *SingboxHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +351,10 @@ func (h *SingboxHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.op.Update(r.Context()); err != nil {
+		if errors.Is(err, singbox.ErrInstallInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INSTALL_IN_PROGRESS")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -381,6 +402,17 @@ func (h *SingboxHandler) Control(w http.ResponseWriter, r *http.Request) {
 
 // ListTunnels handles GET /api/singbox/tunnels.
 // Returns all tunnels enriched with per-tunnel connectivity from the Clash API.
+// The single-tunnel variant lives at its own path /singbox/tunnels/get — the
+// response shapes differ, so they must not share a path/method (#520).
+//
+//	@Summary		List sing-box tunnels
+//	@Tags			singbox
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Success		200	{object}	SingboxTunnelsResponse
+//	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		500	{object}	APIErrorEnvelope
+//	@Router			/singbox/tunnels [get]
 func (h *SingboxHandler) ListTunnels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.MethodNotAllowed(w)
@@ -392,29 +424,6 @@ func (h *SingboxHandler) ListTunnels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, out)
-}
-
-// ServeGETTunnels handles GET /api/singbox/tunnels: list all tunnels, or single tunnel when query tag is set.
-//
-//	@Summary		List or get sing-box tunnel(s)
-//	@Tags			singbox
-//	@Produce		json
-//	@Security		CookieAuth
-//	@Param			tag	query	string	false	"When set, returns single tunnel"
-//	@Success		200	{object}	SingboxTunnelsResponse
-//	@Failure		400	{object}	APIErrorEnvelope
-//	@Failure		500	{object}	APIErrorEnvelope
-//	@Router			/singbox/tunnels [get]
-func (h *SingboxHandler) ServeGETTunnels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		response.MethodNotAllowed(w)
-		return
-	}
-	if r.URL.Query().Has("tag") {
-		h.GetTunnel(w, r)
-		return
-	}
-	h.ListTunnels(w, r)
 }
 
 type singboxConnectivity struct {
@@ -504,7 +513,21 @@ func (h *SingboxHandler) AddTunnels(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, resp)
 }
 
-// GetTunnel handles GET /api/singbox/tunnels?tag={tag}.
+// GetTunnel handles GET /api/singbox/tunnels/get?tag={tag}. The response
+// data shape differs from the list endpoint — a dedicated path keeps the
+// swagger spec (and the frontend runtime validation generated from it)
+// truthful: one path/method — one schema (#520).
+//
+//	@Summary		Get single sing-box tunnel outbound
+//	@Tags			singbox
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			tag	query		string	true	"Outbound tag"
+//	@Success		200	{object}	SingboxTunnelGetResponse
+//	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		404	{object}	APIErrorEnvelope
+//	@Failure		500	{object}	APIErrorEnvelope
+//	@Router			/singbox/tunnels/get [get]
 func (h *SingboxHandler) GetTunnel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.MethodNotAllowed(w)
@@ -575,7 +598,7 @@ func (h *SingboxHandler) ExportShareLink(w http.ResponseWriter, r *http.Request)
 //	@Accept			json
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Success		200	{object}	APIEnvelope
+//	@Success		200	{object}	SingboxTunnelsResponse
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/tunnels [put]
@@ -605,17 +628,32 @@ func (h *SingboxHandler) UpdateTunnel(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, out)
 }
 
+// SingboxRenameRequest is the body for PATCH /singbox/tunnels/rename.
+type SingboxRenameRequest struct {
+	OldTag string `json:"oldTag" example:"proxy-01"`
+	NewTag string `json:"newTag" example:"proxy-eu"`
+}
+
 // RenameTunnel handles PATCH /api/singbox/tunnels/rename.
-// Body: {"oldTag":"old","newTag":"new"}.
+//
+//	@Summary		Rename sing-box tunnel tag
+//	@Tags			singbox
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			request	body		SingboxRenameRequest	true	"Old and new tag"
+//	@Success		200		{object}	SingboxTunnelsResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		409		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/tunnels/rename [patch]
 func (h *SingboxHandler) RenameTunnel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		response.MethodNotAllowed(w)
 		return
 	}
-	var body struct {
-		OldTag string `json:"oldTag"`
-		NewTag string `json:"newTag"`
-	}
+	var body SingboxRenameRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		response.BadRequest(w, "invalid request")
 		return
@@ -942,7 +980,7 @@ func (h *SingboxHandler) SpeedTestStream(w http.ResponseWriter, r *http.Request)
 //	@Tags			singbox
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Success		200	{object}	APIEnvelope
+//	@Success		200	{object}	SingboxTunnelsResponse
 //	@Failure		400	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/tunnels [delete]

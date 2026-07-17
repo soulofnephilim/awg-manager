@@ -16,6 +16,20 @@ func newTestOrch(t *testing.T) (*Orchestrator, string) {
 	return o, dir
 }
 
+// newFakeOrch constructs an Orchestrator wired to a fakeProc, first
+// redirecting the package-level applied-state seam (appliedStatePath) to
+// a file scoped to this test's t.TempDir(). Without this, every
+// fp-backed Reload test would share ONE /var/run/awg-manager/singbox-
+// applied.json for the whole test binary run: besides writing outside
+// the sandbox, several tests enable identical slot content, so one
+// test's persisted hash could satisfy another's skip gate and suppress
+// the Start/Reload/Stop call the test asserts on.
+func newFakeOrch(t *testing.T, dir string, fp *fakeProc) *Orchestrator {
+	t.Helper()
+	appliedStatePath = filepath.Join(t.TempDir(), "singbox-applied.json")
+	return New(dir, fp)
+}
+
 func TestRegisterAndBootstrap(t *testing.T) {
 	o, dir := newTestOrch(t)
 	if err := o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true}); err != nil {
@@ -216,6 +230,14 @@ func (p *fakeProc) Reload() error {
 	return nil
 }
 
+// startsN/stopsN/reloadsN — потокобезопасные читатели счётчиков: тесты
+// читают их, пока отложенный debounce-таймер оркестратора (Save/SetEnabled)
+// ещё может дёрнуть Start/Reload из своей горутины — прямое чтение полей
+// ловится -race (предсуществовавшая гонка, всплыла на гейте #456).
+func (p *fakeProc) startsN() int  { p.mu.Lock(); defer p.mu.Unlock(); return p.starts }
+func (p *fakeProc) stopsN() int   { p.mu.Lock(); defer p.mu.Unlock(); return p.stops }
+func (p *fakeProc) reloadsN() int { p.mu.Lock(); defer p.mu.Unlock(); return p.reloads }
+
 func TestReloadDoesNotStartForAlwaysOnCatalogSlot(t *testing.T) {
 	// Regression: tunnels + awg are AlwaysOn catalog slots. On a fresh
 	// install with no router, no deviceproxy, no subscriptions and an
@@ -223,7 +245,7 @@ func TestReloadDoesNotStartForAlwaysOnCatalogSlot(t *testing.T) {
 	// these slots are enabled by virtue of being AlwaysOn.
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{
 		Slot:       SlotTunnels,
@@ -247,8 +269,8 @@ func TestReloadDoesNotStartForAlwaysOnCatalogSlot(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 0 {
-		t.Errorf("expected 0 starts (no consumers, no tunnels), got %d", fp.starts)
+	if fp.startsN() != 0 {
+		t.Errorf("expected 0 starts (no consumers, no tunnels), got %d", fp.startsN())
 	}
 }
 
@@ -258,7 +280,7 @@ func TestReloadStartsWhenAlwaysOnSlotHasContent(t *testing.T) {
 	// be brought up — even if no other consumer slot is enabled.
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{
 		Slot:       SlotTunnels,
@@ -278,15 +300,15 @@ func TestReloadStartsWhenAlwaysOnSlotHasContent(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 {
-		t.Errorf("expected 1 start (tunnel content present), got %d", fp.starts)
+	if fp.startsN() != 1 {
+		t.Errorf("expected 1 start (tunnel content present), got %d", fp.startsN())
 	}
 }
 
 func TestReloadStartsWhenSlotEnabled(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -304,15 +326,15 @@ func TestReloadStartsWhenSlotEnabled(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 || fp.reloads != 0 {
-		t.Errorf("expected 1 start, 0 reloads; got starts=%d reloads=%d", fp.starts, fp.reloads)
+	if fp.startsN() != 1 || fp.reloadsN() != 0 {
+		t.Errorf("expected 1 start, 0 reloads; got starts=%d reloads=%d", fp.startsN(), fp.reloadsN())
 	}
 }
 
 func TestReloadStopsWhenAllDisabled(t *testing.T) {
 	fp := &fakeProc{running: true} // pretend already running
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -322,15 +344,15 @@ func TestReloadStopsWhenAllDisabled(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.stops != 1 {
-		t.Errorf("expected 1 stop, got %d", fp.stops)
+	if fp.stopsN() != 1 {
+		t.Errorf("expected 1 stop, got %d", fp.stopsN())
 	}
 }
 
 func TestReloadSighupsWhenAlreadyRunning(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -344,15 +366,15 @@ func TestReloadSighupsWhenAlreadyRunning(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if fp.reloads != 1 || fp.starts != 0 {
-		t.Errorf("expected 1 reload, 0 starts; got reloads=%d starts=%d", fp.reloads, fp.starts)
+	if fp.reloadsN() != 1 || fp.startsN() != 0 {
+		t.Errorf("expected 1 reload, 0 starts; got reloads=%d starts=%d", fp.reloadsN(), fp.startsN())
 	}
 }
 
 func TestReloadSkippedOnValidationError(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -368,15 +390,16 @@ func TestReloadSkippedOnValidationError(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected validation error from Reload")
 	}
-	if fp.starts != 0 || fp.reloads != 0 || fp.stops != 0 {
-		t.Errorf("no process action expected on invalid config; got %+v", fp)
+	if fp.startsN() != 0 || fp.reloadsN() != 0 || fp.stopsN() != 0 {
+		t.Errorf("no process action expected on invalid config; got starts=%d reloads=%d stops=%d",
+			fp.startsN(), fp.reloadsN(), fp.stopsN())
 	}
 }
 
 func TestDebouncerCoalescesMultipleSaves(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -392,10 +415,8 @@ func TestDebouncerCoalescesMultipleSaves(t *testing.T) {
 	}
 	// Wait past debounce.
 	time.Sleep(reloadDebounce + 100*time.Millisecond)
-	fp.mu.Lock()
-	reloads := fp.reloads
-	starts := fp.starts
-	fp.mu.Unlock()
+	reloads := fp.reloadsN()
+	starts := fp.startsN()
 	if reloads+starts > 2 {
 		// SetEnabled fires once; the 3 saves coalesce into at most one
 		// additional reload. Tolerate <=2 total.
@@ -441,7 +462,7 @@ func TestReloadStartsForBothAlwaysOnContentAndConsumerSlot(t *testing.T) {
 	// path should shadow the other.
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{
 		Slot:       SlotTunnels,
 		Filename:   "10-tunnels.json",
@@ -464,8 +485,8 @@ func TestReloadStartsForBothAlwaysOnContentAndConsumerSlot(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 {
-		t.Errorf("expected 1 start (both paths active), got %d", fp.starts)
+	if fp.startsN() != 1 {
+		t.Errorf("expected 1 start (both paths active), got %d", fp.startsN())
 	}
 }
 
@@ -520,14 +541,55 @@ func TestBootstrapResolvesBothLocationsConflict(t *testing.T) {
 	}
 }
 
-func TestBootstrap_SweepsStaleApplyCheckDirs(t *testing.T) {
+func TestBootstrap_SweepsStaleCheckDirs(t *testing.T) {
 	dir := t.TempDir()
-	// Pre-create a leftover from a crashed Apply.
-	stale := filepath.Join(dir, ".apply-check-abc123")
-	if err := os.MkdirAll(stale, 0755); err != nil {
-		t.Fatal(err)
+	// Pre-create leftovers from crashed Apply / CheckMerged / CheckSlotAlone runs.
+	stale := []string{
+		filepath.Join(dir, ".apply-check-abc123"),
+		filepath.Join(dir, ".save-check-def456"),
+		filepath.Join(dir, ".alone-check-ghi789"),
 	}
-	if err := os.WriteFile(filepath.Join(stale, "20-router.json"), []byte(`{}`), 0644); err != nil {
+	for _, s := range stale {
+		if err := os.MkdirAll(s, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(s, "20-router.json"), []byte(`{}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	o := New(dir, nil)
+	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
+	if err := o.Bootstrap(); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	for _, s := range stale {
+		if _, err := os.Stat(s); !os.IsNotExist(err) {
+			t.Errorf("stale check dir %s not swept: %v", filepath.Base(s), err)
+		}
+	}
+}
+
+func TestBootstrap_SweepsStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, disabledSubdir), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, "pending"), 0755)
+	// Leftover AtomicWrite temp files from a crash between write and rename,
+	// one in each dir slot writes can land in.
+	staleTmps := []string{
+		filepath.Join(dir, "20-router.json.tmp.1234.5678"),
+		filepath.Join(dir, disabledSubdir, "40-subscriptions.json.tmp.1.2"),
+		filepath.Join(dir, "pending", "90-user.json.tmp.9.9"),
+	}
+	for _, p := range staleTmps {
+		if err := os.WriteFile(p, []byte(`{}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A real slot file must survive the sweep.
+	keep := filepath.Join(dir, "20-router.json")
+	if err := os.WriteFile(keep, []byte(`{}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -537,8 +599,13 @@ func TestBootstrap_SweepsStaleApplyCheckDirs(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Errorf("stale .apply-check-* dir not swept: %v", err)
+	for _, p := range staleTmps {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale temp file not swept: %s (%v)", p, err)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("real slot file wrongly removed: %v", err)
 	}
 }
 
@@ -576,7 +643,7 @@ func TestBootstrap_LeavesPendingFileIntact(t *testing.T) {
 func TestReloadColdStartSuppressedByShouldRun(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -596,8 +663,8 @@ func TestReloadColdStartSuppressedByShouldRun(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 0 {
-		t.Errorf("cold-start must be suppressed; got starts=%d", fp.starts)
+	if fp.startsN() != 0 {
+		t.Errorf("cold-start must be suppressed; got starts=%d", fp.startsN())
 	}
 	if fp.running {
 		t.Errorf("daemon must remain stopped")
@@ -609,7 +676,7 @@ func TestReloadColdStartSuppressedByShouldRun(t *testing.T) {
 func TestReloadColdStartProceedsWhenShouldRunTrue(t *testing.T) {
 	fp := &fakeProc{}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -629,8 +696,8 @@ func TestReloadColdStartProceedsWhenShouldRunTrue(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.starts != 1 {
-		t.Errorf("expected 1 start, got %d", fp.starts)
+	if fp.startsN() != 1 {
+		t.Errorf("expected 1 start, got %d", fp.startsN())
 	}
 }
 
@@ -641,7 +708,7 @@ func TestReloadColdStartProceedsWhenShouldRunTrue(t *testing.T) {
 func TestReloadShouldRunOnlyGatesColdStart(t *testing.T) {
 	fp := &fakeProc{running: true} // already alive
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotBase, Filename: "00-base.json", AlwaysOn: true})
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
@@ -661,11 +728,11 @@ func TestReloadShouldRunOnlyGatesColdStart(t *testing.T) {
 	if err := o.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if fp.reloads != 1 {
-		t.Errorf("SIGHUP must still fire when already running; reloads=%d", fp.reloads)
+	if fp.reloadsN() != 1 {
+		t.Errorf("SIGHUP must still fire when already running; reloads=%d", fp.reloadsN())
 	}
-	if fp.starts != 0 {
-		t.Errorf("must not cold-start when already running; starts=%d", fp.starts)
+	if fp.startsN() != 0 {
+		t.Errorf("must not cold-start when already running; starts=%d", fp.startsN())
 	}
 }
 
@@ -693,7 +760,7 @@ func equalStrs(a, b []string) bool {
 func TestReload_RestartsWhenTunAdded(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -711,8 +778,8 @@ func TestReload_RestartsWhenTunAdded(t *testing.T) {
 	if got := fp.calls(); !equalStrs(got, []string{"stop", "start"}) {
 		t.Errorf("expected restart [stop start], got %v", got)
 	}
-	if fp.reloads != 0 {
-		t.Errorf("must not SIGHUP on tun add; reloads=%d", fp.reloads)
+	if fp.reloadsN() != 0 {
+		t.Errorf("must not SIGHUP on tun add; reloads=%d", fp.reloadsN())
 	}
 	if !o.prevHasTun {
 		t.Errorf("prevHasTun must be true after applying a tun config")
@@ -725,7 +792,7 @@ func TestReload_RestartsWhenTunAdded(t *testing.T) {
 func TestReload_SighupWhenTunStillPresent(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -743,8 +810,8 @@ func TestReload_SighupWhenTunStillPresent(t *testing.T) {
 	if got := fp.calls(); !equalStrs(got, []string{"reload"}) {
 		t.Errorf("expected SIGHUP [reload], got %v", got)
 	}
-	if fp.starts != 0 || fp.stops != 0 {
-		t.Errorf("must not restart when tun unchanged; starts=%d stops=%d", fp.starts, fp.stops)
+	if fp.startsN() != 0 || fp.stopsN() != 0 {
+		t.Errorf("must not restart when tun unchanged; starts=%d stops=%d", fp.startsN(), fp.stopsN())
 	}
 }
 
@@ -755,7 +822,7 @@ func TestReload_SighupWhenTunStillPresent(t *testing.T) {
 func TestReload_RestartsWhenTunRemoved(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
@@ -786,7 +853,7 @@ func TestReload_RestartsWhenTunRemoved(t *testing.T) {
 func TestReload_SighupWhenNoTunEither(t *testing.T) {
 	fp := &fakeProc{running: true}
 	dir := t.TempDir()
-	o := New(dir, fp)
+	o := newFakeOrch(t, dir, fp)
 	_ = o.Register(SlotMeta{Slot: SlotRouter, Filename: "20-router.json"})
 	if err := o.Bootstrap(); err != nil {
 		t.Fatal(err)
