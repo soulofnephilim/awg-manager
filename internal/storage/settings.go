@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion        = 30
+	CurrentSchemaVersion        = 31
 	DefaultPort                 = 2222
 	DefaultInterface            = "br0"
 	DefaultPingCheckTarget      = "8.8.8.8"
@@ -176,6 +176,9 @@ func (s *SettingsStore) Load() (*Settings, error) {
 		if settings.SchemaVersion < 30 {
 			s.migrateToV30(&settings)
 		}
+		if settings.SchemaVersion < 31 {
+			s.migrateToV31(&settings)
+		}
 	}
 
 	// Self-heal duplicated managed servers — see dedupManagedServers comment.
@@ -238,8 +241,10 @@ func (s *SettingsStore) defaultSettings() *Settings {
 			SingboxMaxEntries: 5000,
 		},
 		Updates: UpdateSettings{
-			CheckEnabled: true,
-			Channel:      "stable",
+			CheckEnabled:            true,
+			Channel:                 "stable",
+			AutoInstallIntervalDays: 7,
+			AutoInstallTime:         "05:00",
 		},
 		Download: DownloadSettings{
 			RouteTag:  "direct",

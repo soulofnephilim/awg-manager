@@ -304,6 +304,20 @@ func (s *SettingsStore) migrateToV30(settings *Settings) {
 	settings.SchemaVersion = 30
 }
 
+// migrateToV31 introduces auto-install-by-schedule fields on UpdateSettings
+// (issue #559). Existing installs default to disabled, every 7 days, 05:00
+// window — AutoInstallEnabled zero value (false) is already the intended
+// default, so only the two other fields need an explicit backfill.
+func (s *SettingsStore) migrateToV31(settings *Settings) {
+	if settings.Updates.AutoInstallIntervalDays == 0 {
+		settings.Updates.AutoInstallIntervalDays = 7
+	}
+	if settings.Updates.AutoInstallTime == "" {
+		settings.Updates.AutoInstallTime = "05:00"
+	}
+	settings.SchemaVersion = 31
+}
+
 // migrateManagedServers moves a legacy singular managedServer into the
 // new ManagedServers slice. Idempotent. Caller holds s.mu.
 func (s *SettingsStore) migrateManagedServers() {

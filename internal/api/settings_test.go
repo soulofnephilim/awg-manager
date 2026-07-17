@@ -237,7 +237,7 @@ func TestUpdateUsageLevelEmptyPreserves(t *testing.T) {
 		"pingCheck": {"enabled": false, "defaults": {"method":"http","target":"8.8.8.8","interval":45,"deadInterval":120,"failThreshold":3}},
 		"logging": {"enabled": true, "maxAge": 2},
 		"disableMemorySaving": false,
-		"updates": {"checkEnabled": true},
+		"updates": {"checkEnabled": true, "autoInstallIntervalDays": 7, "autoInstallTime": "05:00"},
 		"dnsRoute": {"autoRefreshEnabled": false},
 		"singboxRouter": {"enabled": false, "policyName": ""}
 	}`)

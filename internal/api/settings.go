@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -60,6 +61,15 @@ type LoggingSettingsDTO struct {
 type UpdateSettingsDTO struct {
 	CheckEnabled bool   `json:"checkEnabled" example:"true"`
 	Channel      string `json:"channel" example:"stable" enums:"stable,develop"`
+	// AutoInstallEnabled turns on unattended installation of checked
+	// updates on the configured schedule.
+	AutoInstallEnabled bool `json:"autoInstallEnabled" example:"false"`
+	// AutoInstallIntervalDays is the minimum number of days between
+	// auto-install attempts, 1..30.
+	AutoInstallIntervalDays int `json:"autoInstallIntervalDays" example:"7" minimum:"1" maximum:"30"`
+	// AutoInstallTime is the daily "HH:MM" (24h) window an auto-install
+	// attempt may start in.
+	AutoInstallTime string `json:"autoInstallTime" example:"05:00"`
 }
 
 type DownloadSettingsDTO struct {
@@ -147,6 +157,9 @@ type SettingsHandler struct {
 }
 
 const settingsMonitoringRefreshTimeout = 10 * time.Second
+
+// autoInstallTimePattern validates updates.autoInstallTime as 24h "HH:MM".
+var autoInstallTimePattern = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
 
 // NewSettingsHandler creates a new settings handler.
 func NewSettingsHandler(store *storage.SettingsStore, appLogger logging.AppLogger) *SettingsHandler {
@@ -330,6 +343,25 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	merged.Logging.SingboxLogLevel = storage.NormalizeSingboxLogLevel(merged.Logging.SingboxLogLevel)
+
+	// Validate auto-install schedule fields only when the client sent an
+	// updates block (Updates is patched as a whole struct, not per-field —
+	// mirrors DNSRoute/GeoFile/PingCheck). An omitted block leaves
+	// merged.Updates carrying the already-valid stored value.
+	if patch.Updates != nil {
+		if merged.Updates.AutoInstallIntervalDays < 1 || merged.Updates.AutoInstallIntervalDays > 30 {
+			response.ErrorWithStatus(w, http.StatusBadRequest,
+				"updates.autoInstallIntervalDays must be between 1 and 30",
+				"INVALID_AUTO_INSTALL_INTERVAL")
+			return
+		}
+		if !autoInstallTimePattern.MatchString(merged.Updates.AutoInstallTime) {
+			response.ErrorWithStatus(w, http.StatusBadRequest,
+				"updates.autoInstallTime must be in HH:MM (24h) format",
+				"INVALID_AUTO_INSTALL_TIME")
+			return
+		}
+	}
 
 	// Detect ping check toggle change before saving
 	pingCheckWasEnabled := oldSettings.PingCheck.Enabled
