@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -226,6 +227,10 @@ func (s *Store) Get(id string) (*Subscription, error) {
 	return &cp, nil
 }
 
+// List возвращает подписки в детерминированном порядке (label без регистра,
+// tie-break по ID) — тем же, что GroupStore.List. s.data — map, её порядок
+// итерации рандомен на каждый вызов: карточки подписок в UI перепрыгивали на
+// каждом 30-секундном поллинге (#525).
 func (s *Store) List() []Subscription {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -233,6 +238,13 @@ func (s *Store) List() []Subscription {
 	for _, sub := range s.data {
 		out = append(out, *sub)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		li, lj := strings.ToLower(out[i].Label), strings.ToLower(out[j].Label)
+		if li != lj {
+			return li < lj
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 
