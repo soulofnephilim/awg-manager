@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/downloader"
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -196,11 +197,27 @@ func TestRunAutoInstallSlot_SingboxUpdateAvailable_WritesMarkerAndUpdates(t *tes
 	if marker.FromVersion != "1.11.0" || marker.ToVersion != "1.11.1" {
 		t.Fatalf("marker = %+v, want from=1.11.0 to=1.11.1", marker)
 	}
+	// A sing-box update never restarts this process, so unlike the manager
+	// self-update marker, this one must already be Reported: the outcome was
+	// journaled live in this same session — a later daemon restart within
+	// freshWindow must not re-journal it (autoInstallRetrospective).
+	if !marker.Reported {
+		t.Fatalf("expected sing-box marker.Reported = true, got %+v", marker)
+	}
 }
 
 func TestRunAutoInstallSlot_SingboxNoUpdateAvailable_StampsCheckedMarker(t *testing.T) {
 	su := &fakeSingboxUpdater{installed: true, updateAvailable: false, current: "1.11.1", required: "1.11.1"}
-	svc := newTestUpdateService(t, su)
+	svc := &Service{
+		version:        "2.12.0",
+		dataDir:        t.TempDir(),
+		singboxUpdater: su,
+		// A downloader that reports a SUCCESSFUL check with nothing newer
+		// (not a failure) — the checked-marker must only be stamped for a
+		// genuine "nothing to do" outcome, not a failed check.
+		downloader: managerUpdateDownloader(t, "2.12.0", nil),
+	}
+	svc.changelog = newChangelogFetcher(changelogURLForChannel(channelStable), 10*time.Minute, svc.downloader)
 	svc.runAutoInstallSlotForced()
 
 	if su.updateCalls != 0 {
@@ -228,7 +245,14 @@ func TestRunAutoInstallSlot_SingboxNoUpdateAvailable_StampsCheckedMarker(t *test
 // next autoInstallDue check (same slot) return false.
 func TestRunAutoInstallSlot_NothingAvailable_SuppressesImmediateRepoll(t *testing.T) {
 	su := &fakeSingboxUpdater{installed: true, updateAvailable: false, current: "1.11.1", required: "1.11.1"}
-	svc := newTestUpdateService(t, su)
+	svc := &Service{
+		version:        "2.12.0",
+		dataDir:        t.TempDir(),
+		singboxUpdater: su,
+		// Genuine "checked, nothing available" — not a failed check.
+		downloader: managerUpdateDownloader(t, "2.12.0", nil),
+	}
+	svc.changelog = newChangelogFetcher(changelogURLForChannel(channelStable), 10*time.Minute, svc.downloader)
 	svc.runAutoInstallSlotForced()
 
 	marker := svc.readAutoInstallMarker()
@@ -240,6 +264,25 @@ func TestRunAutoInstallSlot_NothingAvailable_SuppressesImmediateRepoll(t *testin
 	// not before todayTarget) from time-of-day flakiness.
 	if autoInstallDue(marker.LastAttemptAt, marker, 7, "00:00") {
 		t.Fatal("expected autoInstallDue=false immediately after a checked-marker stamp (same slot must not repoll)")
+	}
+}
+
+// TestRunAutoInstallSlot_ManagerCheckFailed_DoesNotStampCheckedMarker is the
+// regression test for the outage bug: a failed CheckNow (info.Error set, e.g.
+// the entware repo was unreachable) must NOT be treated as "checked, nothing
+// available" — stamping the checked-marker in that case would defer an
+// actually-available update by up to intervalDays if the outage hit the
+// scheduled window. No marker means the next tick retries.
+func TestRunAutoInstallSlot_ManagerCheckFailed_DoesNotStampCheckedMarker(t *testing.T) {
+	svc := newTestUpdateService(t, nil) // failingDownloader, no sing-box updater
+	svc.runAutoInstallSlotForced()
+
+	if marker := svc.readAutoInstallMarker(); marker != nil {
+		t.Fatalf("expected no marker stamped when the manager check itself failed, got %+v", marker)
+	}
+	// No marker at all => autoInstallDue still fires on the next tick.
+	if !autoInstallDue(time.Now(), svc.readAutoInstallMarker(), 7, "00:00") {
+		t.Fatal("expected autoInstallDue=true so the next tick retries the failed check")
 	}
 }
 
@@ -332,6 +375,13 @@ func TestRunAutoInstallSlot_ManagerUpdateAvailable_StampsMarkerBeforeApply(t *te
 	if marker.FromVersion != "2.12.0" || marker.ToVersion != "9.9.9" {
 		t.Fatalf("marker = %+v, want from=2.12.0 to=9.9.9", marker)
 	}
+	// Unlike the sing-box paths, the manager self-update marker must NOT be
+	// Reported: ApplyUpgrade's detached "opkg install" kills this process a
+	// couple of seconds later, so the outcome can only ever be journaled
+	// retrospectively on the next daemon restart.
+	if marker.Reported {
+		t.Fatalf("expected manager marker.Reported = false, got %+v", marker)
+	}
 }
 
 func TestRunAutoInstallSlot_ManagerBusy_SkipsWithoutStamp(t *testing.T) {
@@ -366,6 +416,15 @@ func TestAutoInstallStartupCatchUp_UpdatesOnceOnMismatch(t *testing.T) {
 
 	if su.updateCalls != 1 {
 		t.Fatalf("Update calls = %d, want exactly 1", su.updateCalls)
+	}
+	marker := svc.readAutoInstallMarker()
+	if marker == nil {
+		t.Fatal("expected marker to be written by the startup catch-up")
+	}
+	// Journaled live above in this same session — must be Reported so a
+	// later daemon restart within freshWindow does not re-journal it.
+	if !marker.Reported {
+		t.Fatalf("expected startup catch-up marker.Reported = true, got %+v", marker)
 	}
 }
 
@@ -452,6 +511,75 @@ func TestAutoInstallRetrospective_StaleMarker_NotJournaled(t *testing.T) {
 	}
 	if got.Reported {
 		t.Fatalf("expected Reported to remain false for a stale marker (neither branch matches), got %+v", got)
+	}
+}
+
+// TestAutoInstallRetrospective_SingboxMarker_NotReJournaled is the regression
+// test for the sing-box marker fix: a sing-box update marker written with
+// Reported: true (as the slot / startup catch-up now do) must make
+// autoInstallRetrospective a no-op on the next daemon restart, even though
+// ToVersion matches the live sing-box version and the attempt is well within
+// freshWindow — without the fix this would re-log "автообновление успешно"
+// on every restart within the window.
+func TestAutoInstallRetrospective_SingboxMarker_NotReJournaled(t *testing.T) {
+	su := &fakeSingboxUpdater{current: "1.11.1"}
+	svc := newTestUpdateService(t, su)
+	recorder := &recordingAppLogger{}
+	svc.appLog = logging.NewScopedLogger(recorder, logging.GroupSystem, logging.SubUpdate)
+	svc.settings = newAutoInstallTestSettings(t, true)
+	marker := &autoInstallMarker{
+		LastAttemptAt: time.Now().Add(-time.Hour),
+		FromVersion:   "1.11.0",
+		ToVersion:     "1.11.1", // matches su.current, would otherwise match+journal
+		Reported:      true,
+	}
+	if err := writeAutoInstallMarker(svc.dataDir, marker); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	svc.autoInstallRetrospective()
+
+	if len(recorder.entries) != 0 {
+		t.Fatalf("expected no journal entries for an already-Reported marker, got %+v", recorder.entries)
+	}
+}
+
+// TestNextAutoInstallAt_CheckedMarker_LastIsZero is the regression test for
+// the UI bug: a checked-marker (empty ToVersion — "checked, nothing to
+// install") must not be reported as "last auto-install" in the settings API,
+// or the UI shows «Последняя автоустановка: <date>» when nothing was ever
+// actually installed.
+func TestNextAutoInstallAt_CheckedMarker_LastIsZero(t *testing.T) {
+	svc := newTestUpdateService(t, nil)
+	svc.settings = newAutoInstallTestSettings(t, true)
+	marker := &autoInstallMarker{LastAttemptAt: time.Now().Add(-time.Hour)} // empty From/ToVersion
+	if err := writeAutoInstallMarker(svc.dataDir, marker); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	_, last := svc.NextAutoInstallAt()
+
+	if !last.IsZero() {
+		t.Fatalf("expected last to be zero for a checked-marker, got %v", last)
+	}
+}
+
+// TestNextAutoInstallAt_RealInstallMarker_LastIsSet is the sanity companion:
+// a marker that recorded an actual install (ToVersion set) must still report
+// its LastAttemptAt as "last".
+func TestNextAutoInstallAt_RealInstallMarker_LastIsSet(t *testing.T) {
+	svc := newTestUpdateService(t, nil)
+	svc.settings = newAutoInstallTestSettings(t, true)
+	attemptedAt := time.Now().Add(-time.Hour)
+	marker := &autoInstallMarker{LastAttemptAt: attemptedAt, FromVersion: "2.11.9", ToVersion: "2.12.0"}
+	if err := writeAutoInstallMarker(svc.dataDir, marker); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	_, last := svc.NextAutoInstallAt()
+
+	if !last.Equal(attemptedAt) {
+		t.Fatalf("expected last = %v, got %v", attemptedAt, last)
 	}
 }
 

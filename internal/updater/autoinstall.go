@@ -214,6 +214,11 @@ func (s *Service) runAutoInstallActions(ctx context.Context) {
 				LastAttemptAt: time.Now(),
 				FromVersion:   cur,
 				ToVersion:     req,
+				// A sing-box update does not restart this process, so the
+				// outcome is already journaled live above (or the Warn
+				// below) — mark it Reported so autoInstallRetrospective on
+				// the next daemon restart does not re-log it.
+				Reported: true,
 			})
 			if err != nil {
 				s.appLog.Warn("auto-install", "", "sing-box Update: "+err.Error())
@@ -240,6 +245,15 @@ func (s *Service) runAutoInstallActions(ctx context.Context) {
 	// tick until the next scheduled window. autoInstallRetrospective
 	// ignores markers with an empty ToVersion, so this never gets journaled
 	// as a real attempt.
+	//
+	// Exception: if the manager CheckNow itself failed (info.Error set —
+	// e.g. the entware repo was unreachable), do NOT stamp — a failed check
+	// is not "checked, nothing available", and stamping would defer an
+	// actually-available update by up to intervalDays if the outage hit the
+	// scheduled window. The next 15-minute tick retries instead.
+	if info != nil && info.Error != "" {
+		return
+	}
 	s.writeAutoInstallMarker(&autoInstallMarker{LastAttemptAt: time.Now()})
 }
 
@@ -274,6 +288,10 @@ func (s *Service) autoInstallStartupCatchUp(ctx context.Context) {
 			LastAttemptAt: time.Now(),
 			FromVersion:   cur,
 			ToVersion:     newCur,
+			// Already journaled just above in this same session — mark
+			// Reported so autoInstallRetrospective on a later restart does
+			// not re-log it (sing-box updates don't restart this process).
+			Reported: true,
 		})
 	}
 }
@@ -332,7 +350,7 @@ func nextDailyWindow(now, t time.Time) time.Time {
 // unparsable.
 func (s *Service) NextAutoInstallAt() (next, last time.Time) {
 	marker := s.readAutoInstallMarker()
-	if marker != nil {
+	if marker != nil && marker.ToVersion != "" {
 		last = marker.LastAttemptAt
 	}
 	enabled, intervalDays, hhmm := s.autoInstallSettings()
