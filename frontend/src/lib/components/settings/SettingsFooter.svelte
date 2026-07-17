@@ -37,6 +37,8 @@
 		'@LazIv', '@AverTV', '@xxxaaach', '@defylives', '@AndreyPristup',
 		'@Lethal F',
 		'@Stein_123', '@Tanovitsky',
+		'@Fable 5 (Claude Code)', '@easy_climber', '@Trikruti', '@D_Fedulov', '@VerxSr',
+		'@siniekiti420', '@Матвей Д****н', '@Алексей Д*****в', '@Иван В********ч',
 	];
 
 	let open = $state(false);
@@ -95,7 +97,7 @@
 		<div class="card credits-card">
 			<div class="credits-content">
 				{#each credits as nick}
-					<span class="credits-nick" class:gold={nick === '@dna_pvt' || nick === '@amatol'} class:bronze={nick === '@tiffolk' || nick === '@defylives'}>{nick}</span>
+					<span class="credits-nick" class:gold={nick === '@dna_pvt' || nick === '@amatol'} class:bronze={nick === '@tiffolk' || nick === '@defylives' || nick === '@easy_climber'} class:green={nick === '@Fable 5 (Claude Code)'}>{nick}</span>
 				{/each}
 			</div>
 		</div>
@@ -276,5 +278,12 @@
 		font-weight: 700;
 		background: rgba(205, 127, 50, 0.12);
 		border-color: rgba(205, 127, 50, 0.7);
+	}
+
+	.credits-nick.green {
+		color: #3fb950;
+		font-weight: 700;
+		background: rgba(63, 185, 80, 0.12);
+		border-color: rgba(63, 185, 80, 0.7);
 	}
 </style>
