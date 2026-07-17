@@ -73,9 +73,19 @@ Telegram: [@awgmanager](https://t.me/awgmanager)
 
 ## Поддержать проект
 
-Если проект оказался полезным, можно поддержать разработку донатом:
+Если у вас есть лишние шекели, вам понравилось как вам не отвечают на вопросы и вы готовы самостоятельно решать проблемы, а еще вы оценили подход — «ни дня без нового бага», то:
 
-**USDT (TRC20):** `TEpJh2p9j3fp6MigyqGvq1gC5D3CsxBeJw`
+Вы можете поделиться богатством и дать возможность родить новые проблемы там, где еще вчера все было хорошо:
+
+**USDT / ETH:** `0x7eae43b82157f2e4ea233eddf5d9ce19a1064f04`
+
+**USDT / Tron:** `TDisGwxj2AopFzT2VQ9JwY6QDyjChUP5EA`
+
+**Boosty:** https://boosty.to/awgm_hoaxisr/donate
+
+**ЮMoney:** https://yoomoney.ru/fundraise/1GF36UHR07L.260312
+
+**Или любая сумма:** https://yoomoney.ru/to/4100119477098112/0
 
 ---
 

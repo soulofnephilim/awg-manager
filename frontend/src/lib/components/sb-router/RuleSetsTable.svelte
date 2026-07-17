@@ -21,9 +21,24 @@
     bare?: boolean;
     alphaSort?: boolean;
     onToggleAlphaSort?: () => void;
+    selectMode?: boolean;
+    selected?: Set<string>;
+    onToggleSelect?: (tag: string) => void;
+    onSelectableChange?: (tags: string[]) => void;
   }
 
-  let { ruleSets, onEdit, onDelete, bare = false, alphaSort = false, onToggleAlphaSort }: Props = $props();
+  let {
+    ruleSets,
+    onEdit,
+    onDelete,
+    bare = false,
+    alphaSort = false,
+    onToggleAlphaSort,
+    selectMode = false,
+    selected = new Set(),
+    onToggleSelect = () => {},
+    onSelectableChange,
+  }: Props = $props();
 
   let filter = $state<RsFilter>('all');
 
@@ -31,6 +46,17 @@
     if (filter === 'all') return ruleSets;
     if (filter === 'dat') return ruleSets.filter((rs) => datInfo(rs) !== null);
     return ruleSets.filter((rs) => (rs.type ?? 'remote') === filter);
+  });
+
+  // Видимые-выбираемые теги (remote среди отфильтрованных) — наружу для
+  // «Выбрать все» в ExpertPanel, чтобы bulk-detour не трогал скрытые
+  // фильтром наборы (#558 fix-волна, finding F2).
+  const filteredSelectableTags = $derived(
+    filtered.filter((rs) => rs.type === 'remote').map((rs) => rs.tag),
+  );
+
+  $effect(() => {
+    onSelectableChange?.(filteredSelectableTags);
   });
 
   function sourceFor(rs: SingboxRouterRuleSet): string {
@@ -87,7 +113,26 @@
     </div>
     {#each filtered as rs (rs.tag)}
       <div class="row">
-        <div class="tag">{displayRuleSetTag(rs.tag)}</div>
+        <div class="tag">
+          {#if selectMode}
+            {#if rs.type === 'remote'}
+              <input
+                type="checkbox"
+                class="rs-checkbox"
+                checked={selected.has(rs.tag)}
+                onchange={() => onToggleSelect(rs.tag)}
+                aria-label={`Выбрать набор ${displayRuleSetTag(rs.tag)}`}
+              />
+            {:else}
+              <span
+                class="rs-checkbox-placeholder"
+                title="Download detour применим только к remote"
+                aria-hidden="true"
+              ></span>
+            {/if}
+          {/if}
+          {displayRuleSetTag(rs.tag)}
+        </div>
         <div>
           <RuleSetTypeBadge type={resolveRuleSetDisplayType(rs)} />
         </div>
@@ -224,9 +269,25 @@
     }
   }
   .tag {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-family: var(--font-mono);
     font-size: 11.5px;
     font-weight: 600;
+  }
+  .rs-checkbox {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .rs-checkbox-placeholder {
+    flex-shrink: 0;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
   }
   .source {
     min-width: 0;

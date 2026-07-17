@@ -51,11 +51,19 @@ type Service interface {
 	AddRule(ctx context.Context, rule Rule) error
 	UpdateRule(ctx context.Context, index int, rule Rule) error
 	DeleteRule(ctx context.Context, index int) error
+	// BulkSetRuleOutbound sets Outbound on every rule at the given indices in
+	// a single config write. See ServiceImpl.BulkSetRuleOutbound for the
+	// validation contract.
+	BulkSetRuleOutbound(ctx context.Context, indices []int, outbound string) error
 	MoveRule(ctx context.Context, from, to int) error
 
 	ListRuleSets(ctx context.Context) ([]RuleSet, error)
 	AddRuleSet(ctx context.Context, rs RuleSet) error
 	UpdateRuleSet(ctx context.Context, tag string, rs RuleSet) error
+	// BulkSetRuleSetDetour sets DownloadDetour on every rule set with a tag in
+	// the given list, in a single config write. See
+	// ServiceImpl.BulkSetRuleSetDetour for the validation contract.
+	BulkSetRuleSetDetour(ctx context.Context, tags []string, detour string) error
 	DeleteRuleSet(ctx context.Context, tag string, force bool) error
 	DatRuleSetURL(ctx context.Context, kind string, tags []string) (string, error)
 	DatRuleSetFile(ctx context.Context, kind string, tags []string, token string) (string, error)

@@ -27,6 +27,12 @@
     onDragHandlePointerDown?: (event: PointerEvent) => void;
     dragging?: boolean;
     dragDisabled?: boolean;
+    /** Режим массового выделения (F8, bulk outbound). */
+    selectMode?: boolean;
+    /** Может ли это правило участвовать в массовом выделении. */
+    selectable?: boolean;
+    selected?: boolean;
+    onToggleSelect?: () => void;
   }
   let {
     card,
@@ -40,6 +46,10 @@
     onDragHandlePointerDown,
     dragging = false,
     dragDisabled = false,
+    selectMode = false,
+    selectable = false,
+    selected = false,
+    onToggleSelect,
   }: Props = $props();
 
   const MAX_CHIPS = 4;
@@ -119,8 +129,20 @@
 
 <div class="card-wrap" title={card.isSystem ? card.tooltip : undefined}>
 <div class="card" class:is-system={card.isSystem} class:dragging>
-  <!-- Order number -->
-  <div class="order">{orderStr}</div>
+  <!-- Order number / bulk-select checkbox -->
+  <div class="order">
+    {#if selectMode && selectable}
+      <input
+        type="checkbox"
+        class="rule-checkbox"
+        checked={selected}
+        onchange={onToggleSelect}
+        aria-label={`Выбрать правило #${orderStr}`}
+      />
+    {:else}
+      {orderStr}
+    {/if}
+  </div>
 
   <div class="drag-slot">
     {#if !card.isSystem}
@@ -251,6 +273,12 @@
     text-align: center;
   }
   .is-system .order { color: var(--text-muted); }
+  .rule-checkbox {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
 
   .drag-slot {
     display: flex;

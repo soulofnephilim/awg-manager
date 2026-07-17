@@ -7,6 +7,7 @@ export { default as MatcherChip } from './MatcherChip.svelte';
 export { default as OutboundTile } from './OutboundTile.svelte';
 export type { OutboundTileSize } from './OutboundTile.svelte';
 export { default as RulesPanel } from './RulesPanel.svelte';
+export { default as BulkSelectBar } from './BulkSelectBar.svelte';
 export type {
   RuleAction,
   MatcherKind,

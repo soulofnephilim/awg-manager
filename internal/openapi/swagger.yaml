@@ -3675,6 +3675,20 @@ definitions:
         example: Policy0
         type: string
     type: object
+  api.SingboxRouterBulkUpdatedData:
+    properties:
+      updated:
+        example: 2
+        type: integer
+    type: object
+  api.SingboxRouterBulkUpdatedResponse:
+    properties:
+      data:
+        $ref: '#/definitions/api.SingboxRouterBulkUpdatedData'
+      success:
+        example: true
+        type: boolean
+    type: object
   api.SingboxRouterCreatePolicyRequest:
     properties:
       description:
@@ -4137,6 +4151,19 @@ definitions:
         example: direct
         type: string
     type: object
+  api.SingboxRouterRuleBulkOutboundRequest:
+    properties:
+      indices:
+        example:
+        - 0
+        - 2
+        items:
+          type: integer
+        type: array
+      outbound:
+        example: my-selector
+        type: string
+    type: object
   api.SingboxRouterRuleDTO:
     properties:
       action:
@@ -4203,6 +4230,18 @@ definitions:
       to:
         example: 0
         type: integer
+    type: object
+  api.SingboxRouterRuleSetBulkDetourRequest:
+    properties:
+      downloadDetour:
+        example: direct
+        type: string
+      tags:
+        example:
+        - geosite-cn
+        items:
+          type: string
+        type: array
     type: object
   api.SingboxRouterRuleSetDTO:
     properties:
@@ -11736,6 +11775,40 @@ paths:
       summary: Add fakeip-config route rule
       tags:
       - singbox-fakeip
+  /singbox/fakeip/config/rules/bulk-outbound:
+    post:
+      consumes:
+      - application/json
+      description: Sets Outbound on every route rule at the given indices in a single
+        config write (fakeip-tun slot). Rejects an empty/duplicate index list, an
+        out-of-range index, a non-route rule, or an unknown outbound tag.
+      parameters:
+      - description: Rule indices + new outbound tag
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleBulkOutboundRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set outbound on fakeip-config route rules
+      tags:
+      - singbox-fakeip
   /singbox/fakeip/config/rules/delete:
     post:
       consumes:
@@ -11889,6 +11962,41 @@ paths:
       security:
       - CookieAuth: []
       summary: Add fakeip-config ruleset
+      tags:
+      - singbox-fakeip
+  /singbox/fakeip/config/rulesets/bulk-detour:
+    post:
+      consumes:
+      - application/json
+      description: Sets download_detour on every rule set with a tag in the given
+        list, in a single config write (fakeip-tun slot). Rejects an empty/duplicate
+        tag list, an unknown tag, a rule set whose type isn't "remote", or an unknown
+        outbound tag (empty detour clears the field and skips the known-tag check).
+      parameters:
+      - description: Rule set tags + new download_detour
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleSetBulkDetourRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set download_detour on fakeip-config rulesets
       tags:
       - singbox-fakeip
   /singbox/fakeip/config/rulesets/delete:
@@ -13432,6 +13540,40 @@ paths:
       summary: Add singbox-router rule
       tags:
       - singbox-router
+  /singbox/router/rules/bulk-outbound:
+    post:
+      consumes:
+      - application/json
+      description: Sets Outbound on every route rule at the given indices in a single
+        config write. Rejects an empty/duplicate index list, an out-of-range index,
+        a non-route rule, or an unknown outbound tag.
+      parameters:
+      - description: Rule indices + new outbound tag
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleBulkOutboundRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set outbound on singbox-router rules
+      tags:
+      - singbox-router
   /singbox/router/rules/delete:
     post:
       consumes:
@@ -13584,6 +13726,41 @@ paths:
       security:
       - CookieAuth: []
       summary: Add singbox-router ruleset
+      tags:
+      - singbox-router
+  /singbox/router/rulesets/bulk-detour:
+    post:
+      consumes:
+      - application/json
+      description: Sets download_detour on every rule set with a tag in the given
+        list, in a single config write. Rejects an empty/duplicate tag list, an unknown
+        tag, a rule set whose type isn't "remote", or an unknown outbound tag (empty
+        detour clears the field and skips the known-tag check).
+      parameters:
+      - description: Rule set tags + new download_detour
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SingboxRouterRuleSetBulkDetourRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+      security:
+      - CookieAuth: []
+      summary: Bulk-set download_detour on singbox-router rulesets
       tags:
       - singbox-router
   /singbox/router/rulesets/dat-url:

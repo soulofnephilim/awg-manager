@@ -21,6 +21,7 @@
 	} from '$lib/utils/singboxInlineRules';
 	import { expandGeoLinesInInput } from '$lib/utils/singboxInlineGeoExpand';
 	import { datInfo } from '$lib/utils/ruleSetType';
+	import { buildDownloadDetourOptions } from './outboundOptions';
 	import InlineRuleListEditor from './InlineRuleListEditor.svelte';
 	import GeoTagPicker from './GeoTagPicker.svelte';
 
@@ -61,12 +62,9 @@
 	];
 
 	// ── derived ────────────────────────────────────────────────
-	const downloadDetourOptions = $derived<DropdownOption[]>([
-		{ value: '', label: 'автоматически (direct)' },
-		...outboundOptions.flatMap((g) =>
-			g.items.map((i) => ({ value: i.value, label: i.label, group: g.group })),
-		),
-	]);
+	const downloadDetourOptions = $derived<DropdownOption[]>(
+		buildDownloadDetourOptions(outboundOptions, 'автоматически (direct)'),
+	);
 
 	const isEditing = $derived(Boolean(ruleSet));
 
