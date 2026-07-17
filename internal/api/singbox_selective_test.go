@@ -11,6 +11,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/heavyop"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 // blockingRebuildTriggerer blocks each Rebuild until release is signalled.
@@ -220,4 +221,57 @@ func TestSelectiveGetStatus_ReportsRebuilding(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), `"rebuilding":true`) {
 		t.Fatalf("in-flight status body: %s", rr.Body.String())
 	}
+}
+
+// #564: пересборка при неактивном селективе (спящий флаг в fakeip-режиме,
+// выключенный флаг или выключенный движок) отклоняется — завершившийся
+// rebuild иначе включал припаркованный слот 19-selective-routes.json.
+func TestSelectiveRebuild_RejectedWhenSelectiveInactive(t *testing.T) {
+	newStore := func(t *testing.T, mut func(*storage.SingboxRouterSettings)) *storage.SettingsStore {
+		t.Helper()
+		store := storage.NewSettingsStore(t.TempDir())
+		st, err := store.Get()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mut(&st.SingboxRouter)
+		if err := store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+
+	t.Run("dormant flag in fakeip → 409, no run", func(t *testing.T) {
+		b := &blockingRebuildTriggerer{started: make(chan struct{}, 1), release: make(chan struct{})}
+		store := newStore(t, func(sr *storage.SingboxRouterSettings) {
+			sr.Enabled = true
+			sr.RoutingMode = "fakeip-tun"
+			sr.SelectiveBypass = true
+		})
+		h := NewSelectiveHandler(store, "", b, &stubSelectiveStatus{}, nil)
+		rr := postRebuild(t, h)
+		if rr.Code != http.StatusConflict {
+			t.Fatalf("code=%d body=%s, want 409", rr.Code, rr.Body.String())
+		}
+		if got := b.calls.Load(); got != 0 {
+			t.Fatalf("rebuild must not start, calls=%d", got)
+		}
+	})
+
+	t.Run("active tproxy → 202", func(t *testing.T) {
+		b := &blockingRebuildTriggerer{started: make(chan struct{}, 1), release: make(chan struct{})}
+		store := newStore(t, func(sr *storage.SingboxRouterSettings) {
+			sr.Enabled = true
+			sr.RoutingMode = "tproxy"
+			sr.SelectiveBypass = true
+		})
+		h := NewSelectiveHandler(store, "", b, &stubSelectiveStatus{}, nil)
+		rr := postRebuild(t, h)
+		if rr.Code != http.StatusAccepted {
+			t.Fatalf("code=%d body=%s, want 202", rr.Code, rr.Body.String())
+		}
+		<-b.started
+		close(b.release)
+		waitFor(t, "run finish", func() bool { return !h.rebuilding.Load() })
+	})
 }
