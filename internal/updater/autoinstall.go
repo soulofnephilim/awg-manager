@@ -201,37 +201,46 @@ func (s *Service) runAutoInstallActions(ctx context.Context) {
 	}
 
 	// 2. Managed sing-box binary.
-	if s.singboxUpdater == nil {
-		return
+	if s.singboxUpdater != nil {
+		installed, updateAvailable, cur, req := s.singboxUpdater.UpdateStatus(ctx)
+		if installed && updateAvailable {
+			err := s.singboxUpdater.Update(ctx)
+			if errors.Is(err, ErrSingboxInstallInProgress) {
+				// A manual install/update is already running — skip without
+				// stamping the marker.
+				return
+			}
+			s.writeAutoInstallMarker(&autoInstallMarker{
+				LastAttemptAt: time.Now(),
+				FromVersion:   cur,
+				ToVersion:     req,
+			})
+			if err != nil {
+				s.appLog.Warn("auto-install", "", "sing-box Update: "+err.Error())
+				return
+			}
+			_, _, newCur, _ := s.singboxUpdater.UpdateStatus(ctx)
+			if newCur != "" && newCur != cur {
+				s.appLog.Info("auto-install", "", fmt.Sprintf("автообновление sing-box: %s→%s", cur, newCur))
+			} else {
+				// Update() returned nil but the version did not actually
+				// change (e.g. no free space, or it already matched —
+				// Operator.Update no-ops silently in both cases). Not a
+				// successful update.
+				s.appLog.Warn("auto-install", "", fmt.Sprintf("автообновление sing-box: без изменений (%s)", cur))
+			}
+			return
+		}
 	}
-	installed, updateAvailable, cur, req := s.singboxUpdater.UpdateStatus(ctx)
-	if !installed || !updateAvailable {
-		return
-	}
-	err := s.singboxUpdater.Update(ctx)
-	if errors.Is(err, ErrSingboxInstallInProgress) {
-		// A manual install/update is already running — skip without
-		// stamping the marker.
-		return
-	}
-	s.writeAutoInstallMarker(&autoInstallMarker{
-		LastAttemptAt: time.Now(),
-		FromVersion:   cur,
-		ToVersion:     req,
-	})
-	if err != nil {
-		s.appLog.Warn("auto-install", "", "sing-box Update: "+err.Error())
-		return
-	}
-	_, _, newCur, _ := s.singboxUpdater.UpdateStatus(ctx)
-	if newCur != "" && newCur != cur {
-		s.appLog.Info("auto-install", "", fmt.Sprintf("автообновление sing-box: %s→%s", cur, newCur))
-	} else {
-		// Update() returned nil but the version did not actually change
-		// (e.g. no free space, or it already matched — Operator.Update
-		// no-ops silently in both cases). Not a successful update.
-		s.appLog.Warn("auto-install", "", fmt.Sprintf("автообновление sing-box: без изменений (%s)", cur))
-	}
+
+	// 3. Nothing to install, and neither path was busy — the slot ran to
+	// completion with no work to do. Stamp a lightweight "checked" marker
+	// (empty From/ToVersion) so autoInstallDue's anti-dup + interval gate
+	// (both keyed on LastAttemptAt) suppress re-checking on every 15-minute
+	// tick until the next scheduled window. autoInstallRetrospective
+	// ignores markers with an empty ToVersion, so this never gets journaled
+	// as a real attempt.
+	s.writeAutoInstallMarker(&autoInstallMarker{LastAttemptAt: time.Now()})
 }
 
 // autoInstallStartupCatchUp runs once per process, a few minutes after

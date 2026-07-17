@@ -198,7 +198,7 @@ func TestRunAutoInstallSlot_SingboxUpdateAvailable_WritesMarkerAndUpdates(t *tes
 	}
 }
 
-func TestRunAutoInstallSlot_SingboxNoUpdateAvailable_NoMarker(t *testing.T) {
+func TestRunAutoInstallSlot_SingboxNoUpdateAvailable_StampsCheckedMarker(t *testing.T) {
 	su := &fakeSingboxUpdater{installed: true, updateAvailable: false, current: "1.11.1", required: "1.11.1"}
 	svc := newTestUpdateService(t, su)
 	svc.runAutoInstallSlotForced()
@@ -206,8 +206,40 @@ func TestRunAutoInstallSlot_SingboxNoUpdateAvailable_NoMarker(t *testing.T) {
 	if su.updateCalls != 0 {
 		t.Fatalf("Update calls = %d, want 0", su.updateCalls)
 	}
-	if marker := svc.readAutoInstallMarker(); marker != nil {
-		t.Fatalf("expected no marker, got %+v", marker)
+	// Nothing was available to install — the slot still stamps a
+	// lightweight "checked" marker (empty From/ToVersion) so the 15-minute
+	// ticker does not re-poll CheckNow/UpdateStatus on every tick until the
+	// next scheduled window (see runAutoInstallActions step 3).
+	marker := svc.readAutoInstallMarker()
+	if marker == nil {
+		t.Fatal("expected checked-marker to be stamped when nothing is available")
+	}
+	if marker.FromVersion != "" || marker.ToVersion != "" {
+		t.Fatalf("expected empty From/ToVersion on checked-marker, got %+v", marker)
+	}
+	if marker.LastAttemptAt.IsZero() {
+		t.Fatal("expected LastAttemptAt to be set on checked-marker")
+	}
+}
+
+// TestRunAutoInstallSlot_NothingAvailable_SuppressesImmediateRepoll is the
+// regression test for the steady-state 15-min repoll bug: a slot that ran to
+// completion with nothing to install must stamp a marker that makes the very
+// next autoInstallDue check (same slot) return false.
+func TestRunAutoInstallSlot_NothingAvailable_SuppressesImmediateRepoll(t *testing.T) {
+	su := &fakeSingboxUpdater{installed: true, updateAvailable: false, current: "1.11.1", required: "1.11.1"}
+	svc := newTestUpdateService(t, su)
+	svc.runAutoInstallSlotForced()
+
+	marker := svc.readAutoInstallMarker()
+	if marker == nil {
+		t.Fatal("expected checked-marker to be stamped")
+	}
+	// hhmm="00:00" makes today's target window trivially <= any stamp time
+	// on the same day, isolating the anti-dup gate (marker.LastAttemptAt
+	// not before todayTarget) from time-of-day flakiness.
+	if autoInstallDue(marker.LastAttemptAt, marker, 7, "00:00") {
+		t.Fatal("expected autoInstallDue=false immediately after a checked-marker stamp (same slot must not repoll)")
 	}
 }
 
@@ -250,6 +282,72 @@ func TestRunAutoInstallSlot_SingboxNoOp_NotJournaledAsUpdate(t *testing.T) {
 	}
 	if marker.ToVersion != "1.11.1" {
 		t.Fatalf("marker.ToVersion = %q, want required version stamped as attempted", marker.ToVersion)
+	}
+}
+
+// --- manager (awg-manager self-update) branch of runAutoInstallActions ---
+//
+// All the tests above use failingDownloader, so info.Available is always
+// false and the manager branch always falls through to sing-box. These two
+// exercise the manager branch itself with a downloader stubbed to report an
+// available update via the real Packages.gz parsing path (checkWithDownloader
+// / CheckNow are not mockable through an interface, so the fake plugs in one
+// level down at the Downloader).
+
+func managerUpdateDownloader(t *testing.T, newVersion string, downloadFileFn func(context.Context, downloader.FileRequest) (downloader.FileResult, error)) *fakeDownloader {
+	t.Helper()
+	arch := archSuffix()
+	ipkName := "awg-manager_" + newVersion + "_" + arch + "-kn.ipk"
+	packages := "Package: awg-manager\nVersion: " + newVersion + "\nFilename: " + ipkName + "\n"
+	return &fakeDownloader{
+		readAllFn: func(_ context.Context, _ downloader.Request) ([]byte, downloader.ResponseMeta, error) {
+			return gzipBytes(t, packages), downloader.ResponseMeta{}, nil
+		},
+		downloadFileFn: downloadFileFn,
+	}
+}
+
+func TestRunAutoInstallSlot_ManagerUpdateAvailable_StampsMarkerBeforeApply(t *testing.T) {
+	dl := managerUpdateDownloader(t, "9.9.9", func(context.Context, downloader.FileRequest) (downloader.FileResult, error) {
+		// Force ApplyUpgrade to fail its IPK download so the test never
+		// shells out to a real detached "opkg install". If the marker is
+		// still stamped with the correct from/to versions despite the
+		// downstream failure, that proves the write happens before (and
+		// independent of) ApplyUpgrade's own outcome.
+		return downloader.FileResult{}, errors.New("no download in test")
+	})
+	svc := &Service{
+		version:    "2.12.0",
+		dataDir:    t.TempDir(),
+		downloader: dl,
+		changelog:  newChangelogFetcher(changelogURLForChannel(channelStable), 10*time.Minute, dl),
+	}
+
+	svc.runAutoInstallSlotForced()
+
+	marker := svc.readAutoInstallMarker()
+	if marker == nil {
+		t.Fatal("expected marker to be stamped for the manager self-update attempt")
+	}
+	if marker.FromVersion != "2.12.0" || marker.ToVersion != "9.9.9" {
+		t.Fatalf("marker = %+v, want from=2.12.0 to=9.9.9", marker)
+	}
+}
+
+func TestRunAutoInstallSlot_ManagerBusy_SkipsWithoutStamp(t *testing.T) {
+	dl := managerUpdateDownloader(t, "9.9.9", nil)
+	svc := &Service{
+		version:    "2.12.0",
+		dataDir:    t.TempDir(),
+		downloader: dl,
+		changelog:  newChangelogFetcher(changelogURLForChannel(channelStable), 10*time.Minute, dl),
+		upgrading:  true, // simulates a manual apply already running
+	}
+
+	svc.runAutoInstallSlotForced()
+
+	if marker := svc.readAutoInstallMarker(); marker != nil {
+		t.Fatalf("expected no marker when a manual apply is already in progress, got %+v", marker)
 	}
 }
 
@@ -328,6 +426,32 @@ func TestAutoInstallRetrospective_MismatchRecentWarns(t *testing.T) {
 	got := svc.readAutoInstallMarker()
 	if got == nil || !got.Reported {
 		t.Fatalf("expected marker.Reported = true after mismatch retrospective, got %+v", got)
+	}
+}
+
+func TestAutoInstallRetrospective_StaleMarker_NotJournaled(t *testing.T) {
+	// intervalDays=7 => freshWindow = 14 days. An attempt older than that is
+	// neither a fresh success (age < freshWindow) nor a recent mismatch
+	// (age < 24h) — it must be silently ignored, not journaled either way.
+	svc := newTestUpdateService(t, nil)
+	svc.settings = newAutoInstallTestSettings(t, true)
+	marker := &autoInstallMarker{
+		LastAttemptAt: time.Now().Add(-20 * 24 * time.Hour),
+		FromVersion:   "2.11.9",
+		ToVersion:     "2.99.0", // deliberately does not match svc.version
+	}
+	if err := writeAutoInstallMarker(svc.dataDir, marker); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	svc.autoInstallRetrospective()
+
+	got := svc.readAutoInstallMarker()
+	if got == nil {
+		t.Fatal("expected marker to still exist")
+	}
+	if got.Reported {
+		t.Fatalf("expected Reported to remain false for a stale marker (neither branch matches), got %+v", got)
 	}
 }
 
