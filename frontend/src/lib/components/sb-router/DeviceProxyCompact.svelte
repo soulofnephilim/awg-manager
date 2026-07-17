@@ -8,8 +8,10 @@
   import { Button, Badge } from '$lib/components/ui';
   import { ChevronRight, Trash2, Edit3 } from 'lucide-svelte';
   import { api } from '$lib/api/client';
+  import { deviceProxyOutbounds } from '$lib/stores/deviceproxy';
   import {
     outboundDegradedText,
+    outboundDisplayLabel,
     outboundName,
     outboundNowTag,
   } from '$lib/utils/deviceProxyOutboundLabel';
@@ -98,19 +100,28 @@
   // живой selector.now после выключения движка деградирует и показывать
   // его как настройку — враньё. «сейчас: X» и «выход недоступен — через Y»
   // рендерятся отдельными пометками.
-  function outboundLabelFor(in_: DeviceProxyInstance): string {
+  // Каталог выходов (/api/deviceproxy/outbounds) — тот же, что питает dropdown
+  // «По умолчанию направлять в»: бейджи резолвят сырые теги в те же подписи.
+  const outboundCatalog = $derived($deviceProxyOutbounds.data ?? []);
+
+  function outboundTagFor(in_: DeviceProxyInstance): string {
     return outboundName({ selectedOutbound: in_.selectedOutbound, runtime: runtimeFor(in_.id) });
   }
 
+  function outboundLabelFor(in_: DeviceProxyInstance): string {
+    return outboundDisplayLabel(outboundTagFor(in_), outboundCatalog);
+  }
+
   function outboundNowFor(in_: DeviceProxyInstance): string | null {
-    return outboundNowTag({ selectedOutbound: in_.selectedOutbound, runtime: runtimeFor(in_.id) });
+    const tag = outboundNowTag({ selectedOutbound: in_.selectedOutbound, runtime: runtimeFor(in_.id) });
+    return tag ? outboundDisplayLabel(tag, outboundCatalog) : null;
   }
 
   function outboundDegradedFor(in_: DeviceProxyInstance): string | null {
-    return outboundDegradedText({
-      selectedOutbound: in_.selectedOutbound,
-      runtime: runtimeFor(in_.id),
-    });
+    return outboundDegradedText(
+      { selectedOutbound: in_.selectedOutbound, runtime: runtimeFor(in_.id) },
+      outboundCatalog,
+    );
   }
 
   function outboundVariantFor(tag: string): 'accent' | 'muted' {
@@ -124,6 +135,7 @@
   {#if instances.length > 0}
     <div class="proxy-list">
       {#each instances as in_ (in_.id)}
+        {@const outboundTag = outboundTagFor(in_)}
         {@const outboundLabel = outboundLabelFor(in_)}
         {@const nowTag = outboundNowFor(in_)}
         {@const degradedText = outboundDegradedFor(in_)}
@@ -149,7 +161,7 @@
                 {/if}
                 <span class="arrow">→</span>
                 <span class="outbound-wrap">
-                  <Badge variant={outboundVariantFor(outboundLabel)} size="sm" mono>{outboundLabel}</Badge>
+                  <Badge variant={outboundVariantFor(outboundTag)} size="sm" mono>{outboundLabel}</Badge>
                 </span>
                 {#if in_.enabled && degradedText}
                   <span class="degraded" title={`Выход «${outboundLabel}» отсутствует в текущем конфиге (движок выключен)`}>{degradedText}</span>

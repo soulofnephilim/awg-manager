@@ -6,7 +6,7 @@
 // его как «настройку» — враньё. Прецедент: about-device.ts (selectedOutbound
 // первичен, activeTag — отдельная пометка «активный: X»).
 
-import type { DeviceProxyRuntime } from '$lib/types';
+import type { DeviceProxyOutbound, DeviceProxyRuntime } from '$lib/types';
 
 export interface OutboundLabelInput {
 	/** Настроенный outbound инстанса (instance.selectedOutbound). */
@@ -40,10 +40,42 @@ export function outboundNowTag(input: OutboundLabelInput): string | null {
 /**
  * Текст бейджа деградации: настроенный выход отсутствует в merged-конфиге
  * (слот-источник выключен), трафик идёт через fallback. null — нет деградации.
+ * outbounds (опционально) резолвит fallback-тег в человекочитаемую подпись —
+ * тем же каталогом, что бейдж и «сейчас:»; без каталога остаётся сырой тег.
  */
-export function outboundDegradedText(input: OutboundLabelInput): string | null {
+export function outboundDegradedText(
+	input: OutboundLabelInput,
+	outbounds: DeviceProxyOutbound[] = [],
+): string | null {
 	const rt = input.runtime;
 	if (!rt?.degradedOutbound) return null;
-	const via = rt.fallbackTag || 'direct';
+	const via = outboundDisplayLabel(rt.fallbackTag || 'direct', outbounds);
 	return `выход недоступен — через ${via}`;
+}
+
+/**
+ * Человекочитаемая подпись записи каталога outbound'ов — единый формат для
+ * dropdown'а настроек (SettingsCard) и бейджей карточки Inbounds: kind-правила
+ * повторяют исторический вид опций дропдауна.
+ */
+export function outboundOptionLabel(ob: DeviceProxyOutbound): string {
+	switch (ob.kind) {
+		case 'awg':
+			return `${ob.label} · ${ob.detail}`;
+		case 'router':
+			return ob.detail ? `${ob.label} · ${ob.detail}` : ob.label;
+		default:
+			return ob.label || ob.tag;
+	}
+}
+
+/**
+ * Резолвит сырой тег outbound'а в человекочитаемую подпись через каталог
+ * /api/deviceproxy/outbounds. Тег не найден (каталог не загружен, выход
+ * удалён) или пуст — возвращается сам тег (прежнее поведение как fallback).
+ */
+export function outboundDisplayLabel(tag: string, outbounds: DeviceProxyOutbound[]): string {
+	if (!tag) return tag;
+	const ob = outbounds.find((o) => o.tag === tag);
+	return ob ? outboundOptionLabel(ob) : tag;
 }
