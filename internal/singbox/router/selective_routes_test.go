@@ -12,6 +12,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/selective"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 func TestBuildSelectiveIPRules_GroupsByOutbound(t *testing.T) {
@@ -216,5 +217,53 @@ func TestStripLegacySelectiveRulesFromRouter(t *testing.T) {
 	}
 	if len(rules) != 1 || rules[0].DomainSuffix[0] != "2ip.ru" {
 		t.Fatalf("unexpected rules after strip: %+v", rules)
+	}
+}
+
+// #564: «спящий» селектив (флаг взведён, но режим fakeip-tun) НЕ должен
+// включать слот 19-selective-routes.json — завершившаяся пересборка иначе
+// вытаскивала припаркованный слот из disabled/ и её правила мерджились в
+// работающий fakeip-конфиг.
+func TestSyncSelectiveRoutesSlot_DormantSelectiveKeepsSlotParked(t *testing.T) {
+	dir := t.TempDir()
+	orch := orchestrator.New(dir, nil)
+	_ = orch.Register(orchestrator.SlotMeta{Slot: orchestrator.SlotSelectiveRoutes, Filename: "19-selective-routes.json"})
+
+	store := storage.NewSettingsStore(t.TempDir())
+	st, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SingboxRouter.Enabled = true
+	st.SingboxRouter.RoutingMode = "fakeip-tun"
+	st.SingboxRouter.SelectiveBypass = true // dormant: унаследован из tproxy
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &ServiceImpl{deps: Deps{Orch: orch, Settings: store}}
+	routes := map[string][]string{"tun": {"1.2.3.4/32"}}
+	if _, err := svc.syncSelectiveRoutesSlot(context.Background(), routes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "19-selective-routes.json")); err == nil {
+		t.Fatal("dormant selective must NOT materialize the slot in config.d/")
+	}
+	// Содержимое пишется в disabled/ (паркуется), не теряется.
+	if _, err := os.Stat(filepath.Join(dir, "disabled", "19-selective-routes.json")); err != nil {
+		t.Fatalf("slot content must be parked in disabled/: %v", err)
+	}
+
+	// Активный селектив (tproxy) — прежнее поведение: слот включается.
+	st.SingboxRouter.RoutingMode = "tproxy"
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := svc.syncSelectiveRoutesSlot(context.Background(), routes)
+	if err != nil || !changed {
+		t.Fatalf("active selective sync: changed=%v err=%v", changed, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "19-selective-routes.json")); err != nil {
+		t.Fatalf("active selective must enable the slot: %v", err)
 	}
 }

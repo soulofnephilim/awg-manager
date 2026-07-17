@@ -117,7 +117,7 @@ func (s *ServiceImpl) syncSelectiveRoutesSlot(ctx context.Context, byOutbound ma
 		return false, nil
 	}
 	rules := buildSelectiveIPRules(byOutbound)
-	enable := len(rules) > 0
+	enable := len(rules) > 0 && s.selectiveActive()
 	data, err := marshalSelectiveRoutesSlot(rules)
 	if err != nil {
 		return false, err
@@ -174,7 +174,7 @@ func (s *ServiceImpl) healLegacySelectiveRoutesSlotIfNeeded(ctx context.Context)
 	if err != nil {
 		return err
 	}
-	enable := len(slot.Route.Rules) > 0
+	enable := len(slot.Route.Rules) > 0 && s.selectiveActive()
 	if err := s.deps.Orch.SaveSilent(orchestrator.SlotSelectiveRoutes, fixed); err != nil {
 		return err
 	}
@@ -190,6 +190,21 @@ func selectiveRoutesSlotNeedsHeal(data []byte) bool {
 func bytesContainsLegacyNullSlotKeys(data []byte) bool {
 	s := string(data)
 	return strings.Contains(s, `"outbounds"`) || strings.Contains(s, `"inbounds"`)
+}
+
+// selectiveActive reports whether селективный перехват реально действует
+// (storage.SingboxRouterSettings.SelectiveActive по текущим настройкам).
+// Без Settings-депа (юнит-тесты пайплайна) — активен; ошибка загрузки —
+// fail-closed: слот в таком состоянии не включаем.
+func (s *ServiceImpl) selectiveActive() bool {
+	if s.deps.Settings == nil {
+		return true
+	}
+	settings, err := s.deps.Settings.Load()
+	if err != nil {
+		return false
+	}
+	return settings.SingboxRouter.SelectiveActive()
 }
 
 // disableSelectiveRoutesSlot turns off the overlay slot when selective bypass

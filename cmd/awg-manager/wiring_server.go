@@ -373,7 +373,9 @@ func (a *app) setupRouter() {
 			if err != nil {
 				return false
 			}
-			return st.SingboxRouter.Enabled && st.SingboxRouter.SelectiveBypass
+			// SelectiveActive: в fakeip-режиме взведённый флаг — «спящий»,
+			// фоновый CDN-refresh не должен трогать ipset и слот 19 (#564).
+			return st.SingboxRouter.SelectiveActive()
 		},
 		selectiveAdapter.RefreshCDN,
 		logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSelective),

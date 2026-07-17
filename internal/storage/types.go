@@ -185,6 +185,17 @@ type SingboxRouterSettings struct {
 	QoSClasses []SingboxQoSClass `json:"qosClasses,omitempty"`
 }
 
+// SelectiveActive reports whether селективный перехват реально действует:
+// движок включён, режим tproxy (пустой RoutingMode нормализуется в tproxy)
+// и флаг SelectiveBypass взведён. В режиме fakeip-tun взведённый флаг —
+// валидное «спящее» состояние (router.validateSelectiveBypassSettings) и
+// активности НЕ означает: пересборки ipset и включение слота
+// 19-selective-routes.json на него реагировать не должны (#564).
+func (sr SingboxRouterSettings) SelectiveActive() bool {
+	return sr.Enabled && sr.SelectiveBypass &&
+		(sr.RoutingMode == "" || sr.RoutingMode == "tproxy")
+}
+
 // SingboxQoSClass is one DSCP-based QoS traffic class routed to a dedicated
 // sing-box outbound (issue #371). DSCP is the 6-bit codepoint matched by
 // iptables `-m dscp --dscp N`; Name is a user-facing label; Outbound is the

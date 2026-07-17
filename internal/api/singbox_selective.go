@@ -399,6 +399,18 @@ func (h *SelectiveHandler) Rebuild(w http.ResponseWriter, r *http.Request) {
 		response.ErrorWithStatus(w, http.StatusServiceUnavailable, "selective builder not configured", "NOT_CONFIGURED")
 		return
 	}
+	// Пересборка при неактивном селективе (флаг снят, движок выключен или
+	// «спящий» флаг в режиме fakeip-tun) отклоняется: завершившийся rebuild
+	// включал бы припаркованный слот 19-selective-routes.json, и его правила
+	// мерджились бы в работающий fakeip-конфиг (#564).
+	if h.settings != nil {
+		if st, err := h.settings.Load(); err == nil && !st.SingboxRouter.SelectiveActive() {
+			response.ErrorWithStatus(w, http.StatusConflict,
+				"селективный перехват не активен (выключен или режим не tproxy) — пересборка не выполняется",
+				"SELECTIVE_INACTIVE")
+			return
+		}
+	}
 	// Pre-checks run BEFORE the CAS so the guard flips only at the point of
 	// no return: flipping first and then bailing (already-rebuilding, gate
 	// held) would let a concurrent request see the flag, answer 202
