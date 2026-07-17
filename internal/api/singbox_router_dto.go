@@ -329,6 +329,33 @@ type SingboxRouterRuleUpdateRequest struct {
 	Rule  SingboxRouterRuleDTO `json:"rule"`
 }
 
+// SingboxRouterRuleBulkOutboundRequest is the body for POST
+// /singbox/router/rules/bulk-outbound (and its fakeip-config counterpart).
+type SingboxRouterRuleBulkOutboundRequest struct {
+	Indices  []int  `json:"indices" example:"0,2"`
+	Outbound string `json:"outbound" example:"my-selector"`
+}
+
+// SingboxRouterRuleSetBulkDetourRequest is the body for POST
+// /singbox/router/rulesets/bulk-detour (and its fakeip-config counterpart).
+type SingboxRouterRuleSetBulkDetourRequest struct {
+	Tags           []string `json:"tags" example:"geosite-cn"`
+	DownloadDetour string   `json:"downloadDetour" example:"direct"`
+}
+
+// SingboxRouterBulkUpdatedData is the payload for bulk rule/ruleset mutation
+// endpoints — reports how many entries were updated.
+type SingboxRouterBulkUpdatedData struct {
+	Updated int `json:"updated" example:"2"`
+}
+
+// SingboxRouterBulkUpdatedResponse is the typed envelope for bulk mutation
+// endpoints. Use as @Success {object} SingboxRouterBulkUpdatedResponse.
+type SingboxRouterBulkUpdatedResponse struct {
+	Success bool                         `json:"success" example:"true"`
+	Data    SingboxRouterBulkUpdatedData `json:"data"`
+}
+
 // SingboxRouterRuleDeleteRequest is the body for POST /singbox/router/rules/delete.
 type SingboxRouterRuleDeleteRequest struct {
 	Index int `json:"index" example:"0"`

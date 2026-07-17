@@ -100,6 +100,39 @@ func (h *SingboxRouterHandler) UpdateRule(w http.ResponseWriter, r *http.Request
 	response.Success(w, map[string]bool{"ok": true})
 }
 
+// BulkSetRuleOutbound sets Outbound on every rule at the given indices in a
+// single config write.
+//
+//	@Summary		Bulk-set outbound on singbox-router rules
+//	@Description	Sets Outbound on every route rule at the given indices in a single config write. Rejects an empty/duplicate index list, an out-of-range index, a non-route rule, or an unknown outbound tag.
+//	@Tags			singbox-router
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxRouterRuleBulkOutboundRequest	true	"Rule indices + new outbound tag"
+//	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/router/rules/bulk-outbound [post]
+func (h *SingboxRouterHandler) BulkSetRuleOutbound(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body SingboxRouterRuleBulkOutboundRequest
+	if err := decodeBody(r, &body); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	if err := h.svc.BulkSetRuleOutbound(r.Context(), body.Indices, body.Outbound); err != nil {
+		h.handleErr(w, "request", err)
+		return
+	}
+	h.log.Info("rules-bulk-outbound", body.Outbound,
+		strconv.Itoa(len(body.Indices))+" routing rule(s) set to outbound "+body.Outbound)
+	response.Success(w, map[string]int{"updated": len(body.Indices)})
+}
+
 // DeleteRule removes the rule at the given index.
 //
 //	@Summary		Delete singbox-router rule
@@ -260,6 +293,40 @@ func (h *SingboxRouterHandler) UpdateRuleSet(w http.ResponseWriter, r *http.Requ
 	}
 	h.log.Info("ruleset-update", body.Tag, "ruleset updated: "+body.Tag)
 	response.Success(w, map[string]bool{"ok": true})
+}
+
+// BulkSetRuleSetDetour sets download_detour on every rule set with a tag in
+// the given list, in a single config write.
+//
+//	@Summary		Bulk-set download_detour on singbox-router rulesets
+//	@Description	Sets download_detour on every rule set with a tag in the given list, in a single config write. Rejects an empty/duplicate tag list, an unknown tag, a rule set whose type isn't "remote", or an unknown outbound tag (empty detour clears the field and skips the known-tag check).
+//	@Tags			singbox-router
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		SingboxRouterRuleSetBulkDetourRequest	true	"Rule set tags + new download_detour"
+//	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/router/rulesets/bulk-detour [post]
+func (h *SingboxRouterHandler) BulkSetRuleSetDetour(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var body SingboxRouterRuleSetBulkDetourRequest
+	if err := decodeBody(r, &body); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	if err := h.svc.BulkSetRuleSetDetour(r.Context(), body.Tags, body.DownloadDetour); err != nil {
+		h.handleErr(w, "request", err)
+		return
+	}
+	h.log.Info("rulesets-bulk-detour", body.DownloadDetour,
+		strconv.Itoa(len(body.Tags))+" rule set(s) detour set to "+body.DownloadDetour)
+	response.Success(w, map[string]int{"updated": len(body.Tags)})
 }
 
 // DeleteRuleSet removes the ruleset identified by tag.

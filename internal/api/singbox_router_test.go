@@ -41,6 +41,11 @@ type mockRouterSvc struct {
 	// updateSettingsErr, when set, is returned by UpdateSettings so handler
 	// error-mapping (e.g. QOS_CLASSES_INVALID → 400) can be asserted.
 	updateSettingsErr error
+	// bulkOutboundErr / bulkDetourErr, when set, are returned by
+	// BulkSetRuleOutbound / BulkSetRuleSetDetour so handler error-mapping can
+	// be asserted without a real ServiceImpl.
+	bulkOutboundErr error
+	bulkDetourErr   error
 }
 
 func (m *mockRouterSvc) Enable(ctx context.Context) error    { return m.enableErr }
@@ -85,13 +90,19 @@ func (m *mockRouterSvc) AddRule(ctx context.Context, rule router.Rule) error  { 
 func (m *mockRouterSvc) UpdateRule(ctx context.Context, index int, rule router.Rule) error {
 	return nil
 }
-func (m *mockRouterSvc) DeleteRule(ctx context.Context, index int) error            { return nil }
+func (m *mockRouterSvc) DeleteRule(ctx context.Context, index int) error { return nil }
+func (m *mockRouterSvc) BulkSetRuleOutbound(ctx context.Context, indices []int, outbound string) error {
+	return m.bulkOutboundErr
+}
 func (m *mockRouterSvc) MoveRule(ctx context.Context, from, to int) error           { return nil }
 func (m *mockRouterSvc) SetRouteFinal(ctx context.Context, tag string) error        { return nil }
 func (m *mockRouterSvc) ListRuleSets(ctx context.Context) ([]router.RuleSet, error) { return nil, nil }
 func (m *mockRouterSvc) AddRuleSet(ctx context.Context, rs router.RuleSet) error    { return nil }
 func (m *mockRouterSvc) UpdateRuleSet(ctx context.Context, tag string, rs router.RuleSet) error {
 	return nil
+}
+func (m *mockRouterSvc) BulkSetRuleSetDetour(ctx context.Context, tags []string, detour string) error {
+	return m.bulkDetourErr
 }
 func (m *mockRouterSvc) DeleteRuleSet(ctx context.Context, tag string, force bool) error {
 	return nil
@@ -586,6 +597,150 @@ func TestAddRule_RegressionStagesNotApplies(t *testing.T) {
 	activePath := filepath.Join(dir, "20-router.json")
 	if _, err := os.Stat(activePath); !os.IsNotExist(err) {
 		t.Errorf("active file should not exist, got err=%v", err)
+	}
+}
+
+// TestRouterBulkSetRuleOutbound_200 exercises the endpoint against a real
+// ServiceImpl: seeds one route rule, bulk-sets its outbound, and verifies
+// both the {"updated":1} response and that the rule was actually mutated.
+func TestRouterBulkSetRuleOutbound_200(t *testing.T) {
+	h, _ := newTestRouterHandlerReal(t)
+
+	addBody := `{"action":"route","outbound":"old","domain_suffix":["example.com"]}`
+	addReq := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rules/add", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRR := httptest.NewRecorder()
+	h.AddRule(addRR, addReq)
+	if addRR.Code != http.StatusOK {
+		t.Fatalf("seed AddRule: want 200, got %d (body: %s)", addRR.Code, addRR.Body.String())
+	}
+
+	body := `{"indices":[0],"outbound":"direct"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rules/bulk-outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.BulkSetRuleOutbound(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var env struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Updated int `json:"updated"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, rr.Body.String())
+	}
+	if !env.Success || env.Data.Updated != 1 {
+		t.Fatalf("want success=true updated=1, got %+v", env)
+	}
+
+	rules, err := h.svc.ListRules(context.Background())
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 1 || rules[0].Outbound != "direct" {
+		t.Fatalf("rule outbound not updated: %+v", rules)
+	}
+}
+
+// TestRouterBulkSetRuleOutbound_EmptyIndices_Returns400 verifies the service's
+// empty-selection guard (ErrBulkEmptyIndices) maps to 400, not 500.
+func TestRouterBulkSetRuleOutbound_EmptyIndices_Returns400(t *testing.T) {
+	h, _ := newTestRouterHandlerReal(t)
+
+	body := `{"indices":[],"outbound":"direct"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rules/bulk-outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.BulkSetRuleOutbound(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRouterBulkSetRuleOutbound_MethodNotAllowed(t *testing.T) {
+	h := newMockRouterHandler(&mockRouterSvc{})
+	req := httptest.NewRequest(http.MethodGet, "/api/singbox/router/rules/bulk-outbound", nil)
+	rr := httptest.NewRecorder()
+	h.BulkSetRuleOutbound(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status: got %d, want 405", rr.Code)
+	}
+}
+
+// TestRouterBulkSetRuleSetDetour_200 exercises the endpoint against a real
+// ServiceImpl: seeds one remote ruleset, bulk-sets its detour, and verifies
+// both the {"updated":1} response and that the ruleset was actually mutated.
+func TestRouterBulkSetRuleSetDetour_200(t *testing.T) {
+	h, _ := newTestRouterHandlerReal(t)
+
+	addBody := `{"tag":"geosite-test","type":"remote","url":"https://cdn.example.com/geosite-test.srs","download_detour":"old"}`
+	addReq := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rulesets/add", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRR := httptest.NewRecorder()
+	h.AddRuleSet(addRR, addReq)
+	if addRR.Code != http.StatusOK {
+		t.Fatalf("seed AddRuleSet: want 200, got %d (body: %s)", addRR.Code, addRR.Body.String())
+	}
+
+	body := `{"tags":["geosite-test"],"downloadDetour":"direct"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rulesets/bulk-detour", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.BulkSetRuleSetDetour(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var env struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Updated int `json:"updated"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, rr.Body.String())
+	}
+	if !env.Success || env.Data.Updated != 1 {
+		t.Fatalf("want success=true updated=1, got %+v", env)
+	}
+
+	ruleSets, err := h.svc.ListRuleSets(context.Background())
+	if err != nil {
+		t.Fatalf("ListRuleSets: %v", err)
+	}
+	if len(ruleSets) != 1 || ruleSets[0].DownloadDetour != "direct" {
+		t.Fatalf("ruleset detour not updated: %+v", ruleSets)
+	}
+}
+
+// TestRouterBulkSetRuleSetDetour_EmptyTags_Returns400 verifies the service's
+// empty-selection guard (ErrBulkEmptyTags) maps to 400, not 500.
+func TestRouterBulkSetRuleSetDetour_EmptyTags_Returns400(t *testing.T) {
+	h, _ := newTestRouterHandlerReal(t)
+
+	body := `{"tags":[],"downloadDetour":"direct"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rulesets/bulk-detour", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.BulkSetRuleSetDetour(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRouterBulkSetRuleSetDetour_MethodNotAllowed(t *testing.T) {
+	h := newMockRouterHandler(&mockRouterSvc{})
+	req := httptest.NewRequest(http.MethodGet, "/api/singbox/router/rulesets/bulk-detour", nil)
+	rr := httptest.NewRecorder()
+	h.BulkSetRuleSetDetour(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status: got %d, want 405", rr.Code)
 	}
 }
 

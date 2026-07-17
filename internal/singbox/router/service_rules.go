@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"errors"
 	"fmt"
 )
 
@@ -107,7 +106,7 @@ func (s *ServiceImpl) isKnownOutboundTag(ctx context.Context, tag string, cfg *R
 // recognized tag ("direct"/"block"/"dns" or a catalog outbound).
 func bulkSetRuleOutbound(c *RouterConfig, indices []int, outbound string, known func(string) bool) error {
 	if len(indices) == 0 {
-		return errors.New("empty indices")
+		return ErrBulkEmptyIndices
 	}
 	if !known(outbound) {
 		return fmt.Errorf("unknown outbound tag %q", outbound)
@@ -137,7 +136,7 @@ func bulkSetRuleOutbound(c *RouterConfig, indices []int, outbound string, known 
 // the field is always allowed).
 func bulkSetRuleSetDetour(c *RouterConfig, tags []string, detour string, known func(string) bool) error {
 	if len(tags) == 0 {
-		return errors.New("empty tags")
+		return ErrBulkEmptyTags
 	}
 	if detour != "" && !known(detour) {
 		return fmt.Errorf("unknown outbound tag %q", detour)
