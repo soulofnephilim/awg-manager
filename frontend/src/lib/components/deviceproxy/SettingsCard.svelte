@@ -2,6 +2,7 @@
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
 	import { Toggle, Button, Dropdown, type DropdownOption } from '$lib/components/ui';
+	import { outboundOptionLabel } from '$lib/utils/deviceProxyOutboundLabel';
 	import type { DeviceProxyConfig, DeviceProxyOutbound } from '$lib/types';
 
 	interface Props {
@@ -108,20 +109,14 @@
 		...bridgeInterfaces.map((br) => ({ value: br.id, label: br.label })),
 	]);
 
+	// Подписи опций — общий outboundOptionLabel: тот же формат видят бейджи
+	// карточки Inbounds (DeviceProxyCompact), расхождение тег/имя исключено.
 	let outboundOpts = $derived<DropdownOption[]>([
-		...grouped.direct.map((ob) => ({ value: ob.tag, label: ob.label })),
-		...grouped.sb.map((ob) => ({ value: ob.tag, label: ob.label, group: 'Sing-box туннели' })),
-		...grouped.sub.map((ob) => ({
-			value: ob.tag,
-			label: ob.label || ob.tag,
-			group: 'Подписки',
-		})),
-		...grouped.awg.map((ob) => ({ value: ob.tag, label: `${ob.label} · ${ob.detail}`, group: 'Туннели' })),
-		...grouped.router.map((ob) => ({
-			value: ob.tag,
-			label: ob.detail ? `${ob.label} · ${ob.detail}` : ob.label,
-			group: 'Выходы sb-router',
-		})),
+		...grouped.direct.map((ob) => ({ value: ob.tag, label: outboundOptionLabel(ob) })),
+		...grouped.sb.map((ob) => ({ value: ob.tag, label: outboundOptionLabel(ob), group: 'Sing-box туннели' })),
+		...grouped.sub.map((ob) => ({ value: ob.tag, label: outboundOptionLabel(ob), group: 'Подписки' })),
+		...grouped.awg.map((ob) => ({ value: ob.tag, label: outboundOptionLabel(ob), group: 'Туннели' })),
+		...grouped.router.map((ob) => ({ value: ob.tag, label: outboundOptionLabel(ob), group: 'Выходы sb-router' })),
 	]);
 </script>
 
