@@ -17,8 +17,6 @@ describe('RuleSetsTable', () => {
         ],
         onEdit: vi.fn(),
         onDelete: vi.fn(),
-        outboundOptions: [],
-        onBulkDetour: vi.fn(),
       },
     });
 
@@ -41,8 +39,6 @@ describe('RuleSetsTable', () => {
         ],
         onEdit: vi.fn(),
         onDelete: vi.fn(),
-        outboundOptions: [],
-        onBulkDetour: vi.fn(),
       },
     });
 

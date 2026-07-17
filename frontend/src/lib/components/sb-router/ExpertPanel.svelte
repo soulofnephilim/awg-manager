@@ -47,6 +47,9 @@
   import SidePanel from './SidePanel.svelte';
   import RoutingTable from './RoutingTable.svelte';
   import RuleSetsTable from './RuleSetsTable.svelte';
+  import BulkSelectBar from './BulkSelectBar.svelte';
+  import { isSystemRule, mapRuleAction } from './adapters';
+  import { buildDownloadDetourOptions } from '$lib/components/routing/singboxRouter/outboundOptions';
   import SbRouterRuleSetCatalogModal from './SbRouterRuleSetCatalogModal.svelte';
   import SbRouterGeositeCatalogModal from './SbRouterGeositeCatalogModal.svelte';
   import { addGeositeRuleSets, applyCatalogPresetsAsRuleSets } from './rulesetCatalogActions';
@@ -483,6 +486,141 @@
     },
   ]);
 
+  // ── Bulk-выбор правил (Эксперт: RoutingTable) ─────────────────────────
+  let rulesSelectMode = $state(false);
+  let rulesSelected = $state<Set<number>>(new Set());
+  let rulesBulkBusy = $state(false);
+  let prevRulesRef: SingboxRouterRule[] | undefined;
+
+  function isSelectableRule(r: SingboxRouterRule): boolean {
+    return !isSystemRule(r) && mapRuleAction(r) === 'route';
+  }
+
+  const selectableRuleIndices = $derived(
+    $storeRules.reduce<number[]>((acc, r, i) => {
+      if (isSelectableRule(r)) acc.push(i);
+      return acc;
+    }, []),
+  );
+  const selectableRuleIndexSet = $derived(new Set(selectableRuleIndices));
+
+  // Тот же каталог outbound'ов, что у RuleEditModal ($storeOptions), сплющенный
+  // в плоский список для BulkSelectBar.
+  const bulkOutboundOptions = $derived(
+    $storeOptions.flatMap((g) => g.items.map((i) => ({ value: i.value, label: i.label, group: g.group }))),
+  );
+
+  function toggleRulesSelectMode(): void {
+    rulesSelectMode = true;
+    rulesSelected = new Set();
+  }
+
+  function cancelRulesSelectMode(): void {
+    rulesSelectMode = false;
+    rulesSelected = new Set();
+  }
+
+  function toggleRuleSelect(index: number): void {
+    const next = new Set(rulesSelected);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    rulesSelected = next;
+  }
+
+  function selectAllRules(): void {
+    rulesSelected = new Set(selectableRuleIndices);
+  }
+
+  async function applyRulesBulkOutbound(value: string): Promise<void> {
+    if (rulesSelected.size === 0 || rulesBulkBusy) return;
+    rulesBulkBusy = true;
+    try {
+      const { updated } = await api.singboxRouterBulkOutbound([...rulesSelected], value);
+      notifications.success(`Изменено ${updated}`);
+      rulesSelectMode = false;
+      rulesSelected = new Set();
+      await singboxRouterStore.loadAll();
+    } catch (e) {
+      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      rulesBulkBusy = false;
+    }
+  }
+
+  // Список правил мог перезагрузиться из другого источника, пока шло
+  // выделение (SSE-инвалидация, чужое действие) — индексы больше не
+  // гарантированно соответствуют выбранным чекбоксам. bulkBusy гейтит
+  // собственный apply (см. applyRulesBulkOutbound — selectMode уже false
+  // к моменту прихода нового $storeRules).
+  $effect(() => {
+    const current = $storeRules;
+    if (rulesSelectMode && !rulesBulkBusy && prevRulesRef !== undefined && current !== prevRulesRef) {
+      rulesSelectMode = false;
+      rulesSelected = new Set();
+      notifications.info('Список изменился, выбор сброшен');
+    }
+    prevRulesRef = current;
+  });
+
+  // ── Bulk-выбор rule-set'ов (Эксперт: RuleSetsTable) ────────────────────
+  let rsSelectMode = $state(false);
+  let rsSelected = $state<Set<string>>(new Set());
+  let rsBulkBusy = $state(false);
+  let prevRuleSetsRef: SingboxRouterRuleSet[] | undefined;
+
+  const selectableRsTags = $derived(
+    $storeRuleSets.filter((rs) => rs.type === 'remote').map((rs) => rs.tag),
+  );
+
+  const rsBulkDetourOptions = $derived(buildDownloadDetourOptions($storeOptions, '— сбросить —'));
+
+  function toggleRsSelectMode(): void {
+    rsSelectMode = true;
+    rsSelected = new Set();
+  }
+
+  function cancelRsSelectMode(): void {
+    rsSelectMode = false;
+    rsSelected = new Set();
+  }
+
+  function toggleRsSelect(tag: string): void {
+    const next = new Set(rsSelected);
+    if (next.has(tag)) next.delete(tag);
+    else next.add(tag);
+    rsSelected = next;
+  }
+
+  function selectAllRs(): void {
+    rsSelected = new Set(selectableRsTags);
+  }
+
+  async function applyRsBulkDetour(value: string): Promise<void> {
+    if (rsSelected.size === 0 || rsBulkBusy) return;
+    rsBulkBusy = true;
+    try {
+      const { updated } = await handleRsBulkDetour([...rsSelected], value);
+      notifications.success(`Изменено ${updated}`);
+      rsSelectMode = false;
+      rsSelected = new Set();
+    } catch (e) {
+      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      rsBulkBusy = false;
+    }
+  }
+
+  // Аналогичный сброс выделения rule-set'ов при внешней инвалидации списка.
+  $effect(() => {
+    const current = $storeRuleSets;
+    if (rsSelectMode && !rsBulkBusy && prevRuleSetsRef !== undefined && current !== prevRuleSetsRef) {
+      rsSelectMode = false;
+      rsSelected = new Set();
+      notifications.info('Список изменился, выбор сброшен');
+    }
+    prevRuleSetsRef = current;
+  });
+
   // Rule handlers
   function handleDeleteRule(idx: number) {
     pendingConfirm = {
@@ -728,10 +866,27 @@
         section="rules"
         title="Правила маршрутизации"
         count={String($storeRules.length)}
-        actionLabel="+ Правило"
-        actionVariant="filled"
-        onAction={() => (ruleAddOpen = true)}
       >
+        {#snippet actions()}
+          {#if rulesSelectMode}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={rulesBulkBusy || selectableRuleIndices.length === 0}
+              onclick={selectAllRules}
+            >
+              Выбрать все
+            </Button>
+            <Button variant="ghost" size="sm" disabled={rulesBulkBusy} onclick={cancelRulesSelectMode}>
+              Отмена
+            </Button>
+          {:else}
+            {#if selectableRuleIndices.length > 0}
+              <Button variant="ghost" size="sm" onclick={toggleRulesSelectMode}>Выбрать</Button>
+            {/if}
+            <Button variant="primary" size="sm" onclick={() => (ruleAddOpen = true)}>+ Правило</Button>
+          {/if}
+        {/snippet}
         <div class="globals-bar">
           <span class="gb-label gb-label-full">first-match-wins · если ничего не подошло →</span>
           <span class="gb-label gb-label-mobile">если не подошло →</span>
@@ -755,7 +910,21 @@
           onEdit={(idx) => (ruleEditIdx = idx)}
           onDelete={handleDeleteRule}
           onMove={handleMoveRule}
+          selectMode={rulesSelectMode}
+          selected={rulesSelected}
+          onToggleSelect={toggleRuleSelect}
+          isSelectable={(i) => selectableRuleIndexSet.has(i)}
         />
+        {#if rulesSelectMode}
+          <BulkSelectBar
+            count={rulesSelected.size}
+            options={bulkOutboundOptions}
+            applyLabel="Применить"
+            onapply={applyRulesBulkOutbound}
+            oncancel={cancelRulesSelectMode}
+            busy={rulesBulkBusy}
+          />
+        {/if}
       </SidePanel>
 
       <SidePanel
@@ -765,6 +934,21 @@
       >
         {#snippet actions()}
           <div class="rs-head-actions">
+            {#if rsSelectMode}
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={rsBulkBusy || selectableRsTags.length === 0}
+                onclick={selectAllRs}
+              >
+                Выбрать все
+              </Button>
+              <Button variant="ghost" size="sm" disabled={rsBulkBusy} onclick={cancelRsSelectMode}>
+                Отмена
+              </Button>
+            {:else if selectableRsTags.length > 0}
+              <Button variant="ghost" size="sm" onclick={toggleRsSelectMode}>Выбрать</Button>
+            {/if}
             <Button variant="secondary" size="sm" onclick={() => (rsCatalogOpen = true)}>
               {#snippet iconBefore()}
                 <LayoutGrid size={14} aria-hidden="true" />
@@ -796,9 +980,20 @@
           }}
           onEdit={(tag) => (rsEditTag = tag)}
           onDelete={handleDeleteRs}
-          outboundOptions={$storeOptions}
-          onBulkDetour={handleRsBulkDetour}
+          selectMode={rsSelectMode}
+          selected={rsSelected}
+          onToggleSelect={toggleRsSelect}
         />
+        {#if rsSelectMode}
+          <BulkSelectBar
+            count={rsSelected.size}
+            options={rsBulkDetourOptions}
+            applyLabel="Применить"
+            onapply={applyRsBulkDetour}
+            oncancel={cancelRsSelectMode}
+            busy={rsBulkBusy}
+          />
+        {/if}
       </SidePanel>
     </div>
 

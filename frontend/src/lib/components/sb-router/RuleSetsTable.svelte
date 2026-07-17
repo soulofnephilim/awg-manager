@@ -6,15 +6,11 @@
   import type { SingboxRouterRuleSet } from '$lib/types';
   import { Edit3, Trash2, ArrowDownAZ } from 'lucide-svelte';
   import RuleSetTypeBadge from './RuleSetTypeBadge.svelte';
-  import BulkSelectBar from './BulkSelectBar.svelte';
   import {
     datInfo,
     resolveRuleSetDisplayType,
   } from '$lib/utils/ruleSetType';
   import { displayRuleSetTag } from '$lib/utils/singboxInlineRules';
-  import { buildDownloadDetourOptions } from '$lib/components/routing/singboxRouter/outboundOptions';
-  import type { OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
-  import { notifications } from '$lib/stores/notifications';
 
   type RsFilter = 'all' | 'remote' | 'local' | 'inline' | 'dat';
 
@@ -25,8 +21,9 @@
     bare?: boolean;
     alphaSort?: boolean;
     onToggleAlphaSort?: () => void;
-    outboundOptions: OutboundGroup[];
-    onBulkDetour: (tags: string[], downloadDetour: string) => Promise<{ updated: number }>;
+    selectMode?: boolean;
+    selected?: Set<string>;
+    onToggleSelect?: (tag: string) => void;
   }
 
   let {
@@ -36,8 +33,9 @@
     bare = false,
     alphaSort = false,
     onToggleAlphaSort,
-    outboundOptions,
-    onBulkDetour,
+    selectMode = false,
+    selected = new Set(),
+    onToggleSelect = () => {},
   }: Props = $props();
 
   let filter = $state<RsFilter>('all');
@@ -61,72 +59,6 @@
     if (datInfo(rs)) return 'direct';
     return rs.download_detour ?? '—';
   }
-
-  // ── Bulk download-detour select (тот же паттерн, что RulesPanel) ───────
-  // Только remote-наборы поддерживают download_detour — чекбоксы у остальных
-  // не рендерятся (title-подсказка вместо них).
-  let selectMode = $state(false);
-  let selected = $state<Set<string>>(new Set());
-  let bulkBusy = $state(false);
-  let prevRuleSetsRef: SingboxRouterRuleSet[] | undefined;
-
-  const hasSelectable = $derived(ruleSets.some((rs) => rs.type === 'remote'));
-  const filteredSelectableTags = $derived(
-    filtered.filter((rs) => rs.type === 'remote').map((rs) => rs.tag),
-  );
-
-  const bulkDetourOptions = $derived(buildDownloadDetourOptions(outboundOptions, '— сбросить —'));
-
-  function toggleSelectMode(): void {
-    selectMode = true;
-    selected = new Set();
-  }
-
-  function cancelSelectMode(): void {
-    selectMode = false;
-    selected = new Set();
-  }
-
-  function toggleSelect(tag: string): void {
-    const next = new Set(selected);
-    if (next.has(tag)) next.delete(tag);
-    else next.add(tag);
-    selected = next;
-  }
-
-  function selectAllRs(): void {
-    selected = new Set(filteredSelectableTags);
-  }
-
-  async function applyBulkDetour(value: string): Promise<void> {
-    if (selected.size === 0 || bulkBusy) return;
-    bulkBusy = true;
-    try {
-      const { updated } = await onBulkDetour([...selected], value);
-      notifications.success(`Изменено ${updated}`);
-      selectMode = false;
-      selected = new Set();
-    } catch (e) {
-      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      bulkBusy = false;
-    }
-  }
-
-  // Набор мог перезагрузиться из другого источника, пока шло выделение
-  // (SSE-инвалидация, чужое действие) — теги больше не гарантированно
-  // соответствуют актуальному списку. bulkBusy гейтит собственный apply:
-  // его onBulkDetour сам вызывает reload, и по его завершении selectMode уже
-  // false (сброшен на успехе выше), поэтому эффект в этом случае не сработает.
-  $effect(() => {
-    const current = ruleSets;
-    if (selectMode && !bulkBusy && prevRuleSetsRef !== undefined && current !== prevRuleSetsRef) {
-      selectMode = false;
-      selected = new Set();
-      notifications.info('Список изменился, выбор сброшен');
-    }
-    prevRuleSetsRef = current;
-  });
 </script>
 
 <div class="wrap">
@@ -143,20 +75,6 @@
         </button>
       {/each}
     </div>
-    {#if selectMode}
-      <button
-        type="button"
-        class="seg-tab select-action"
-        disabled={bulkBusy || filteredSelectableTags.length === 0}
-        onclick={selectAllRs}
-      >
-        Выбрать все
-      </button>
-    {:else if hasSelectable}
-      <button type="button" class="seg-tab select-action" onclick={toggleSelectMode}>
-        Выбрать
-      </button>
-    {/if}
     {#if onToggleAlphaSort}
       <button
         type="button"
@@ -189,7 +107,7 @@
                 type="checkbox"
                 class="rs-checkbox"
                 checked={selected.has(rs.tag)}
-                onchange={() => toggleSelect(rs.tag)}
+                onchange={() => onToggleSelect(rs.tag)}
                 aria-label={`Выбрать набор ${displayRuleSetTag(rs.tag)}`}
               />
             {:else}
@@ -233,17 +151,6 @@
       <div class="empty">Нет наборов</div>
     {/if}
   </div>
-
-  {#if selectMode}
-    <BulkSelectBar
-      count={selected.size}
-      options={bulkDetourOptions}
-      applyLabel="Применить"
-      onapply={applyBulkDetour}
-      oncancel={cancelSelectMode}
-      busy={bulkBusy}
-    />
-  {/if}
 </div>
 
 <style>
@@ -303,17 +210,6 @@
     flex: 0 0 auto;
     border-right: 0;
     border-left: 1px solid var(--border);
-  }
-  .seg-tab.select-action {
-    flex: 0 0 auto;
-    border-right: 0;
-    border-left: 1px solid var(--border);
-    white-space: nowrap;
-    padding-inline: 14px;
-  }
-  .seg-tab.select-action:disabled {
-    cursor: default;
-    opacity: 0.5;
   }
   .table {
     background: var(--bg-secondary);
