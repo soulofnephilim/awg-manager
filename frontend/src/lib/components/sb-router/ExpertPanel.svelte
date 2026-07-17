@@ -493,7 +493,8 @@
   let prevRulesRef: SingboxRouterRule[] | undefined;
 
   function isSelectableRule(r: SingboxRouterRule): boolean {
-    return !isSystemRule(r) && mapRuleAction(r) === 'route';
+    const action = mapRuleAction(r);
+    return !isSystemRule(r) && (action === 'route' || action === 'direct');
   }
 
   const selectableRuleIndices = $derived(
@@ -620,6 +621,21 @@
       notifications.info('Список изменился, выбор сброшен');
     }
     prevRuleSetsRef = current;
+  });
+
+  // Смена тип-фильтра в RuleSetsTable могла скрыть уже выбранные теги —
+  // держим rsSelected ⊆ видимых-выбираемых, иначе count в баре и Apply
+  // затрагивали бы невидимые наборы (#558 fix-волна 2, Minor 4).
+  $effect(() => {
+    const visible = new Set(rsFilteredSelectableTags);
+    if (rsSelected.size === 0) return;
+    let changed = false;
+    const next = new Set<string>();
+    for (const tag of rsSelected) {
+      if (visible.has(tag)) next.add(tag);
+      else changed = true;
+    }
+    if (changed) rsSelected = next;
   });
 
   // Rule handlers

@@ -195,6 +195,21 @@
 		prevRuleSetsRef = current;
 	});
 
+	// Смена тип-фильтра могла скрыть уже выбранные теги — держим
+	// selected ⊆ видимых-выбираемых, иначе count в баре и Apply
+	// затрагивали бы невидимые наборы (#558 fix-волна 2, Minor 4).
+	$effect(() => {
+		const visible = new Set(filteredSelectableTags);
+		if (selected.size === 0) return;
+		let changed = false;
+		const next = new Set<string>();
+		for (const tag of selected) {
+			if (visible.has(tag)) next.add(tag);
+			else changed = true;
+		}
+		if (changed) selected = next;
+	});
+
 	// ── Модалы (state) ───────────────────────────────────────────────────
 	let rsAddOpen = $state(false);
 	let rsEditTag = $state<string | null>(null);
