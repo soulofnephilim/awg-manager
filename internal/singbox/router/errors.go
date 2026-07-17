@@ -12,8 +12,14 @@ var (
 	// ErrBulkEmptyIndices / ErrBulkEmptyTags reject an empty selection passed
 	// to a bulk rule/ruleset mutation (nothing to do — client error). Mapped
 	// to 400 by the API.
-	ErrBulkEmptyIndices         = errors.New("empty indices")
-	ErrBulkEmptyTags            = errors.New("empty tags")
+	ErrBulkEmptyIndices = errors.New("empty indices")
+	ErrBulkEmptyTags    = errors.New("empty tags")
+	// ErrBulkInvalidSelection rejects a non-empty bulk selection that is
+	// itself invalid (duplicate index/tag, a rule that isn't a route rule,
+	// an unknown outbound tag, or a rule set that isn't type=remote) — a
+	// client error just like the empty-selection cases above. Mapped to 400
+	// by the API.
+	ErrBulkInvalidSelection     = errors.New("invalid bulk selection")
 	ErrRuleSetTagConflict       = errors.New("rule set with this tag already exists")
 	ErrRuleSetNotFound          = errors.New("rule set not found")
 	ErrDatRuleSetForbidden      = errors.New("dat rule set token is invalid")

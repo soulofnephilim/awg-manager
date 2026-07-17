@@ -662,6 +662,41 @@ func TestRouterBulkSetRuleOutbound_EmptyIndices_Returns400(t *testing.T) {
 	}
 }
 
+// TestRouterBulkSetRuleOutbound_DuplicateIndex_Returns400 verifies the
+// service's non-empty-but-invalid selection guard (ErrBulkInvalidSelection)
+// maps to 400, not 500.
+func TestRouterBulkSetRuleOutbound_DuplicateIndex_Returns400(t *testing.T) {
+	h, _ := newTestRouterHandlerReal(t)
+
+	addBody := `{"action":"route","outbound":"old","domain_suffix":["example.com"]}`
+	addReq := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rules/add", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRR := httptest.NewRecorder()
+	h.AddRule(addRR, addReq)
+	if addRR.Code != http.StatusOK {
+		t.Fatalf("seed AddRule: want 200, got %d (body: %s)", addRR.Code, addRR.Body.String())
+	}
+
+	body := `{"indices":[0,0],"outbound":"direct"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/router/rules/bulk-outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.BulkSetRuleOutbound(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var env struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, rr.Body.String())
+	}
+	if env.Code != "BULK_INVALID_SELECTION" {
+		t.Fatalf("want code BULK_INVALID_SELECTION, got %q", env.Code)
+	}
+}
+
 func TestRouterBulkSetRuleOutbound_MethodNotAllowed(t *testing.T) {
 	h := newMockRouterHandler(&mockRouterSvc{})
 	req := httptest.NewRequest(http.MethodGet, "/api/singbox/router/rules/bulk-outbound", nil)

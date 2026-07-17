@@ -109,19 +109,19 @@ func bulkSetRuleOutbound(c *RouterConfig, indices []int, outbound string, known 
 		return ErrBulkEmptyIndices
 	}
 	if !known(outbound) {
-		return fmt.Errorf("unknown outbound tag %q", outbound)
+		return fmt.Errorf("%w: unknown outbound tag %q", ErrBulkInvalidSelection, outbound)
 	}
 	seen := make(map[int]bool, len(indices))
 	for _, i := range indices {
 		if seen[i] {
-			return fmt.Errorf("duplicate rule index %d", i)
+			return fmt.Errorf("%w: duplicate rule index %d", ErrBulkInvalidSelection, i)
 		}
 		seen[i] = true
 		if i < 0 || i >= len(c.Route.Rules) {
 			return fmt.Errorf("%w: index %d", ErrRuleIndexOutOfRange, i)
 		}
 		if !c.Route.Rules[i].ActionIsRoute() {
-			return fmt.Errorf("rule %d is not a route rule (action %q)", i, c.Route.Rules[i].Action)
+			return fmt.Errorf("%w: rule %d is not a route rule (action %q)", ErrBulkInvalidSelection, i, c.Route.Rules[i].Action)
 		}
 	}
 	for _, i := range indices {
@@ -139,7 +139,7 @@ func bulkSetRuleSetDetour(c *RouterConfig, tags []string, detour string, known f
 		return ErrBulkEmptyTags
 	}
 	if detour != "" && !known(detour) {
-		return fmt.Errorf("unknown outbound tag %q", detour)
+		return fmt.Errorf("%w: unknown outbound tag %q", ErrBulkInvalidSelection, detour)
 	}
 	byTag := make(map[string]int, len(c.Route.RuleSet))
 	for i, rs := range c.Route.RuleSet {
@@ -148,7 +148,7 @@ func bulkSetRuleSetDetour(c *RouterConfig, tags []string, detour string, known f
 	seen := make(map[string]bool, len(tags))
 	for _, tag := range tags {
 		if seen[tag] {
-			return fmt.Errorf("duplicate rule set tag %q", tag)
+			return fmt.Errorf("%w: duplicate rule set tag %q", ErrBulkInvalidSelection, tag)
 		}
 		seen[tag] = true
 		i, ok := byTag[tag]
@@ -156,7 +156,7 @@ func bulkSetRuleSetDetour(c *RouterConfig, tags []string, detour string, known f
 			return fmt.Errorf("%w: %q", ErrRuleSetNotFound, tag)
 		}
 		if c.Route.RuleSet[i].Type != "remote" {
-			return fmt.Errorf("rule set %q is not type=remote (got %q)", tag, c.Route.RuleSet[i].Type)
+			return fmt.Errorf("%w: rule set %q is not type=remote (got %q)", ErrBulkInvalidSelection, tag, c.Route.RuleSet[i].Type)
 		}
 	}
 	for _, tag := range tags {

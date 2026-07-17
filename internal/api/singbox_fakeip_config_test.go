@@ -235,6 +235,46 @@ func TestFakeIPConfigHandler_BulkSetRuleOutbound_EmptyIndices_Returns400(t *test
 	}
 }
 
+// TestFakeIPConfigHandler_BulkSetRuleOutbound_DuplicateIndex_Returns400
+// verifies the service's non-empty-but-invalid selection guard
+// (ErrBulkInvalidSelection) maps to 400, not 500.
+func TestFakeIPConfigHandler_BulkSetRuleOutbound_DuplicateIndex_Returns400(t *testing.T) {
+	fh := newTestFakeIPConfigHandler(t)
+
+	addBody := `{"action":"route","outbound":"old","domain_suffix":["example.com"]}`
+	addReq := httptest.NewRequest(http.MethodPost, "/api/singbox/fakeip/config/rules/add", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRR := httptest.NewRecorder()
+	fh.AddRule(addRR, addReq)
+	if addRR.Code != http.StatusOK {
+		t.Fatalf("seed AddRule: want 200, got %d (body: %s)", addRR.Code, addRR.Body.String())
+	}
+	rules, err := fh.svc.FakeIPListRules(context.Background())
+	if err != nil {
+		t.Fatalf("FakeIPListRules: %v", err)
+	}
+	seededIndex := len(rules) - 1
+
+	body := fmt.Sprintf(`{"indices":[%d,%d],"outbound":"direct"}`, seededIndex, seededIndex)
+	req := httptest.NewRequest(http.MethodPost, "/api/singbox/fakeip/config/rules/bulk-outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	fh.BulkSetRuleOutbound(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var env struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, rr.Body.String())
+	}
+	if env.Code != "BULK_INVALID_SELECTION" {
+		t.Fatalf("want code BULK_INVALID_SELECTION, got %q", env.Code)
+	}
+}
+
 // TestFakeIPConfigHandler_BulkSetRuleSetDetour_200 exercises the endpoint
 // against a real ServiceImpl: seeds one remote ruleset, bulk-sets its detour,
 // and verifies both the {"updated":1} response and the actual mutation.

@@ -61,6 +61,10 @@ func (h *SingboxFakeIPConfigHandler) handleErr(w http.ResponseWriter, action str
 		errors.Is(err, router.ErrBulkEmptyTags):
 		// 400: empty selection for a bulk rule/ruleset mutation — nothing to do.
 		response.Error(w, err.Error(), "BULK_EMPTY_SELECTION")
+	case errors.Is(err, router.ErrBulkInvalidSelection):
+		// 400: non-empty but invalid bulk selection (duplicate index/tag,
+		// non-route rule, unknown outbound tag, non-remote rule set).
+		response.Error(w, err.Error(), "BULK_INVALID_SELECTION")
 	default:
 		response.InternalError(w, err.Error())
 	}

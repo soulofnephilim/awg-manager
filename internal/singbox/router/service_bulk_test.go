@@ -48,8 +48,8 @@ func TestBulkSetRuleOutbound_DuplicateIndex(t *testing.T) {
 		{Domain: []string{"a.com"}, Action: "route", Outbound: "old"},
 	}
 	err := bulkSetRuleOutbound(cfg, []int{0, 0}, "direct", knownAllBut())
-	if err == nil || !strings.Contains(err.Error(), "0") {
-		t.Fatalf("expected duplicate index error, got %v", err)
+	if !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "0") {
+		t.Fatalf("expected ErrBulkInvalidSelection duplicate index error, got %v", err)
 	}
 }
 
@@ -71,11 +71,11 @@ func TestBulkSetRuleOutbound_NonRouteAction(t *testing.T) {
 		{Domain: []string{"b.com"}, Action: "reject"},
 		{Action: "sniff"},
 	}
-	if err := bulkSetRuleOutbound(cfg, []int{1}, "direct", knownAllBut()); err == nil || !strings.Contains(err.Error(), "1") {
-		t.Fatalf("expected error naming index 1 for reject rule, got %v", err)
+	if err := bulkSetRuleOutbound(cfg, []int{1}, "direct", knownAllBut()); !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "1") {
+		t.Fatalf("expected ErrBulkInvalidSelection naming index 1 for reject rule, got %v", err)
 	}
-	if err := bulkSetRuleOutbound(cfg, []int{2}, "direct", knownAllBut()); err == nil || !strings.Contains(err.Error(), "2") {
-		t.Fatalf("expected error naming index 2 for sniff rule, got %v", err)
+	if err := bulkSetRuleOutbound(cfg, []int{2}, "direct", knownAllBut()); !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "2") {
+		t.Fatalf("expected ErrBulkInvalidSelection naming index 2 for sniff rule, got %v", err)
 	}
 }
 
@@ -85,8 +85,8 @@ func TestBulkSetRuleOutbound_UnknownOutbound(t *testing.T) {
 		{Domain: []string{"a.com"}, Action: "route", Outbound: "old"},
 	}
 	err := bulkSetRuleOutbound(cfg, []int{0}, "ghost", knownAllBut("ghost"))
-	if err == nil || !strings.Contains(err.Error(), "ghost") {
-		t.Fatalf("expected unknown outbound error, got %v", err)
+	if !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("expected ErrBulkInvalidSelection unknown outbound error, got %v", err)
 	}
 }
 
@@ -152,8 +152,8 @@ func TestBulkSetRuleSetDetour_DuplicateTag(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.Route.RuleSet = []RuleSet{{Tag: "geosite-a", Type: "remote"}}
 	err := bulkSetRuleSetDetour(cfg, []string{"geosite-a", "geosite-a"}, "direct", knownAllBut())
-	if err == nil || !strings.Contains(err.Error(), "geosite-a") {
-		t.Fatalf("expected duplicate tag error, got %v", err)
+	if !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "geosite-a") {
+		t.Fatalf("expected ErrBulkInvalidSelection duplicate tag error, got %v", err)
 	}
 }
 
@@ -172,11 +172,11 @@ func TestBulkSetRuleSetDetour_NonRemoteType(t *testing.T) {
 		{Tag: "local-a", Type: "local"},
 		{Tag: "inline-a", Type: "inline", Rules: []map[string]any{{"domain": "x"}}},
 	}
-	if err := bulkSetRuleSetDetour(cfg, []string{"local-a"}, "direct", knownAllBut()); err == nil || !strings.Contains(err.Error(), "local-a") {
-		t.Fatalf("expected error naming tag local-a, got %v", err)
+	if err := bulkSetRuleSetDetour(cfg, []string{"local-a"}, "direct", knownAllBut()); !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "local-a") {
+		t.Fatalf("expected ErrBulkInvalidSelection naming tag local-a, got %v", err)
 	}
-	if err := bulkSetRuleSetDetour(cfg, []string{"inline-a"}, "direct", knownAllBut()); err == nil || !strings.Contains(err.Error(), "inline-a") {
-		t.Fatalf("expected error naming tag inline-a, got %v", err)
+	if err := bulkSetRuleSetDetour(cfg, []string{"inline-a"}, "direct", knownAllBut()); !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "inline-a") {
+		t.Fatalf("expected ErrBulkInvalidSelection naming tag inline-a, got %v", err)
 	}
 }
 
@@ -184,8 +184,8 @@ func TestBulkSetRuleSetDetour_UnknownDetourTag(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.Route.RuleSet = []RuleSet{{Tag: "geosite-a", Type: "remote"}}
 	err := bulkSetRuleSetDetour(cfg, []string{"geosite-a"}, "ghost", knownAllBut("ghost"))
-	if err == nil || !strings.Contains(err.Error(), "ghost") {
-		t.Fatalf("expected unknown outbound error, got %v", err)
+	if !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("expected ErrBulkInvalidSelection unknown outbound error, got %v", err)
 	}
 }
 
