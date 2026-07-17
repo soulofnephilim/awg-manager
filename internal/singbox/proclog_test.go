@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // tailFile: строки, дописанные ПОСЛЕ старта тейлера, доезжают до onLine;
@@ -334,5 +336,96 @@ func TestReadLogTail(t *testing.T) {
 	}
 	if readLogTail(filepath.Join(dir, "absent.log"), 8) != "" {
 		t.Fatal("absent file must give empty tail")
+	}
+}
+
+// #562: openProcLog c truncate обязан сохранять O_APPEND — иначе у
+// писателя (child sing-box) позиционный fd, и после self-ротации каждая
+// его запись создаёт sparse-дыру из NUL-байтов с начала файла.
+func TestOpenProcLog_TruncateKeepsAppend(t *testing.T) {
+	dir := t.TempDir()
+	f, err := openProcLog(filepath.Join(dir, "err.log"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	flags, err := unix.FcntlInt(f.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&unix.O_APPEND == 0 {
+		t.Fatal("truncate-open must keep O_APPEND: positional fd + tail self-rotation = sparse NUL hole (#562)")
+	}
+}
+
+// #562: адоптированный sing-box старой сборки держит ПОЗИЦИОННЫЙ fd (без
+// O_APPEND). После self-ротации его следующая запись уходит на старое
+// смещение — файл становится sparse, и tail с offset 0 вычитывает дыру из
+// NUL-байтов. Эти байты не должны доезжать до onLine (до фикса они
+// доставлялись 64КБ-«строками» и раздували ОЗУ через slog-экранирование).
+func TestTailFile_PositionalWriterSparseHoleFiltered(t *testing.T) {
+	old := procLogMaxBytes
+	procLogMaxBytes = 16
+	t.Cleanup(func() { procLogMaxBytes = old })
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "err.log")
+	// Позиционный fd, как у писателя, заспавненного до фикса.
+	w, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.WriteString("line-one\nline-two-\n"); err != nil { // 19 байт > потолка 16
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var got []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go tailFile(ctx, p, false, func(line string) {
+		mu.Lock()
+		got = append(got, line)
+		mu.Unlock()
+	})
+
+	// Ждём self-ротацию (файл усечён до нуля).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if fi, err := os.Stat(p); err == nil && fi.Size() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("file was not self-truncated after exceeding procLogMaxBytes")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Позиционный писатель продолжает с offset 19 → sparse-дыра из 19 NUL.
+	if _, err := w.WriteString("after-hole\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, l := range got {
+		if strings.ContainsRune(l, '\x00') {
+			t.Fatalf("line %d contains NUL bytes (len=%d): sparse hole leaked into onLine", i, len(l))
+		}
+	}
+	want := "line-one,line-two-,after-hole"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("tail lines = %v, want [%s]", got, want)
 	}
 }
