@@ -314,8 +314,11 @@ type LoggingSettings struct {
 
 // UpdateSettings contains auto-update configuration.
 type UpdateSettings struct {
-	CheckEnabled bool   `json:"checkEnabled"` // default: true
-	Channel      string `json:"channel"`      // "stable" (default) | "develop"
+	CheckEnabled            bool   `json:"checkEnabled"`            // default: true
+	Channel                 string `json:"channel"`                 // "stable" (default) | "develop"
+	AutoInstallEnabled      bool   `json:"autoInstallEnabled"`      // default: false
+	AutoInstallIntervalDays int    `json:"autoInstallIntervalDays"` // default: 7, valid 1-30
+	AutoInstallTime         string `json:"autoInstallTime"`         // "HH:MM", default: "05:00"
 }
 
 // DNSRouteSettings contains DNS route auto-refresh configuration.

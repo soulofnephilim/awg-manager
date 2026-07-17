@@ -313,6 +313,10 @@ func (h *SingboxHandler) Install(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.op.Install(r.Context()); err != nil {
+		if errors.Is(err, singbox.ErrInstallInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INSTALL_IN_PROGRESS")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -338,6 +342,7 @@ func (h *SingboxHandler) Install(w http.ResponseWriter, r *http.Request) {
 //	@Security		CookieAuth
 //	@Success		200	{object}	SingboxStatusResponse
 //	@Failure		405	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/singbox/update [post]
 func (h *SingboxHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -346,6 +351,10 @@ func (h *SingboxHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.op.Update(r.Context()); err != nil {
+		if errors.Is(err, singbox.ErrInstallInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INSTALL_IN_PROGRESS")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}

@@ -148,6 +148,13 @@ type Operator struct {
 	// в disabled-режиме (предыдущая сессия не успела дочистить).
 	needsOrphanCleanup atomic.Bool
 
+	// installBusy guards Install/Update against interleaving with each
+	// other — manual (UI) and scheduled (auto-update) calls both go
+	// through the same Operator, and a second call while one is mid-flight
+	// (download/stop/activate/start) would race the binary swap. CAS'd on
+	// entry, released via defer.
+	installBusy atomic.Bool
+
 	// activeWorkFn, when wired (SetActiveWorkFn in main.go), reports
 	// whether the orchestrator has active work beyond base/catalog slots
 	// (router / deviceproxy / subscriptions enabled, or user tunnels

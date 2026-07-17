@@ -283,6 +283,10 @@ func (o *Operator) IsPresent() bool {
 // places it at /opt/etc/awg-manager/singbox/sing-box. Used by the UI
 // "Install" action when sing-box is not yet present.
 func (o *Operator) Install(ctx context.Context) error {
+	if !o.installBusy.CompareAndSwap(false, true) {
+		return ErrInstallInProgress
+	}
+	defer o.installBusy.Store(false)
 	if o.inst == nil {
 		return fmt.Errorf("installer not wired")
 	}
@@ -319,6 +323,10 @@ func (o *Operator) Install(ctx context.Context) error {
 // awg-manager build is pinned to. Stops sing-box, swaps the binary, restarts.
 // No-op when current binary matches both the required version and SHA256.
 func (o *Operator) Update(ctx context.Context) error {
+	if !o.installBusy.CompareAndSwap(false, true) {
+		return ErrInstallInProgress
+	}
+	defer o.installBusy.Store(false)
 	if o.inst == nil {
 		return fmt.Errorf("installer not wired")
 	}

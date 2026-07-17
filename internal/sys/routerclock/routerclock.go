@@ -48,6 +48,22 @@ func Get() Info {
 	}
 }
 
+// InstallAsLocal sets time.Local to the router's timezone (parsed from
+// /etc/TZ or /var/TZ) so daily HH:MM schedulers fire on router-local time
+// instead of UTC. Keenetic stores the zone as a POSIX string ("MSK-3")
+// that the Go runtime does not read from /etc/localtime, so without this
+// the daemon runs in UTC. No-op (returns false) when the router TZ can't
+// be read/parsed — the runtime zone is left untouched. Call once, early in
+// main, before any goroutine reads time.Local.
+func InstallAsLocal() bool {
+	info := Get()
+	if info.Source == "runtime" || info.Location == nil {
+		return false
+	}
+	time.Local = info.Location
+	return true
+}
+
 func readRouterTZ() (string, string, bool) {
 	for _, p := range tzCandidates {
 		b, err := os.ReadFile(p)

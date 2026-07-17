@@ -227,6 +227,9 @@ export interface LoggingSettings {
 export interface UpdateSettings {
 	checkEnabled: boolean;
 	channel: 'stable' | 'develop';
+	autoInstallEnabled: boolean;
+	autoInstallIntervalDays: number;
+	autoInstallTime: string;
 }
 
 export interface DownloadSettings {
@@ -315,6 +318,10 @@ export interface UpdateInfo {
 	checking: boolean;
 	error?: string;
 	warning?: string;
+	/** Computed by the auto-install scheduler; absent when auto-install is disabled. */
+	nextAutoInstallAt?: string;
+	/** Absent until the first auto-install attempt has run. */
+	lastAutoInstallAt?: string;
 }
 
 export interface ChangelogGroup {
