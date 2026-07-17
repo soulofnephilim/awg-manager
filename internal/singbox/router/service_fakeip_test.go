@@ -1701,3 +1701,18 @@ func TestReconcileFakeIPTun_PermitACL_RetriedAfterFailure(t *testing.T) {
 		t.Errorf("SetPermitACL called %d times, want 2 (fail, retry-success, then stop)", got)
 	}
 }
+
+// #567: перед валидирующим reload'ом enable fakeip-tun обязан освежить
+// 15-awg.json — протухший каталог AWG-тегов (кэш lastBytes, пропущенная
+// инвалидация) валил enable «unknown-outbound» по живому туннелю.
+func TestEnableFakeIPTun_RefreshesAWGOutbounds(t *testing.T) {
+	h := newFakeIPEnableHarness(t, "")
+	called := 0
+	h.svc.deps.AWGOutboundsRefresh = func(ctx context.Context) error { called++; return nil }
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable(fakeip-tun): %v", err)
+	}
+	if called == 0 {
+		t.Fatal("AWGOutboundsRefresh must be invoked during fakeip enable")
+	}
+}

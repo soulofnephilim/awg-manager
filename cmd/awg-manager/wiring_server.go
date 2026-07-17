@@ -304,6 +304,7 @@ func (a *app) setupRouter() {
 		Events:                 a.eventBus,
 		Bus:                    a.eventBus,
 		AWGTags:                &routerAWGTagAdapter{src: a.awgoutboundsSvc},
+		AWGOutboundsRefresh:    a.awgoutboundsSvc.Reconcile,
 		SingboxTunnels:         &routerSingboxTunnelAdapter{src: a.singboxOp},
 		SubscriptionComposites: router.NewSubscriptionCompositesAdapter(a.subAdapter),
 		Orch:                   a.sbOrch,

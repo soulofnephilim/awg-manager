@@ -1160,6 +1160,9 @@ func newQoSLifecycleService(t *testing.T, sr storage.SingboxRouterSettings, outb
 		Policies: &fakeAccessPolicyProvider{},
 	})
 	cfg := NewEmptyConfig()
+	// Атомарный член, на который ссылаются сеяные композиты: с валидацией
+	// членов (#567) плейсхолдер обязан существовать в каталоге.
+	cfg.Outbounds = append(cfg.Outbounds, Outbound{Type: "socks", Tag: "member-x", Server: "10.0.0.1"})
 	for _, ob := range outbounds {
 		cfg.Outbounds = append(cfg.Outbounds, Outbound{Type: "selector", Tag: ob, Outbounds: []string{"member-x"}})
 	}

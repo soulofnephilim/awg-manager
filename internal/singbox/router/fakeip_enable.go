@@ -293,6 +293,15 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 			s.notifyRoutingSlotsChanged()
 		}
 	})
+	// Освежить 15-awg.json ДО валидирующего reload'а: протухший каталог
+	// AWG-тегов (byte-кэш, пропущенная инвалидация) даёт ложный
+	// «unknown-outbound» по живому туннелю и откат всего enable (#567).
+	// Best-effort: ошибка каталога не должна блокировать enable сама по себе.
+	if s.deps.AWGOutboundsRefresh != nil {
+		if e := s.deps.AWGOutboundsRefresh(ctx); e != nil {
+			s.appLog.Warn("fakeip-enable", "awg-outbounds", "refresh 15-awg.json: "+e.Error())
+		}
+	}
 	if err = s.persistFakeIPConfig(ctx, fcfg); err != nil {
 		return fmt.Errorf("enable fakeip-tun: persist fakeip config: %w", err)
 	}
