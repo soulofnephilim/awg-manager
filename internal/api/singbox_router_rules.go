@@ -307,7 +307,6 @@ func (h *SingboxRouterHandler) UpdateRuleSet(w http.ResponseWriter, r *http.Requ
 //	@Param			body	body		SingboxRouterRuleSetBulkDetourRequest	true	"Rule set tags + new download_detour"
 //	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
 //	@Failure		400		{object}	APIErrorEnvelope
-//	@Failure		404		{object}	APIErrorEnvelope
 //	@Failure		500		{object}	APIErrorEnvelope
 //	@Router			/singbox/router/rulesets/bulk-detour [post]
 func (h *SingboxRouterHandler) BulkSetRuleSetDetour(w http.ResponseWriter, r *http.Request) {

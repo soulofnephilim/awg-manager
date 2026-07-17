@@ -11990,10 +11990,6 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/api.APIErrorEnvelope'
         "500":
           description: Internal Server Error
           schema:
@@ -13756,10 +13752,6 @@ paths:
             $ref: '#/definitions/api.SingboxRouterBulkUpdatedResponse'
         "400":
           description: Bad Request
-          schema:
-            $ref: '#/definitions/api.APIErrorEnvelope'
-        "404":
-          description: Not Found
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
         "500":

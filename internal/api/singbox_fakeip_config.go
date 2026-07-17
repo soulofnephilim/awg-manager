@@ -789,7 +789,6 @@ func (h *SingboxFakeIPConfigHandler) UpdateRuleSet(w http.ResponseWriter, r *htt
 //	@Param			body	body		SingboxRouterRuleSetBulkDetourRequest	true	"Rule set tags + new download_detour"
 //	@Success		200		{object}	SingboxRouterBulkUpdatedResponse
 //	@Failure		400		{object}	APIErrorEnvelope
-//	@Failure		404		{object}	APIErrorEnvelope
 //	@Failure		500		{object}	APIErrorEnvelope
 //	@Router			/singbox/fakeip/config/rulesets/bulk-detour [post]
 func (h *SingboxFakeIPConfigHandler) BulkSetRuleSetDetour(w http.ResponseWriter, r *http.Request) {
