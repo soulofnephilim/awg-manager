@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 
 	"log/slog"
@@ -16,7 +17,29 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
 	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/updater"
 )
+
+// singboxUpdaterAdapter adapts *singbox.Operator to updater.SingboxUpdater
+// so the updater package can drive sing-box auto-install without importing
+// internal/singbox. Errors are translated to the updater package's own
+// sentinel so the scheduler doesn't need to know about singbox.ErrInstallInProgress.
+type singboxUpdaterAdapter struct {
+	op *singbox.Operator
+}
+
+func (a *singboxUpdaterAdapter) UpdateStatus(ctx context.Context) (installed, updateAvailable bool, current, required string) {
+	st := a.op.GetStatus(ctx)
+	return st.Installed, st.UpdateAvailable, st.CurrentVersion, st.RequiredVersion
+}
+
+func (a *singboxUpdaterAdapter) Update(ctx context.Context) error {
+	err := a.op.Update(ctx)
+	if errors.Is(err, singbox.ErrInstallInProgress) {
+		return updater.ErrSingboxInstallInProgress
+	}
+	return err
+}
 
 // setupSingbox builds the sing-box operator, the config.d slot
 // orchestrator, the subscription service, the managed-binary installer and
@@ -246,4 +269,12 @@ func (a *app) setupSingbox() {
 	a.deferOnExit(logFwdCancel)
 	go singbox.NewLogForwarder(a.singboxOp.Clash().Address(), a.loggingService).Run(logFwdCtx)
 
+	// Updater service (awg-manager self-update check/apply + scheduled
+	// auto-install for both awg-manager and the managed sing-box binary).
+	// Constructed here rather than in setupServices because the sing-box
+	// auto-install path needs a.singboxOp, which does not exist yet at
+	// that earlier point in main.go's setup sequence.
+	a.updaterService = updater.New(version, a.settingsStore, a.loggingService, a.dataDir, &singboxUpdaterAdapter{op: a.singboxOp})
+	a.updaterService.Start()
+	a.deferOnExit(a.updaterService.Stop)
 }

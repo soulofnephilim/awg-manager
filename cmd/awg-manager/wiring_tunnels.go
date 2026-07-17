@@ -33,7 +33,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/state"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wg"
-	"github.com/hoaxisr/awg-manager/internal/updater"
 )
 
 // setupTunnels wires the tunnel core (wg/backend/state/firewall, NDMS
@@ -224,10 +223,8 @@ func (a *app) setupServices() {
 	a.trafficHistory = traffic.New()
 	a.deferOnExit(a.trafficHistory.Stop)
 
-	// Updater service
-	a.updaterService = updater.New(version, a.settingsStore, a.loggingService)
-	a.updaterService.Start()
-	a.deferOnExit(a.updaterService.Stop)
+	// Updater service is constructed in setupSingbox (needs a.singboxOp for
+	// the sing-box auto-install path, which is only wired at that point).
 
 	// Managed WireGuard server service — constructed after ndmsCommands is built.
 
