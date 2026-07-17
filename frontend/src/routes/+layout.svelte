@@ -469,18 +469,22 @@
 		size="sm"
 		onclose={closeDonateModal}
 	>
+		<p class="donate-intro">
+			Если у вас есть лишние шекели, вам понравилось как вам не отвечают на вопросы и вы готовы
+			самостоятельно решать проблемы, а еще вы оценили подход - "ни дня без нового бага", то:
+		</p>
+		<p class="donate-intro">
+			Вы можете поделиться богатством и дать возможность родить новые проблемы там где еще вчера
+			все было хорошо:
+		</p>
 		<div class="donate-wallets">
 			<div class="donate-wallet">
 				<span class="donate-wallet-label">USDT / ETH</span>
 				<code class="donate-wallet-addr">0x7eae43b82157f2e4ea233eddf5d9ce19a1064f04</code>
 			</div>
 			<div class="donate-wallet">
-				<span class="donate-wallet-label">USDT ERC20</span>
-				<code class="donate-wallet-addr">0x35eC46d51f06DAf2DDbfA2a1b9B28a360643fEa8</code>
-			</div>
-			<div class="donate-wallet">
-				<span class="donate-wallet-label">USDT / TRC20</span>
-				<code class="donate-wallet-addr">TEpJh2p9j3fp6MigyqGvq1gC5D3CsxBeJw</code>
+				<span class="donate-wallet-label">USDT / Tron</span>
+				<code class="donate-wallet-addr">TDisGwxj2AopFzT2VQ9JwY6QDyjChUP5EA</code>
 			</div>
 			<div class="donate-wallet">
 				<span class="donate-wallet-label">Boosty</span>
@@ -489,6 +493,10 @@
 			<div class="donate-wallet">
 				<span class="donate-wallet-label">ЮMoney</span>
 				<a class="donate-wallet-link" href="https://yoomoney.ru/fundraise/1GF36UHR07L.260312" target="_blank" rel="noopener">yoomoney.ru/fundraise</a>
+			</div>
+			<div class="donate-wallet">
+				<span class="donate-wallet-label">Или любая сумма</span>
+				<a class="donate-wallet-link" href="https://yoomoney.ru/to/4100119477098112/0" target="_blank" rel="noopener">yoomoney.ru/to/4100119477098112</a>
 			</div>
 		</div>
 	</Modal>
@@ -584,6 +592,12 @@
 		color: var(--text-tertiary);
 		font-size: 0.8125rem;
 		margin: 0;
+	}
+
+	.donate-intro {
+		font-size: 0.8125rem;
+		color: var(--text-secondary);
+		margin: 0 0 0.75rem;
 	}
 
 	.donate-wallets {
