@@ -52,7 +52,7 @@
   // «Выбрать все» в ExpertPanel, чтобы bulk-detour не трогал скрытые
   // фильтром наборы (#558 fix-волна, finding F2).
   const filteredSelectableTags = $derived(
-    filtered.filter((rs) => (rs.type ?? 'remote') === 'remote').map((rs) => rs.tag),
+    filtered.filter((rs) => rs.type === 'remote').map((rs) => rs.tag),
   );
 
   $effect(() => {

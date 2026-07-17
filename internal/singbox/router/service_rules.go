@@ -123,6 +123,9 @@ func bulkSetRuleOutbound(c *RouterConfig, indices []int, outbound string, known 
 		if !c.Route.Rules[i].ActionIsRoute() {
 			return fmt.Errorf("%w: rule %d is not a route rule (action %q)", ErrBulkInvalidSelection, i, c.Route.Rules[i].Action)
 		}
+		if isSystemRule(c.Route.Rules[i]) {
+			return fmt.Errorf("%w: rule %d is a system rule", ErrBulkInvalidSelection, i)
+		}
 	}
 	for _, i := range indices {
 		c.Route.Rules[i].Outbound = outbound

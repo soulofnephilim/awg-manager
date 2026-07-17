@@ -79,6 +79,22 @@ func TestBulkSetRuleOutbound_NonRouteAction(t *testing.T) {
 	}
 }
 
+func TestBulkSetRuleOutbound_SystemRule(t *testing.T) {
+	cfg := NewEmptyConfig()
+	private := true
+	cfg.Route.Rules = []Rule{
+		{Domain: []string{"a.com"}, Action: "route", Outbound: "old"},
+		{Action: "route", IPIsPrivate: &private, Outbound: "old"},
+	}
+	err := bulkSetRuleOutbound(cfg, []int{1}, "direct", knownAllBut())
+	if !errors.Is(err, ErrBulkInvalidSelection) || !strings.Contains(err.Error(), "1") {
+		t.Fatalf("expected ErrBulkInvalidSelection naming index 1 for system ip_is_private rule, got %v", err)
+	}
+	if cfg.Route.Rules[1].Outbound != "old" {
+		t.Fatalf("system rule was mutated: %+v", cfg.Route.Rules[1])
+	}
+}
+
 func TestBulkSetRuleOutbound_UnknownOutbound(t *testing.T) {
 	cfg := NewEmptyConfig()
 	cfg.Route.Rules = []Rule{
