@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/hoaxisr/awg-manager/internal/sys/routerclock"
 )
 
 const defaultDataDir = "/opt/etc/awg-manager"
@@ -22,6 +24,12 @@ func main() {
 	pprofOnMain := flag.Bool("pprof-on-main", false, "Also mount /debug/pprof/* on the main HTTP server (LAN/loopback listeners)")
 	slowReqMS := flag.Int("slow-request-ms", 0, "Log HTTP handlers slower than this (ms) to stderr via slog (0 disables); long-lived SSE/WS routes are excluded")
 	flag.Parse()
+
+	// Adopt the router's local timezone before anything reads time.Local.
+	// Keenetic stores the zone as a POSIX string ("MSK-3") in /var/TZ, which
+	// the Go runtime does not honor via /etc/localtime — so without this the
+	// daemon runs in UTC and daily HH:MM schedulers fire 3h off.
+	routerclock.InstallAsLocal()
 
 	// Ensure Go can find CA certificates on entware-based systems (Keenetic).
 	// Must run before any HTTPS calls (kmod download, etc.).
