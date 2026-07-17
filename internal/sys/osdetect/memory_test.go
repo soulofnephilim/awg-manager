@@ -24,8 +24,13 @@ func TestGCEnvForTotalMemoryMB_TierTable(t *testing.T) {
 		{"256MB router (~248 reported)", 248, []string{"GOGC=50", "GOMEMLIMIT=96MiB"}},
 		{"512MB router (~500 reported)", 500, []string{"GOGC=50", "GOMEMLIMIT=96MiB"}},
 		{"mid boundary 699", 699, []string{"GOGC=50", "GOMEMLIMIT=96MiB"}},
-		{"mid boundary 700", 700, nil},
-		{"1GB router (~950 reported)", 950, nil},
+		// High tier (#562): 1GB+ модели раньше жили вовсе без потолка —
+		// аллокационный шторм доезжал до 90%+ ОЗУ роутера. Мягкий
+		// GOMEMLIMIT без смены GOGC: идл ~30-60МБ, легитимные пики
+		// ~100-150МБ — трэша нет, runaway гасится.
+		{"mid boundary 700", 700, []string{"GOMEMLIMIT=256MiB"}},
+		{"1GB router (~950 reported)", 950, []string{"GOMEMLIMIT=256MiB"}},
+		{"2GB (hypothetical)", 2000, []string{"GOMEMLIMIT=256MiB"}},
 	}
 	for _, tc := range cases {
 		if got := gcEnvForTotalMemoryMB(tc.mem); !slices.Equal(got, tc.want) {
