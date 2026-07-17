@@ -94,6 +94,15 @@ func TestComputeIssues(t *testing.T) {
 			wantIssue:        false,
 		},
 		{
+			// Пустой action = route (sing-box исполняет): висячий outbound у
+			// такого правила обязан давать то же предупреждение.
+			name:      "empty action with dangling outbound",
+			outbounds: []Outbound{{Tag: "other", Type: "vless"}},
+			rule:      Rule{Outbound: "ghost"},
+			wantIssue: true,
+			wantTag:   "ghost",
+		},
+		{
 			// Anti-false-negative: when nothing covers the tag the
 			// orphan-rule warn must still fire.
 			name:             "tag missing from every source",

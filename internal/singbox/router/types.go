@@ -120,6 +120,17 @@ type Rule struct {
 	AwgmManaged string `json:"awgm_managed,omitempty"`
 }
 
+// ActionIsRoute reports whether the rule's action is "route" in sing-box
+// semantics: an EMPTY action is route too (sing-box defaults it). Readers
+// must use this instead of comparing Action == "route" — a rule persisted
+// without the field (API callers omit it; the frontend always sends it) is
+// executed by sing-box but was invisible to strict comparisons: the fakeip
+// loop-safety gate skipped its CIDR tun-routes and the dangling-outbound
+// issue detector skipped its warning (стенд-находка #534-расследования).
+func (r Rule) ActionIsRoute() bool {
+	return r.Action == "" || r.Action == "route"
+}
+
 // UnmarshalJSON implements json.Unmarshaler for Rule. It accepts both
 // `"port": 53` (scalar) and `"port": [53]` (array) forms so that
 // older or hand-edited sing-box configs deserialize without error.
