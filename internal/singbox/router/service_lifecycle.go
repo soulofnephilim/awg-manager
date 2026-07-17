@@ -460,7 +460,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 
 	sr.Enabled = true
 
-	cfg, err := s.loadRouterConfig()
+	cfg, err := s.loadAppliedRouterConfig()
 	if err != nil {
 		return err
 	}
@@ -674,27 +674,45 @@ func filterTProxyInbound(in []Inbound) []Inbound {
 	return out
 }
 
-// healTProxyInbound checks the persisted router config and brings the
-// tproxy-in inbound to spec: re-adds it if missing, and applies the current
-// udpTimeout if it drifted (e.g. the user changed the setting while the engine
-// was running — this is the Reconcile path that path takes). Idempotent.
+// healTProxyInbound checks the persisted router config and brings the two
+// UDP-timeout carriers to spec: the tproxy-in inbound (re-added if missing,
+// udp_timeout re-applied on drift) AND the system route-options rule that
+// raises sing-box's short sniff timeouts (#469). Both drift the same way —
+// the user changes the setting while the engine is running (UpdateSettings →
+// Reconcile lands here). The rule used to be regenerated only by Enable, so
+// a changed timeout stayed stale in the config until the engine was toggled
+// off/on (#554). Idempotent.
 func (s *ServiceImpl) healTProxyInbound(ctx context.Context, udpTimeout string) error {
-	cfg, err := s.loadRouterConfig()
+	// APPLIED config, not the effective (pending-first) view: heal writes to
+	// active/, so reading a user's staged draft here would materialize the
+	// draft into the live config BYPASSING ApplyDraft validation (and leave
+	// the stale pending banner hanging over an already-applied config).
+	cfg, err := s.loadAppliedRouterConfig()
 	if err != nil {
 		return err
 	}
-	// Cheap steady-state guard: present and already at the desired timeout →
+	// Cheap steady-state guard: both carriers already at the desired timeout →
 	// skip the marshal/write entirely (this runs on every reconcile tick).
 	effective := resolveUDPTimeout(udpTimeout)
+	inboundOK := false
 	for _, in := range cfg.Inbounds {
 		if in.Tag == "tproxy-in" {
-			if in.UDPTimeout == effective {
-				return nil
-			}
-			break // present but drifted — fall through to re-apply
+			inboundOK = in.UDPTimeout == effective
+			break
 		}
 	}
+	ruleOK := false
+	for _, r := range cfg.Route.Rules {
+		if isSystemUDPTimeoutRule(r) {
+			ruleOK = r.UDPTimeout == effective
+			break
+		}
+	}
+	if inboundOK && ruleOK {
+		return nil
+	}
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, udpTimeout)
+	cfg.EnsureUDPTimeoutRule(effective)
 	// System self-heal — direct write, no staging UI.
 	return s.persistConfigDirect(ctx, cfg)
 }
@@ -1105,7 +1123,7 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 		// Legacy fallback: strip the tproxy inbound in place so
 		// the running sing-box stops accepting on the TPROXY port
 		// after the persistConfigDirect reload.
-		cfg, err := s.loadRouterConfig()
+		cfg, err := s.loadAppliedRouterConfig()
 		if err == nil && cfg != nil {
 			filtered := make([]Inbound, 0, len(cfg.Inbounds))
 			for _, in := range cfg.Inbounds {
