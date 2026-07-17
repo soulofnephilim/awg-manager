@@ -5724,8 +5724,19 @@ definitions:
       currentVersion:
         example: 2.5.0
         type: string
+      lastAutoInstallAt:
+        example: "2024-01-15T05:00:00Z"
+        type: string
       latestVersion:
         example: 2.5.0
+        type: string
+      nextAutoInstallAt:
+        description: |-
+          NextAutoInstallAt/LastAutoInstallAt are computed by the auto-install
+          scheduler (internal/updater.Service.NextAutoInstallAt), not stored on
+          the cached UpdateInfo — they are injected into the response in both
+          the cached and force=true branches of Check (task #559-4, MAJOR-2).
+        example: "2024-01-16T05:00:00Z"
         type: string
     type: object
   api.UpdatePeerRequestDTO:
@@ -15144,6 +15155,10 @@ paths:
             $ref: '#/definitions/api.SingboxStatusResponse'
         "405":
           description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/api.APIErrorEnvelope'
+        "409":
+          description: Conflict
           schema:
             $ref: '#/definitions/api.APIErrorEnvelope'
         "500":
