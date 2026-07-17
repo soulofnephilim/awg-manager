@@ -42,12 +42,13 @@
 	import { singboxRuleToCard, resolveOutboundDisplay } from '$lib/components/sb-router/adapters';
 	import MatcherChip from '$lib/components/sb-router/MatcherChip.svelte';
 	import RuleOutboundAction from '$lib/components/sb-router/RuleOutboundAction.svelte';
+	import BulkSelectBar from '$lib/components/sb-router/BulkSelectBar.svelte';
 	import { displayRuleSetTag } from '$lib/utils/singboxInlineRules';
 	import {
 		RuleEditModal,
 		computeRuleSetUsage,
 	} from '$lib/components/routing/singboxRouter';
-	import { ConfirmModal, Dropdown } from '$lib/components/ui';
+	import { ConfirmModal, Dropdown, Button } from '$lib/components/ui';
 	import type { DropdownOption } from '$lib/components/ui';
 	import { GripVertical, Pencil, Trash2, Plus, Check, X } from 'lucide-svelte';
 	import type { SingboxRouterRule } from '$lib/types';
@@ -101,6 +102,83 @@
 			),
 		),
 	);
+
+	// ── Bulk outbound select (тот же паттерн, что RulesPanel/tproxy) ────────
+	let selectMode = $state(false);
+	let selected = $state<Set<number>>(new Set());
+	let bulkBusy = $state(false);
+	let prevRulesRef: SingboxRouterRule[] | undefined;
+
+	function isSelectable(card: RuleCardData): boolean {
+		return !card.isSystem && card.action === 'route';
+	}
+
+	const selectableIndices = $derived(
+		cards.reduce<number[]>((acc, c, i) => {
+			if (isSelectable(c)) acc.push(i);
+			return acc;
+		}, []),
+	);
+
+	// Тот же каталог outbound'ов, что у RuleEditModal ($storeOptions),
+	// сплющенный в плоский список для BulkSelectBar.
+	const bulkOutboundOptions = $derived(
+		$storeOptions.flatMap((g) => g.items.map((it) => ({ value: it.value, label: it.label, group: g.group }))),
+	);
+
+	function toggleSelectMode(): void {
+		selectMode = true;
+		selected = new Set();
+	}
+
+	function cancelSelectMode(): void {
+		selectMode = false;
+		selected = new Set();
+	}
+
+	function toggleSelect(index: number): void {
+		const next = new Set(selected);
+		if (next.has(index)) next.delete(index);
+		else next.add(index);
+		selected = next;
+	}
+
+	function selectAllRules(): void {
+		selected = new Set(selectableIndices);
+	}
+
+	// FakeIP staging не завязан на этот bulk-эндпоинт — backend сам делает один
+	// reload после применения, поэтому здесь достаточно fakeipConfig.loadAll().
+	async function applyBulkOutbound(value: string): Promise<void> {
+		if (selected.size === 0 || bulkBusy) return;
+		bulkBusy = true;
+		try {
+			const { updated } = await api.singboxFakeIPBulkOutbound([...selected], value);
+			notifications.success(`Изменено ${updated}`);
+			selectMode = false;
+			selected = new Set();
+			await fakeipConfig.loadAll();
+		} catch (e) {
+			notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			bulkBusy = false;
+		}
+	}
+
+	// Список правил мог перезагрузиться из другого источника, пока шло
+	// выделение (SSE-инвалидация, чужое действие) — индексы больше не
+	// гарантированно соответствуют выбранным чекбоксам. Сбрасываем выделение;
+	// при собственном bulk-apply selectMode уже false к моменту прихода
+	// нового $storeRules, поэтому условие там не сработает.
+	$effect(() => {
+		const current = $storeRules;
+		if (selectMode && prevRulesRef !== undefined && current !== prevRulesRef) {
+			selectMode = false;
+			selected = new Set();
+			notifications.info('Список изменился, выбор сброшен');
+		}
+		prevRulesRef = current;
+	});
 
 	// Final-outbound — rendered via RuleOutboundAction (same as tproxy).
 	// currentFinal is seeded from singboxRouter.status.final (mode-aware) and
@@ -183,10 +261,11 @@
 		// +1 виртуальная read-only «final»-строка в самом конце.
 		count: () => $storeRules.length + 1,
 		getPanelEl: () => panelEl,
-		// Фиксированы: «final»-строка (последний индекс) и системные правила
+		// Фиксированы: «final»-строка (последний индекс), системные правила
 		// (sniff / hijack-dns / локальная сеть) — их нельзя ни схватить, ни
 		// сделать целью переноса; firstMovableIndex держит юзер-правила ниже них.
-		isFixed: (i) => i >= $storeRules.length || !!cards[i]?.isSystem,
+		// В selectMode (массовое выделение) drag отключается целиком.
+		isFixed: (i) => selectMode || i >= $storeRules.length || !!cards[i]?.isSystem,
 		onCommit: async (from, to) => {
 			const snapshot = get(fakeipConfig.rules);
 			fakeipConfig.applyRules(reorder(snapshot, from, to));
@@ -307,15 +386,27 @@
 			<button
 				type="button"
 				class="grip"
-				class:is-busy={drag.busy}
+				class:is-busy={drag.busy || selectMode}
 				aria-label={`Перетащить правило #${i + 1}`}
 				title="Перетащить для изменения порядка"
-				onpointerdown={drag.busy ? undefined : (e) => drag.handlePointerDown(i, e)}
+				onpointerdown={drag.busy || selectMode ? undefined : (e) => drag.handlePointerDown(i, e)}
 			>
 				<GripVertical size={16} strokeWidth={2} />
 			</button>
 		{/if}
-		<span class="num">{i + 1}</span>
+		<span class="num">
+			{#if selectMode && isSelectable(card)}
+				<input
+					type="checkbox"
+					class="rule-checkbox"
+					checked={selected.has(i)}
+					onchange={() => toggleSelect(i)}
+					aria-label={`Выбрать правило #${i + 1}`}
+				/>
+			{:else}
+				{i + 1}
+			{/if}
+		</span>
 		<div class="match">
 			{#if visibleChips.length === 0}
 				<span class="m-none">—</span>
@@ -372,9 +463,25 @@
 <section class="panel" bind:this={panelEl}>
 	<header class="ph">
 		<span class="nm">Route rules · {$storeRules.length}</span>
-		<button type="button" class="add" onclick={() => (ruleAddOpen = true)}>
-			<Plus size={14} strokeWidth={2} aria-hidden="true" /> Правило
-		</button>
+		<div class="ph-actions">
+			{#if selectMode}
+				<Button
+					variant="ghost"
+					size="sm"
+					disabled={bulkBusy || selectableIndices.length === 0}
+					onclick={selectAllRules}
+				>
+					Выбрать все
+				</Button>
+			{:else}
+				{#if selectableIndices.length > 0}
+					<Button variant="ghost" size="sm" onclick={toggleSelectMode}>Выбрать</Button>
+				{/if}
+				<button type="button" class="add" onclick={() => (ruleAddOpen = true)}>
+					<Plus size={14} strokeWidth={2} aria-hidden="true" /> Правило
+				</button>
+			{/if}
+		</div>
 	</header>
 	<p class="pd">
 		Куда направить трафик. Порядок важен — first-match. Матч: rule_set / domain /
@@ -485,6 +592,17 @@
 			{/if}
 		</div>
 	</div>
+
+	{#if selectMode}
+		<BulkSelectBar
+			count={selected.size}
+			options={bulkOutboundOptions}
+			applyLabel="Применить"
+			onapply={applyBulkOutbound}
+			oncancel={cancelSelectMode}
+			busy={bulkBusy}
+		/>
+	{/if}
 </section>
 
 <!-- ── Плавающая ghost-карточка (тот же сниппет → пиксель-в-пиксель) ──── -->
@@ -566,6 +684,11 @@
 	}
 	.add:hover {
 		background: color-mix(in srgb, var(--color-accent, var(--accent)) 12%, transparent);
+	}
+	.ph-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
 	}
 
 	.pd {
@@ -794,10 +917,19 @@
 	}
 
 	.num {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
 		color: var(--text-muted);
 		font-size: 0.8125rem;
 		font-family: var(--font-mono);
 		text-align: right;
+	}
+	.rule-checkbox {
+		width: 16px;
+		height: 16px;
+		cursor: pointer;
+		accent-color: var(--color-accent, var(--accent));
 	}
 
 	.match {
