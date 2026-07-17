@@ -586,6 +586,12 @@
     await singboxRouterStore.loadAll();
   }
 
+  async function handleRsBulkDetour(tags: string[], downloadDetour: string) {
+    const result = await api.singboxRouterBulkDetour(tags, downloadDetour);
+    await singboxRouterStore.loadAll();
+    return result;
+  }
+
   async function handleRsCatalogConfirm(presets: CatalogPreset[]) {
     if (rsCatalogBusy || presets.length === 0) return;
     rsCatalogBusy = true;
@@ -790,6 +796,8 @@
           }}
           onEdit={(tag) => (rsEditTag = tag)}
           onDelete={handleDeleteRs}
+          outboundOptions={$storeOptions}
+          onBulkDetour={handleRsBulkDetour}
         />
       </SidePanel>
     </div>

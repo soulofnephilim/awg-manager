@@ -6,11 +6,15 @@
   import type { SingboxRouterRuleSet } from '$lib/types';
   import { Edit3, Trash2, ArrowDownAZ } from 'lucide-svelte';
   import RuleSetTypeBadge from './RuleSetTypeBadge.svelte';
+  import BulkSelectBar from './BulkSelectBar.svelte';
   import {
     datInfo,
     resolveRuleSetDisplayType,
   } from '$lib/utils/ruleSetType';
   import { displayRuleSetTag } from '$lib/utils/singboxInlineRules';
+  import { buildDownloadDetourOptions } from '$lib/components/routing/singboxRouter/outboundOptions';
+  import type { OutboundGroup } from '$lib/components/routing/singboxRouter/outboundOptions';
+  import { notifications } from '$lib/stores/notifications';
 
   type RsFilter = 'all' | 'remote' | 'local' | 'inline' | 'dat';
 
@@ -21,9 +25,20 @@
     bare?: boolean;
     alphaSort?: boolean;
     onToggleAlphaSort?: () => void;
+    outboundOptions: OutboundGroup[];
+    onBulkDetour: (tags: string[], downloadDetour: string) => Promise<{ updated: number }>;
   }
 
-  let { ruleSets, onEdit, onDelete, bare = false, alphaSort = false, onToggleAlphaSort }: Props = $props();
+  let {
+    ruleSets,
+    onEdit,
+    onDelete,
+    bare = false,
+    alphaSort = false,
+    onToggleAlphaSort,
+    outboundOptions,
+    onBulkDetour,
+  }: Props = $props();
 
   let filter = $state<RsFilter>('all');
 
@@ -46,6 +61,72 @@
     if (datInfo(rs)) return 'direct';
     return rs.download_detour ?? '—';
   }
+
+  // ── Bulk download-detour select (тот же паттерн, что RulesPanel) ───────
+  // Только remote-наборы поддерживают download_detour — чекбоксы у остальных
+  // не рендерятся (title-подсказка вместо них).
+  let selectMode = $state(false);
+  let selected = $state<Set<string>>(new Set());
+  let bulkBusy = $state(false);
+  let prevRuleSetsRef: SingboxRouterRuleSet[] | undefined;
+
+  const hasSelectable = $derived(ruleSets.some((rs) => rs.type === 'remote'));
+  const filteredSelectableTags = $derived(
+    filtered.filter((rs) => rs.type === 'remote').map((rs) => rs.tag),
+  );
+
+  const bulkDetourOptions = $derived(buildDownloadDetourOptions(outboundOptions, '— сбросить —'));
+
+  function toggleSelectMode(): void {
+    selectMode = true;
+    selected = new Set();
+  }
+
+  function cancelSelectMode(): void {
+    selectMode = false;
+    selected = new Set();
+  }
+
+  function toggleSelect(tag: string): void {
+    const next = new Set(selected);
+    if (next.has(tag)) next.delete(tag);
+    else next.add(tag);
+    selected = next;
+  }
+
+  function selectAllRs(): void {
+    selected = new Set(filteredSelectableTags);
+  }
+
+  async function applyBulkDetour(value: string): Promise<void> {
+    if (selected.size === 0 || bulkBusy) return;
+    bulkBusy = true;
+    try {
+      const { updated } = await onBulkDetour([...selected], value);
+      notifications.success(`Изменено ${updated}`);
+      selectMode = false;
+      selected = new Set();
+    } catch (e) {
+      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  // Набор мог перезагрузиться из другого источника, пока шло выделение
+  // (SSE-инвалидация, чужое действие) — теги больше не гарантированно
+  // соответствуют актуальному списку. bulkBusy гейтит собственный apply:
+  // его onBulkDetour сам вызывает reload, и по его завершении selectMode уже
+  // false (сброшен на успехе выше), поэтому эффект в этом случае не сработает.
+  $effect(() => {
+    const current = ruleSets;
+    if (selectMode && !bulkBusy && prevRuleSetsRef !== undefined && current !== prevRuleSetsRef) {
+      selectMode = false;
+      selected = new Set();
+      notifications.info('Список изменился, выбор сброшен');
+    }
+    prevRuleSetsRef = current;
+  });
 </script>
 
 <div class="wrap">
@@ -62,6 +143,20 @@
         </button>
       {/each}
     </div>
+    {#if selectMode}
+      <button
+        type="button"
+        class="seg-tab select-action"
+        disabled={bulkBusy || filteredSelectableTags.length === 0}
+        onclick={selectAllRs}
+      >
+        Выбрать все
+      </button>
+    {:else if hasSelectable}
+      <button type="button" class="seg-tab select-action" onclick={toggleSelectMode}>
+        Выбрать
+      </button>
+    {/if}
     {#if onToggleAlphaSort}
       <button
         type="button"
@@ -87,7 +182,26 @@
     </div>
     {#each filtered as rs (rs.tag)}
       <div class="row">
-        <div class="tag">{displayRuleSetTag(rs.tag)}</div>
+        <div class="tag">
+          {#if selectMode}
+            {#if rs.type === 'remote'}
+              <input
+                type="checkbox"
+                class="rs-checkbox"
+                checked={selected.has(rs.tag)}
+                onchange={() => toggleSelect(rs.tag)}
+                aria-label={`Выбрать набор ${displayRuleSetTag(rs.tag)}`}
+              />
+            {:else}
+              <span
+                class="rs-checkbox-placeholder"
+                title="Download detour применим только к remote"
+                aria-hidden="true"
+              ></span>
+            {/if}
+          {/if}
+          {displayRuleSetTag(rs.tag)}
+        </div>
         <div>
           <RuleSetTypeBadge type={resolveRuleSetDisplayType(rs)} />
         </div>
@@ -119,6 +233,17 @@
       <div class="empty">Нет наборов</div>
     {/if}
   </div>
+
+  {#if selectMode}
+    <BulkSelectBar
+      count={selected.size}
+      options={bulkDetourOptions}
+      applyLabel="Применить"
+      onapply={applyBulkDetour}
+      oncancel={cancelSelectMode}
+      busy={bulkBusy}
+    />
+  {/if}
 </div>
 
 <style>
@@ -179,6 +304,17 @@
     border-right: 0;
     border-left: 1px solid var(--border);
   }
+  .seg-tab.select-action {
+    flex: 0 0 auto;
+    border-right: 0;
+    border-left: 1px solid var(--border);
+    white-space: nowrap;
+    padding-inline: 14px;
+  }
+  .seg-tab.select-action:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
   .table {
     background: var(--bg-secondary);
     border: 1px solid var(--border);
@@ -224,9 +360,25 @@
     }
   }
   .tag {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-family: var(--font-mono);
     font-size: 11.5px;
     font-weight: 600;
+  }
+  .rs-checkbox {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .rs-checkbox-placeholder {
+    flex-shrink: 0;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
   }
   .source {
     min-width: 0;
