@@ -199,7 +199,7 @@ type GenerateLinkRequest struct {
 
 // GenerateLinkResponse is the envelope for POST /api/freeturn/server/link.
 type GenerateLinkResponse struct {
-	Success bool   `json:"success" example:"true"`
+	Success bool `json:"success" example:"true"`
 	Data    struct {
 		Link     string `json:"link"`
 		Peer     string `json:"peer"`
@@ -308,7 +308,7 @@ type DecodeLinkRequest struct {
 
 // DecodeLinkResponse is the envelope for POST /api/freeturn/link/decode.
 type DecodeLinkResponse struct {
-	Success bool                `json:"success" example:"true"`
+	Success bool                 `json:"success" example:"true"`
 	Data    freeturn.LinkPayload `json:"data"`
 }
 

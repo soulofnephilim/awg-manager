@@ -261,13 +261,17 @@ type Deps struct {
 	AppLog   logging.AppLogger
 	Settings *storage.SettingsStore
 	// PresetCatalog is the unified preset catalog. Required for ListPresets and ApplyPreset.
-	PresetCatalog  *presets.Catalog
-	Singbox        SingboxController
-	Policies       AccessPolicyProvider
-	Events         *events.Bus
-	IPTables       *IPTables
-	AWGTags        AWGTagCatalog        // optional — when nil, computeIssues only sees cfg.Outbounds
-	SingboxTunnels SingboxTunnelCatalog // optional — when nil, computeIssues skips cross-slot tunnel tags
+	PresetCatalog *presets.Catalog
+	Singbox       SingboxController
+	Policies      AccessPolicyProvider
+	Events        *events.Bus
+	IPTables      *IPTables
+	AWGTags       AWGTagCatalog // optional — when nil, computeIssues only sees cfg.Outbounds
+	// AWGOutboundsRefresh перегенерирует 15-awg.json (awgoutbounds.Reconcile).
+	// Optional. Зовётся перед валидирующим reload'ом enable fakeip-tun, чтобы
+	// протухший каталог AWG-тегов не валил enable «unknown-outbound» (#567).
+	AWGOutboundsRefresh func(ctx context.Context) error
+	SingboxTunnels      SingboxTunnelCatalog // optional — when nil, computeIssues skips cross-slot tunnel tags
 	// SubscriptionComposites lists composite outbounds owned by the
 	// subscription slot (40-subscriptions.json). Optional — when nil,
 	// ListCompositeOutbounds returns only this service's own composites.

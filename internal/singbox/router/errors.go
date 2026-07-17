@@ -19,11 +19,13 @@ var (
 	// an unknown outbound tag, or a rule set that isn't type=remote) — a
 	// client error just like the empty-selection cases above. Mapped to 400
 	// by the API.
-	ErrBulkInvalidSelection     = errors.New("invalid bulk selection")
-	ErrRuleSetTagConflict       = errors.New("rule set with this tag already exists")
-	ErrRuleSetNotFound          = errors.New("rule set not found")
-	ErrDatRuleSetForbidden      = errors.New("dat rule set token is invalid")
-	ErrOutboundTagConflict      = errors.New("outbound with this tag already exists")
+	ErrBulkInvalidSelection = errors.New("invalid bulk selection")
+	ErrRuleSetTagConflict   = errors.New("rule set with this tag already exists")
+	ErrRuleSetNotFound      = errors.New("rule set not found")
+	ErrDatRuleSetForbidden  = errors.New("dat rule set token is invalid")
+	ErrOutboundTagConflict  = errors.New("outbound with this tag already exists")
+	// ErrCompositeMemberUnknown — член selector/urltest ссылается на несуществующий выход (#567).
+	ErrCompositeMemberUnknown   = errors.New("неизвестный член композита")
 	ErrOutboundNotFound         = errors.New("outbound not found")
 	ErrDNSServerTagConflict     = errors.New("dns server with this tag already exists")
 	ErrDNSServerReferenced      = errors.New("dns server is referenced by one or more dns rules or used as final/default")

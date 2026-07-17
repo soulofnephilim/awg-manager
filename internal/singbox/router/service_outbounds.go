@@ -74,6 +74,38 @@ func (s *ServiceImpl) RenameExternalOutboundTag(ctx context.Context, oldTag, new
 		s.emitStagingEvent("staged")
 		changed = true
 	}
+	// 21-fakeip.json: члены композитов и правила fakeip-слота ссылаются на
+	// те же внешние теги — без переписи ссылка повисает и валит enable
+	// fakeip-tun кросс-слот валидацией (#567). Та же тройка локаций.
+	fakeipActive := filepath.Join(configDir, "21-fakeip.json")
+	fakeipDisabled := filepath.Join(configDir, "disabled", "21-fakeip.json")
+	fakeipPending := filepath.Join(configDir, "pending", "21-fakeip.json")
+	if data, ok, err := rewriteRouterConfigOutboundRefs(fakeipActive, oldTag, newTag); err != nil {
+		return err
+	} else if ok {
+		// Через Orch.Save: активный слот мерджится в живой конфиг — запись
+		// должна взвести debounced reload (как router-ветка выше).
+		if err := s.deps.Orch.Save(orchestrator.SlotFakeIP, data); err != nil {
+			return err
+		}
+		changed = true
+	}
+	if data, ok, err := rewriteRouterConfigOutboundRefs(fakeipDisabled, oldTag, newTag); err != nil {
+		return err
+	} else if ok {
+		if err := storage.AtomicWrite(fakeipDisabled, data); err != nil {
+			return err
+		}
+		changed = true
+	}
+	if data, ok, err := rewriteRouterConfigOutboundRefs(fakeipPending, oldTag, newTag); err != nil {
+		return err
+	} else if ok {
+		if err := storage.AtomicWrite(fakeipPending, data); err != nil {
+			return err
+		}
+		changed = true
+	}
 	if changed {
 		if cfg, err := s.loadRouterConfig(); err == nil {
 			s.emitCfgEvent("all", s.ruleSetMaterializer().restoreConfig(cfg))
@@ -189,9 +221,21 @@ func (s *ServiceImpl) RulesReferencing(tag string) []int {
 // deletion of a tunnel still referenced via composite member, route
 // final, dns detour, or rule_set download_detour.
 func (s *ServiceImpl) OutboundReferenceLocations(tag string) []string {
-	cfg, err := s.loadRouterConfig()
-	if err != nil || cfg == nil {
-		return nil
+	var out []string
+	if cfg, err := s.loadRouterConfig(); err == nil && cfg != nil {
+		out = append(out, cfg.outboundReferencesExcludingRules(tag)...)
 	}
-	return cfg.outboundReferencesExcludingRules(tag)
+	// fakeip-слот ссылается на те же внешние теги (члены композитов, правила,
+	// route.final) — без учёта guard позволял удалить туннель и оставить
+	// висячего члена, валящего enable fakeip-tun (#567). Правила здесь идут
+	// строками, а не индексами: RulesReferencing — контракт про router-слот.
+	if fcfg, err := s.loadFakeIPConfig(); err == nil && fcfg != nil {
+		for _, i := range fcfg.rulesReferencingOutbound(tag) {
+			out = append(out, fmt.Sprintf("[fakeip] route.rules[%d]", i))
+		}
+		for _, loc := range fcfg.outboundReferencesExcludingRules(tag) {
+			out = append(out, "[fakeip] "+loc)
+		}
+	}
+	return out
 }
