@@ -313,6 +313,10 @@ func (h *SingboxHandler) Install(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.op.Install(r.Context()); err != nil {
+		if errors.Is(err, singbox.ErrInstallInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INSTALL_IN_PROGRESS")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -346,6 +350,10 @@ func (h *SingboxHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.op.Update(r.Context()); err != nil {
+		if errors.Is(err, singbox.ErrInstallInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INSTALL_IN_PROGRESS")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
