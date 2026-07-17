@@ -154,3 +154,44 @@ func TestOutboundReferenceLocations_IncludesFakeIPSlot(t *testing.T) {
 		t.Fatalf("unreferenced tag must give no locations, got %v", locs)
 	}
 }
+
+// #567 (follow-up): tproxy-CRUD композитов валидирует member-теги тем же
+// хелпером — симметрично fakeip, чтобы мёртвый член не доезжал до конфига.
+func TestCompositeOutbound_TproxyRejectsUnknownMembers(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+	ctx := context.Background()
+
+	// Router-слот с двумя атомарными выходами — валидные члены.
+	routerCfg := `{"outbounds":[{"tag":"have","type":"socks","server":"1.2.3.4"},{"tag":"have2","type":"socks","server":"5.6.7.8"},{"tag":"direct","type":"direct"}],"route":{"final":"direct","rules":[]}}`
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"), []byte(routerCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := svc.AddCompositeOutbound(ctx, Outbound{
+		Tag: "combo", Type: "urltest", Outbounds: []string{"have", "ghost-1"},
+	})
+	if err == nil {
+		t.Fatal("tproxy composite with unknown member must be rejected")
+	}
+	if !errors.Is(err, ErrCompositeMemberUnknown) {
+		t.Fatalf("error must wrap ErrCompositeMemberUnknown, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ghost-1") {
+		t.Fatalf("error must name the unknown member, got: %v", err)
+	}
+
+	// Все члены известны — принимается.
+	if err := svc.AddCompositeOutbound(ctx, Outbound{
+		Tag: "combo", Type: "urltest", Outbounds: []string{"have", "have2"},
+	}); err != nil {
+		t.Fatalf("valid tproxy composite rejected: %v", err)
+	}
+
+	// Update с мёртвым членом — отказ.
+	err = svc.UpdateCompositeOutbound(ctx, "combo", Outbound{
+		Tag: "combo", Type: "urltest", Outbounds: []string{"ghost-2"},
+	})
+	if err == nil || !errors.Is(err, ErrCompositeMemberUnknown) {
+		t.Fatalf("tproxy update with unknown member must be rejected, got: %v", err)
+	}
+}

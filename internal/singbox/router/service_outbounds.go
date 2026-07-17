@@ -161,7 +161,12 @@ func (s *ServiceImpl) AddCompositeOutbound(ctx context.Context, o Outbound) erro
 			return err
 		}
 	}
-	return s.withConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.AddCompositeOutbound(o) })
+	return s.withConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
+			return err
+		}
+		return c.AddCompositeOutbound(o)
+	})
 }
 
 func (s *ServiceImpl) UpdateCompositeOutbound(ctx context.Context, tag string, o Outbound) error {
@@ -170,7 +175,12 @@ func (s *ServiceImpl) UpdateCompositeOutbound(ctx context.Context, tag string, o
 			return err
 		}
 	}
-	if err := s.withConfig(ctx, "outbounds", func(c *RouterConfig) error { return c.UpdateCompositeOutbound(tag, o) }); err != nil {
+	if err := s.withConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
+			return err
+		}
+		return c.UpdateCompositeOutbound(tag, o)
+	}); err != nil {
 		return err
 	}
 	// A rename rewrites config references (renameOutboundReferences inside
