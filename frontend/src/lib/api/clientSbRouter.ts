@@ -86,6 +86,20 @@ export class SbRouterClient extends SingboxClient {
 		});
 	}
 
+	async singboxRouterBulkOutbound(indices: number[], outbound: string): Promise<{ updated: number }> {
+		return this.request('/singbox/router/rules/bulk-outbound', {
+			method: 'POST',
+			body: JSON.stringify({ indices, outbound }),
+		});
+	}
+
+	async singboxRouterBulkDetour(tags: string[], downloadDetour: string): Promise<{ updated: number }> {
+		return this.request('/singbox/router/rulesets/bulk-detour', {
+			method: 'POST',
+			body: JSON.stringify({ tags, downloadDetour }),
+		});
+	}
+
 	async singboxRouterListRuleSets(): Promise<SingboxRouterRuleSet[]> {
 		return this.request('/singbox/router/rulesets/list');
 	}
@@ -559,6 +573,20 @@ export class SbRouterClient extends SingboxClient {
 		await this.request('/singbox/fakeip/config/rules/move', {
 			method: 'POST',
 			body: JSON.stringify({ from, to }),
+		});
+	}
+
+	async singboxFakeIPBulkOutbound(indices: number[], outbound: string): Promise<{ updated: number }> {
+		return this.request('/singbox/fakeip/config/rules/bulk-outbound', {
+			method: 'POST',
+			body: JSON.stringify({ indices, outbound }),
+		});
+	}
+
+	async singboxFakeIPBulkDetour(tags: string[], downloadDetour: string): Promise<{ updated: number }> {
+		return this.request('/singbox/fakeip/config/rulesets/bulk-detour', {
+			method: 'POST',
+			body: JSON.stringify({ tags, downloadDetour }),
 		});
 	}
 

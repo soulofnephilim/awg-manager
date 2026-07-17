@@ -14,6 +14,7 @@
   import { SectionLabel, Button, ConfirmModal } from '$lib/components/ui';
   import { openAddWizard, openEditWizard } from './addWizardStore';
   import RuleCard from './RuleCard.svelte';
+  import BulkSelectBar from './BulkSelectBar.svelte';
   import { isSystemRule, singboxRuleToCard } from './adapters';
   import { classifyRuleSimplicity } from './simpleRule';
   import { prefillWizardFromRule } from './ruleWizardPrefill';
@@ -118,6 +119,81 @@
   const CARD_GAP = 6;
 
   let count = $derived(cards.length);
+
+  // ─── Bulk outbound select (F8) ───
+  let selectMode = $state(false);
+  let selected = $state<Set<number>>(new Set());
+  let bulkBusy = $state(false);
+  let prevRulesRef: SingboxRouterRule[] | undefined;
+
+  function isSelectable(card: RuleCardData): boolean {
+    return !card.isSystem && card.action === 'route';
+  }
+
+  let selectableIndices = $derived(
+    cards.reduce<number[]>((acc, c, i) => {
+      if (isSelectable(c)) acc.push(i);
+      return acc;
+    }, []),
+  );
+
+  // Тот же каталог outbound'ов, что у RuleEditModal ($options — общий derived
+  // store, buildOutboundOptions), сплющенный в плоский список для BulkSelectBar.
+  let bulkOutboundOptions = $derived(
+    $options.flatMap((g) => g.items.map((i) => ({ value: i.value, label: i.label, group: g.group }))),
+  );
+
+  function toggleSelectMode(): void {
+    selectMode = true;
+    selected = new Set();
+  }
+
+  function cancelSelectMode(): void {
+    selectMode = false;
+    selected = new Set();
+  }
+
+  function toggleSelect(index: number): void {
+    const next = new Set(selected);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    selected = next;
+  }
+
+  function selectAllRules(): void {
+    selected = new Set(selectableIndices);
+  }
+
+  async function applyBulkOutbound(value: string): Promise<void> {
+    if (selected.size === 0 || bulkBusy) return;
+    bulkBusy = true;
+    try {
+      const { updated } = await api.singboxRouterBulkOutbound([...selected], value);
+      notifications.success(`Изменено ${updated}`);
+      selectMode = false;
+      selected = new Set();
+      await singboxRouterStore.loadAll();
+    } catch (e) {
+      notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  // Список правил мог перезагрузиться из другого источника, пока шло
+  // выделение (SSE-инвалидация `singbox.router.rules`, чужое действие) —
+  // индексы больше не гарантированно соответствуют выбранным чекбоксам.
+  // Сбрасываем выделение; при собственном bulk-apply selectMode уже false
+  // к моменту прихода нового $rules, поэтому условие там не сработает.
+  $effect(() => {
+    const current = $rules;
+    if (selectMode && prevRulesRef !== undefined && current !== prevRulesRef) {
+      selectMode = false;
+      selected = new Set();
+      notifications.info('Список изменился, выбор сброшен');
+    }
+    prevRulesRef = current;
+  });
 
   let deleteIndex = $state<number | null>(null);
   let deleteTarget = $state<{ index: number; summary: string } | null>(null);
@@ -774,9 +850,25 @@
       <div class="counter">
         {pluralize(count, RULE_WORDS)}
       </div>
-      <Button variant="secondary" size="sm" onclick={() => openAddWizard()}>
-        + Правило
-      </Button>
+      {#if selectMode}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={bulkBusy || selectableIndices.length === 0}
+          onclick={selectAllRules}
+        >
+          Выбрать все
+        </Button>
+      {:else}
+        {#if selectableIndices.length > 0}
+          <Button variant="ghost" size="sm" onclick={toggleSelectMode}>
+            Выбрать
+          </Button>
+        {/if}
+        <Button variant="secondary" size="sm" onclick={() => openAddWizard()}>
+          + Правило
+        </Button>
+      {/if}
     </div>
   </header>
 
@@ -813,7 +905,7 @@
             {card}
             index={i}
             dragging={draggingIndex === i}
-            dragDisabled={moveInFlight || dropCommitPending}
+            dragDisabled={moveInFlight || dropCommitPending || selectMode}
             onEdit={() => requestEdit(i)}
             onTextMatchersClick={() => requestTextMatchersEdit(i)}
             onInlineListClick={() => requestInlineListEdit(i)}
@@ -821,6 +913,10 @@
             {knownRulesetTags}
             onDelete={() => requestDelete(i)}
             onDragHandlePointerDown={(e) => handleDragPointerDown(i, card, e)}
+            {selectMode}
+            selectable={isSelectable(card)}
+            selected={selected.has(i)}
+            onToggleSelect={() => toggleSelect(i)}
           />
         </div>
       {/each}
@@ -833,6 +929,17 @@
         ></div>
       {/if}
     </div>
+  {/if}
+
+  {#if selectMode}
+    <BulkSelectBar
+      count={selected.size}
+      options={bulkOutboundOptions}
+      applyLabel="Применить"
+      onapply={applyBulkOutbound}
+      oncancel={cancelSelectMode}
+      busy={bulkBusy}
+    />
   {/if}
 </section>
 
