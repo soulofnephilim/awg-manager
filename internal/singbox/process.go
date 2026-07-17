@@ -353,9 +353,46 @@ func (p *Process) AttachIfRunning() (bool, int) {
 	if !running {
 		return false, 0
 	}
+	// Транзиционный шим #562: sing-box, заспавненный сборкой до фикса
+	// O_APPEND в openProcLog, держит ПОЗИЦИОННЫЙ fd лога — после
+	// self-ротации каждая его запись оставляет растущую NUL-дыру,
+	// которую tail вынужден перечитывать. Такой процесс не адоптируем:
+	// гасим, boot-путь заспавнит свежий с O_APPEND-fd.
+	if logFdNeedsRespawn(pid) {
+		_ = p.stopLocked()
+		return false, 0
+	}
 	p.startTails(true)
 	p.attached = true
 	return true, pid
+}
+
+// logFdNeedsRespawn сообщает, пишет ли процесс stderr в ОБЫЧНЫЙ ФАЙЛ
+// позиционным fd (без O_APPEND в /proc/<pid>/fdinfo/2; flags там в
+// восьмеричной записи). Только эта комбинация — след спавна сборкой до
+// фикса #562; пайп/терминал (тесты, ручной запуск) и любая ошибка
+// чтения/парсинга — fail-open (false): адопции не мешаем.
+func logFdNeedsRespawn(pid int) bool {
+	fi, err := os.Stat(fmt.Sprintf("/proc/%d/fd/2", pid))
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/fdinfo/2", pid))
+	if err != nil {
+		return false
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		rest, ok := strings.CutPrefix(ln, "flags:")
+		if !ok {
+			continue
+		}
+		flags, err := strconv.ParseUint(strings.TrimSpace(rest), 8, 64)
+		if err != nil {
+			return false
+		}
+		return flags&syscall.O_APPEND == 0
+	}
+	return false
 }
 
 // effectiveLogDir returns p.logDir, falling back to the procLogDir

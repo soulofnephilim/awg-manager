@@ -3,6 +3,7 @@ package singbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -43,9 +44,14 @@ func openProcLog(path string, truncate bool) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
+	// O_APPEND обязателен и в truncate-ветке: без него у писателя (child
+	// sing-box) позиционный fd, и после self-ротации (Truncate ниже в
+	// tailFile) каждая его запись уходит на старое смещение — файл
+	// становится sparse, tail вычитывает дыру из NUL-байтов и раздувает
+	// ОЗУ демона их обработкой (#562).
 	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
 	if truncate {
-		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC | os.O_APPEND
 	}
 	return os.OpenFile(path, flags, 0644)
 }
@@ -124,6 +130,15 @@ func tailFile(ctx context.Context, path string, fromEnd bool, onLine func(string
 			chunk, readErr := r.ReadBytes('\n')
 			if len(chunk) > 0 {
 				offset += int64(len(chunk)) // потреблённые байты файла, всегда
+				// NUL-байты — sparse-дыра от писателя с позиционным fd
+				// (sing-box, заспавненный сборкой до фикса #562 и живущий
+				// через адопцию): после self-ротации его запись на старом
+				// смещении оставляет дыру с начала файла. В логах NUL
+				// легитимно не встречается — вырезаем, offset выше уже
+				// учёл сырые байты.
+				if bytes.IndexByte(chunk, 0) >= 0 {
+					chunk = bytes.ReplaceAll(chunk, []byte{0}, nil)
+				}
 				pending = append(pending, chunk...)
 			}
 			if readErr != nil {

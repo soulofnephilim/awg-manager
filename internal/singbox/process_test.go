@@ -2,6 +2,7 @@
 package singbox
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -645,4 +646,92 @@ func TestProcess_AttachThenStartSpawnedJoinsAdoptedTails(t *testing.T) {
 	if counts["gen2-marker"] != 1 {
 		t.Errorf("gen2-marker delivered %d times, want exactly 1 (adopted tail not joined before spawn truncate)", counts["gen2-marker"])
 	}
+}
+
+// #562: logFdNeedsRespawn триггерится ТОЛЬКО на обычный файл без
+// O_APPEND на fd 2 (след спавна до-фиксовой сборкой); недоступный
+// процесс — fail-open (false). Пайп/терминал покрыт интеграционно:
+// у самого тестового процесса fd 2 — не файл, и адопционные тесты выше
+// не самоубиваются.
+func TestLogFdNeedsRespawn(t *testing.T) {
+	if logFdNeedsRespawn(999999999) {
+		t.Fatal("unreadable /proc must fail open (false)")
+	}
+	if logFdNeedsRespawn(os.Getpid()) {
+		t.Fatal("non-regular-file fd 2 (pipe/terminal) must not trigger respawn")
+	}
+}
+
+// #562, транзиционный шим: процесс с ПОЗИЦИОННЫМ stderr-fd (заспавнен
+// сборкой до фикса O_APPEND) не адоптируется — AttachIfRunning гасит его
+// и возвращает false, чтобы boot-путь заспавнил свежий процесс с
+// O_APPEND-fd. Процесс с append-fd адоптируется как раньше.
+func TestAttachIfRunning_KillsPositionalFdProcess(t *testing.T) {
+	run := func(t *testing.T, openFlags int) (adopted bool, pid int, alive func() bool) {
+		dir := t.TempDir()
+		f, err := os.OpenFile(filepath.Join(dir, "err.log"), openFlags, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		cmd := exec.Command("/bin/sleep", "30")
+		cmd.Stderr = f
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		// Реап конкурентно: в проде адоптированный процесс — сирота под
+		// init, зомби не задерживается; здесь же sleep — ребёнок теста, и
+		// без Wait он после SIGTERM остаётся зомби (isAlive true).
+		go func() { _ = cmd.Wait() }()
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
+		// Дождаться exec'а: до него /proc/<pid>/cmdline ещё показывает
+		// тестовый бинарь, и pidMatch внутри AttachIfRunning не признал
+		// бы процесс своим (в проде адопция смотрит на давно живой
+		// процесс — этой гонки там нет).
+		execDeadline := time.Now().Add(2 * time.Second)
+		for {
+			b, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", cmd.Process.Pid))
+			if strings.Contains(string(b), "sleep") {
+				break
+			}
+			if time.Now().After(execDeadline) {
+				t.Fatal("child never exec'd sleep")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		p := NewProcess("/bin/sleep", "/dev/null", filepath.Join(dir, "sing-box.pid"))
+		p.logDir = dir
+		if err := p.writePID(cmd.Process.Pid); err != nil {
+			t.Fatal(err)
+		}
+		ok, gotPid := p.AttachIfRunning()
+		if ok {
+			t.Cleanup(func() { _ = p.Stop() })
+		}
+		return ok, gotPid, func() bool { return isAlive(cmd.Process.Pid) }
+	}
+
+	t.Run("positional fd → kill, not adopt", func(t *testing.T) {
+		adopted, _, alive := run(t, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+		if adopted {
+			t.Fatal("process with positional stderr fd must not be adopted")
+		}
+		deadline := time.Now().Add(4 * time.Second)
+		for alive() && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if alive() {
+			t.Fatal("positional-fd process must be stopped by AttachIfRunning")
+		}
+	})
+
+	t.Run("append fd → adopted", func(t *testing.T) {
+		adopted, pid, alive := run(t, os.O_CREATE|os.O_WRONLY|os.O_APPEND)
+		if !adopted || pid == 0 {
+			t.Fatalf("append-fd process must be adopted, got (%v, %d)", adopted, pid)
+		}
+		if !alive() {
+			t.Fatal("adopted process must stay alive")
+		}
+	})
 }
