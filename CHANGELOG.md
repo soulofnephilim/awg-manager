@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.16.0] - 2026-07-17
 
 ### Новые возможности
 
@@ -36,7 +36,7 @@
 
 ### Прочее
 
-- **sing-box** — бамп до 1.14.0-alpha.39 (совместимость с обновлённым mieru-патчем из [#459](https://github.com/hoaxisr/awg-manager/pull/459); xhttp-патч применяется без изменений). Смоук сгенерированных конфигов (tproxy и fakeip-tun, все слоты config.d) против нового бинаря: `sing-box check` и полный старт проходят чисто; наши генераторы НЕ используют конструкции, удалённые в 1.14 (legacy address filter в DNS-правилах, outbound DNS rule item, `store_rdrc`, `independent_cache` не эмитятся). Осталось два деприкейшена с удалением в 1.16 (только WARN в логе, миграция отдельным issue): `download_detour` у remote rule-set (→ `http_client`) и неявный HTTP-клиент через default outbound у remote rule-set без detour.
+- **sing-box** — бамп до 1.14.0-alpha.42 (совместимость с обновлённым mieru-патчем из [#459](https://github.com/hoaxisr/awg-manager/pull/459); xhttp-патч применяется без изменений). Смоук сгенерированных конфигов (tproxy и fakeip-tun, все слоты config.d) против нового бинаря: `sing-box check` и полный старт проходят чисто; наши генераторы НЕ используют конструкции, удалённые в 1.14 (legacy address filter в DNS-правилах, outbound DNS rule item, `store_rdrc`, `independent_cache` не эмитятся). Осталось два деприкейшена с удалением в 1.16 (только WARN в логе, миграция отдельным issue): `download_detour` у remote rule-set (→ `http_client`) и неявный HTTP-клиент через default outbound у remote rule-set без detour.
 
 ### Исправления
 
