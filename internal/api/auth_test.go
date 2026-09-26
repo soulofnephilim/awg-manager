@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,7 +74,7 @@ func TestAuthStatus_AuthEnabled_NoCookie(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	s.AuthEnabled = true
-	if err := settings.Save(s); err != nil {
+	if err := settings.Update(func(cur *storage.Settings) error { *cur = *s; return nil }); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	h := NewAuthHandler(nil, sessions, settings, silentAppLogger{})
@@ -103,7 +104,7 @@ func TestAuthStatus_ValidSession(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	s.AuthEnabled = true
-	if err := settings.Save(s); err != nil {
+	if err := settings.Update(func(cur *storage.Settings) error { *cur = *s; return nil }); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	h := NewAuthHandler(nil, sessions, settings, silentAppLogger{})
@@ -234,7 +235,7 @@ func newLoginHandlerForTest(t *testing.T, entwareEnabled bool, ke *fakeKeenetic,
 	}
 	s.AuthEnabled = true
 	s.EntwareAuthEnabled = entwareEnabled
-	if err := settings.Save(s); err != nil {
+	if err := settings.Update(func(cur *storage.Settings) error { *cur = *s; return nil }); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	sessions := auth.NewSessionStore(settings.GetSessionTTL)
@@ -247,8 +248,23 @@ func newLoginHandlerForTest(t *testing.T, entwareEnabled bool, ke *fakeKeenetic,
 
 func doLogin(t *testing.T, h *AuthHandler) *httptest.ResponseRecorder {
 	t.Helper()
+	return doLoginFrom(t, h, "")
+}
+
+// doLoginFrom — попытка входа с ЗАДАННОГО адреса источника. Пустой addr
+// оставляет умолчание httptest (один и тот же адрес и порт у всех запросов).
+//
+// Нужен тестам троттлинга: пока все попытки шли с одного `192.0.2.1:1234`,
+// ключ ведра был константой, и подмена ключа не различалась вовсе — ни на
+// «один ключ на всех», ни на «ключ вместе с портом» (последнее выключает
+// защиту: у каждого нового соединения свой эфемерный порт).
+func doLoginFrom(t *testing.T, h *AuthHandler, addr string) *httptest.ResponseRecorder {
+	t.Helper()
 	body := strings.NewReader(`{"login":"admin","password":"secret"}`)
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", body)
+	if addr != "" {
+		req.RemoteAddr = addr
+	}
 	rr := httptest.NewRecorder()
 	h.Login(rr, req)
 	return rr
@@ -441,6 +457,79 @@ func TestAuthLogin_Throttle429AfterFiveFailures(t *testing.T) {
 	}
 }
 
+// RT11: кука сессии закрыта от скриптов и от межсайтовой отправки.
+//
+// `HttpOnly` — единственное, что отделяет XSS на странице от увода сессии
+// админки роутера; `SameSite=Strict` — от того, что чужая страница выполнит
+// действие от имени залогиненного администратора. Мутация «HttpOnly:false,
+// SameSite:None» проходила по всему пакету незамеченной: куку проверяли на
+// имя и срок, но не на защитные признаки.
+func TestAuthLogin_SessionCookieIsProtected(t *testing.T) {
+	ke := &fakeKeenetic{}
+	h, _ := newLoginHandlerForTest(t, false, ke, &fakeEntware{})
+
+	rr := doLogin(t, h)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("вход не удался: %d", rr.Code)
+	}
+	var got *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == auth.SessionCookie {
+			got = c
+		}
+	}
+	if got == nil {
+		t.Fatal("кука сессии не выставлена")
+	}
+	if !got.HttpOnly {
+		t.Error("кука доступна скриптам: XSS на странице уводит сессию администратора")
+	}
+	if got.SameSite != http.SameSiteStrictMode {
+		t.Errorf("SameSite = %v, ждали Strict: иначе чужая страница действует от имени админа", got.SameSite)
+	}
+}
+
+// Троттлинг считает попытки ПО КЛИЕНТУ: перебор с одного адреса не должен
+// запирать вход остальным. Иначе один настойчивый бот выключает админку всем,
+// а тест «шестая попытка = 429» этого не заметит — он ходит с одного адреса.
+func TestAuthLogin_ThrottleIsPerClientIP(t *testing.T) {
+	ke := &fakeKeenetic{err: auth.ErrInvalidCredentials}
+	h, _ := newLoginHandlerForTest(t, false, ke, &fakeEntware{})
+
+	const attacker = "203.0.113.7:40001"
+	for i := 0; i < 5; i++ {
+		if rr := doLoginFrom(t, h, attacker); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("попытка %d с %s: код %d, ждали 401", i+1, attacker, rr.Code)
+		}
+	}
+	if rr := doLoginFrom(t, h, attacker); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("шестая попытка с %s: код %d, ждали 429", attacker, rr.Code)
+	}
+
+	// Сосед по сети к перебору отношения не имеет — его пускают дальше.
+	if rr := doLoginFrom(t, h, "203.0.113.8:50002"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("чужой адрес заперт вместе с перебирающим: код %d, ждали 401", rr.Code)
+	}
+}
+
+// Ключ ведра — АДРЕС, а не адрес с портом. Порт у каждого нового соединения
+// свой, и ключ вместе с портом означал бы, что счётчик не накапливается
+// никогда: переподключился — и перебирай дальше.
+func TestAuthLogin_ThrottleIgnoresSourcePort(t *testing.T) {
+	ke := &fakeKeenetic{err: auth.ErrInvalidCredentials}
+	h, _ := newLoginHandlerForTest(t, false, ke, &fakeEntware{})
+
+	for i := 0; i < 5; i++ {
+		addr := fmt.Sprintf("198.51.100.4:%d", 40000+i) // каждый раз новый порт
+		if rr := doLoginFrom(t, h, addr); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("попытка %d с %s: код %d, ждали 401", i+1, addr, rr.Code)
+		}
+	}
+	if rr := doLoginFrom(t, h, "198.51.100.4:49999"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("перебор с одного адреса по разным портам не пойман: код %d, ждали 429", rr.Code)
+	}
+}
+
 func TestAuthLogin_ThrottleResetsOnSuccess(t *testing.T) {
 	ke := &fakeKeenetic{err: auth.ErrInvalidCredentials}
 	h, _ := newLoginHandlerForTest(t, false, ke, &fakeEntware{})
@@ -466,7 +555,7 @@ func TestAuthLogin_CookieMaxAgeUsesConfiguredTTL(t *testing.T) {
 	h, settings := newLoginHandlerForTest(t, false, ke, &fakeEntware{})
 	s, _ := settings.Get()
 	s.SessionTtlHours = 48
-	if err := settings.Save(s); err != nil {
+	if err := settings.Update(func(cur *storage.Settings) error { *cur = *s; return nil }); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
@@ -498,7 +587,7 @@ func TestAuthStatus_ReportsEntwareAuthEnabled(t *testing.T) {
 	}
 	s.AuthEnabled = true
 	s.EntwareAuthEnabled = true
-	if err := settings.Save(s); err != nil {
+	if err := settings.Update(func(cur *storage.Settings) error { *cur = *s; return nil }); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	h := NewAuthHandler(nil, sessions, settings, silentAppLogger{})

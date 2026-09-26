@@ -18,8 +18,9 @@ type StaticRouteSpec struct {
 	Mask      string
 	Reject    bool
 	Comment   string
-	// V6 selects the IPv6 route form (bare network+interface, no mask/host/
-	// reject/comment). Mirrors ndmscommand.StaticRouteSpec.V6.
+	// V6 selects the IPv6 route form: подсеть уезжает ключом prefix (хост — как
+	// /128), mask и host там отсутствуют, а reject и comment поддержаны.
+	// Mirrors ndmscommand.StaticRouteSpec.V6.
 	V6 bool
 }
 
@@ -104,8 +105,8 @@ type FakeIPTunParams struct {
 	// (resolveFakeIPParams).
 	RealServer string
 	// CachePath is the sing-box experimental.cache_file path (store_fakeip).
-	// Not a spec-default — wired by cmd/awg-manager from singbox.DefaultCacheDBPath
-	// so the router stays decoupled from the operator's path layout.
+	// Not a Deps input: fakeIPParamsWithCache fills it from Deps.CacheDBPath
+	// (the operator's effective path, issue #842) on the way to the overlay spec.
 	CachePath string
 }
 
@@ -120,18 +121,53 @@ func DefaultFakeIPTunParams() FakeIPTunParams {
 		TunAddr6:   "fdfe:dcba:9876::1/126",
 		MTU:        1500,
 		RealServer: "1.1.1.1", // default upstream; user-overridable via FakeIPRealServer
-		// CachePath left empty — wired by main.go from singbox.DefaultCacheDBPath.
+		// CachePath left empty — fakeIPParamsWithCache takes Deps.CacheDBPath.
 	}
 }
 
-// resolveFakeIPParams overlays the user-editable engine settings (pool4/6,
+// resolveFakeIPParams — вариант для сервиса: адрес bootstrap берётся из
+// живых настроек, а не из снимка времени сборки зависимостей.
+func (s *ServiceImpl) resolveFakeIPParams(sr storage.SingboxRouterSettings) FakeIPTunParams {
+	return resolveFakeIPParamsWith(s.deps.FakeIPTun, sr, s.bootstrapDNS())
+}
+
+// fakeIPParamsWithCache — параметры для overlay и спеки: плюс эффективный
+// путь cache.db у оператора (issue #842). Отдельно от resolveFakeIPParams,
+// который зовётся с тика планировщика ради адресов и пулов и не должен
+// ради них читать 00-base.json с флеша.
+func (s *ServiceImpl) fakeIPParamsWithCache(sr storage.SingboxRouterSettings) FakeIPTunParams {
+	p := s.resolveFakeIPParams(sr)
+	if s.deps.CacheDBPath != nil {
+		p.CachePath = s.deps.CacheDBPath()
+	}
+	return p
+}
+
+// bootstrapDNS читает общий адрес bootstrap-резолвера; пусто, когда стор не
+// подключён (тестовые wiring'и) или настройка не задана.
+func (s *ServiceImpl) bootstrapDNS() string {
+	if s.deps.Settings == nil {
+		return ""
+	}
+	return s.deps.Settings.GetSingboxBootstrapDNS()
+}
+
+// resolveFakeIPParamsWith overlays the user-editable engine settings (pool4/6,
 // MTU, real upstream) from sr onto the wired static params base, returning
 // the effective FakeIPTunParams. Single source of truth shared by
 // enableFakeIPTun and the fakeip config overlay so the live tun/cache/pool
 // can never diverge from what the user is editing. Mirrors the merge formerly
 // inlined in enableFakeIPTun.
-func resolveFakeIPParams(base FakeIPTunParams, sr storage.SingboxRouterSettings) FakeIPTunParams {
+// bootstrapDNS — общий адрес bootstrap-резолвера sing-box
+// (Settings.SingboxBootstrapDNS). Он подставляется в "real", когда своя
+// настройка FakeIP не задана: в режиме fakeip-tun резолвером доменных
+// адресов владеет слот fakeip, и без этого общая настройка bootstrap в
+// этом режиме не влияла бы ни на что (issue #770).
+func resolveFakeIPParamsWith(base FakeIPTunParams, sr storage.SingboxRouterSettings, bootstrapDNS string) FakeIPTunParams {
 	p := base
+	if bootstrapDNS != "" {
+		p.RealServer = bootstrapDNS
+	}
 	if sr.FakeIPPool4 != "" {
 		p.Inet4Range = sr.FakeIPPool4
 	}

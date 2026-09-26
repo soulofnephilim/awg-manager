@@ -28,6 +28,106 @@ func TestBuildStreamFromQuery_TCPNoTLS(t *testing.T) {
 	}
 }
 
+// #904: type=tcp&headerType=http — обфускация заголовком, она же транспорт
+// http sing-box без TLS.
+func TestBuildStreamFromQuery_TCPHeaderTypeHTTP(t *testing.T) {
+	q := parseQuery(t, "type=tcp&headerType=http&host=h.example.com&path=/p&security=none")
+	s, err := BuildStreamFromQuery(q, "example.com")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if s.Network != "http" {
+		t.Errorf("network=%q, want http", s.Network)
+	}
+	if s.HTTPMethod != "GET" {
+		t.Errorf("method=%q, want GET (умолчание обфускации)", s.HTTPMethod)
+	}
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	tr, _ := out["transport"].(map[string]any)
+	if tr["type"] != "http" || tr["path"] != "/p" || tr["method"] != "GET" {
+		t.Errorf("transport=%+v, want type=http path=/p method=GET", tr)
+	}
+	if hosts, _ := tr["host"].([]string); len(hosts) != 1 || hosts[0] != "h.example.com" {
+		t.Errorf("transport host=%+v, want [h.example.com]", tr["host"])
+	}
+	if s.TLS != nil {
+		t.Errorf("expected nil TLS, got %+v", s.TLS)
+	}
+}
+
+// С TLS тот же транспорт у sing-box становится HTTP/2 — это не обфускация
+// заголовком, поэтому ссылку отвергаем, а не собираем молча другой протокол.
+func TestBuildStreamFromQuery_TCPHeaderTypeHTTPWithTLS_Rejected(t *testing.T) {
+	for _, sec := range []string{"tls", "reality"} {
+		q := parseQuery(t, "type=tcp&headerType=http&security="+sec+"&sni=h&pbk=K&sid=ab")
+		if _, err := BuildStreamFromQuery(q, "example.com"); err == nil {
+			t.Errorf("security=%s: expected error", sec)
+		}
+	}
+}
+
+// headerType=none — это обычный tcp.
+func TestBuildStreamFromQuery_TCPHeaderTypeNone(t *testing.T) {
+	q := parseQuery(t, "type=tcp&headerType=none&security=none")
+	s, err := BuildStreamFromQuery(q, "example.com")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if s.Network != "tcp" {
+		t.Errorf("network=%q, want tcp", s.Network)
+	}
+}
+
+// Значение headerType регистронезависимо: ссылки с HTTP встречаются наравне.
+func TestBuildStreamFromQuery_TCPHeaderTypeCaseInsensitive(t *testing.T) {
+	q := parseQuery(t, "type=tcp&headerType=HTTP")
+	s, err := BuildStreamFromQuery(q, "example.com")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if s.Network != "http" {
+		t.Errorf("network=%q, want http", s.Network)
+	}
+}
+
+// F323: заголовки mKCP на tcp не существуют — отказ вместо голого tcp.
+func TestBuildStreamFromQuery_TCPHeaderTypeUnknown_Rejected(t *testing.T) {
+	for _, ht := range []string{"srtp", "utp", "wechat-video", "dtls", "wireguard"} {
+		q := parseQuery(t, "type=tcp&headerType="+ht)
+		if _, err := BuildStreamFromQuery(q, "example.com"); err == nil {
+			t.Errorf("headerType=%s: expected error", ht)
+		}
+	}
+}
+
+// F323: метод из формата, который его несёт, побеждает умолчание GET; у h2 без
+// указания метод не выставляется вовсе — остаётся умолчание sing-box.
+func TestBuildStreamFromQuery_HTTPMethod(t *testing.T) {
+	q := parseQuery(t, "type=tcp&headerType=http&method=post")
+	s, err := BuildStreamFromQuery(q, "example.com")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if s.HTTPMethod != "POST" {
+		t.Errorf("method=%q, want POST", s.HTTPMethod)
+	}
+
+	q = parseQuery(t, "type=h2&security=tls&sni=h")
+	s, err = BuildStreamFromQuery(q, "example.com")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if s.HTTPMethod != "" {
+		t.Errorf("h2 method=%q, want empty (sing-box default)", s.HTTPMethod)
+	}
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	if tr, _ := out["transport"].(map[string]any); tr["method"] != nil {
+		t.Errorf("h2 transport.method=%v, want absent", tr["method"])
+	}
+}
+
 func TestBuildStreamFromQuery_WSWithTLS(t *testing.T) {
 	q := parseQuery(t, "type=ws&security=tls&path=/abc%3Fed%3D2048&host=cdn.example.com&sni=foo.com&alpn=h2,http/1.1&fp=chrome")
 	s, err := BuildStreamFromQuery(q, "example.com")
@@ -71,6 +171,25 @@ func TestBuildStreamFromQuery_GRPC(t *testing.T) {
 	}
 	if s.ServiceName != "mysvc" {
 		t.Errorf("service=%q", s.ServiceName)
+	}
+}
+
+// F324: h2/http без TLS — это h2c, которого клиент sing-box не умеет. Молчать
+// и отдавать вместо него HTTP/1.1 — тот же дефект, что #904.
+func TestBuildStreamFromQuery_HTTP2WithoutTLS_Rejected(t *testing.T) {
+	for _, q := range []string{
+		"type=h2&path=/h",
+		"type=h2&security=none&path=/h",
+		"type=http&host=h.example.com",
+		"type=http&security=none",
+	} {
+		if _, err := BuildStreamFromQuery(parseQuery(t, q), "example.com"); err == nil {
+			t.Errorf("%s: expected error", q)
+		}
+	}
+	// С TLS тот же транспорт — обычный HTTP/2, он поддержан.
+	if _, err := BuildStreamFromQuery(parseQuery(t, "type=h2&security=tls&sni=h"), "example.com"); err != nil {
+		t.Errorf("h2 с TLS: %v", err)
 	}
 }
 
@@ -192,5 +311,65 @@ func TestMergeIntoOutbound_XHTTP_KeepsExplicitPadding(t *testing.T) {
 	tr := out["transport"].(map[string]any)
 	if tr["x_padding_bytes"] != "200-800" {
 		t.Errorf("x_padding_bytes=%v, want 200-800", tr["x_padding_bytes"])
+	}
+}
+
+// Early data по конвенции экосистемы едет в заголовке Sec-WebSocket-Protocol
+// (mihomo при "?ed=N" ставит именно его). Без имени заголовка sing-box
+// дописывает данные в URL-путь (transport/v2raywebsocket/conn.go), и сервер их
+// не понимает — то есть ws+ed не работал ни на одном пути.
+func TestBuildStreamFromQuery_WSEarlyDataHeader(t *testing.T) {
+	q := parseQuery(t, "type=ws&path=%2Fws%3Fed%3D2048")
+	s, err := BuildStreamFromQuery(q, "example.com")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	tr := out["transport"].(map[string]any)
+	if tr["max_early_data"] != 2048 {
+		t.Errorf("max_early_data=%v", tr["max_early_data"])
+	}
+	if tr["early_data_header_name"] != "Sec-WebSocket-Protocol" {
+		t.Errorf("early_data_header_name=%v, want Sec-WebSocket-Protocol", tr["early_data_header_name"])
+	}
+}
+
+// Без early data имя заголовка не выдумываем.
+func TestBuildStreamFromQuery_WSNoEarlyData(t *testing.T) {
+	q := parseQuery(t, "type=ws&path=%2Fws")
+	s, _ := BuildStreamFromQuery(q, "example.com")
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	tr := out["transport"].(map[string]any)
+	if _, present := tr["early_data_header_name"]; present {
+		t.Errorf("unexpected early_data_header_name: %v", tr)
+	}
+}
+
+// REALITY без uTLS движок не поднимает вовсе ("uTLS is required by reality
+// client"), поэтому ссылка без fp= обязана получить дефолтный отпечаток.
+func TestBuildStreamFromQuery_RealityDefaultFingerprint(t *testing.T) {
+	q := parseQuery(t, "type=tcp&security=reality&sni=a.example.com&pbk=k&sid=ab12")
+	s, err := BuildStreamFromQuery(q, "example.com")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	utls, _ := out["tls"].(map[string]any)["utls"].(map[string]any)
+	if utls == nil || utls["fingerprint"] != "chrome" {
+		t.Errorf("utls=%v, want default chrome", utls)
+	}
+}
+
+// Обычный TLS без fp= отпечаток не требует — дефолт не навязываем.
+func TestBuildStreamFromQuery_PlainTLSNoFingerprint(t *testing.T) {
+	q := parseQuery(t, "type=tcp&security=tls&sni=a.example.com")
+	s, _ := BuildStreamFromQuery(q, "example.com")
+	out := map[string]any{}
+	s.MergeIntoOutbound(out)
+	if _, present := out["tls"].(map[string]any)["utls"]; present {
+		t.Errorf("unexpected utls: %v", out["tls"])
 	}
 }

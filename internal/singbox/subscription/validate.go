@@ -70,22 +70,53 @@ func classifyOutbound(ob map[string]any) string {
 	if typ == "selector" || typ == "urltest" {
 		return ""
 	}
+	// Аутбаунд hysteria2 с реле адреса не имеет по построению: sing-box берёт
+	// его из realm.server_url и прямо запрещает соседство с server/server_port
+	// (protocol/hysteria2/outbound.go). Общее требование «есть server» такой
+	// узел отбрасывало бы с причиной «missing server».
+	viaRealm := false
+	if typ == "hysteria2" {
+		if realm, _ := ob["realm"].(map[string]any); realm != nil {
+			// Признак засчитывается только у пригодного блока: пустой realm
+			// и realm рядом с адресом движок отвергает сам
+			// (protocol/hysteria2/outbound.go), и пропускать такое в конфиг
+			// незачем — отказ с внятной причиной честнее.
+			url, _ := realm["server_url"].(string)
+			_, hasServer := ob["server"]
+			_, hasPort := ob["server_port"]
+			_, hasPorts := ob["server_ports"]
+			if url == "" {
+				return "realm without server_url"
+			}
+			if hasServer || hasPort || hasPorts {
+				return "realm conflicts with server/server_port/server_ports"
+			}
+			viaRealm = true
+		}
+	}
+
 	// Universal required fields for connect-style outbounds.
-	if _, ok := ob["server"].(string); !ok || ob["server"] == "" {
+	srv, ok := ob["server"].(string)
+	if !ok || srv == "" {
 		// Direct/block/dns don't take a server — exempt those.
 		switch typ {
 		case "direct", "block", "dns":
 			// ok
 		default:
-			return "missing server"
+			if !viaRealm {
+				return "missing server"
+			}
 		}
 	}
-	if port := portValue(ob["server_port"]); port < 1 || port > 65535 {
+	port := portValue(ob["server_port"])
+	if port < 1 || port > 65535 {
 		switch typ {
 		case "direct", "block", "dns":
 			// ok
 		default:
-			return "missing or invalid server_port"
+			if !viaRealm {
+				return "missing or invalid server_port"
+			}
 		}
 	}
 	// Type-specific rules.
@@ -112,6 +143,18 @@ func classifyOutbound(ob map[string]any) string {
 		}
 		if stringOf(ob["method"]) == "" {
 			return "missing shadowsocks method"
+		}
+	}
+
+	if srv != "" {
+		lowerSrv := strings.ToLower(strings.TrimSpace(srv))
+		if lowerSrv == "0.0.0.0" || (port == 1 && (lowerSrv == "127.0.0.1" || lowerSrv == "localhost" || lowerSrv == "::1")) {
+			switch typ {
+			case "direct", "block", "dns":
+				// ok
+			default:
+				return "non-routable/dummy host"
+			}
 		}
 	}
 	return ""

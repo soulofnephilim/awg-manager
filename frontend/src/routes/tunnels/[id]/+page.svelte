@@ -6,19 +6,20 @@
 	import { usageLevel } from '$lib/stores/settings';
 	import { notifications } from '$lib/stores/notifications';
 	import { api } from '$lib/api/client';
-	import type { AWGTunnel, SystemInfo, WANInterface, RouterInterface, TunnelListItem } from '$lib/types';
+	import type { AWGTunnel, SystemInfo, WANInterface, RouterInterface, TunnelListItem, TunnelObfuscator } from '$lib/types';
 	import { PageContainer, LoadingSpinner } from '$lib/components/layout';
 	import { Toggle, Dropdown, Tabs, type DropdownOption } from '$lib/components/ui';
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { editTunnelSchema } from '$lib/schemas/tunnel';
-	import { AWGAdvancedParams, ReplaceTunnelConfigModal } from '$lib/components/tunnels';
+	import { AWGAdvancedParams, ObfuscatorParams, ReplaceTunnelConfigModal } from '$lib/components/tunnels';
 	import TunnelEditHeader from '$lib/components/tunnels/TunnelEditHeader.svelte';
 	import AwgConfigAnalyzer from '$lib/components/diagnostics/AwgConfigAnalyzer.svelte';
 	import { SettingsSectionLabel } from '$lib/components/settings';
 	import { AWG_PARAM_HINTS } from '$lib/utils/awgParamHints';
-	import { supportsAwg3 } from '$lib/utils/backendAvailability';
-	import { Network, Route, Router, Server, Tag } from 'lucide-svelte';
+	import { awgProxyOutdated, supportsAwg3, supportsAwg31OnNativeWG } from '$lib/utils/backendAvailability';
+	import { keepaliveHint } from '$lib/utils/keepalive';
+	import { Network, Route, Router, Server, Shuffle, Tag } from 'lucide-svelte';
 
 	let { data } = $props();
 
@@ -33,18 +34,44 @@
 
 	type ActionStatus = 'loading' | 'success' | 'error';
 
-	type TunnelDetailTab = 'basic' | 'obfuscation' | 'routing' | 'awgConfig';
+	// Параметры обфускатора живут отдельным состоянием: общая editTunnelSchema —
+	// плоская форма WireGuard, обфускатор в неё не вписывается.
+	let obf = $state<TunnelObfuscator | null>(null);
+	let obfError = $state('');
+
+	type TunnelDetailTab = 'basic' | 'obfuscation' | 'obfuscator' | 'routing' | 'awgConfig';
 	let activeTab = $state<TunnelDetailTab>('basic');
-	const detailTabs = [
+	// У обфусцированного туннеля обычный WireGuard без AWG-параметров: вкладка
+	// «Обфускация» уступает место «Обфускатору».
+	let detailTabs = $derived([
 		{ id: 'basic', label: 'Основное' },
-		{ id: 'obfuscation', label: 'Обфускация' },
+		...(obf ? [{ id: 'obfuscator', label: 'Обфускатор' }] : [{ id: 'obfuscation', label: 'Обфускация' }]),
 		{ id: 'routing', label: 'Маршрутизация' },
 		{ id: 'awgConfig', label: 'Анализ конфига' },
-	];
+	]);
 	let replaceModalOpen = $state(false);
 
 	let tunnel = $state<AWGTunnel | null>(null);
 	let systemInfo = $state<SystemInfo | null>(null);
+	// AWG 3.0 идёт от версии kernel-модуля, AWG 3.1 на NativeWG — от версии
+	// awg_proxy.ko: у бэкендов разные модули и разные версии.
+	// Модуль в ядре старее того, что принёс IPK: awg_proxy не перезагружается,
+	// пока у него есть живые слоты, поэтому при поднятом туннеле апгрейд ждёт
+	// перезагрузки роутера — и до неё AWG 3.1 недоступен без видимой причины.
+	// С 5.02.A.11 ASC прошивки сам несёт все параметры 3.x: awg_proxy
+	// NativeWG-туннелю не нужен, и его версия ничего не решает.
+	let nativeASC3 = $derived(tunnel?.backend === 'nativewg' && !!systemInfo?.supportsWireguardASC3);
+	let proxyOutdated = $derived(
+		tunnel?.backend === 'nativewg' &&
+			!nativeASC3 &&
+			awgProxyOutdated(systemInfo?.awgProxyVersion, systemInfo?.awgProxyExpectedVersion),
+	);
+	let awg3Available = $derived(
+		tunnel?.backend === 'nativewg'
+			? nativeASC3 ||
+					supportsAwg31OnNativeWG(systemInfo?.awgProxyVersion, systemInfo?.awgProxyExpectedVersion)
+			: supportsAwg3(systemInfo?.kernelModuleLoadedVersion),
+	);
 	let loading = $state(true);
 	let saving = $state(false);
 
@@ -97,7 +124,16 @@
 
 	let ispValue = $derived(tunnel?.ispInterface || 'auto');
 
+	// Зеркальная запись прокси-выхода: имя, WAN-подключение и маршрут по
+	// умолчанию ведёт прокси-рантайм, правка отсюда не применится (бэкенд
+	// отвечает на неё отказом).
+	let isMirror = $derived(tunnel?.backend === 'wdtt-raw');
+
 	let otherTunnels = $derived(allTunnels.filter(t => t.id !== tunnelId));
+
+	// Решение «показывать ли подпись» — в keepaliveHint: на страницу тестов
+	// нет, а на хелпер есть таблица (lib/utils/keepalive.test.ts).
+	let keepaliveApplied = $derived(keepaliveHint(tunnel?.backend, $form.persistentKeepalive));
 
 	function handleKeydown(e: KeyboardEvent) {
 		if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -127,6 +163,9 @@
 		loading = true;
 		try {
 			tunnel = await api.getTunnel(tunnelId);
+			obf = tunnel.obfuscator ? { ...tunnel.obfuscator } : null;
+			// Набор вкладок зависит от obf: пришедшая из URL вкладка могла исчезнуть.
+			if (!detailTabs.some(t => t.id === activeTab)) activeTab = 'basic';
 			populateForm();
 		} catch (e) {
 			notifications.error(`Ошибка загрузки: ${(e as Error).message}`);
@@ -175,6 +214,10 @@
 		$form.rejectAfterTime = tunnel.interface.rejectAfterTime || '';
 		$form.keepaliveTimeout = tunnel.interface.keepaliveTimeout || '';
 		$form.maxHandshakeAttempts = tunnel.interface.maxHandshakeAttempts || '';
+		// AWG 3.1 flags: read-only in the editor, shown only when the imported
+		// config carries them. buildUpdatePayload keeps them via the interface spread.
+		$form.randomTrailers = tunnel.interface.randomTrailers ?? false;
+		$form.disableCookies = tunnel.interface.disableCookies ?? false;
 		publicKey = tunnel.peer.publicKey;
 		$form.endpoint = tunnel.peer.endpoint;
 		$form.allowedIPs = tunnel.peer.allowedIPs.join(', ');
@@ -206,9 +249,11 @@
 				keepaliveTimeout: $form.keepaliveTimeout || undefined,
 				maxHandshakeAttempts: $form.maxHandshakeAttempts || undefined
 			},
+			...(obf ? { obfuscator: { ...obf, idleTimeout: obf.idleTimeout || undefined, obfuscateBytes: obf.obfuscateBytes || undefined } } : {}),
 			peer: {
 				...tunnel!.peer,
-				endpoint: $form.endpoint,
+				// У обфусцированного туннеля endpoint — локальный релей, его не правят.
+				endpoint: obf ? tunnel!.peer.endpoint : $form.endpoint,
 				allowedIPs: $form.allowedIPs.split(',').map(ip => ip.trim()).filter(Boolean),
 				persistentKeepalive: $form.persistentKeepalive
 			}
@@ -225,8 +270,16 @@
 		}
 	}
 
+	// Сервер обфускатора не проходит через zod-схему формы — проверяем руками.
+	function obfTargetInvalid(): boolean {
+		obfError = obf && !/^\[?[^\s\]]+\]?:\d{1,5}$/.test(obf.target.trim()) ? 'Нужен host:port' : '';
+		if (obfError) notifications.error(`Сервер обфускатора: ${obfError}`);
+		return !!obfError;
+	}
+
 	async function handleSaveOnly() {
 		if (!tunnel) return;
+		if (obfTargetInvalid()) return;
 
 		saving = true;
 		try {
@@ -242,6 +295,7 @@
 
 	async function handleSaveAndStart() {
 		if (!tunnel) return;
+		if (obfTargetInvalid()) return;
 
 		const isRunning = tunnel.state === 'running';
 		actionStatus = 'loading';
@@ -357,7 +411,17 @@
 						<SettingsSectionLabel label="Название" icon={Tag} tone="slate" header />
 						<div class="flex flex-col gap-1.5">
 							<label class="field-label" for="name">Название туннеля</label>
-							<input type="text" id="name" class="field-input" bind:value={$form.name} />
+							<input
+								type="text"
+								id="name"
+								class="field-input"
+								bind:value={$form.name}
+								disabled={isMirror}
+								title={isMirror ? 'Имя задаётся инстансом WDTT' : undefined}
+							/>
+							{#if isMirror}
+								<p class="field-hint">Имя задаётся инстансом WDTT и меняется в его настройках.</p>
+							{/if}
 							{#if $errors.name}<p class="text-xs text-error-500 mt-1">{$errors.name}</p>{/if}
 						</div>
 					</section>
@@ -386,7 +450,7 @@
 						<div class="flex flex-col gap-1.5" style="margin-top:12px">
 							<label class="field-label" for="dns">DNS</label>
 							<input type="text" id="dns" class="field-input" bind:value={$form.dns} placeholder="1.1.1.1, 8.8.8.8" />
-							<p class="field-hint">DNS-серверы через запятую. Применяются на роутере при старте туннеля.</p>
+							<p class="field-hint">DNS-серверы через запятую. Применяются на роутере при старте туннеля. Первый IPv4 из списка sing-box использует для доменов, направленных в этот туннель, и запрос идёт через сам туннель; если поле пустое — 1.1.1.1 (для split-туннеля адрес должен входить в AllowedIPs).</p>
 						</div>
 					</section>
 
@@ -398,8 +462,13 @@
 						</div>
 						<div class="flex flex-col gap-1.5" style="margin-bottom:12px">
 							<label class="field-label" for="endpoint">Endpoint</label>
-							<input type="text" id="endpoint" class="field-input" placeholder="vpn.example.com:51820 или [2001:db8::1]:51820" bind:value={$form.endpoint} />
-							{#if $errors.endpoint}<p class="text-xs text-error-500 mt-1">{$errors.endpoint}</p>{/if}
+							{#if obf}
+								<input type="text" id="endpoint" class="field-input" value={obf.target} disabled />
+								<p class="field-hint">Сервер задаётся во вкладке «Обфускатор»; WireGuard ходит в локальный релей.</p>
+							{:else}
+								<input type="text" id="endpoint" class="field-input" placeholder="vpn.example.com:51820 или [2001:db8::1]:51820" bind:value={$form.endpoint} />
+								{#if $errors.endpoint}<p class="text-xs text-error-500 mt-1">{$errors.endpoint}</p>{/if}
+							{/if}
 						</div>
 						<div class="inline-fields">
 							<div class="flex flex-col gap-1.5" style="flex:1">
@@ -413,17 +482,38 @@
 								{#if $errors.persistentKeepalive}<p class="text-xs text-error-500 mt-1">{$errors.persistentKeepalive}</p>{/if}
 							</div>
 						</div>
+						{#if keepaliveApplied !== null}
+							<p class="field-hint">Keepalive: применяется {keepaliveApplied} с — диапазон понимает только режим kernel.</p>
+						{/if}
 					</section>
 				</form>
 
 			{:else if activeTab === 'obfuscation'}
 				<div class="tab-form">
+					{#if proxyOutdated}
+						<p class="module-warn">
+							В ядре загружен awg_proxy {systemInfo?.awgProxyVersion}, а в этой сборке —
+							{systemInfo?.awgProxyExpectedVersion}. Модуль нельзя заменить, пока через него
+							идут туннели: перезагрузите роутер, иначе параметры AWG 3.1 останутся недоступны.
+						</p>
+					{/if}
 					<AWGAdvancedParams
 						bind:form={$form}
 						errors={$errors}
 						{hints}
-						awg3={tunnel?.backend !== 'nativewg' && supportsAwg3(systemInfo?.kernelModuleLoadedVersion)}
+						awg3={awg3Available}
+						awg3Limited={tunnel?.backend === 'nativewg' && !nativeASC3}
 					/>
+				</div>
+
+			{:else if activeTab === 'obfuscator' && obf}
+				<div class="tab-form">
+					<section class="card tunnel-section">
+						<SettingsSectionLabel label="Обфускатор" icon={Shuffle} tone="indigo" header />
+						<div class="obf-fields">
+							<ObfuscatorParams bind:obfuscator={obf} error={obfError} />
+						</div>
+					</section>
 				</div>
 
 			{:else if activeTab === 'routing'}
@@ -445,9 +535,12 @@
 							value={ispValue}
 							options={ispOpts}
 							onchange={updateIspInterface}
-							disabled={savingIsp}
+							disabled={savingIsp || isMirror}
 							fullWidth
 						/>
+						{#if isMirror}
+							<p class="field-hint">Подключение задаёт инстанс WDTT и меняется в его настройках.</p>
+						{/if}
 						<div class="setting-row toggle-inline-row advanced-toggle">
 							<div class="flex flex-col gap-1">
 								<span class="font-medium">Показать все интерфейсы</span>
@@ -464,20 +557,30 @@
 					{#if $usageLevel === 'expert'}
 						<section class="card tunnel-section">
 							<SettingsSectionLabel label="Маршрут по умолчанию" icon={Route} tone="green" header />
-							<div class="setting-row toggle-inline-row">
-								<div class="flex flex-col gap-1">
-									<span class="font-medium">NDMS Default Route</span>
-									<span class="setting-description">
-										В NDMS для OpkgTunX выполняется «ip route default», а не как full-tunnel на уровне Linux. <br>
-										Так туннель регистрируется среди интернет-выходов с метрикой (весом), по которому NDMS выбирает канал по умолчанию. 
-										Без этой записи туннель не участвует в политиках доступа. <br>
-										В большинстве случаев, данная опция должна быть включена, особенно, если интерфейс должен конкурировать за роль основного выхода.</span>
+							{#if isMirror}
+								<!-- У зеркальной записи тумблера НЕТ, а не «есть, но выключен»:
+								     кандидатурой в NDMS распоряжается прокси-рантайм по конфигу
+								     инстанса, а флаг записи к этому отношения не имеет — его
+								     проставляет миграция чтения (storage/awg_store.go:150-154),
+								     и любое показанное состояние было бы выдумкой. -->
+								<p class="setting-description">
+									Маршрутом по умолчанию распоряжается инстанс WDTT: он объявляет
+									свой интерфейс кандидатом в NDMS по своим настройкам. Здесь
+									менять нечего.
+								</p>
+							{:else}
+								<div class="setting-row toggle-inline-row">
+									<div class="flex flex-col gap-1">
+										<span class="font-medium">NDMS Default Route</span>
+										<span class="setting-description">
+											В NDMS для OpkgTunX выполняется «ip route default», а не как full-tunnel на уровне Linux. <br>
+											Так туннель регистрируется среди интернет-выходов с метрикой (весом), по которому NDMS выбирает канал по умолчанию. 
+											Без этой записи туннель не участвует в политиках доступа. <br>
+											В большинстве случаев, данная опция должна быть включена, особенно, если интерфейс должен конкурировать за роль основного выхода.</span>
+									</div>
+									<Toggle checked={tunnel.defaultRoute} onchange={() => toggleDefaultRoute()} />
 								</div>
-								<Toggle
-									checked={tunnel.defaultRoute}
-									onchange={() => toggleDefaultRoute()}
-								/>
-							</div>
+							{/if}
 						</section>
 					{/if}
 				</div>
@@ -505,6 +608,7 @@
 			tunnelState={tunnel.state ?? 'stopped'}
 			backendLabel={tunnel.backend === 'nativewg' ? 'NativeWG' : 'Kernel'}
 			ndmsName={tunnel.interfaceName ?? tunnel.id}
+			tunnelCountry={tunnel.amneziaCountry}
 			onclose={() => replaceModalOpen = false}
 			onreplaced={() => { replaceModalOpen = false; loadTunnel(); }}
 		/>
@@ -512,6 +616,16 @@
 {/if}
 
 <style>
+	.module-warn {
+		margin: 0 0 1rem;
+		padding: 0.7rem 0.9rem;
+		font-size: 0.85rem;
+		color: var(--warning);
+		background: color-mix(in srgb, var(--warning) 8%, transparent);
+		border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+		border-radius: 8px;
+	}
+
 	.text-secondary {
 		color: var(--color-text-secondary);
 	}
@@ -533,6 +647,12 @@
 		display: flex;
 		gap: 12px;
 		align-items: flex-start;
+	}
+
+	.obf-fields {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
 	}
 
 	.tunnel-section {

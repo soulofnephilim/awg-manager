@@ -3,29 +3,26 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"slices"
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/accesspolicy"
-	"github.com/hoaxisr/awg-manager/internal/logging"
-	"github.com/hoaxisr/awg-manager/internal/managed"
+	"github.com/hoaxisr/awg-manager/internal/diagnostics"
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	ndmscommand "github.com/hoaxisr/awg-manager/internal/ndms/command"
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
+	"github.com/hoaxisr/awg-manager/internal/singbox/dnsrewrite"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
-	"github.com/hoaxisr/awg-manager/internal/storage"
-	"github.com/hoaxisr/awg-manager/internal/sys/netif"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/sysinfo"
-	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
-	"github.com/hoaxisr/awg-manager/internal/wdtt"
 )
 
 // Compile-time guarantees that the adapters satisfy their router-side
 // interfaces — catches interface drift at the declaration line instead
 // of at the wiring callsite in main.go.
 var (
-	_ router.AccessPolicyProvider  = (*routerAccessPolicyAdapter)(nil)
-	_ router.KeenDNSDomainProvider = (*keenDNSDomainAdapter)(nil)
-	_ router.LANIPv4Provider       = keenDNSLANAdapter{}
+	_ router.AccessPolicyProvider = (*routerAccessPolicyAdapter)(nil)
+	_ router.KeenDNSInfoProvider  = keenDNSInfoAdapter{}
 )
 
 // routerAccessPolicyAdapter projects the accesspolicy.Service surface
@@ -33,7 +30,6 @@ var (
 // router doesn't import accesspolicy types directly.
 type routerAccessPolicyAdapter struct {
 	svc accesspolicy.Service
-	wan *wan.Model
 }
 
 func (a *routerAccessPolicyAdapter) GetPolicyMark(ctx context.Context, name string) (string, error) {
@@ -46,6 +42,10 @@ func (a *routerAccessPolicyAdapter) ListPolicyExits(ctx context.Context, iface s
 
 func (a *routerAccessPolicyAdapter) PermitInterface(ctx context.Context, name, iface string, order int) error {
 	return a.svc.PermitInterface(ctx, name, iface, order)
+}
+
+func (a *routerAccessPolicyAdapter) DenyInterface(ctx context.Context, name, iface string) error {
+	return a.svc.DenyInterface(ctx, name, iface)
 }
 
 func (a *routerAccessPolicyAdapter) AssignDevice(ctx context.Context, mac, name string) error {
@@ -100,33 +100,14 @@ func (a *routerAccessPolicyAdapter) ListPolicies(ctx context.Context) ([]router.
 }
 
 func (a *routerAccessPolicyAdapter) CreatePolicy(ctx context.Context, description string) (router.PolicyInfo, error) {
-	// NDMS won't issue a fwmark for a policy that has no permitted
-	// interface, so we MUST resolve a default WAN before creating the
-	// policy. Failing fast here yields a clean diagnostic for the user
-	// instead of a half-broken policy that later fails on Enable with
-	// the cryptic ErrPolicyMissing.
-	if a.wan == nil {
-		return router.PolicyInfo{}, fmt.Errorf("WAN model unavailable; cannot auto-permit a default WAN for new policy")
-	}
-	iface, ok := a.wan.PreferredUp()
-	if !ok {
-		return router.PolicyInfo{}, fmt.Errorf("no WAN interface is up; bring up a WAN connection before creating a router policy")
-	}
-	ndmsID := a.wan.IDFor(iface)
-	if ndmsID == "" {
-		return router.PolicyInfo{}, fmt.Errorf("WAN interface %q has no NDMS id; cannot auto-permit", iface)
-	}
-
+	// Выходы политике здесь не выдаются: они зависят от режима захвата и
+	// ставятся при его включении (router/policy_wan.go). Прежний permit WAN с
+	// order 100 на 5.01 отвергался (order — позиция в списке, на пустой
+	// политике допустим только 0) и оставлял политику-сироту, а в policy-tun
+	// WAN вторым выходом — обход туннеля (F440). Метку NDMS выдаёт и без permit.
 	p, err := a.svc.Create(ctx, description)
 	if err != nil {
 		return router.PolicyInfo{}, err
-	}
-	if err := a.svc.PermitInterface(ctx, p.Name, ndmsID, 100); err != nil {
-		// Best-effort cleanup: the policy was created but is now stuck
-		// without a permit. Surface the error so the user knows; the
-		// orphaned policy stays in NDMS for them to clean up via the
-		// Access Policies UI.
-		return router.PolicyInfo{}, fmt.Errorf("permit WAN %s on policy %s: %w", ndmsID, p.Name, err)
 	}
 	mark, _ := a.svc.GetPolicyMark(ctx, p.Name)
 	return router.PolicyInfo{
@@ -260,74 +241,48 @@ func (a *routerStaticRouteAdapter) RemoveStaticRoute(ctx context.Context, r rout
 
 var _ router.OpkgTunIndexLister = (*routerOpkgTunIndexAdapter)(nil)
 
-// routerOpkgTunIndexAdapter unions kernel /sys opkgtun indices with NDMS-known
-// interface names so the fakeip index allocator sees every occupied slot.
+// routerOpkgTunIndexAdapter отвечает на ДВА разных вопроса, и их нельзя
+// смешивать в одной карте.
+//
+// LiveOpkgTunIndices — что существует в ядре ПРЯМО СЕЙЧАС. Этой картой
+// проверяются «жив ли мой прежний интерфейс» и «можно ли переиспользовать свой
+// удержанный номер», поэтому запись NDMS без устройства сюда попадать не
+// должна: иначе смерть интерфейса после краха читалась бы как жизнь.
+//
+// Номера, удерживаемые ЗАПИСЯМИ NDMS, собирает отдельный поставщик занятости
+// (ndmsHolders) поверх того же store. Проверено на стенде 5.01.C.3.0-1:
+// `ndmc -c "interface OpkgTun12"` создаёт и запись, и устройство, но после
+// `ip link del opkgtun12` запись живёт дальше со `state: error`, а в /sys
+// устройства нет. Такой номер занят — выдать его нельзя, хотя интерфейс мёртв.
 type routerOpkgTunIndexAdapter struct {
 	store *ndmsquery.InterfaceStore
-	log   *logging.ScopedLogger
+	// listSys — чтение kernel-половины; поле ради тестируемости отказа.
+	listSys func() ([]int, error)
 }
 
-func (a *routerOpkgTunIndexAdapter) LiveOpkgTunIndices(ctx context.Context) (map[int]bool, error) {
-	sysNums, err := sysinfo.ListSystemInterfaces()
+func (a *routerOpkgTunIndexAdapter) LiveOpkgTunIndices(context.Context) (map[int]bool, error) {
+	listSys := a.listSys
+	if listSys == nil {
+		listSys = sysinfo.ListSystemInterfaces
+	}
+	sysNums, err := listSys()
 	if err != nil {
-		// A /sys read failure under-counts occupied opkgtun indices — the
-		// one direction that can cause an index collision — so log it,
-		// then degrade to NDMS-only names.
-		if a.log != nil {
-			a.log.Warn("opkgtun-index", "", "list system interfaces failed: "+err.Error())
-		}
-		sysNums = nil
+		// Недосчёт занятых номеров — единственное направление, дающее
+		// коллизию, поэтому отказ, а не пустая карта: пустая читается как
+		// «все номера свободны».
+		return nil, fmt.Errorf("list system interfaces: %w", err)
 	}
-	all, err := a.store.ListAll(ctx)
-	if err != nil {
-		return nil, err
+	live := make(map[int]bool, len(sysNums))
+	for _, n := range sysNums {
+		live[n] = true
 	}
-	names := make([]string, 0, len(all))
-	for _, i := range all {
-		names = append(names, i.Name)
-	}
-	return router.UnionOpkgTunIndices(sysNums, names), nil
-}
-
-var _ wdtt.OpkgTunExistChecker = (*opkgTunExistAdapter)(nil)
-
-type opkgTunExistAdapter struct {
-	store *ndmsquery.InterfaceStore
-}
-
-func (a *opkgTunExistAdapter) OpkgTunExists(ctx context.Context, ndmsName string) bool {
-	if a.store == nil {
-		return false
-	}
-	iface, err := a.store.Get(ctx, ndmsName)
-	return err == nil && iface != nil
-}
-
-var _ wdtt.NDMSPolicyTableGetter = (*policyTableAdapter)(nil)
-var _ wdtt.NDMSPolicyMarkGetter = (*policyTableAdapter)(nil)
-
-type policyTableAdapter struct {
-	marks *ndmsquery.PolicyMarkStore
-}
-
-func (a *policyTableAdapter) GetPolicyMark(ctx context.Context, policyName string) (string, error) {
-	if a.marks == nil {
-		return "", fmt.Errorf("policy mark store not wired")
-	}
-	return a.marks.Get(ctx, policyName)
-}
-
-func (a *policyTableAdapter) PolicyTable4(ctx context.Context, policyName string) (int, error) {
-	if a.marks == nil {
-		return 0, fmt.Errorf("policy mark store not wired")
-	}
-	return a.marks.Table4(ctx, policyName)
+	return live, nil
 }
 
 // opkgTunScanner returns the router Deps.OpkgTunScan hook: NDMS OpkgTun
 // interface IDs stamped with the given description — the reap's persist-less
 // fakeip-orphan fallback. "OpkgTun" is the NDMS (CamelCase) ID prefix, the
-// same convention fakeIPNDMSName produces on the router side.
+// same convention tunNDMSName produces on the router side.
 func opkgTunScanner(store *ndmsquery.InterfaceStore) func(ctx context.Context, description string) ([]string, error) {
 	return func(ctx context.Context, description string) ([]string, error) {
 		all, err := store.List(ctx)
@@ -375,6 +330,25 @@ func (a *routerWANInterfaceAdapter) ListBindable(ctx context.Context) ([]router.
 	return filterBindable(ifaces, native, occupied), nil
 }
 
+// ListAllBindable returns all egress-capable router interfaces (security-level "public"
+// minus our own auto-managed ones) without excluding occupied direct binds (#709).
+// Used by subscriptions and manual proxy tunnels which can share interfaces with direct outbounds.
+func (a *routerWANInterfaceAdapter) ListAllBindable(ctx context.Context) ([]router.WANInterfaceInfo, error) {
+	ifaces, err := a.store.ListAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	native := map[string]bool{}
+	if a.nativeProxies != nil {
+		if names, e := a.nativeProxies(ctx); e == nil {
+			for _, n := range names {
+				native[n] = true
+			}
+		}
+	}
+	return filterBindable(ifaces, native, nil), nil
+}
+
 // filterBindable keeps egress interfaces (security-level "public") minus our
 // own auto-managed ones and minus already-bound interfaces, rescuing
 // KeenOS-native proxies in the native set.
@@ -404,130 +378,48 @@ func filterBindable(ifaces []ndms.AllInterface, native, occupied map[string]bool
 	return out
 }
 
-// wdttAccessAdapter projects managed.Service into wdtt.AccessManager.
-type wdttAccessAdapter struct {
-	svc    *managed.Service
-	ifaces *ndmscommand.InterfaceCommands
+// keenDNSInfoAdapter собирает данные пресета keendns с самого роутера: FQDN
+// из /show/ndns и IPv4, к которым роутер направляет свои KeenDNS-имена —
+// статические записи ndnproxy по зонам KeenDNS плюс адрес доступа в режиме
+// direct, где статической записи нет вовсе (issue #729).
+type keenDNSInfoAdapter struct {
+	keendns  *ndmsquery.KeenDNSStore
+	dnsProxy *ndmsquery.DNSProxyStatusStore
 }
 
-func (a *wdttAccessAdapter) ApplyNATModeToInterface(ctx context.Context, ifaceName, mode, prevWAN string) (string, error) {
-	if a.svc == nil {
-		return "", fmt.Errorf("managed service not available")
-	}
-	return a.svc.ApplyNATModeToInterface(ctx, ifaceName, mode, prevWAN)
-}
-
-func (a *wdttAccessAdapter) ApplyPolicyToInterface(ctx context.Context, ifaceName, policy string) error {
-	if a.svc == nil {
-		return fmt.Errorf("managed service not available")
-	}
-	return a.svc.ApplyPolicyToInterface(ctx, ifaceName, policy)
-}
-
-func (a *wdttAccessAdapter) ApplyLANSegmentsToInterface(ctx context.Context, iface, addr, mask string, segments []string) error {
-	if a.svc == nil {
-		return fmt.Errorf("managed service not available")
-	}
-	return a.svc.ApplyLANSegmentsToInterface(ctx, iface, addr, mask, segments)
-}
-
-func (a *wdttAccessAdapter) EnsureInterfaceFirewallPermit(ctx context.Context, ifaceName string) error {
-	if a.ifaces == nil {
-		return nil
-	}
-	return a.ifaces.SetPermitAllACL(ctx, ifaceName)
-}
-
-func (a *wdttAccessAdapter) KernelIfaceName(ctx context.Context, ndmsName string) string {
-	if a.svc == nil {
-		return ndmsName
-	}
-	return a.svc.ResolveKernelIfaceName(ctx, ndmsName)
-}
-
-func (a *wdttAccessAdapter) ResolveLANSegmentCIDRs(ctx context.Context, names []string) ([]string, error) {
-	if a.svc == nil {
-		return nil, fmt.Errorf("managed service not available")
-	}
-	catalog, err := a.svc.ListLANSegments(ctx)
-	if err != nil {
-		return nil, err
-	}
-	byName := make(map[string]string, len(catalog))
-	for _, seg := range catalog {
-		byName[seg.Name] = seg.Subnet
-	}
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		cidr, ok := byName[name]
-		if !ok {
-			return nil, fmt.Errorf("LAN-сегмент %q не найден", name)
+func (a keenDNSInfoAdapter) KeenDNSInfo(ctx context.Context) (string, []string, error) {
+	var fqdn string
+	var addrs []string
+	if a.keendns != nil {
+		info, err := a.keendns.Get(ctx)
+		if err != nil {
+			return "", nil, err
 		}
-		out = append(out, cidr)
+		if info != nil && info.Enabled {
+			fqdn = info.Domain
+			if ip := net.ParseIP(info.Address); ip != nil && ip.To4() != nil {
+				addrs = append(addrs, ip.String())
+			}
+		}
 	}
-	return out, nil
-}
-
-func (a *wdttAccessAdapter) DefaultGatewayNDMS(ctx context.Context) (string, error) {
-	if a.svc == nil {
-		return "", fmt.Errorf("managed service not available")
+	if a.dnsProxy != nil {
+		raw, err := a.dnsProxy.List(ctx)
+		if err != nil {
+			return "", nil, err
+		}
+		proxies, err := diagnostics.ParseDNSProxy(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		static := diagnostics.StaticIPv4InZones(proxies,
+			dnsrewrite.KeenDNSHosts(), dnsrewrite.KeenDNSZones())
+		for _, ip := range static {
+			if !slices.Contains(addrs, ip) {
+				addrs = append(addrs, ip)
+			}
+		}
 	}
-	return a.svc.DefaultGatewayNDMSInterface(ctx)
-}
-
-// keenDNSDomainAdapter projects ndmsquery.KeenDNSStore → router.KeenDNSDomainProvider.
-type keenDNSDomainAdapter struct {
-	store *ndmsquery.KeenDNSStore
-}
-
-func (a *keenDNSDomainAdapter) KeenDNSDomain(ctx context.Context) (string, error) {
-	if a.store == nil {
-		return "", nil
-	}
-	info, err := a.store.Get(ctx)
-	if err != nil {
-		return "", err
-	}
-	if info == nil || !info.Enabled {
-		return "", nil
-	}
-	return info.Domain, nil
-}
-
-// keenDNSLANAdapter returns br0 (DefaultInterface) IPv4 for KeenDNS rewrites.
-type keenDNSLANAdapter struct{}
-
-func (keenDNSLANAdapter) LANIPv4() string {
-	return netif.FirstIPv4(storage.DefaultInterface)
-}
-
-var _ wdtt.IngressRefEnsurer = (*wdttIngressEnsurer)(nil)
-
-type wdttIngressEnsurer struct {
-	settings *storage.SettingsStore
-	router   wdtt.RouterReconciler
-}
-
-func (e *wdttIngressEnsurer) EnsureWdttServerIngressRefs(ctx context.Context, wgKernelIface string) error {
-	if e.settings == nil {
-		return nil
-	}
-	settings, err := e.settings.Load()
-	if err != nil {
-		return err
-	}
-	next, changed := wdtt.EnsureWdttIngressRefs(settings.SingboxRouter.IngressInterfaces, wgKernelIface)
-	if !changed {
-		return nil
-	}
-	settings.SingboxRouter.IngressInterfaces = next
-	if err := e.settings.Save(settings); err != nil {
-		return err
-	}
-	if e.router != nil {
-		return e.router.Reconcile(ctx)
-	}
-	return nil
+	return fqdn, addrs, nil
 }
 
 // routerSegmentDetailsAdapter отдаёт router описание и адресацию сегмента по

@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { LegacyTabs, LegacyTab, IconButton } from '$lib/components/ui';
 	import BrandLogoMark from './BrandLogoMark.svelte';
+	import SaveStatusLed from './SaveStatusLed.svelte';
 	import NotificationCenter from './NotificationCenter.svelte';
 	import { usageLevel } from '$lib/stores/settings';
 	import type { ThemeState } from '$lib/stores/theme';
@@ -23,11 +24,7 @@
 			href: '/',
 			label: 'ТУННЕЛИ',
 			matches: (p) =>
-				p === '/' ||
-				p.startsWith('/tunnels') ||
-				p.startsWith('/system-tunnels') ||
-				p.startsWith('/freeturn') ||
-				p.startsWith('/wdtt'),
+				p === '/' || p.startsWith('/tunnels') || p.startsWith('/system-tunnels'),
 		},
 		{
 			section: 'servers',
@@ -40,6 +37,14 @@
 			href: '/routing',
 			label: 'МАРШРУТИЗАЦИЯ',
 			matches: (p) => p.startsWith('/routing'),
+		},
+		{
+			section: 'proxy',
+			href: '/proxy',
+			label: 'ПРОКСИ',
+			// /freeturn и /wdtt — редиректы на /proxy; матчер снят с «ТУННЕЛЕЙ».
+			matches: (p) =>
+				p.startsWith('/proxy') || p.startsWith('/freeturn') || p.startsWith('/wdtt'),
 		},
 		{
 			section: 'diagnostics',
@@ -127,6 +132,7 @@
 			ТУННЕЛИ: 'Туннели',
 			СЕРВЕРЫ: 'Серверы',
 			МАРШРУТИЗАЦИЯ: 'Маршрутизация',
+			ПРОКСИ: 'Прокси',
 			ИНСТРУМЕНТЫ: 'Инструменты',
 			НАСТРОЙКИ: 'Настройки',
 		};
@@ -168,6 +174,10 @@
 				<BrandLogoMark />
 				<span class="wordmark">AWG⋅Manager</span>
 			</a>
+
+			{#if authenticated}
+				<SaveStatusLed />
+			{/if}
 
 			{#if currentVersion || (versionPending && authenticated)}
 				<span class="version-slot">

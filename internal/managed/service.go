@@ -51,7 +51,7 @@ type ManagedServerService interface {
 	TogglePeer(ctx context.Context, id, pubkey string, enabled bool) error
 
 	// Config generation
-	GenerateConf(ctx context.Context, id, pubkey string) (string, error)
+	GenerateConf(ctx context.Context, id, pubkey, endpointHost string) (string, error)
 
 	// Runtime stats
 	GetStats(ctx context.Context, id string) (*ManagedServerStats, error)
@@ -66,6 +66,10 @@ type ManagedServerService interface {
 	// frontend re-fetch) sees fresh NDMS state instead of cached
 	// pre-mutation values.
 	InvalidateCache(id string)
+
+	// ForeignAccessGroups returns access-group names bound to the interface
+	// via `ip access-group … in`, excluding our own AWGM_<iface>.
+	ForeignAccessGroups(ctx context.Context, iface string) ([]string, error)
 }
 
 // rciPoster is the minimal POST surface managed needs from the NDMS transport.
@@ -88,6 +92,26 @@ type Service struct {
 	// wgRun is the wg-tools execution seam. Production uses realWgRunner;
 	// tests inject a stub to avoid forking real binaries.
 	wgRun wgRunner
+	// keyGen is the peer key-generation seam. Production uses realKeyGen
+	// (execs /opt/sbin/awg); tests inject deterministic keys.
+	keyGen keyGenerator
+}
+
+// keyGenerator produces WireGuard key material for a new peer.
+type keyGenerator interface {
+	GenerateKeyPair(ctx context.Context) (privateKey, publicKey string, err error)
+	GeneratePresharedKey(ctx context.Context) (string, error)
+}
+
+// realKeyGen is the production keyGenerator over keys.go (awg genkey/pubkey/genpsk).
+type realKeyGen struct{}
+
+func (realKeyGen) GenerateKeyPair(ctx context.Context) (string, string, error) {
+	return GenerateKeyPair(ctx)
+}
+
+func (realKeyGen) GeneratePresharedKey(ctx context.Context) (string, error) {
+	return GeneratePresharedKey(ctx)
 }
 
 // New creates a new managed server service.
@@ -109,6 +133,7 @@ func New(
 		log:       log,
 		appLog:    logging.NewScopedLogger(appLogger, logging.GroupServer, logging.SubManaged),
 		wgRun:     realWgRunner,
+		keyGen:    realKeyGen{},
 	}
 }
 
@@ -132,13 +157,4 @@ func (s *Service) resolveKernelName(ctx context.Context, ndmsName string) string
 		return ""
 	}
 	return s.queries.Interfaces.ResolveSystemName(ctx, ndmsName)
-}
-
-// ResolveKernelIfaceName maps an NDMS interface id to the kernel netdev (eth3,
-// ppp0, …). Falls back to the input when resolution is unavailable.
-func (s *Service) ResolveKernelIfaceName(ctx context.Context, ndmsName string) string {
-	if k := s.resolveKernelName(ctx, ndmsName); k != "" {
-		return k
-	}
-	return ndmsName
 }

@@ -128,6 +128,7 @@ type SingboxHandler struct {
 	settingsStore   *storage.SettingsStore
 	deviceProxyRefs tunnelservice.DeviceProxyRefChecker
 	routerRefs      tunnelservice.RouterRefChecker
+	bindValidator   func(ctx context.Context, name string) error
 }
 
 // ndmsProxyToggler — узкий интерфейс для чтения текущего значения
@@ -138,6 +139,12 @@ type ndmsProxyToggler interface {
 }
 
 var errTunnelNoInterface = errors.New("tunnel has no kernel interface")
+
+// Швы над сетевыми пробами: тесты подменяют, прод — функции пакета testing.
+var (
+	checkIPByInterface              = testing.CheckIPByInterface
+	checkConnectivityByInterfaceURL = testing.CheckConnectivityByInterfaceURL
+)
 
 // NewSingboxHandler creates a new singbox handler.
 func NewSingboxHandler(op *singbox.Operator, bus *events.Bus, dc *singbox.DelayChecker, ts *testing.Service, appLogger ...logging.AppLogger) *SingboxHandler {
@@ -165,6 +172,30 @@ func (h *SingboxHandler) SetNDMSProxyMigrator(m *singbox.Migrator, settings ndms
 // SetSettingsStore wires global settings for connectivity checks.
 func (h *SingboxHandler) SetSettingsStore(settings *storage.SettingsStore) {
 	h.settingsStore = settings
+}
+
+// SetBindValidator wires the router's validateBindInterface for direct API tunnel saves.
+func (h *SingboxHandler) SetBindValidator(validator func(ctx context.Context, name string) error) {
+	h.bindValidator = validator
+}
+
+// validateOutboundBind rejects an outbound whose bind_interface is not in the
+// router's bindable catalog. No validator wired (tests / minimal bootstrap) —
+// no check, mirroring the router service.
+func (h *SingboxHandler) validateOutboundBind(ctx context.Context, raw json.RawMessage) error {
+	if h.bindValidator == nil || len(raw) == 0 {
+		return nil
+	}
+	var peek struct {
+		BindInterface string `json:"bind_interface"`
+	}
+	if err := json.Unmarshal(raw, &peek); err != nil || peek.BindInterface == "" {
+		return nil
+	}
+	if err := h.bindValidator(ctx, peek.BindInterface); err != nil {
+		return fmt.Errorf("invalid bind_interface: %w", err)
+	}
+	return nil
 }
 
 // SetOutboundRefCheckers wires device-proxy and router reference guards for
@@ -237,8 +268,9 @@ func (h *SingboxHandler) ToggleNDMSProxy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	publishInvalidated(h.bus, ResourceSingboxStatus, "ndms-proxy-toggled")
-	publishInvalidated(h.bus, ResourceSingboxTunnels, "ndms-proxy-toggled")
+	// Инвалидацию публикует сам мигратор (MigrateOn/MigrateOff) — тем же
+	// ключам здесь взяться неоткуда, а дубль будил бы подписчиков шины
+	// (deviceproxy.Reconcile, SyncAWGOutbounds) второй раз за одно нажатие.
 	response.Success(w, map[string]any{"enabled": req.Enabled, "migrated": true})
 }
 
@@ -274,6 +306,11 @@ func (h *SingboxHandler) DelayCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Success(w, map[string]any{"tag": tag, "delay": delay})
 }
+
+// DelayChecker exposes the latency prober so other wiring (the MCP
+// adapter) can reuse the one instance that already runs periodically —
+// a second checker would double the probes against the same proxies.
+func (h *SingboxHandler) DelayChecker() *singbox.DelayChecker { return h.delayChecker }
 
 // Status handles GET /api/singbox/status.
 //
@@ -321,13 +358,74 @@ func (h *SingboxHandler) Install(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := h.op.GetStatus(r.Context())
-	publishInvalidated(h.bus, ResourceSingboxStatus, "installed")
+	h.bus.PublishInvalidated(events.ResourceSingboxStatus, "installed")
 	// sysInfo.singbox mirrors the installed flag on its own 30s cadence;
 	// invalidate it too so UI paths that still read SystemInfo.singbox
 	// (e.g. the tunnels-page tab guard) see the change immediately
 	// instead of waiting up to 30s for the next poll tick.
-	publishInvalidated(h.bus, ResourceSysInfo, "singbox-installed")
+	h.bus.PublishInvalidated(events.ResourceSysInfo, "singbox-installed")
 	response.Success(w, singboxStatusData(s))
+}
+
+// Uninstall handles POST /api/singbox/uninstall.
+// Останавливает движок и удаляет его артефакты: бинарь, слоты config.d, кэш
+// FakeIP, pid и журналы процесса. Настройки AWGM (подписки, правила
+// маршрутизации, device-proxy) сохраняются — повторная установка возвращает
+// рабочее состояние.
+//
+//	@Summary		Uninstall sing-box
+//	@Description	Останавливает движок и удаляет бинарь с его конфигурацией. Отклоняется, пока включена маршрутизация sing-box.
+//	@Tags			singbox
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Success		200	{object}	SingboxStatusResponse
+//	@Failure		405	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
+//	@Failure		500	{object}	APIErrorEnvelope
+//	@Router			/singbox/uninstall [post]
+func (h *SingboxHandler) Uninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	// Гейт: движок под включённой маршрутизацией снимать нельзя — правила
+	// iptables, OpkgTun и ACL остались бы висеть без процесса, который их
+	// обслуживает, и трафик встал бы (issue #771).
+	if h.routingEnabled() {
+		response.ErrorWithStatus(w, http.StatusConflict,
+			"сначала выключите маршрутизацию sing-box", "SINGBOX_ROUTING_ENABLED")
+		return
+	}
+	if h.op == nil {
+		response.InternalError(w, "sing-box operator not wired")
+		return
+	}
+	if err := h.op.Uninstall(r.Context()); err != nil {
+		if errors.Is(err, singbox.ErrInstallInProgress) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "INSTALL_IN_PROGRESS")
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
+	s := h.op.GetStatus(r.Context())
+	h.bus.PublishInvalidated(events.ResourceSingboxStatus, "uninstalled")
+	h.bus.PublishInvalidated(events.ResourceSysInfo, "singbox-uninstalled")
+	response.Success(w, singboxStatusData(s))
+}
+
+// routingEnabled сообщает, работает ли сейчас маршрутизация sing-box. Нет
+// доступа к настройкам — считаем, что работает: отказать по незнанию безопаснее,
+// чем снести движок из-под живых правил.
+func (h *SingboxHandler) routingEnabled() bool {
+	if h.settingsStore == nil {
+		return true
+	}
+	st, err := h.settingsStore.Get()
+	if err != nil {
+		return true
+	}
+	return st.SingboxRouter.Enabled
 }
 
 // Update handles POST /api/singbox/update.
@@ -359,8 +457,8 @@ func (h *SingboxHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := h.op.GetStatus(r.Context())
-	publishInvalidated(h.bus, ResourceSingboxStatus, "updated")
-	publishInvalidated(h.bus, ResourceSysInfo, "singbox-updated")
+	h.bus.PublishInvalidated(events.ResourceSingboxStatus, "updated")
+	h.bus.PublishInvalidated(events.ResourceSysInfo, "singbox-updated")
 	response.Success(w, singboxStatusData(s))
 }
 
@@ -396,7 +494,7 @@ func (h *SingboxHandler) Control(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := h.op.GetStatus(r.Context())
-	publishInvalidated(h.bus, ResourceSingboxStatus, "control-"+req.Action)
+	h.bus.PublishInvalidated(events.ResourceSingboxStatus, "control-"+req.Action)
 	response.Success(w, singboxStatusData(s))
 }
 
@@ -480,6 +578,25 @@ func (h *SingboxHandler) AddTunnels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	batch := singbox.ParseTunnelLinksInput(body.Links)
+	// Мульти-адресный TrustTunnel-конфиг — это Группа серверов, не N одиночных
+	// туннелей (spec-manager.md п. 4). n — число мульти-адресных outbound'ов во
+	// всём батче (может прийти из нескольких склеенных конфигов), не адресов
+	// одного конфига. Отбиваем ДО записи, фронт переводит в группу.
+	if n := trustTunnelAddressCount(batch.Outbounds); n > 1 {
+		response.ErrorWithData(w, http.StatusUnprocessableEntity,
+			fmt.Sprintf("TrustTunnel-конфиг с несколькими адресами (%d) — создайте Группу серверов", n),
+			"TRUSTTUNNEL_MULTI_ADDRESS", map[string]int{"addresses": n})
+		return
+	}
+	for _, p := range batch.Outbounds {
+		if err := h.validateOutboundBind(r.Context(), p.Outbound); err != nil {
+			response.BadRequest(w, err.Error())
+			return
+		}
+	}
+
 	h.log.Info("single-add", "", "requested via API")
 	added, errs, err := h.op.AddTunnels(r.Context(), body.Links)
 	if err != nil {
@@ -495,7 +612,7 @@ func (h *SingboxHandler) AddTunnels(w http.ResponseWriter, r *http.Request) {
 		added = []singbox.TunnelInfo{}
 	}
 	if len(added) > 0 {
-		publishInvalidated(h.bus, ResourceSingboxTunnels, "tunnel-added")
+		h.bus.PublishInvalidated(events.ResourceSingboxTunnels, "tunnel-added")
 	}
 	fresh, ferr := h.enrichedTunnels(r.Context())
 	if ferr != nil {
@@ -511,6 +628,18 @@ func (h *SingboxHandler) AddTunnels(w http.ResponseWriter, r *http.Request) {
 		resp.Errors = append(resp.Errors, errItem{Line: e.Line, Input: e.Input, Error: e.Err.Error()})
 	}
 	response.Success(w, resp)
+}
+
+// trustTunnelAddressCount returns how many parsed outbounds came from a
+// multi-address TrustTunnel config (Task 2 marks each of them).
+func trustTunnelAddressCount(parsed []vlink.ParsedOutbound) int {
+	n := 0
+	for _, p := range parsed {
+		if p.MultiAddress {
+			n++
+		}
+	}
+	return n
 }
 
 // GetTunnel handles GET /api/singbox/tunnels/get?tag={tag}. The response
@@ -614,12 +743,18 @@ func (h *SingboxHandler) UpdateTunnel(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "tag required")
 		return
 	}
+
+	if err := h.validateOutboundBind(r.Context(), body.Outbound); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+
 	h.log.Info("single-update", tag, "requested via API")
 	if err := h.op.UpdateTunnel(r.Context(), tag, body.Outbound); err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
-	publishInvalidated(h.bus, ResourceSingboxTunnels, "tunnel-updated")
+	h.bus.PublishInvalidated(events.ResourceSingboxTunnels, "tunnel-updated")
 	out, err := h.enrichedTunnels(r.Context())
 	if err != nil {
 		response.InternalError(w, err.Error())
@@ -676,7 +811,7 @@ func (h *SingboxHandler) RenameTunnel(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	publishInvalidated(h.bus, ResourceSingboxTunnels, "tunnel-renamed")
+	h.bus.PublishInvalidated(events.ResourceSingboxTunnels, "tunnel-renamed")
 	out, err := h.enrichedTunnels(r.Context())
 	if err != nil {
 		response.InternalError(w, err.Error())
@@ -731,7 +866,7 @@ func (h *SingboxHandler) CheckConnectivity(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	result := testing.CheckConnectivityByInterfaceURL(r.Context(), iface, h.connectivityCheckURL())
+	result := checkConnectivityByInterfaceURL(r.Context(), iface, h.connectivityCheckURL())
 	response.Success(w, result)
 }
 
@@ -794,7 +929,7 @@ func (h *SingboxHandler) CheckIP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	service := r.URL.Query().Get("service")
-	result, err := testing.CheckIPByInterface(r.Context(), iface, service)
+	result, err := checkIPByInterface(r.Context(), iface, service)
 	if err != nil {
 		response.Error(w, err.Error(), "IP_CHECK_FAILED")
 		return
@@ -1007,7 +1142,7 @@ func (h *SingboxHandler) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, err.Error())
 		return
 	}
-	publishInvalidated(h.bus, ResourceSingboxTunnels, "tunnel-removed")
+	h.bus.PublishInvalidated(events.ResourceSingboxTunnels, "tunnel-removed")
 	out, err := h.enrichedTunnels(r.Context())
 	if err != nil {
 		response.InternalError(w, err.Error())

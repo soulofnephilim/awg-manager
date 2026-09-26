@@ -33,11 +33,6 @@ export interface DashboardFlatContext {
 	/** sing-box установлен — без него операции с AWG3 отклоняет бэкенд. */
 	readonly awg3Visible: boolean;
 	readonly exporting: boolean;
-	// FreeTurn доступен только табом — в dashboard-режиме вход через кнопку тулбара (#585).
-	readonly freeturnAvailable: boolean;
-	readonly freeturnOpen: boolean;
-	readonly wdttAvailable: boolean;
-	readonly wdttOpen: boolean;
 	readonly awgAutoConnectivityNonce: number;
 	readonly singboxAutoDelayCheckNonce: number;
 	readonly deleteLoading: Record<string, boolean>;
@@ -51,9 +46,8 @@ export interface DashboardFlatContext {
 	flatGridEl: HTMLElement | null;
 	// --- обработчики ---
 	handleAdoptClick(interfaceName: string): void;
+	handleExternalDelete(interfaceName: string): void;
 	handleExportAll(): Promise<void>;
-	toggleFreeturn(): void;
-	toggleWdtt(): void;
 	handleGripKeydown(index: number, event: KeyboardEvent): void;
 	handleGripPointerDown(index: number, event: PointerEvent): void;
 	handleToggleOnOff(id: string): Promise<void>;
@@ -64,5 +58,6 @@ export interface DashboardFlatContext {
 	openSingboxDetail(tag: string): void;
 	openWizard(preselect: 'choose' | 'single' | 'inline' | 'url'): void;
 	requestDelete(id: string): void;
+	handleLockClick(id: string): void;
 	requestSubscriptionDelete(id: string): void;
 }

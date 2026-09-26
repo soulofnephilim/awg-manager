@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/events"
@@ -85,6 +86,9 @@ type Orchestrator struct {
 	// Per-tunnel execution locks
 	tunnelMu sync.Map
 
+	// tunnelLockOwner: tunnelID -> lockHolder, кто держит tunnelMu.
+	tunnelLockOwner sync.Map
+
 	// Expected NDMS hooks — queue of hooks our own actions will trigger.
 	// Consumed in HandleEvent to filter self-triggered iflayerchanged events.
 	expectedHooks []expectedHook
@@ -102,6 +106,12 @@ type Orchestrator struct {
 	staticRoute StaticRouteExecutor
 	clientRoute ClientRouteExecutor
 
+	// baseCtx — контекст жизни демона. Нужен отложенному буту: тот приезжает
+	// из горутины NDMS-хука, у которой свой 60-секундный дедлайн
+	// (internal/api/hook.go), а бут на нескольких туннелях с медленным NDMS
+	// в него не укладывается — обрывался бы посередине и без повтора.
+	baseCtx context.Context
+
 	// Event bus for SSE publishing
 	bus *events.Bus
 
@@ -109,14 +119,20 @@ type Orchestrator struct {
 	appLog *logging.ScopedLogger
 
 	// clock returns current time; injectable for tests. nil → time.Now.
+	// Читается без o.mu: ставится в New (или тестом до первого события) и
+	// дальше не меняется — в отличие от хуков, которые ставит проводка.
 	clock func() time.Time
 
 	// confSettleDelay overrides the package const; injectable for tests.
 	confSettleDelay time.Duration
 
-	// confLayerRunning reads the interface's CURRENT conf layer straight from
-	// NDMS (fresh, not from the snapshot cache). Used to second-guess a
-	// conf=disabled edge before acting on it. nil → check skipped.
+	// confLayerRunning (пишется и читается под o.mu — у остальных Set*-полей
+	// контракт слабее: они ставятся однократно в setupOrchestrator до приёма
+	// событий и дальше не меняются) reads the
+	// interface's CURRENT conf layer straight from
+	// NDMS (fresh, not from the snapshot cache). Им перепроверяются обе грани:
+	// conf=disabled перед остановкой и conf=running перед подъёмом.
+	// Ошибка значит «не знаем» — грань остаётся в силе. nil → check skipped.
 	confLayerRunning func(ctx context.Context, ndmsName string) (bool, error)
 
 	// ifaceInvalidator, when set, refreshes the NDMS interface cache for a
@@ -170,20 +186,40 @@ func (o *Orchestrator) SetStaticRoute(sr StaticRouteExecutor) { o.staticRoute = 
 func (o *Orchestrator) SetClientRoute(cr ClientRouteExecutor) { o.clientRoute = cr }
 
 // SetEventBus sets the event bus for SSE publishing.
-func (o *Orchestrator) SetEventBus(bus *events.Bus) { o.bus = bus }
+//
+// Все три хука ниже (bus, ifaceInvalidator, onTunnelRunning) ЧИТАЮТСЯ из
+// updateState под o.mu, поэтому и пишутся под ним же: асимметрия
+// «write-unlocked / read-locked» — та же болезнь, что у пробы conf-слоя, и
+// стоит она столько же, сколько лишний Lock на старте демона. F258.
+func (o *Orchestrator) SetEventBus(bus *events.Bus) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.bus = bus
+}
 
 // SetInterfaceInvalidator wires the NDMS interface-cache refresh invoked on a
 // kernel tunnel's confirmed "running" transition. nil-safe. See issue #328.
-func (o *Orchestrator) SetInterfaceInvalidator(fn func(name string)) { o.ifaceInvalidator = fn }
+func (o *Orchestrator) SetInterfaceInvalidator(fn func(name string)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.ifaceInvalidator = fn
+}
 
 // SetOnTunnelRunning wires a callback invoked when any tunnel (kernel or
 // NativeWG) reaches confirmed running state. Used to restart HydraRoute Neo
 // so it re-applies CONNMARK rules.
-func (o *Orchestrator) SetOnTunnelRunning(fn func(tunnelID string)) { o.onTunnelRunning = fn }
+func (o *Orchestrator) SetOnTunnelRunning(fn func(tunnelID string)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.onTunnelRunning = fn
+}
 
 // SetConfLayerProbe wires the fresh NDMS read of an interface's conf layer.
-// nil-safe: without it, settleConfDisabled falls back to the hook edges alone.
+// Им перепроверяются ОБЕ грани: conf=disabled перед остановкой и conf=running
+// перед подъёмом. nil-safe: без пробы обе верят хукам как есть.
 func (o *Orchestrator) SetConfLayerProbe(fn func(ctx context.Context, ndmsName string) (bool, error)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.confLayerRunning = fn
 }
 
@@ -225,6 +261,14 @@ func (o *Orchestrator) RefreshTunnelState(tunnelID string) {
 		fresh.lastConfRunningAt = cur.lastConfRunningAt
 	}
 	o.state.tunnels[tunnelID] = fresh
+}
+
+// SetBaseContext задаёт контекст жизни демона для работ, которые нельзя
+// исполнять под коротким контекстом вызывающего (отложенный бут).
+func (o *Orchestrator) SetBaseContext(ctx context.Context) {
+	o.mu.Lock()
+	o.baseCtx = ctx
+	o.mu.Unlock()
 }
 
 // LoadState populates the state cache from storage and live operator state.
@@ -366,6 +410,7 @@ func (o *Orchestrator) settleConfDisabled(ctx context.Context, event Event) bool
 	o.mu.Lock()
 	t = o.state.tunnels[tunnelID]
 	bounced := t != nil && t.lastConfRunningAt.After(now)
+	probe := o.confLayerRunning
 	o.mu.Unlock()
 	if t == nil {
 		return true
@@ -381,10 +426,10 @@ func (o *Orchestrator) settleConfDisabled(ctx context.Context, event Event) bool
 	// bring the interface back. Ask NDMS what it actually holds (issue #669:
 	// one lost edge left the tunnel stopped and Enabled=false, which nothing
 	// in the daemon ever undoes). An unreadable NDMS leaves the edge in force.
-	if o.confLayerRunning == nil {
+	if probe == nil {
 		return true
 	}
-	up, err := o.confLayerRunning(ctx, event.NDMSName)
+	up, err := probe(ctx, event.NDMSName)
 	if err != nil || !up {
 		return true
 	}
@@ -393,12 +438,60 @@ func (o *Orchestrator) settleConfDisabled(ctx context.Context, event Event) bool
 	return false
 }
 
+// settleConfRunning — зеркало settleConfDisabled для грани conf=running.
+//
+// NDMS переигрывает конфигурацию сам и шлёт conf=running по интерфейсам,
+// которых мы не трогали: на стенде 5.01 пачка пришла через девять секунд
+// после удаления СОСЕДНЕГО OpkgTun. Поднимать туннель по такой грани нельзя —
+// decideNDMSHook сознательно не смотрит на Enabled (внешнее включение из
+// веб-интерфейса роутера обязано работать, issue #183), и ActionPersistRunning
+// вернёт Enabled=true: стор начнёт противоречить тому, что нажал пользователь.
+//
+// Отличает грани не время, а факт: спрашиваем NDMS, что он держит СЕЙЧАС.
+// Держит up — включение настоящее. Держит down — грань уже неверна, её
+// породила чужая операция. Непрочитанный NDMS оставляет грань в силе, как и в
+// settleConfDisabled: лучше лишний старт, чем туннель, лежащий до ручного
+// вмешательства (#669).
+func (o *Orchestrator) settleConfRunning(ctx context.Context, event Event) bool {
+	o.mu.Lock()
+	t := o.state.findByNDMSName(event.NDMSName)
+	var tunnelID string
+	var running bool
+	if t != nil {
+		tunnelID, running = t.ID, t.Running
+	}
+	probe := o.confLayerRunning
+	o.mu.Unlock()
+
+	// Неизвестный или уже работающий туннель decide и так не тронет.
+	if tunnelID == "" || running || probe == nil {
+		return true
+	}
+
+	up, err := probe(ctx, event.NDMSName)
+	if ctx.Err() != nil {
+		// Вызывающий сдался — исполнять на мёртвом контексте нечего: действия
+		// отвалятся посередине. Тот же выбор, что в settleConfDisabled.
+		return false
+	}
+	if err != nil || up {
+		return true
+	}
+	o.appLog.Info("conf-settle", tunnelID,
+		"NDMS держит интерфейс выключенным — conf=running не от пользователя, туннель не поднимаем")
+	return false
+}
+
 // awaitTunnelIdle blocks until nothing is executing for the tunnel behind
 // ndmsName (or the wait gives up). An external conf=running that lands while
 // our own stop is still running would otherwise be swallowed by decide's
 // t.Running guard — and since that stop persists Enabled=false, no later
 // event brings the tunnel back on its own (issue #669).
-func (o *Orchestrator) awaitTunnelIdle(ctx context.Context, ndmsName string) {
+// Возвращает true, если ждать пришлось: по туннелю в этот момент шла НАША
+// операция. Это важно для settleConfRunning — её вопрос «что NDMS держит
+// сейчас» после нашей же остановки получает ответ «down», потому что
+// InterfaceDown только что его туда и записал, а не потому что грань чужая.
+func (o *Orchestrator) awaitTunnelIdle(ctx context.Context, ndmsName string) bool {
 	o.mu.Lock()
 	var tunnelID string
 	if t := o.state.findByNDMSName(ndmsName); t != nil {
@@ -406,15 +499,62 @@ func (o *Orchestrator) awaitTunnelIdle(ctx context.Context, ndmsName string) {
 	}
 	o.mu.Unlock()
 	if tunnelID == "" {
-		return
+		return false
 	}
-	if err := o.lockTunnel(ctx, tunnelID); err == nil {
+	if o.tryLockTunnel(tunnelID, "await-idle") {
 		o.unlockTunnel(tunnelID)
+		return false
+	}
+	if err := o.lockTunnel(ctx, tunnelID, "await-idle"); err == nil {
+		o.unlockTunnel(tunnelID)
+	}
+	return true
+}
+
+// tryLockTunnel — неблокирующий lockTunnel: берёт замок, если он свободен
+// прямо сейчас, и сообщает, получилось ли.
+func (o *Orchestrator) tryLockTunnel(tunnelID, owner string) bool {
+	semAny, _ := o.tunnelMu.LoadOrStore(tunnelID, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+		o.tunnelLockOwner.Store(tunnelID, &lockHolder{owner: owner, since: time.Now()})
+		return true
+	default:
+		return false
 	}
 }
 
 // HandleEvent is the single entry point for ALL events.
 // Decides what to do, then executes.
+// decideLocked принимает решение под o.mu и сообщает, был ли это отложенный
+// бут. Выделено из HandleEvent, чтобы диспетчеризацию можно было проверить
+// без исполнителей: иначе единственным признаком подмены decideBoot на что-то
+// другое остаётся паника на nil-исполнителе, а это не проверка.
+func (o *Orchestrator) decideLocked(event Event) (actions []Action, deferredBoot bool, baseCtx context.Context) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Ensure tunnel is in cache (covers tunnels created/imported after startup)
+	if event.Tunnel != "" {
+		o.state.ensureTunnel(event.Tunnel, o.store)
+	}
+	// Отложенный бут: загрузка прошла без WAN, и первое WAN-событие обязано
+	// отработать за неё. Пометку снимает сам decideBoot.
+	//
+	// WANUp берём из модели WAN, а НЕ из факта прихода EventWANUp. Хук шлёт
+	// это событие для любого интерфейса с ipv4-слоем, кроме туннельных
+	// (IsNonISPInterface отсеивает только их): подъём LAN-моста br0 или
+	// L2TP-клиента запускал бы полный бут при мёртвом WAN — холодный старт
+	// всех туннелей и глобальный sweep маршрутов в никуда. Модель знает
+	// только интерфейсы с ролью WAN из NDMS. Не подтвердилось — decideBoot
+	// оставит пометку, и бут дождётся настоящего WAN.
+	if event.Type == EventWANUp && o.state.bootPending {
+		return decideBoot(Event{Type: EventBoot, WANUp: o.state.anyWANUp(), Now: event.Now}, &o.state), true, o.baseCtx
+	}
+	return decide(event, &o.state), false, o.baseCtx
+}
+
 func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 	// Filter self-triggered NDMS hooks before decide.
 	// Our operators register expected hooks before InterfaceUp/Down.
@@ -432,8 +572,18 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 	if event.Type == EventNDMSHook && event.Layer == "conf" {
 		switch event.Level {
 		case "running":
+			// Ждали своей же операции — спрашивать NDMS бесполезно: он
+			// отдаст то, что мы сами только что записали. Грань идёт в decide
+			// как до появления пробы, иначе вернётся #669: наш Stop
+			// персистит Enabled=false, и поднять туннель больше нечему.
+			if !o.awaitTunnelIdle(ctx, event.NDMSName) && !o.settleConfRunning(ctx, event) {
+				return nil
+			}
+			// Штамп «видели внешний running» ставим только для грани, которая
+			// устояла: по нему settleConfDisabled отличает перезапуск
+			// интерфейса в NDMS от настоящего выключения, и опровергнутая
+			// грань подавляла бы там законную остановку.
 			o.noteConfRunning(event.NDMSName)
-			o.awaitTunnelIdle(ctx, event.NDMSName)
 		case "disabled":
 			if !o.settleConfDisabled(ctx, event) {
 				return nil
@@ -446,12 +596,13 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 	}
 
 	// Decide (under lock)
-	o.mu.Lock()
-	// Ensure tunnel is in cache (covers tunnels created/imported after startup)
-	if event.Tunnel != "" {
-		o.state.ensureTunnel(event.Tunnel, o.store)
+	actions, deferredBoot, baseCtx := o.decideLocked(event)
+	execCtx := ctx
+	if deferredBoot && baseCtx != nil {
+		execCtx = baseCtx
 	}
-	actions := decide(event, &o.state)
+
+	o.mu.Lock()
 	// conf=disabled detail: тот же резолвер, что decideNDMSHook —
 	// findByNDMSName(event.NDMSName), layer=="conf" (НЕ event.Tunnel).
 	if event.Type == EventNDMSHook && event.Layer == "conf" && event.Level == "disabled" {
@@ -479,6 +630,11 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 		return nil
 	}
 
+	if deferredBoot {
+		o.appLog.Info("startup", "",
+			fmt.Sprintf("отложенный бут пошёл по WAN-up (%s), действий: %d", event.WANIface, len(actions)))
+	}
+
 	// Per-tunnel lock for execution
 	tunnelID := event.Tunnel
 	if tunnelID == "" {
@@ -486,7 +642,7 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 		// tunnel and run each group under that tunnel's lock so a concurrent
 		// single-tunnel NDMS hook for the same tunnel cannot interleave a
 		// Stop into the middle of our Start sequence (the boot kill race).
-		return o.executeActionsGrouped(ctx, actions)
+		return o.executeActionsGrouped(execCtx, actions, event.Type.String())
 	}
 
 	// Single-tunnel event: lock that tunnel. Bounded acquisition (issue
@@ -496,11 +652,11 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 	// another and kept the tunnel wedged until the daemon was restarted.
 	// Failing fast with ErrOperationInProgress gives the UI an honest,
 	// retryable "операция уже выполняется" instead of a hung request.
-	if err := o.lockTunnel(ctx, tunnelID); err != nil {
+	if err := o.lockTunnel(execCtx, tunnelID, event.Type.String()); err != nil {
 		return err
 	}
 	defer o.unlockTunnel(tunnelID)
-	return o.executeActions(ctx, actions)
+	return o.executeActions(execCtx, actions)
 }
 
 // tunnelLockTimeout bounds how long a caller waits for a busy tunnel's
@@ -509,36 +665,112 @@ func (o *Orchestrator) HandleEvent(ctx context.Context, event Event) error {
 // that the HTTP caller gets an answer instead of a hung request.
 const tunnelLockTimeout = 15 * time.Second
 
+// lockHolder records who took a tunnel's execution lock and when. Issue
+// #795: a wedged tunnel rejected every UI action for minutes and the log
+// named neither the holder nor how long it had been holding, so the app
+// log alone could not tell a stuck operation from a slow one.
+//
+// refused считает, скольким вызывающим этот держатель отказал. По нему
+// решается уровень строки освобождения: долгое держание само по себе
+// штатно (boot/reconnect на медленном NDMS), а вот долгое держание,
+// которому кто-то упёрся, — та самая улика.
+type lockHolder struct {
+	owner   string
+	since   time.Time
+	refused atomic.Int32
+}
+
+// WithTunnelLock выполняет fn под тем же per-tunnel замком, которым
+// оркестратор сериализует свои действия. Нужен владельцам, которые правят
+// живой туннель в обход событий (service.Update) и стражу endpoint'ов в
+// nwg: без замка их работа переплетается с WAN-up по тому же туннелю.
+func (o *Orchestrator) WithTunnelLock(ctx context.Context, tunnelID, owner string, fn func() error) error {
+	if err := o.lockTunnel(ctx, tunnelID, owner); err != nil {
+		return err
+	}
+	defer o.unlockTunnel(tunnelID)
+	return fn()
+}
+
 // lockTunnel acquires the per-tunnel execution semaphore. Gives up when ctx
-// is cancelled (client disconnected) or after tunnelLockTimeout.
-func (o *Orchestrator) lockTunnel(ctx context.Context, tunnelID string) error {
+// is cancelled (client disconnected) or after tunnelLockTimeout. owner names
+// the operation for the log — it is what identifies the holder when a later
+// caller is refused.
+func (o *Orchestrator) lockTunnel(ctx context.Context, tunnelID, owner string) error {
 	semAny, _ := o.tunnelMu.LoadOrStore(tunnelID, make(chan struct{}, 1))
 	sem := semAny.(chan struct{})
 	timer := time.NewTimer(tunnelLockTimeout)
 	defer timer.Stop()
 	select {
 	case sem <- struct{}{}:
+		o.tunnelLockOwner.Store(tunnelID, &lockHolder{owner: owner, since: time.Now()})
+		o.appLog.Debug("tunnel-lock", tunnelID, "взят: "+owner)
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("%w (%s)", tunnel.ErrOperationInProgress, tunnelID)
+		return o.lockBusyErr(tunnelID, owner, "контекст вызывающего отменён")
 	case <-timer.C:
-		return fmt.Errorf("%w (%s)", tunnel.ErrOperationInProgress, tunnelID)
+		return o.lockBusyErr(tunnelID, owner, "таймаут ожидания")
 	}
+}
+
+// lockBusyErr logs why the caller was refused and who holds the lock right
+// now, then returns the retryable error the HTTP layer turns into 409.
+//
+// Длительность держания сюда НЕ пишется: журнал сворачивает повторы по
+// точному совпадению текста (logging.CoalesceOrAdd), а растущее число
+// секунд делает каждую строку уникальной — залипший туннель залил бы
+// журнал несворачиваемыми Warn каждые tunnelLockTimeout. Сколько держали
+// на самом деле, говорит строка освобождения в unlockTunnel.
+//
+// «сейчас» в тексте — не оговорка: держатель мог смениться, пока мы ждали.
+// Врать в улике хуже, чем назвать её приблизительной.
+func (o *Orchestrator) lockBusyErr(tunnelID, owner, reason string) error {
+	if hAny, ok := o.tunnelLockOwner.Load(tunnelID); ok {
+		h := hAny.(*lockHolder)
+		h.refused.Add(1)
+		o.appLog.Warn("tunnel-lock", tunnelID,
+			fmt.Sprintf("отказано %s (%s): сейчас держит %s", owner, reason, h.owner))
+	} else {
+		// Держателя нет — либо замок и правда свободен (ветки select
+		// равноправны, при отменённом ctx выбор мог пасть на ctx.Done()),
+		// либо держатель уже стёр свою запись и вот-вот отпустит.
+		// Warn про занятость здесь соврал бы.
+		o.appLog.Debug("tunnel-lock", tunnelID,
+			fmt.Sprintf("отказано %s (%s): держателя нет — освободился или вот-вот отпустит", owner, reason))
+	}
+	return fmt.Errorf("%w (%s)", tunnel.ErrOperationInProgress, tunnelID)
 }
 
 // unlockTunnel releases the per-tunnel execution semaphore.
+//
+// Запись в tunnelMu намеренно не удаляется даже для удалённого туннеля:
+// удалять её мог только сам держатель, и тогда конкурент успевал создать
+// новый канал, а отложенный unlock сливал ЧУЖОЙ токен — взаимоисключение
+// ломалось. Цена отказа от очистки — один пустой канал на когда-либо
+// существовавший ID туннеля (пул номеров OpkgTun конечен — см.
+// opkgtun.Ceiling).
 func (o *Orchestrator) unlockTunnel(tunnelID string) {
+	if hAny, ok := o.tunnelLockOwner.LoadAndDelete(tunnelID); ok {
+		h := hAny.(*lockHolder)
+		held := time.Since(h.since)
+		// Warn только если держание кому-то реально помешало. Долгое
+		// держание само по себе штатно: boot/reconnect на медленном NDMS
+		// переваливает за tunnelLockTimeout каждый ребут.
+		if refused := h.refused.Load(); refused > 0 {
+			o.appLog.Warn("tunnel-lock", tunnelID,
+				fmt.Sprintf("освобождён: %s держал %s, отказано попыткам: %d",
+					h.owner, held.Round(time.Second), refused))
+		} else {
+			o.appLog.Debug("tunnel-lock", tunnelID,
+				fmt.Sprintf("освобождён: %s держал %s", h.owner, held.Round(time.Millisecond)))
+		}
+	}
 	if semAny, ok := o.tunnelMu.Load(tunnelID); ok {
 		select {
 		case <-semAny.(chan struct{}):
-		default: // already released / entry recreated after cleanup — no-op
+		default: // already released — no-op
 		}
 	}
-}
-
-// cleanupTunnelLock removes the lock entry for a deleted tunnel.
-func (o *Orchestrator) cleanupTunnelLock(tunnelID string) {
-	o.tunnelMu.Delete(tunnelID)
 }
 
 // executeActions executes a list of actions sequentially.
@@ -601,10 +833,10 @@ func groupContiguousByTunnel(actions []Action) [][]Action {
 // tunnel locks at once, so there is no lock-ordering deadlock against
 // concurrent single-tunnel hook events. Tunnel-less groups (Tunnel=="")
 // run unlocked.
-func (o *Orchestrator) executeActionsGrouped(ctx context.Context, actions []Action) error {
+func (o *Orchestrator) executeActionsGrouped(ctx context.Context, actions []Action, owner string) error {
 	var firstErr error
 	for _, group := range groupContiguousByTunnel(actions) {
-		if err := o.executeGroup(ctx, group); err != nil && firstErr == nil {
+		if err := o.executeGroup(ctx, group, owner); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -614,7 +846,7 @@ func (o *Orchestrator) executeActionsGrouped(ctx context.Context, actions []Acti
 // executeGroup runs one same-tunnel action group. The per-tunnel lock is
 // released via defer (iteration-scoped here, matching the single-tunnel
 // path in HandleEvent) so a panic in executeActions cannot leak the lock.
-func (o *Orchestrator) executeGroup(ctx context.Context, group []Action) error {
+func (o *Orchestrator) executeGroup(ctx context.Context, group []Action, owner string) error {
 	tid := group[0].Tunnel
 	if tid == "" {
 		return o.executeActions(ctx, group)
@@ -622,7 +854,7 @@ func (o *Orchestrator) executeGroup(ctx context.Context, group []Action) error {
 	// Bounded like the single-tunnel path: a wedged tunnel skips its group
 	// (logged via firstErr) instead of stalling the whole boot/reconnect
 	// sweep behind one dead endpoint.
-	if err := o.lockTunnel(ctx, tid); err != nil {
+	if err := o.lockTunnel(ctx, tid, owner); err != nil {
 		return err
 	}
 	defer o.unlockTunnel(tid)
@@ -680,7 +912,7 @@ func (o *Orchestrator) updateState(action Action) {
 			o.bus.Publish("tunnel:state", events.TunnelStateEvent{
 				ID: t.ID, Name: t.Name, State: "running", Backend: t.Backend,
 			})
-			publishInvalidatedBus(o.bus, "tunnels", "state-running")
+			o.bus.PublishInvalidated(events.ResourceTunnels, "state-running")
 			// Kernel tunnels: NDMS iflayerchanged hooks are unreliable for
 			// OpkgTun, so the cache invalidate done at InterfaceUp can snapshot
 			// a pre-"running" layer and then never get corrected — leaving
@@ -700,13 +932,13 @@ func (o *Orchestrator) updateState(action Action) {
 			o.bus.Publish("tunnel:state", events.TunnelStateEvent{
 				ID: t.ID, Name: t.Name, State: "stopped", Backend: t.Backend,
 			})
-			publishInvalidatedBus(o.bus, "tunnels", "state-stopped")
+			o.bus.PublishInvalidated(events.ResourceTunnels, "state-stopped")
 		case ActionDeleteKernel, ActionDeleteNativeWG:
 			// tunnel:deleted remains as a no-op SSE for any legacy
 			// subscriber; the frontend handler is removed so nobody
 			// reacts. Future cleanup can drop this publish.
 			o.bus.Publish("tunnel:deleted", events.TunnelDeletedEvent{ID: action.Tunnel})
-			publishInvalidatedBus(o.bus, "tunnels", "deleted")
+			o.bus.PublishInvalidated(events.ResourceTunnels, "deleted")
 		}
 	}
 }
@@ -724,22 +956,4 @@ func (o *Orchestrator) QuiescentUntil(tunnelID string) time.Time {
 		return t.quiescentUntil
 	}
 	return time.Time{}
-}
-
-// publishInvalidatedBus posts a resource:invalidated hint. Duplicated
-// here (from internal/api.publishInvalidated) to avoid an import cycle
-// between the orchestrator and the api package.
-//
-// TODO(tech-debt): consolidate publishInvalidatedBus helpers into
-// internal/events once the import-cycle with internal/api is resolved.
-// Currently duplicated in internal/orchestrator and internal/pingcheck
-// because those packages cannot import internal/api.
-func publishInvalidatedBus(bus *events.Bus, resource, reason string) {
-	if bus == nil {
-		return
-	}
-	bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{
-		Resource: resource,
-		Reason:   reason,
-	})
 }

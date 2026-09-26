@@ -3,8 +3,10 @@ package pingcheck
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,9 +18,17 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wg"
 )
 
+// ifaceUp — шов над проверкой флага UP интерфейса: `tunnelRunning` kernel-записи
+// в статусе мониторинга (у nativewg ту же роль играет Bound из NDMS).
+var ifaceUp = func(name string) bool {
+	ifi, err := net.InterfaceByName(name)
+	return err == nil && ifi.Flags&net.FlagUp != 0
+}
+
 // wgClient is the subset of wg.Client needed by the health sensor.
 type wgClient interface {
 	Show(ctx context.Context, iface string) (*wg.ShowResult, error)
+	LatestHandshake(ctx context.Context, iface string) (time.Time, error)
 }
 
 // Service manages ping check monitoring for all tunnels.
@@ -52,6 +62,9 @@ type tunnelMonitor struct {
 	lastResult    *CheckResult
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
+	// tickMu сериализует sensorTick между циклом монитора и check-now:
+	// два параллельных лечения на одном интерфейсе недопустимы.
+	tickMu sync.Mutex
 }
 
 // checkConfig holds resolved check configuration for a tunnel.
@@ -211,12 +224,22 @@ func (s *Service) GetStatus() []TunnelStatus {
 		monitoredIDs[tunnelID] = true
 		config := s.getCheckConfig(tunnelID)
 
+		// Бэкенд берём из записи: живой монитор бывает не только у kernel —
+		// зеркальную запись прокси-выхода этот цикл тоже перечисляет, и
+		// зашитое "kernel" врало о её природе.
+		backend := "kernel"
+		if stored, err := s.tunnels.Get(tunnelID); err == nil && stored.Backend != "" {
+			backend = stored.Backend
+		}
+
+		// Как nwgCardStatus: лежащий интерфейс — «stopped», но не во время
+		// лечения (см. pingStatus).
+		running := ifaceUp(s.resolveIfaceName(tunnelID))
 		status := "disabled"
 		if config != nil {
-			if m.restartCount > 0 && (m.lastResult == nil || !m.lastResult.Success) {
-				status = "recovering"
-			} else {
-				status = "alive"
+			status = pingStatus(m, config.FailThreshold, backend)
+			if status == "alive" && !running {
+				status = "stopped"
 			}
 		}
 
@@ -240,7 +263,7 @@ func (s *Service) GetStatus() []TunnelStatus {
 			TunnelID:      tunnelID,
 			TunnelName:    m.tunnelName,
 			Enabled:       config != nil,
-			Backend:       "kernel",
+			Backend:       backend,
 			Status:        status,
 			Method:        method,
 			LastCheck:     lastCheck,
@@ -248,6 +271,7 @@ func (s *Service) GetStatus() []TunnelStatus {
 			FailCount:     m.failCount,
 			FailThreshold: failThreshold,
 			RestartCount:  m.restartCount,
+			TunnelRunning: running,
 		})
 	}
 
@@ -264,7 +288,10 @@ func (s *Service) GetStatus() []TunnelStatus {
 			if t.Backend == "nativewg" {
 				continue
 			}
-			// WDTT Raw registry rows are not kernel AWG tunnels.
+			// WDTT Raw registry rows are not kernel AWG tunnels: авто-скан
+			// их не подхватывает намеренно. Мониторинг raw-записи включается
+			// её собственным конфигом, и ровно тот путь резолвит живое имя
+			// интерфейса (resolveIfaceName, требование 8) — это не баг.
 			if t.Backend == "wdtt-raw" {
 				continue
 			}
@@ -281,6 +308,7 @@ func (s *Service) GetStatus() []TunnelStatus {
 				Status:        "disabled",
 				Method:        "http",
 				FailThreshold: 3,
+				TunnelRunning: ifaceUp(ifaceName),
 			})
 		}
 	}
@@ -304,16 +332,32 @@ func (s *Service) GetTunnelPingStatus(tunnelID string) TunnelPingInfo {
 		return TunnelPingInfo{Status: "disabled"}
 	}
 
-	info := TunnelPingInfo{
-		Status:        "alive",
+	backend := "kernel"
+	if s.tunnels != nil {
+		if stored, err := s.tunnels.Get(tunnelID); err == nil && stored.Backend != "" {
+			backend = stored.Backend
+		}
+	}
+	return TunnelPingInfo{
+		Status:        pingStatus(m, m.failThreshold, backend),
 		RestartCount:  m.restartCount,
 		FailCount:     m.failCount,
 		FailThreshold: m.failThreshold,
 	}
-	if info.RestartCount > 0 && (m.lastResult == nil || !m.lastResult.Success) {
-		info.Status = "recovering"
+}
+
+// pingStatus — единая для карточки туннеля и страницы мониторинга оценка
+// живого монитора: «recovering» пока лечение не подтверждено успешной
+// проверкой либо идёт его окно down/up (failCount на пороге; зеркало wdtt-raw
+// не лечится и счётчик не сбрасывает — для него это не окно), иначе «alive».
+func pingStatus(m *tunnelMonitor, threshold int, backend string) string {
+	if m.restartCount > 0 && (m.lastResult == nil || !m.lastResult.Success) {
+		return "recovering"
 	}
-	return info
+	if backend == "kernel" && threshold > 0 && m.failCount >= threshold {
+		return "recovering"
+	}
+	return "alive"
 }
 
 // CheckAllNow triggers immediate checks on all monitored tunnels.
@@ -345,6 +389,39 @@ func (s *Service) CheckAllNow() {
 
 		s.performCheckAndUpdate(m, config)
 	}
+}
+
+// checkNowAsync запускает внеочередную проверку kernel-монитора, не блокируя
+// вызывающего: sensorTick на пороге уходит в лечение (ждёт рукопожатие до
+// 30 с, затем backoff до maxBackoff), и HTTP-хендлер check-now висел бы всё
+// это время. Занятый монитор (тик или лечение в процессе) пропускается —
+// второе лечение на том же интерфейсе недопустимо. Горутина учтена в m.wg
+// под s.mu вместе с проверкой stopCh: StopMonitoring закрывает канал под тем
+// же локом и ждёт её, а закрытый канал мгновенно выводит из ожидания
+// рукопожатия и backoff (doLinkToggle снимает канал под локом до лечения).
+func (s *Service) checkNowAsync(m *tunnelMonitor, config *checkConfig) {
+	s.mu.RLock()
+	stopCh := m.stopCh
+	if stopCh != nil {
+		m.wg.Add(1)
+	}
+	s.mu.RUnlock()
+	if stopCh == nil {
+		return
+	}
+	go func() {
+		defer m.wg.Done()
+		if !m.tickMu.TryLock() {
+			return
+		}
+		defer m.tickMu.Unlock()
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+		s.sensorTick(m, config)
+	}()
 }
 
 // IsEnabled returns whether ping check is globally enabled.
@@ -446,14 +523,23 @@ func (s *Service) connectivityCheckURL() string {
 // performCheckAndUpdate performs a single check and updates monitor state.
 // Used by CheckAllNow for immediate checks.
 func (s *Service) performCheckAndUpdate(m *tunnelMonitor, config *checkConfig) {
-	s.sensorTick(m, config)
+	s.checkNowAsync(m, config)
 }
 
 // resolveIfaceName returns the kernel interface name for a tunnel,
-// using NativeWG names (nwgN) for nativewg backend, kernel names (opkgtunN/awgmN) otherwise.
+// using NativeWG names (nwgN) for nativewg backend, the live iface of the
+// mirror record for wdtt-raw, kernel names (opkgtunN/awgmN) otherwise.
 func (s *Service) resolveIfaceName(tunnelID string) string {
-	if stored, err := s.tunnels.Get(tunnelID); err == nil && stored.Backend == "nativewg" {
-		return nwg.NewNWGNames(stored.NWGIndex).IfaceName
+	if stored, err := s.tunnels.Get(tunnelID); err == nil {
+		if stored.Backend == "nativewg" {
+			return nwg.NewNWGNames(stored.NWGIndex).IfaceName
+		}
+		// Имя raw-записи цифр не несёт: NewNames("wdttraw-de") даёт
+		// opkgtun0 — ЧУЖОЙ живой интерфейс, и health бил бы по нему
+		// (требование 8). Живое имя знает только сама запись.
+		if stored.Backend == "wdtt-raw" && strings.TrimSpace(stored.RawKernelIface) != "" {
+			return strings.TrimSpace(stored.RawKernelIface)
+		}
 	}
 	return tunnel.NewNames(tunnelID).IfaceName
 }

@@ -17,14 +17,10 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/diagnostics"
 	"github.com/hoaxisr/awg-manager/internal/dnscheck"
 	"github.com/hoaxisr/awg-manager/internal/downloader"
-	"github.com/hoaxisr/awg-manager/internal/freeturn"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
-	"github.com/hoaxisr/awg-manager/internal/listenfirewall"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/monitoring"
-	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/server"
-	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/singbox/awgoutbounds"
 	singboxcfg "github.com/hoaxisr/awg-manager/internal/singbox/configmerge"
 	"github.com/hoaxisr/awg-manager/internal/singbox/dnsrewrite"
@@ -35,7 +31,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
-	"github.com/hoaxisr/awg-manager/internal/wdtt"
 )
 
 // setupServer registers routing snapshot providers and constructs the HTTP
@@ -81,7 +76,6 @@ func (a *app) setupServer() {
 			Version:              version,
 			FrontendFS:           frontendFS,
 			PprofStandaloneAddr:  strings.TrimSpace(a.pprofListen),
-			PprofOnMain:          a.pprofOnMain,
 			SlowRequestThreshold: slowHTTPThreshold,
 		},
 		server.Deps{
@@ -93,10 +87,8 @@ func (a *app) setupServer() {
 			Settings:            a.settingsStore,
 			Tunnels:             a.awgStore,
 			PingCheckService:    a.pingCheckFacade,
-			FreeTurnService:     a.freeturnService,
-			WdttService:         a.wdttService,
+			ProxyRecords:        a.proxyStore,
 			LoggingService:      a.loggingService,
-			ActiveBackend:       a.backendImpl,
 			KmodLoader:          a.kmodLoader,
 			UpdaterService:      a.updaterService,
 			NdmsQueries:         a.ndmsQueries,
@@ -120,6 +112,7 @@ func (a *app) setupServer() {
 			ClashProxy:          a.clashProxy,
 			SingboxConnsHandler: a.singboxConnsHandler,
 			MonitoringService:   a.monitoringService,
+			McpKeys:             a.mcpKeys,
 			SingboxSubMembers: func() []diagnostics.SingboxSubMember {
 				subs := a.subSvc.List()
 				out := make([]diagnostics.SingboxSubMember, 0, len(subs)*2)
@@ -140,11 +133,12 @@ func (a *app) setupServer() {
 			SingboxConfigPreview: func() (string, error) {
 				return singboxcfg.MergeDir(a.sbOrch.ConfigDir())
 			},
+			OrphanIfaces:          orphanIfaces(a.opkgPool, a.ndmsQueries.Interfaces),
+			OrphanIfacesExclusive: orphanIfacesExclusive(a.opkgPool, a.ndmsQueries.Interfaces),
 		},
 	)
 
 	a.srv.SetSingboxOperator(a.singboxOp)
-	a.singboxOp.SetEventBus(a.eventBus)
 
 }
 
@@ -237,33 +231,11 @@ func (a *app) setupDeviceProxy() {
 			return lease.Client, lease.Route.DisplayName(), lease.Close, nil
 		},
 	)
+	a.downloadSvc = sharedDownloadSvc
 	a.dnsRouteService.SetDownloader(&dnsRouteDownloaderAdapter{svc: sharedDownloadSvc})
 	a.dnsRefreshScheduler.Start()
 	a.geoRefreshScheduler.Start()
 	a.updaterService.SetDownloader(sharedDownloadSvc)
-	// FreeTurn one-click install: закреплённые в билде спеки по арху +
-	// общий загрузчик. Нет спеков для арха → кнопка недоступна, панель
-	// оставляет подсказку о ручной установке.
-	a.freeturnService.SetLogger(a.loggingService)
-	if specs, ok := freeturn.EmbeddedBinaries[detectArch()]; ok {
-		a.freeturnService.SetInstallSpecs(specs)
-		a.freeturnService.SetDownloader(&freeturnDownloaderAdapter{svc: sharedDownloadSvc})
-	}
-	a.wdttService.SetLogger(a.loggingService)
-	if a.managedService != nil {
-		a.wdttService.SetAccessManager(&wdttAccessAdapter{
-			svc:    a.managedService,
-			ifaces: a.ndmsCommands.Interfaces,
-		})
-	}
-	a.wdttService.SetInterfaceChecker(wdtt.NewSysNetChecker())
-	if specs, ok := wdtt.EmbeddedBinaries[detectArch()]; ok {
-		a.wdttService.SetInstallSpecs(specs)
-		a.wdttService.SetDownloader(&wdttDownloaderAdapter{svc: sharedDownloadSvc})
-	}
-	// Автостарт FreeTurn/WDTT — в boot.go (cold-boot/post-restore/daemon-restart)
-	// и по WAN UP hook; не здесь: ранний старт ловит DNS до sing-box.
-	a.srv.SetProxyClientAutostart(a.resumeEnabledProxyClients)
 	if a.singboxInstaller != nil {
 		a.singboxInstaller.SetDownloader(&installerDownloaderAdapter{svc: sharedDownloadSvc})
 		// Auto-migration goroutine: when legacy sing-box-naive opkg
@@ -281,7 +253,7 @@ func (a *app) setupDeviceProxy() {
 			// Skip migration if there is not enough disk space — GetStatus
 			// will surface InstallStateMissingNoSpace automatically; no
 			// point burning bandwidth on a download that will fail.
-			if a.singboxInstaller.EvaluateInstallState() == installer.InstallStateMissingNoSpace {
+			if a.singboxInstaller.EvaluateInstallState("") == installer.InstallStateMissingNoSpace {
 				a.bootLog.Warn("singbox-auto-migration", "", "skipped: not enough disk space")
 				return
 			}
@@ -297,11 +269,12 @@ func (a *app) setupDeviceProxy() {
 	a.srv.SetDownloadService(sharedDownloadSvc)
 	// Note: legacy awg-* outbound cleanup happens lazily on first
 	// deviceproxy CRUD via pruneAWGOutbounds(nil) inside EnsureDeviceProxy.
-	// We deliberately do NOT call ForceApply on boot because it triggers
-	// ApplyConfig → startAndWait, which spuriously starts sing-box even
-	// when both the deviceproxy and the router engine are disabled —
-	// once started, only an explicit Stop call (no UI today) brings it
-	// back down. Reconcile already handles cleanup on the next legitimate
+	// We deliberately do NOT call ForceApply on boot: it writes the slot
+	// and arms a reload, which spuriously starts sing-box even when both
+	// the deviceproxy and the router engine are disabled — once started,
+	// only an explicit Stop call (no UI today) brings it back down.
+	// (Прежде это шло через ApplyConfig → startAndWait; путь снят, но
+	// причина не звать ForceApply на буте осталась той же.) Reconcile already handles cleanup on the next legitimate
 	// trigger; the migration tax is at most one stale file fragment that
 	// gets stripped on the next Save/Enable.
 	a.srv.SetNDMSDispatcher(a.ndmsDispatcher)
@@ -315,12 +288,19 @@ func (a *app) setupDeviceProxy() {
 // the geoip bypass set, subscription scheduler/handler and the remaining
 // sing-box HTTP handlers.
 func (a *app) setupRouter() {
+	// Порты инбаундов sb-router лежат внутри эфемерного диапазона ядра
+	// (49000-61001 на Keenetic), поэтому исходящее соединение может занять
+	// их в окно рестарта sing-box и уронить старт с EADDRINUSE (#762).
+	if err := router.ReserveListenPorts(); err != nil {
+		logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSingboxRouter).
+			Warn("reserve-ports", "", "зарезервировать порты инбаундов: "+err.Error())
+	}
 	bindableAdapter := &routerWANInterfaceAdapter{store: a.ndmsQueries.Interfaces, nativeProxies: a.singboxOp.ListNativeProxies}
 	routerSvc := router.NewService(router.Deps{
 		AppLog:                 a.loggingService,
 		Settings:               a.settingsStore,
 		Singbox:                a.singboxOp,
-		Policies:               &routerAccessPolicyAdapter{svc: a.accessPolicySvc, wan: a.wanModel},
+		Policies:               &routerAccessPolicyAdapter{svc: a.accessPolicySvc},
 		Events:                 a.eventBus,
 		Bus:                    a.eventBus,
 		AWGTags:                &routerAWGTagAdapter{src: a.awgoutboundsSvc, awg3: a.awg3Svc},
@@ -336,10 +316,13 @@ func (a *app) setupRouter() {
 		GeoTagCounts:           a.geoDataStore,
 		OpkgTun:                a.ndmsCommands.Interfaces, // *InterfaceCommands satisfies OpkgTunProvisioner directly
 		StaticRoutes:           &routerStaticRouteAdapter{routes: a.ndmsCommands.Routes},
-		OpkgTunIndices: &routerOpkgTunIndexAdapter{
-			store: a.ndmsQueries.Interfaces,
-			log:   logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSingboxRouter),
-		},
+		OpkgTunIndices:         &routerOpkgTunIndexAdapter{store: a.ndmsQueries.Interfaces},
+		// ОБЩИЙ пул, один на процесс и на все четыре подсистемы. Своя
+		// удерживающая запись из состава НЕ вычитается: режим узнаёт свой
+		// номер по ключу держателя, и пул отдаёт его пину по совпадению
+		// ключа. Прежнее вычитание ломалось на смене режима — номер там
+		// принадлежит ДРУГОМУ режиму, и вычитать было нечего.
+		OpkgTunPool:   a.opkgPool,
 		OpkgTunScan:   opkgTunScanner(a.ndmsQueries.Interfaces),
 		DefaultRoute:  a.ndmsCommands.Routes, // *RouteCommands satisfies DefaultRouteProvider directly
 		SegmentNAT:    a.ndmsCommands.NAT,    // *NATCommands satisfies SegmentNATProvider directly
@@ -347,12 +330,10 @@ func (a *app) setupRouter() {
 		RunningConfig: a.ndmsQueries.RunningConfig,
 		NATState:      &routerNATStateAdapter{nat: a.ndmsQueries.NAT, static: a.ndmsQueries.StaticNAT},
 		// *RouteStore satisfies DefaultGatewayResolver directly.
-		DefaultGateway: a.ndmsQueries.Routes,
-		FakeIPTun: func() router.FakeIPTunParams {
-			p := router.DefaultFakeIPTunParams()
-			p.CachePath = singbox.DefaultCacheDBPath()
-			return p
-		}(),
+		DefaultGateway:         a.ndmsQueries.Routes,
+		FakeIPTun:              router.DefaultFakeIPTunParams(),
+		CacheDBPath:            a.singboxOp.CacheDBPath,
+		ApplyCacheFileLocation: a.singboxOp.ApplyCacheFileLocation,
 		// Синхронный мост «роутер → device-proxy»: после перепарковки слотов
 		// маршрутизации (Enable/Disable/смена режима) слот 30 перегенерируется
 		// ДО ближайшего reload — селекторы device-proxy деградируют ссылки на
@@ -367,6 +348,7 @@ func (a *app) setupRouter() {
 		},
 	})
 	a.routerSvc = routerSvc
+	a.subSvc.SetBindInterfaceValidator(subscriptionBindValidator{adapter: bindableAdapter})
 	// Health-check бинаря ipset пишет вердикты в журнал (битый Entware-бинарь
 	// вида «libc.so: cannot open shared object file» иначе виден только как
 	// молчаливые exit 127 на каждой команде). До подключения логгер nil-safe.
@@ -396,6 +378,7 @@ func (a *app) setupRouter() {
 	a.tunnelService.SetDeviceProxyRefChecker(a.deviceProxySvc)
 	a.tunnelService.SetRouterRefChecker(routerSvc)
 	a.singboxHandler.SetOutboundRefCheckers(a.deviceProxySvc, routerSvc)
+	a.singboxHandler.SetBindValidator(subscriptionBindValidator{adapter: bindableAdapter}.ValidateBindInterface)
 	a.deviceProxySvc.SetRouterOutbounds(&deviceproxyRouterOutboundsAdapter{src: routerSvc})
 	// Initial reconcile on boot — idempotent, brings config.json in sync
 	// with storage + current tunnel set. Runs strictly AFTER
@@ -441,9 +424,14 @@ func (a *app) setupRouter() {
 	a.srv.SetSingboxRouterHandler(singboxRouterHandler)
 	// Атрибуция tproxy-потоков на странице соединений: connmark == PolicyMark
 	// активной sb-router-политики. Кэшируется внутри connections.Service (60s).
+	//
+	// Гейт по Enabled, а не по Active: марка политики от того, стоит ли дефолт
+	// в её таблице, не зависит, а Active с #932 учитывает и это. Иначе ровно в
+	// инциденте, который панель теперь показывает, отваливался бы соседний
+	// инструмент наблюдения — страница соединений теряла бы атрибуцию потоков.
 	a.srv.SetConnectionsMarkProvider(func(ctx context.Context) (string, bool) {
 		st, err := routerSvc.GetStatus(ctx)
-		if err != nil || !st.Active || st.PolicyMark == "" {
+		if err != nil || !st.Enabled || st.PolicyMark == "" {
 			return "", false
 		}
 		return st.PolicyMark, true
@@ -513,30 +501,6 @@ func (a *app) setupRouter() {
 	a.srv.SetSubscriptionHandler(subHandler)
 	a.srv.AddShutdownHook(subSched.Stop)
 
-	if a.wdttService != nil && a.ndmsCommands != nil {
-		policyMarks := &policyTableAdapter{marks: ndmsquery.NewPolicyMarkStore(a.ndmsTransportClient, nil)}
-		a.wdttService.SetNDMSInterfaceCommands(a.ndmsCommands.Interfaces)
-		a.wdttService.SetOpkgTunIndexLister(&routerOpkgTunIndexAdapter{
-			store: a.ndmsQueries.Interfaces,
-			log:   logging.NewScopedLogger(a.loggingService, logging.GroupRouting, "wdtt"),
-		})
-		a.wdttService.SetOpkgTunExistChecker(&opkgTunExistAdapter{store: a.ndmsQueries.Interfaces})
-		a.wdttService.SetOpkgTunScanner(opkgTunScanner(a.ndmsQueries.Interfaces))
-		a.wdttService.SetRouterReconciler(routerSvc)
-		a.wdttService.SetClientRouteHooks(a.clientRouteService)
-		a.wdttService.SetNDMSPolicyRouting(
-			a.ndmsCommands.Policies,
-			a.ndmsQueries.Policies,
-			policyMarks,
-		)
-		a.wdttService.SetPolicyMarkGetter(policyMarks)
-		a.wdttService.SetIngressRefEnsurer(&wdttIngressEnsurer{
-			settings: a.settingsStore,
-			router:   routerSvc,
-		})
-		a.accessPolicySvc.SetOpkgPolicyRouteSyncer(a.wdttService)
-	}
-
 }
 
 // setupListen wires DNS rewrites, selects the HTTP port, applies the
@@ -545,17 +509,20 @@ func (a *app) setupListen() {
 	// DNS Rewrites — sing-box slot 17-dns-rewrites.json.
 	dnsRewriteStorePath := filepath.Join(a.dataDir, "dns_rewrites.json")
 	dnsRewriteStore := storage.NewDNSRewriteStore(dnsRewriteStorePath)
-	dnsRewriteSvc := dnsrewrite.NewService(dnsRewriteStore, &dnsRewriteOrchAdapter{orch: a.sbOrch}, a.eventBus)
+	dnsRewriteSvc := dnsrewrite.NewService(dnsRewriteStore, &dnsRewriteOrchAdapter{orch: a.sbOrch})
 	if err := dnsRewriteSvc.Resync(); err != nil {
 		a.bootLog.Warn("dnsrewrite-resync", "", err.Error())
 	}
 	a.srv.SetDNSRewritesHandler(api.NewDNSRewritesHandler(dnsRewriteSvc, a.loggingService))
-	// keendns preset → managed DNS rewrite (own FQDN → LAN), not iptables
-	// /32 for 78.47.125.180 (that IP is shared with every other KeenDNS host).
+	// keendns preset → имена KeenDNS резолвит сам роутер, а его адреса идут
+	// мимо sing-box. Прежняя подмена FQDN на LAN IP ломала доступ к морде
+	// роутера по имени KeenDNS (issue #729).
 	if a.routerSvc != nil {
 		a.routerSvc.SetKeenDNSPreset(
-			&keenDNSDomainAdapter{store: a.ndmsQueries.KeenDNS},
-			keenDNSLANAdapter{},
+			keenDNSInfoAdapter{
+				keendns:  a.ndmsQueries.KeenDNS,
+				dnsProxy: a.ndmsQueries.DNSProxyStatus,
+			},
 			dnsRewriteSvc,
 		)
 		// Догоняющий sync: startup-Reconcile (setupRouter) стартовал раньше
@@ -564,7 +531,7 @@ func (a *app) setupListen() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			a.routerSvc.SyncKeenDNSRewrites(ctx)
+			a.routerSvc.SyncKeenDNSPreset(ctx)
 		}()
 	}
 
@@ -585,8 +552,15 @@ func (a *app) setupListen() {
 	// Persist actual port in settings so postinst / status / hooks show the right URL.
 	if selectedPort != a.settings.Server.Port {
 		fmt.Fprintf(os.Stderr, "Warning: port %d occupied, using port %d\n", a.settings.Server.Port, selectedPort)
-		a.settings.Server.Port = selectedPort
-		_ = a.settingsStore.Save(a.settings)
+		_ = a.settingsStore.Update(func(cur *storage.Settings) error {
+			cur.Server.Port = selectedPort
+			return nil
+		})
+		// Update публикует новую запись — прежний указатель на неё уже не
+		// смотрит, а ниже по проводке настройки читают именно через него.
+		if refreshed, err := a.settingsStore.Get(); err == nil {
+			a.settings = refreshed
+		}
 	}
 
 	// Bind-адреса применяет мультилистенер-менеджер (server/listen.go):
@@ -605,7 +579,10 @@ func (a *app) setupListen() {
 		&runningTunnelAdapter{svc: a.tunnelService},
 		a.loggingService,
 	)
-	dnsCheckService.EnsureIPHost(context.Background())
+	// Запись пробы живёт только на время проверки (её заводит Start). Здесь
+	// снимаем остаток: от демона, убитого внутри этого окна, и от прежних
+	// версий, которые держали её постоянно (#942).
+	_ = dnsCheckService.RemoveProbeHost(context.Background())
 	a.srv.SetDnsCheckService(dnsCheckService)
 
 	logStartup(a.bootLog, version, string(osdetect.Get()),
@@ -618,27 +595,24 @@ func (a *app) setupListen() {
 func (a *app) setupShutdown() {
 	// Shutdown context — cancelled on shutdown
 	a.shutdownCtx, a.shutdownCancel = context.WithCancel(context.Background())
+	// Отложенный бут приезжает из горутины хука с её 60-секундным дедлайном;
+	// исполнять его надо под жизнью демона, иначе бут на нескольких туннелях
+	// обрывается посередине и повтора не будет.
+	a.orch.SetBaseContext(a.shutdownCtx)
 	a.deferOnExit(a.shutdownCancel)
 
 	// Start the monitoring scheduler now that shutdownCtx exists.
 	a.monitoringService.Start(a.shutdownCtx)
-	// Re-apply WDTT entware iptables NAT — sing-box router reconcile can flush rules.
-	a.wdttService.StartNATReconciler(a.shutdownCtx)
-	// Супервизор гейтится теми же условиями, что и автостарт прокси-клиентов:
-	// boot-фазы (NDMS/WAN/DNS) и маркер post-restore. Без гейта его первый тик
-	// поднимал бы клиентов раньше резолвера и вопреки восстановлению из архива.
-	proxyReady := func() bool {
-		return atomic.LoadInt32(&a.bootDone) == 1 && !backup.HasPostRestoreMarker(a.dataDir)
-	}
-	a.freeturnService.StartSupervisor(a.shutdownCtx, proxyReady)
-	a.wdttService.StartSupervisor(a.shutdownCtx, proxyReady)
-	// Re-apply FreeTurn/WDTT listen-port INPUT rules after iptables flushes.
-	listenfirewall.StartReconciler(a.shutdownCtx, func() []listenfirewall.PortSpec {
-		var out []listenfirewall.PortSpec
-		out = append(out, a.freeturnService.RunningServerListenPorts()...)
-		out = append(out, a.wdttService.RunningServerListenPorts()...)
-		return listenfirewall.MergePortSpecs(out)
-	})
+	// Прокси-рантайм. Точка встраивания выбрана здесь, а не сразу за
+	// присвоением a.routerSvc: ingress-адаптер сервера действительно требует
+	// готового router-сервиса, но замыкания проводки держат ДОЛГОЖИВУЩИЙ
+	// контекст, а он появляется строкой выше. Обе поверхности регистрируются
+	// до srv.Start, где строятся маршруты.
+	//
+	// Старый listenfirewall.StartReconciler снят здесь же (а не в задаче
+	// снятия старого движка): его первый холостой тик — Reconcile(nil), то
+	// есть разом закрытые порты нового мира и снятый хук.
+	a.wireProxyrt()
 
 	// Register shutdown hooks for graceful cleanup before syscall.Exec restart.
 	a.srv.AddShutdownHook(a.shutdownCancel)
@@ -646,8 +620,12 @@ func (a *app) setupShutdown() {
 		if !backup.HasPostRestoreMarker(a.dataDir) {
 			return
 		}
-		a.freeturnService.Stop()
-		a.wdttService.Stop()
+		// Воркеры снимаются ДО добивания процессов: живой воркер поднял бы
+		// убитый инстанс обратно, и восстановленный конфиг стартовал бы
+		// поверх старого поколения.
+		if a.proxyMgr != nil {
+			a.proxyMgr.Shutdown()
+		}
 		backup.KillOrphanProxyProcesses(filepath.Join(a.dataDir, "run"))
 	})
 	// Intentionally NOT removing kmod proxy slots on restart: the
@@ -665,6 +643,12 @@ func (a *app) setupShutdown() {
 	a.srv.AddShutdownHook(a.geoRefreshScheduler.Stop)
 	a.srv.AddShutdownHook(a.routerScheduler.Stop)
 	a.srv.AddShutdownHook(a.sessionStore.Stop)
+	// Фоновые горутины с владельцем-демоном: debounce-reload sing-box, страж
+	// endpoint'ов NativeWG, инвалидатор кэша состояний — до остановки NDMS
+	// dispatcher'а, иначе sweep/reload стучатся в уже закрытый транспорт.
+	a.srv.AddShutdownHook(a.sbOrch.Close)
+	a.srv.AddShutdownHook(a.nwgOp.Close)
+	a.srv.AddShutdownHook(a.tunnelService.Close)
 	a.srv.AddShutdownHook(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

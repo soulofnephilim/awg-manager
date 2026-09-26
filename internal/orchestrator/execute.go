@@ -2,18 +2,32 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/config"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/netutil"
 )
 
 // executeOne dispatches a single action to the appropriate executor.
+
+// persistWarn логирует провал записи runtime-полей, кроме одного законного
+// исхода: записи уже нет. На путях остановки, очистки и обхода снимка туннель
+// мог быть удалён, пока шла долгая работа снаружи лока (ровно тот случай, под
+// который заведён storage.ErrNotFound), — предупреждать тут не о чем, а Warn
+// на штатном «остановили и удалили» приучал бы не читать журнал.
+func (o *Orchestrator) persistWarn(tunnelID, what string, err error) {
+	if errors.Is(err, storage.ErrNotFound) {
+		return
+	}
+	o.appLog.Warn("persist-state", tunnelID, what+": "+err.Error())
+}
+
 func (o *Orchestrator) executeOne(ctx context.Context, action Action) error {
 	switch action.Type {
 	case ActionColdStartKernel:
@@ -32,9 +46,6 @@ func (o *Orchestrator) executeOne(ctx context.Context, action Action) error {
 		return o.executeRestoreKmod(ctx, action)
 	case ActionRestoreEndpointTracking:
 		return o.executeRestoreEndpointTracking(ctx)
-	case ActionLinkToggle:
-		// Placeholder: pingcheck calls ip link down/up directly.
-		return nil
 	case ActionReconcileKernel:
 		return o.executeReconcileKernel(ctx, action)
 	case ActionSuspendKernel:
@@ -158,7 +169,7 @@ func (o *Orchestrator) executeOne(ctx context.Context, action Action) error {
 }
 
 // executeColdStartKernel creates a kernel tunnel from scratch.
-// resolveWAN → writeConfigFile → build config → resolve endpoint IP →
+// resolveWAN → config.WriteFile → build config → resolve endpoint IP →
 // check address conflict → kernelOp.ColdStart → persist state.
 func (o *Orchestrator) executeColdStartKernel(ctx context.Context, action Action) error {
 	stored, err := o.store.Get(action.Tunnel)
@@ -177,7 +188,7 @@ func (o *Orchestrator) executeColdStartKernel(ctx context.Context, action Action
 	}
 
 	// Write config file
-	if err := writeConfigFile(stored); err != nil {
+	if err := config.WriteFile(stored); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
@@ -197,8 +208,12 @@ func (o *Orchestrator) executeColdStartKernel(ctx context.Context, action Action
 
 	// Check address conflict
 	managedIfaces := collectManagedIfaceNames(o.store)
-	if err := checkSystemAddressConflict(cfg.Address, cfg.AddressIPv6, managedIfaces); err != nil {
-		return fmt.Errorf("start %s: %w", action.Tunnel, err)
+	addrWarnings, addrErr := checkSystemAddressConflict(cfg.Address, cfg.AddressIPv6, managedIfaces)
+	for _, w := range addrWarnings {
+		o.appLog.Warn("address-conflict", action.Tunnel, w)
+	}
+	if addrErr != nil {
+		return fmt.Errorf("start %s: %w", action.Tunnel, addrErr)
 	}
 
 	// ColdStart
@@ -206,14 +221,20 @@ func (o *Orchestrator) executeColdStartKernel(ctx context.Context, action Action
 		return err
 	}
 
-	// Persist state
-	stored.Enabled = true
-	stored.ActiveWAN = resolvedWAN
-	stored.StartedAt = time.Now().UTC().Format(time.RFC3339)
-	if trackedIP := o.kernelOp.GetTrackedEndpointIP(action.Tunnel); trackedIP != "" {
-		stored.ResolvedEndpointIP = trackedIP
-	}
-	if err := o.store.Save(stored); err != nil {
+	// Persist state. Всё, что выше, шло по снимку и заняло секунды RCI —
+	// правка карточки, приехавшая за это время, лежит в записи и обязана её
+	// пережить: мутатор ставит ТОЛЬКО runtime-поля на свежее чтение.
+	trackedIP := o.kernelOp.GetTrackedEndpointIP(action.Tunnel)
+	startedAt := time.Now().UTC().Format(time.RFC3339)
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		t.Enabled = true
+		t.ActiveWAN = resolvedWAN
+		t.StartedAt = startedAt
+		if trackedIP != "" {
+			t.ResolvedEndpointIP = trackedIP
+		}
+		return nil
+	}); err != nil {
 		o.appLog.Warn("persist-state", action.Tunnel, "kernel start: "+err.Error())
 	}
 
@@ -253,11 +274,14 @@ func (o *Orchestrator) executeReconcileKernel(ctx context.Context, action Action
 	}
 
 	// Persist resolved WAN
-	stored.ActiveWAN = resolvedWAN
-	if trackedIP := o.kernelOp.GetTrackedEndpointIP(action.Tunnel); trackedIP != "" {
-		stored.ResolvedEndpointIP = trackedIP
-	}
-	if err := o.store.Save(stored); err != nil {
+	trackedIP := o.kernelOp.GetTrackedEndpointIP(action.Tunnel)
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		t.ActiveWAN = resolvedWAN
+		if trackedIP != "" {
+			t.ResolvedEndpointIP = trackedIP
+		}
+		return nil
+	}); err != nil {
 		o.appLog.Warn("persist-state", action.Tunnel, "kernel reconcile: "+err.Error())
 	}
 
@@ -283,7 +307,54 @@ func (o *Orchestrator) executeResumeKernel(ctx context.Context, action Action) e
 		return err
 	}
 	o.appLog.Info("resume", action.Tunnel, "kernel tunnel resumed")
+	o.refreshEndpointRouteAfterResume(ctx, action.Tunnel)
 	return nil
+}
+
+// refreshEndpointRouteAfterResume приводит маршрут до endpoint после возврата
+// линка.
+//
+// Resume — это ровно `ip link set up`, о маршрутах он не знает. А пока линк
+// лежал, ядро вычистило всё, что вело через этот интерфейс, включая хост-
+// маршрут до endpoint; вдобавок после передозвона (PPPoE/DHCP) шлюз может
+// оказаться другим. Раньше маршрут не переигрывался до следующего полного
+// старта туннеля.
+//
+// Канал при этом НЕ менялся: ActionResumeKernel выдаётся только туннелю с
+// явной привязкой и только когда поднялся тот же самый интерфейс
+// (canStartOnWAN). Смена канала — это ветка ISPInterface=="" → Reconcile,
+// который маршрут обновляет сам.
+//
+// Отказ не фатален — см. контракт SetupEndpointRoute; туннель уже поднят, и
+// ронять его из-за маршрута нельзя.
+func (o *Orchestrator) refreshEndpointRouteAfterResume(ctx context.Context, tunnelID string) {
+	stored, err := o.store.Get(tunnelID)
+	if err != nil || stored.Peer.Endpoint == "" {
+		return
+	}
+	resolvedWAN, err := o.resolveWAN(ctx, stored.ISPInterface)
+	if err != nil {
+		o.appLog.Warn("resume", tunnelID, "маршрут до endpoint не обновлён, WAN не разрешён: "+err.Error())
+		return
+	}
+	ip, err := o.kernelOp.SetupEndpointRoute(ctx, tunnelID, stored.Peer.Endpoint,
+		o.resolveKernelDevice(resolvedWAN), resolvedWAN)
+	if err != nil {
+		o.appLog.Warn("resume", tunnelID, "маршрут до endpoint не обновлён: "+err.Error())
+		return
+	}
+	// Свежий адрес обязан осесть в записи — как это делают старт и реконсайл.
+	// Иначе следующий холодный старт засеет маршрут протухшим IP из стора
+	// (execute.go, ветка ColdStart), и туннель пойдёт через мёртвый шлюз.
+	if err := o.store.Update(tunnelID, func(t *storage.AWGTunnel) error {
+		t.ActiveWAN = resolvedWAN
+		if ip != "" {
+			t.ResolvedEndpointIP = ip
+		}
+		return nil
+	}); err != nil {
+		o.persistWarn(tunnelID, "resume endpoint route", err)
+	}
 }
 
 // executeStartNativeWG starts a NativeWG tunnel via the NWG operator.
@@ -307,16 +378,30 @@ func (o *Orchestrator) executeStartNativeWG(ctx context.Context, action Action) 
 	// matching what /etc/ndm/iflayerchanged.d/50-awg-manager.sh sends in
 	// WAN events. Empty result preserves the previous ActiveWAN — protects
 	// against transient RCI failure when re-starting an already-running tunnel.
-	stored.Enabled = true
-	stored.StartedAt = time.Now().UTC().Format(time.RFC3339)
-	if activeWAN := o.nwgOp.ResolveActiveWAN(ctx, stored); activeWAN != "" {
-		stored.ActiveWAN = activeWAN
-	}
-	if err := o.store.Save(stored); err != nil {
+	activeWAN := o.nwgOp.ResolveActiveWAN(ctx, stored)
+	// Адрес — в ту же транзакцию: ActionPersistRunning доедет лишь через
+	// несколько действий, а до тех пор соседний туннель с тем же target
+	// читает из стора прежний адрес и решает по нему, чей это host-route.
+	trackedIP := o.nwgOp.GetTrackedEndpointIP(action.Tunnel)
+	startedAt := time.Now().UTC().Format(time.RFC3339)
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		t.Enabled = true
+		t.StartedAt = startedAt
+		if activeWAN != "" {
+			t.ActiveWAN = activeWAN
+		}
+		if trackedIP != "" {
+			t.ResolvedEndpointIP = trackedIP
+		}
+		return nil
+	}); err != nil {
 		o.appLog.Warn("persist-state", action.Tunnel, "nwg start: "+err.Error())
 	}
 
-	wan := stored.ActiveWAN
+	wan := activeWAN
+	if wan == "" {
+		wan = stored.ActiveWAN
+	}
 	if wan == "" {
 		wan = "unknown"
 	}
@@ -371,11 +456,12 @@ func (o *Orchestrator) executeStopKernel(ctx context.Context, action Action) err
 
 	// Clear runtime-only fields. User intent (Enabled=false) is persisted by
 	// ActionPersistStopped; restart/reconnect paths deliberately omit it.
-	stored, err := o.store.Get(action.Tunnel)
-	if err == nil {
-		stored.ActiveWAN = ""
-		stored.StartedAt = ""
-		_ = o.store.Save(stored)
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		t.ActiveWAN = ""
+		t.StartedAt = ""
+		return nil
+	}); err != nil {
+		o.persistWarn(action.Tunnel, "kernel stop", err)
 	}
 
 	o.appLog.Info("stop", action.Tunnel, "kernel tunnel stopped")
@@ -399,9 +485,13 @@ func (o *Orchestrator) executeStopNativeWG(ctx context.Context, action Action) e
 
 	// Clear runtime-only fields. User intent (Enabled=false) is persisted by
 	// ActionPersistStopped; restart/reconnect paths deliberately omit it.
-	stored.ActiveWAN = ""
-	stored.StartedAt = ""
-	_ = o.store.Save(stored)
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		t.ActiveWAN = ""
+		t.StartedAt = ""
+		return nil
+	}); err != nil {
+		o.persistWarn(action.Tunnel, "nwg stop", err)
+	}
 
 	o.appLog.Info("stop", action.Tunnel, "NativeWG tunnel stopped")
 	return nil
@@ -440,21 +530,30 @@ func (o *Orchestrator) executeRestoreKmod(ctx context.Context, action Action) er
 	//  - ActiveWAN: at boot NDMS may have picked a different WAN than stored.
 	//  - ResolvedEndpointIP: RestoreKmodTunnel resolved the endpoint (or used cache);
 	//    persist a freshly-resolved IP so the next boot has a current fallback.
-	dirty := false
-	if activeWAN := o.nwgOp.ResolveActiveWAN(ctx, stored); activeWAN != "" && stored.ActiveWAN != activeWAN {
-		stored.ActiveWAN = activeWAN
-		dirty = true
+	activeWAN := o.nwgOp.ResolveActiveWAN(ctx, stored)
+	trackedIP := o.nwgOp.GetTrackedEndpointIP(action.Tunnel)
+	var wanRefreshed, ipRefreshed bool
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		wanRefreshed = activeWAN != "" && t.ActiveWAN != activeWAN
+		ipRefreshed = trackedIP != "" && t.ResolvedEndpointIP != trackedIP
+		if !wanRefreshed && !ipRefreshed {
+			return storage.ErrNoChange
+		}
+		if wanRefreshed {
+			t.ActiveWAN = activeWAN
+		}
+		if ipRefreshed {
+			t.ResolvedEndpointIP = trackedIP
+		}
+		return nil
+	}); err != nil {
+		o.persistWarn(action.Tunnel, "refresh runtime state", err)
+	}
+	if wanRefreshed {
 		o.appLog.Info("restore-kmod", action.Tunnel, fmt.Sprintf("active WAN refreshed to %s", activeWAN))
 	}
-	if trackedIP := o.nwgOp.GetTrackedEndpointIP(action.Tunnel); trackedIP != "" && trackedIP != stored.ResolvedEndpointIP {
-		stored.ResolvedEndpointIP = trackedIP
-		dirty = true
+	if ipRefreshed {
 		o.appLog.Info("restore-kmod", action.Tunnel, "resolved endpoint IP refreshed to "+trackedIP)
-	}
-	if dirty {
-		if err := o.store.Save(stored); err != nil {
-			o.appLog.Warn("persist-state", action.Tunnel, "refresh runtime state: "+err.Error())
-		}
 	}
 
 	return nil
@@ -485,28 +584,29 @@ func (o *Orchestrator) executeRestoreEndpointTracking(ctx context.Context) error
 		}
 
 		// Restore tracking (route already exists in system)
-		isp := t.ActiveWAN
-		if isp == "" {
-			// Migration: tunnel from older version without ActiveWAN
-			if resolved, err := o.resolveWAN(ctx, t.ISPInterface); err == nil {
-				isp = resolved
-			} else {
-				o.appLog.Warn("resolve-wan", t.ID, "no stored ActiveWAN: "+err.Error())
-			}
-		}
-		ip, err := o.kernelOp.RestoreEndpointTracking(ctx, t.ID, t.Peer.Endpoint, isp)
+		ip, err := o.kernelOp.RestoreEndpointTracking(ctx, t.ID, t.Peer.Endpoint)
 		if err != nil {
 			o.appLog.Warn("restore-endpoint-tracking", t.ID, err.Error())
 			continue
 		}
 
-		// Migration: fill ResolvedEndpointIP for tunnels from older versions
+		// Migration: fill ResolvedEndpointIP for tunnels from older versions.
+		// Снимок List — только дешёвый гейт; решает свежая запись в мутаторе.
 		if ip != "" && t.ResolvedEndpointIP == "" {
-			t.ResolvedEndpointIP = ip
-			if err := o.store.Save(&t); err != nil {
-				o.appLog.Warn("persist-state", t.ID, "endpoint IP: "+err.Error())
+			migrated := false
+			if err := o.store.Update(t.ID, func(fresh *storage.AWGTunnel) error {
+				if fresh.ResolvedEndpointIP != "" {
+					return storage.ErrNoChange
+				}
+				fresh.ResolvedEndpointIP = ip
+				migrated = true
+				return nil
+			}); err != nil {
+				o.persistWarn(t.ID, "endpoint IP", err)
 			}
-			o.appLog.Info("migrate", t.ID, "persisted resolved endpoint IP "+ip)
+			if migrated {
+				o.appLog.Info("migrate", t.ID, "persisted resolved endpoint IP "+ip)
+			}
 		}
 		restored++
 	}
@@ -526,7 +626,16 @@ func (o *Orchestrator) executeRestoreEndpointTracking(ctx context.Context) error
 		stateInfo := o.stateMgr.GetState(ctx, t.ID)
 		if !stateInfo.ProcessRunning {
 			o.appLog.Info("clear-stale-state", t.ID, "process dead")
-			o.store.ClearRuntimeState(t.ID)
+			if err := o.store.Update(t.ID, func(fresh *storage.AWGTunnel) error {
+				if fresh.ActiveWAN == "" && fresh.StartedAt == "" {
+					return storage.ErrNoChange
+				}
+				fresh.ActiveWAN = ""
+				fresh.StartedAt = ""
+				return nil
+			}); err != nil {
+				o.persistWarn(t.ID, "clear stale runtime state", err)
+			}
 		}
 	}
 
@@ -544,14 +653,12 @@ func (o *Orchestrator) executeDeleteKernel(ctx context.Context, action Action) e
 		return err
 	}
 
-	confPath := tunnel.NewNames(action.Tunnel).ConfPath
-	_ = os.Remove(confPath)
+	config.RemoveFile(action.Tunnel)
 
 	if err := o.store.Delete(action.Tunnel); err != nil {
 		return fmt.Errorf("delete from storage: %w", err)
 	}
 
-	o.cleanupTunnelLock(action.Tunnel)
 	o.appLog.Info("delete", action.Tunnel, "kernel tunnel deleted")
 	return nil
 }
@@ -571,14 +678,12 @@ func (o *Orchestrator) executeDeleteNativeWG(ctx context.Context, action Action)
 		return err
 	}
 
-	confPath := filepath.Join(confDir, stored.ID+".conf")
-	_ = os.Remove(confPath)
+	config.RemoveFile(stored.ID)
 
 	if err := o.store.Delete(action.Tunnel); err != nil {
 		return fmt.Errorf("delete from storage: %w", err)
 	}
 
-	o.cleanupTunnelLock(action.Tunnel)
 	o.appLog.Info("delete", action.Tunnel, "NativeWG tunnel deleted")
 	return nil
 }
@@ -591,10 +696,6 @@ func (o *Orchestrator) executePersistRunning(action Action) error {
 		return tunnel.ErrNotFound
 	}
 
-	stored.Enabled = true
-	if stored.StartedAt == "" {
-		stored.StartedAt = time.Now().UTC().Format(time.RFC3339)
-	}
 	var trackedIP string
 	if stored.Backend == "nativewg" {
 		if o.nwgOp != nil {
@@ -603,11 +704,18 @@ func (o *Orchestrator) executePersistRunning(action Action) error {
 	} else if o.kernelOp != nil {
 		trackedIP = o.kernelOp.GetTrackedEndpointIP(action.Tunnel)
 	}
-	if trackedIP != "" {
-		stored.ResolvedEndpointIP = trackedIP
-	}
+	startedAt := time.Now().UTC().Format(time.RFC3339)
 
-	if err := o.store.Save(stored); err != nil {
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		t.Enabled = true
+		if t.StartedAt == "" {
+			t.StartedAt = startedAt
+		}
+		if trackedIP != "" {
+			t.ResolvedEndpointIP = trackedIP
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("persist running state: %w", err)
 	}
 	return nil
@@ -615,26 +723,76 @@ func (o *Orchestrator) executePersistRunning(action Action) error {
 
 // executePersistStopped clears runtime state for a stopped tunnel.
 func (o *Orchestrator) executePersistStopped(action Action) error {
-	stored, err := o.store.Get(action.Tunnel)
-	if err != nil {
-		return tunnel.ErrNotFound
-	}
-
-	stored.Enabled = false
-	stored.ActiveWAN = ""
-	stored.StartedAt = ""
-
-	if err := o.store.Save(stored); err != nil {
+	if err := o.store.Update(action.Tunnel, func(t *storage.AWGTunnel) error {
+		t.Enabled = false
+		t.ActiveWAN = ""
+		t.StartedAt = ""
+		return nil
+	}); err != nil {
 		return fmt.Errorf("persist stopped state: %w", err)
 	}
 	return nil
 }
 
+// hostIface — интерфейс хоста в том виде, в каком его читает проверка
+// конфликта адресов: имя, состояние и уже разобранные адреса.
+//
+// Шов отдаёт ГОТОВЫЕ адреса, а не net.Interface, и это не украшательство:
+// Addrs() у net.Interface ходит в ядро по индексу, подменить его тестом
+// нечем, поэтому прежний шов умел ровно одно — «пустой список». Обе ветки
+// severity ниже при таком шве непроверяемы, а цена ошибки в них — либо
+// невидимый конфликт адресов, либо туннель, который перестал стартовать.
+type hostIface struct {
+	Name  string
+	Up    bool
+	Addrs []string
+}
+
+// listInterfaces — шов над net.Interfaces: тесты подставляют свой список,
+// иначе проверка конфликта адресов читает интерфейсы хоста разработчика.
+var listInterfaces = hostInterfaces
+
+// hostInterfaces — прод-половина шва. Петля отсеивается здесь, чтобы у
+// проверки остался один смысл на функцию.
+func hostInterfaces() ([]hostIface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]hostIface, 0, len(ifaces))
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		ips := make([]string, 0, len(addrs))
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok {
+				ips = append(ips, ipNet.IP.String())
+			}
+		}
+		out = append(out, hostIface{Name: iface.Name, Up: iface.Flags&net.FlagUp != 0, Addrs: ips})
+	}
+	return out, nil
+}
+
 // checkSystemAddressConflict checks if ipv4 or ipv6 is already assigned to any
 // system network interface. excludeIfaceNames are excluded from the check.
-func checkSystemAddressConflict(ipv4, ipv6 string, excludeIfaceNames []string) error {
+//
+// Severity разведена по состоянию чужого интерфейса, и это не косметика.
+// Погашенный интерфейс адрес ДЕРЖИТ — с точки зрения занятости он ничем не
+// отличается от поднятого, и прежний пропуск не-UP делал конфликт невидимым
+// ровно до момента, когда сирота поднимется (сирота opkgtun10 с адресом живого
+// opkgtun13 в дампе с роутера). Но поднятым он станет не сейчас, а отказать
+// сейчас значит уронить туннель, который до обновления работал. Поэтому:
+// поднятый чужой интерфейс — отказ, погашенный — предупреждение вызывающему,
+// и старт продолжается.
+func checkSystemAddressConflict(ipv4, ipv6 string, excludeIfaceNames []string) (warnings []string, err error) {
 	if ipv4 == "" && ipv6 == "" {
-		return nil
+		return nil, nil
 	}
 
 	excludeSet := make(map[string]struct{}, len(excludeIfaceNames))
@@ -642,42 +800,31 @@ func checkSystemAddressConflict(ipv4, ipv6 string, excludeIfaceNames []string) e
 		excludeSet[name] = struct{}{}
 	}
 
-	ifaces, err := net.Interfaces()
+	ifaces, err := listInterfaces()
 	if err != nil {
-		return nil // can't check — don't block start
+		return nil, nil // can't check — don't block start
 	}
 
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
 		if _, ok := excludeSet[iface.Name]; ok {
 			continue
 		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
+		for _, ip := range iface.Addrs {
+			taken := ""
+			switch {
+			case ipv4 != "" && ip == ipv4:
+				taken = ipv4
+			case ipv6 != "" && ip == ipv6:
+				taken = ipv6
+			default:
 				continue
 			}
-			ip := ipNet.IP.String()
-
-			if ipv4 != "" && ip == ipv4 {
-				return fmt.Errorf("%w: address %s already assigned to interface %s", tunnel.ErrAddressInUse, ipv4, iface.Name)
+			if iface.Up {
+				return warnings, fmt.Errorf("%w: address %s already assigned to interface %s", tunnel.ErrAddressInUse, taken, iface.Name)
 			}
-			if ipv6 != "" && ip == ipv6 {
-				return fmt.Errorf("%w: address %s already assigned to interface %s", tunnel.ErrAddressInUse, ipv6, iface.Name)
-			}
+			warnings = append(warnings, fmt.Sprintf("address %s is also assigned to %s (interface is down); it will collide if that interface comes up", taken, iface.Name))
 		}
 	}
 
-	return nil
+	return warnings, nil
 }

@@ -79,7 +79,7 @@ func TestInterfaceCommandsPayloads_AddressAndIPv6(t *testing.T) {
 		t.Fatalf("SetIPv6Address: %v", err)
 	}
 	requireJSONEqual(t, poster.Payloads()[2], `{
-		"interface":{"OpkgTun10":{"ipv6":{"address":[{},{"block":"fd00::1/128"}]}}}
+		"interface":{"OpkgTun10":{"ipv6":{"address":[{"no":true},{"block":"fd00::1/128"}]}}}
 	}`)
 
 	if err := cmds.ClearIPv6Address(context.Background(), "OpkgTun10"); err != nil {
@@ -107,4 +107,18 @@ func TestInterfaceCommandsPayloads_DNS(t *testing.T) {
 	if err := cmds.ClearDNS(context.Background(), "OpkgTun10", []string{"1.1.1.1", "8.8.8.8"}); err != nil {
 		t.Fatalf("ClearDNS: %v", err)
 	}
+}
+
+// Снятие `ip global` идёт parse-формой: JSON-обёртки у обратной команды нет,
+// форма снята со стенда 5.01 2026-09-06 («global priority cleared»).
+func TestClearIPGlobal_ParseForm(t *testing.T) {
+	cmds, poster, _, _, _ := newTestInterfaceCommands(t)
+
+	if err := cmds.ClearIPGlobal(context.Background(), "OpkgTun10"); err != nil {
+		t.Fatalf("ClearIPGlobal: %v", err)
+	}
+	if len(poster.Payloads()) != 1 {
+		t.Fatalf("payloads: want 1, got %d", len(poster.Payloads()))
+	}
+	requireJSONEqual(t, poster.Payloads()[0], `{"parse": "interface OpkgTun10 no ip global"}`)
 }

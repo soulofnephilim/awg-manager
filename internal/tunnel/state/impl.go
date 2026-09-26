@@ -10,7 +10,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
-	"github.com/hoaxisr/awg-manager/internal/tunnel/backend"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wg"
 )
 
@@ -19,14 +18,21 @@ import (
 // whole query store.
 //
 // Get reads cached existence (1 HTTP at bootstrap, then in-memory).
-// FetchSummary issues a fresh /show/interface/<name>/summary on every
-// call — used for kernel-tunnel state determination because the
-// cached Link field can stay stale (NDMS layer hooks aren't reliable
-// for OpkgTun, see InterfaceStore.FetchSummary).
+// FetchSummary ходит к роутеру на КАЖДЫЙ вызов, мимо кэша (сегодня —
+// командой show interface через батчер, а не сырым GET) — состояние
+// kernel-туннеля определяется по нему, потому что кэшированный Link
+// протухает: хуки слоёв NDMS для OpkgTun срабатывают не всегда
+// (см. InterfaceStore.FetchSummary).
 type InterfaceQueries interface {
 	Get(ctx context.Context, name string) (*ndms.Interface, error)
 	GetDetails(ctx context.Context, name string) (*ndms.InterfaceDetails, error)
 	FetchSummary(ctx context.Context, name string) (*ndms.InterfaceDetails, error)
+}
+
+// Backend reports whether the tunnel interface is up.
+// Implemented by *backend.KernelBackend; an interface for test doubles.
+type Backend interface {
+	IsRunning(ctx context.Context, ifaceName string) (running bool, pid int)
 }
 
 // ManagerImpl is the implementation of the state Manager.
@@ -34,16 +40,19 @@ type InterfaceQueries interface {
 type ManagerImpl struct {
 	ifaces   InterfaceQueries
 	wg       wg.Client
-	backend  backend.Backend
+	backend  Backend
 	matrixV2 StateMatrixV2
 	appLog   *logging.ScopedLogger
 	// deviceExists checks if a network device exists. Defaults to sysfs check.
 	// Override in tests where /sys/class/net is not available.
 	deviceExists func(ifaceName string) bool
+	// linkUp reports whether the interface link is up. Defaults to the sysfs
+	// operstate check; override in tests where /sys/class/net is not available.
+	linkUp func(ifaceName string) bool
 }
 
 // New creates a new StateManager.
-func New(ifaces InterfaceQueries, wgClient wg.Client, backendImpl backend.Backend, appLogger logging.AppLogger) *ManagerImpl {
+func New(ifaces InterfaceQueries, wgClient wg.Client, backendImpl Backend, appLogger logging.AppLogger) *ManagerImpl {
 	m := &ManagerImpl{
 		ifaces:   ifaces,
 		wg:       wgClient,
@@ -52,6 +61,7 @@ func New(ifaces InterfaceQueries, wgClient wg.Client, backendImpl backend.Backen
 		appLog:   logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubState),
 	}
 	m.deviceExists = m.sysfsDeviceExists
+	m.linkUp = m.sysfsLinkUp
 	return m
 }
 
@@ -68,7 +78,8 @@ func (m *ManagerImpl) GetState(ctx context.Context, tunnelID string) tunnel.Stat
 	var showInterfaceFailed bool
 	if !hasNDMS {
 		// OS4 / lightweight: check link status via sysfs operstate (fast, no NDMS)
-		linkUp = m.sysfsLinkUp(names.IfaceName)
+		linkUp = m.linkUp(names.IfaceName)
+		info.InterfaceUp = linkUp
 	} else if hasNDMS {
 		iface, err := m.ifaces.Get(ctx, names.NDMSName)
 		if err == nil && iface != nil {
@@ -76,11 +87,10 @@ func (m *ManagerImpl) GetState(ctx context.Context, tunnelID string) tunnel.Stat
 		}
 
 		if info.OpkgTunExists {
-			// Fresh /show/interface/<name>/summary on every call (direct
-			// GET, bypasses the cache). The cached Link can stay stale
-			// for OpkgTun after `ip link set up` — NDMS layer hooks
-			// don't reliably fire link=running for kernel-AWG tunnels,
-			// freezing the matrix at StateStarting for a working tunnel.
+			// Свежая сводка на каждый вызов, мимо кэша. Кэшированный Link
+			// у OpkgTun протухает после `ip link set up`: хуки слоёв NDMS
+			// не всегда шлют link=running для kernel-AWG туннелей, и
+			// матрица замирала на StateStarting у работающего туннеля.
 			details, err := m.ifaces.FetchSummary(ctx, names.NDMSName)
 			if err == nil && details != nil {
 				intent = details.Intent()
@@ -135,7 +145,7 @@ func (m *ManagerImpl) GetState(ctx context.Context, tunnelID string) tunnel.Stat
 	m.appLog.Debug("state", tunnelID, fmt.Sprintf("State resolved: %s", info.State))
 
 	// 7. Add backend type
-	info.BackendType = m.backend.Type().String()
+	info.BackendType = "kernel"
 
 	// 8. Add diagnostic details
 	info.Details = m.buildDetails(info)

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
+	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -93,9 +95,21 @@ type GeoFileSettingsDTO struct {
 	RefreshDailyTime     string `json:"refreshDailyTime" example:"03:00"`
 }
 
-// SettingsData is the payload for GET /settings/get.
+// SettingsData is the payload of every settings response (Get, Update,
+// RegenerateApiKey) — и НАСТОЯЩИЙ тип тела, а не только документация.
+//
+// Состав — белый список: каждое отдаваемое поле названо здесь и в
+// settingsResponse ровно по одному разу. Новое поле storage.Settings
+// наружу не уходит, пока его сюда не внесли: отказ закрытый по построению.
+// Так эта граница заменила вычистку секретов по именам полей, трижды
+// пропустившую настоящую утечку (структура с секретным именем и невинными
+// листьями, встроенная неэкспортированная структура, тег `json:"-,"`).
+// Состав стережёт TestSettingsResponse_TopLevelKeysAreWhitelisted.
 type SettingsData struct {
-	SchemaVersion int  `json:"schemaVersion" example:"16"`
+	// SchemaVersion повторяет тег storage.Settings ВМЕСТЕ с omitempty:
+	// страница шлёт тело ответа обратно PATCH-ем, а поле патчабельное, так
+	// что "schemaVersion":0 в ответе уехал бы в хранилище.
+	SchemaVersion int  `json:"schemaVersion,omitempty" example:"16"`
 	AuthEnabled   bool `json:"authEnabled" example:"false"`
 	// SessionTtlHours is the auth session lifetime in hours (1..720,
 	// sliding window; server-side expiry applies immediately, browser
@@ -103,7 +117,15 @@ type SettingsData struct {
 	SessionTtlHours int `json:"sessionTtlHours" example:"24" minimum:"1" maximum:"720"`
 	// EntwareAuthEnabled allows login with Entware system credentials
 	// (/opt/etc/shadow) verified locally, without the NDMS /auth call.
-	EntwareAuthEnabled        bool                 `json:"entwareAuthEnabled" example:"false"`
+	EntwareAuthEnabled bool `json:"entwareAuthEnabled" example:"false"`
+	// McpEnabled turns on the Model Context Protocol endpoint at /mcp.
+	// Off by default; keys are managed via /mcp/keys*.
+	McpEnabled bool `json:"mcpEnabled" example:"false"`
+	// ApiKey is the opaque secret accepted in place of a session cookie via
+	// `Authorization: Bearer <key>`. Отдаётся сознательно: панель настроек
+	// показывает его и даёт скопировать — ключ для того и заводится. Ротация
+	// — POST /settings/regenerate-api-key.
+	ApiKey                    string               `json:"apiKey,omitempty" example:"d2f1c0a4-5b6e-4a7c-8d9e-0f1a2b3c4d5e"`
 	Server                    ServerSettingsDTO    `json:"server"`
 	PingCheck                 PingCheckSettingsDTO `json:"pingCheck"`
 	Logging                   LoggingSettingsDTO   `json:"logging"`
@@ -121,6 +143,17 @@ type SettingsData struct {
 	// enum value over the example tag); putting `expert` first means
 	// dev:mock surfaces all advanced UI without manual toggling.
 	UsageLevel string `json:"usageLevel" example:"expert" enums:"expert,advanced,basic"`
+	// SingboxBootstrapDNS is the address of the dns-bootstrap resolver in
+	// 00-base.json — the resolver sing-box uses for domain addresses in
+	// dial fields (tunnel endpoints, subscription servers). It answers
+	// before any other resolver exists, so it must be a literal IP, no
+	// hostname and no port. Empty leaves 00-base.json untouched.
+	SingboxBootstrapDNS string `json:"singboxBootstrapDNS,omitempty" example:"8.8.8.8"`
+	// SingboxClashPort is the port of experimental.clash_api.external_controller
+	// in 00-base.json. The host is always 127.0.0.1 — Clash API is
+	// awg-manager's internal control channel, not a user-facing listener
+	// (ADR 0001). 0 means "default" (9099). Issue #788.
+	SingboxClashPort int `json:"singboxClashPort,omitempty" example:"9099"`
 }
 
 // SettingsResponse is the envelope for GET /settings/get.
@@ -151,9 +184,19 @@ type SettingsHandler struct {
 	logsSnapshot            func()
 	applyLogSettings        func()
 	applySingboxLogSettings func() error
+	applyBootstrapDNS       func(string) error
+	applyClashPort          func(int) error
+	clashPorts              clashPortInspector
 	downloadSvc             *downloader.Service
 	log                     *logging.ScopedLogger
 	bus                     *events.Bus
+	exposure                exposureChecker
+}
+
+// exposureChecker re-runs the "are we exposed without a password" check
+// after a settings save — the HTTP port may have just changed.
+type exposureChecker interface {
+	Check(ctx context.Context)
 }
 
 const settingsMonitoringRefreshTimeout = 10 * time.Second
@@ -168,6 +211,9 @@ func NewSettingsHandler(store *storage.SettingsStore, appLogger logging.AppLogge
 		log:   logging.NewScopedLogger(appLogger, logging.GroupSystem, logging.SubSettings),
 	}
 }
+
+// SetExposureGuard wires the guard re-checked after every settings save.
+func (h *SettingsHandler) SetExposureGuard(g exposureChecker) { h.exposure = g }
 
 // SetTunnelStore sets the tunnel store for ping check toggle logic.
 func (h *SettingsHandler) SetTunnelStore(tunnels *storage.AWGTunnelStore) {
@@ -203,6 +249,24 @@ func (h *SettingsHandler) SetApplySingboxLogSettings(fn func() error) {
 	h.applySingboxLogSettings = fn
 }
 
+// SetApplyBootstrapDNS wires the hook that pushes a changed dns-bootstrap
+// address into the running sing-box (issue #770).
+func (h *SettingsHandler) SetApplyBootstrapDNS(fn func(string) error) {
+	h.applyBootstrapDNS = fn
+}
+
+// SetApplyClashPort wires the hook that pushes a changed Clash API port
+// into 00-base.json and repoints our ClashClient (issue #788).
+func (h *SettingsHandler) SetApplyClashPort(fn func(int) error) {
+	h.applyClashPort = fn
+}
+
+// SetClashPortInspector wires the /proc scanner used to reject a Clash API
+// port already held by a foreign process.
+func (h *SettingsHandler) SetClashPortInspector(insp clashPortInspector) {
+	h.clashPorts = insp
+}
+
 func (h *SettingsHandler) SetDownloadService(svc *downloader.Service) {
 	h.downloadSvc = svc
 }
@@ -211,10 +275,100 @@ func (h *SettingsHandler) SetDownloadService(svc *downloader.Service) {
 // resource:invalidated hint to all connected clients.
 func (h *SettingsHandler) SetEventBus(bus *events.Bus) { h.bus = bus }
 
+// settingsResponse строит тело ответа настроек по БЕЛОМУ СПИСКУ: из
+// storage.Settings в SettingsData переносится ровно то, что названо ниже, —
+// поле за полем, без рефлексии и без «скопировать всё и снять лишнее».
+// ЕДИНСТВЕННАЯ точка сборки: её проходят все три ручки, отдающие настройки
+// (Get, Update, RegenerateApiKey).
+//
+// Цена ошибки ЗДЕСЬ — не «поле не видно в интерфейсе»: страница настроек шлёт
+// тело ответа обратно PATCH-ем, поэтому забытое или перепутанное присваивание
+// СТИРАЕТ хранимое на первом же сохранении (пропущенный authEnabled выключает
+// авторизацию панели). То же и у вложенных блоков: server, pingCheck, updates,
+// dnsRoute и geoFile патчатся ЦЕЛИКОМ (applyStructPatch), так что поле,
+// добавленное в storage-структуру и забытое в DTO, обнуляется. Стережёт
+// TestSettingsRoundTrip_ResponseBodyPatchedBack_KeepsSecrets: он заполняет
+// всё дерево настроек разными значениями и сверяет хранимое до и после
+// круговорота.
+//
+// Состав списка выведен из фактического потребления фронтом: рукописный тип
+// frontend/src/lib/types/system.ts (export interface Settings) плюс ключ API,
+// который панель показывает. Ключевой материал (AmneziaPremiumKeyCipher,
+// ServerPeerSecrets, ManagedServers/ManagedServer) и backend-managed запись
+// владения (OpkgTun, DNSChainPreset, SingboxRouter, …) сюда не входят вовсе,
+// поэтому уехать наружу им физически неоткуда.
+//
+// Аргумент только читается: DTO забирает срезы как есть (Interfaces,
+// MonitoringExcludedTunnels), но ни один писатель их не трогает, и правки по
+// месту здесь нет — живой кэш стора не пострадает и у будущего вызывающего,
+// подавшего сюда store.Get().
+func settingsResponse(s *storage.Settings) SettingsData {
+	return SettingsData{
+		SchemaVersion:      s.SchemaVersion,
+		AuthEnabled:        s.AuthEnabled,
+		SessionTtlHours:    s.SessionTtlHours,
+		EntwareAuthEnabled: s.EntwareAuthEnabled,
+		McpEnabled:         s.McpEnabled,
+		ApiKey:             s.ApiKey,
+		Server: ServerSettingsDTO{
+			Port:       s.Server.Port,
+			Interface:  s.Server.Interface,
+			Interfaces: s.Server.Interfaces,
+		},
+		PingCheck: PingCheckSettingsDTO{
+			Enabled: s.PingCheck.Enabled,
+			Defaults: PingCheckDefaultsDTO{
+				Method:        s.PingCheck.Defaults.Method,
+				Target:        s.PingCheck.Defaults.Target,
+				Interval:      s.PingCheck.Defaults.Interval,
+				DeadInterval:  s.PingCheck.Defaults.DeadInterval,
+				FailThreshold: s.PingCheck.Defaults.FailThreshold,
+			},
+		},
+		Logging: LoggingSettingsDTO{
+			Enabled:           s.Logging.Enabled,
+			MaxAge:            s.Logging.MaxAge,
+			LogLevel:          s.Logging.LogLevel,
+			SingboxLogLevel:   s.Logging.SingboxLogLevel,
+			AppMaxEntries:     s.Logging.AppMaxEntries,
+			SingboxMaxEntries: s.Logging.SingboxMaxEntries,
+		},
+		MonitoringExcludedTunnels: s.MonitoringExcludedTunnels,
+		DisableMemorySaving:       s.DisableMemorySaving,
+		Updates: UpdateSettingsDTO{
+			CheckEnabled:            s.Updates.CheckEnabled,
+			Channel:                 s.Updates.Channel,
+			AutoInstallEnabled:      s.Updates.AutoInstallEnabled,
+			AutoInstallIntervalDays: s.Updates.AutoInstallIntervalDays,
+			AutoInstallTime:         s.Updates.AutoInstallTime,
+		},
+		Download: DownloadSettingsDTO{
+			RouteTag:  s.Download.RouteTag,
+			RouteKind: s.Download.RouteKind,
+		},
+		DnsRoute: DNSRouteSettingsDTO{
+			AutoRefreshEnabled:   s.DNSRoute.AutoRefreshEnabled,
+			RefreshIntervalHours: s.DNSRoute.RefreshIntervalHours,
+			RefreshMode:          s.DNSRoute.RefreshMode,
+			RefreshDailyTime:     s.DNSRoute.RefreshDailyTime,
+		},
+		GeoFile: GeoFileSettingsDTO{
+			AutoRefreshEnabled:   s.GeoFile.AutoRefreshEnabled,
+			RefreshIntervalHours: s.GeoFile.RefreshIntervalHours,
+			RefreshMode:          s.GeoFile.RefreshMode,
+			RefreshDailyTime:     s.GeoFile.RefreshDailyTime,
+		},
+		ConnectivityCheckURL: s.ConnectivityCheckURL,
+		UsageLevel:           s.UsageLevel,
+		SingboxBootstrapDNS:  s.SingboxBootstrapDNS,
+		SingboxClashPort:     s.SingboxClashPort,
+	}
+}
+
 // Get returns current settings.
 //
 //	@Summary		Get settings
-//	@Description	Returns the full Settings object (server, pingCheck, logging, dnsRoute, managed, apiKey, ...).
+//	@Description	Returns the settings whitelist (SettingsData): server, pingCheck, logging, updates, download, dnsRoute, geoFile, apiKey and the rest of the fields the UI reads. Server-internal state (managed servers, peer secrets, sing-box router, OpkgTun ownership) is NOT part of the response.
 //	@Tags			settings
 //	@Produce		json
 //	@Security		CookieAuth
@@ -228,19 +382,21 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings, err := h.store.Get()
+	// Снапшот, а не Get(): живой объект кэша нельзя маршалить — его
+	// map-поля параллельно правят узкие мутаторы стора.
+	settings, err := h.store.Snapshot()
 	if err != nil {
 		response.Error(w, err.Error(), "SETTINGS_LOAD_ERROR")
 		return
 	}
 
-	response.Success(w, settings)
+	response.Success(w, settingsResponse(settings))
 }
 
 // Update saves settings.
 //
 //	@Summary		Update settings
-//	@Description	Persists Settings via patch semantics: any field omitted from the payload is preserved, including top-level bool flags. Send only the fields you want to change, or send the full Settings object to update everything atomically. ApiKey preserved when omitted (rotate via /settings/regenerate-api-key).
+//	@Description	Persists Settings via patch semantics: any field omitted from the payload is preserved, including top-level bool flags. Send only the fields you want to change, or send the full Settings object to update everything atomically. ApiKey preserved when omitted (rotate via /settings/regenerate-api-key). singboxRouter.routingMode and singboxRouter.enabled are ignored: the routing mode changes only via POST /singbox/router/mode, enable/disable only via the dedicated endpoints.
 //	@Tags			settings
 //	@Accept			json
 //	@Produce		json
@@ -275,123 +431,89 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if patch.ApiKey != nil && *patch.ApiKey == "" {
 		patch.ApiKey = nil
 	}
-	merged := *oldSettings
-	storage.ApplyPatch(&merged, &patch)
-	merged.PingCheck.Defaults.Target = normalizePingCheckTarget(merged.PingCheck.Defaults.Target)
-	if err := validatePingCheckTarget(merged.PingCheck.Defaults.Target); err != nil {
-		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_PING_CHECK_TARGET")
+	// Черновик: выводим желаемые настройки из текущих и патча, чтобы отдать
+	// клиенту отказ валидации ДО всякой записи. На диск уедет не он — мутатор
+	// ниже выведет запись заново, из актуального состояния стора.
+	want := *oldSettings
+	prev, dErr := h.deriveSettingsHead(&want, &patch)
+	if dErr != nil {
+		respondSettingsError(w, dErr)
 		return
 	}
-	merged.ConnectivityCheckURL = normalizeConnectivityCheckURL(merged.ConnectivityCheckURL)
-	if err := validateConnectivityCheckURL(merged.ConnectivityCheckURL); err != nil {
-		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_CONNECTIVITY_CHECK_URL")
-		return
-	}
-	merged.Download.RouteTag = strings.TrimSpace(merged.Download.RouteTag)
-	if merged.Download.RouteTag == "" {
-		merged.Download.RouteTag = "direct"
-	}
-	if merged.Download.RouteTag == "direct" {
-		merged.Download.RouteKind = "direct"
-	}
-	if patch.Download != nil && merged.Download.RouteTag != "direct" {
+
+	// Шаги деривации, ходящие наружу: проверка маршрута загрузок дёргает
+	// downloader, проверка порта Clash API сканирует /proc. Считаем их ЗДЕСЬ,
+	// между головой и хвостом — так и приоритет ошибок остаётся прежним, и
+	// хвост становится чистым, а значит исполнимым под локом стора.
+	var probes settingsProbes
+	if patch.Download != nil && want.Download.RouteTag != "direct" {
 		if h.downloadSvc == nil {
 			response.ErrorWithStatus(w, http.StatusBadRequest, "download service is not configured", "INVALID_DOWNLOAD_ROUTE")
 			return
 		}
 		info, vErr := h.downloadSvc.ValidateRoute(r.Context(), &downloader.Route{
-			Tag:  merged.Download.RouteTag,
-			Kind: strings.TrimSpace(merged.Download.RouteKind),
+			Tag:  want.Download.RouteTag,
+			Kind: strings.TrimSpace(want.Download.RouteKind),
 		})
 		if vErr != nil {
 			response.ErrorWithStatus(w, http.StatusBadRequest, vErr.Error(), "INVALID_DOWNLOAD_ROUTE")
 			return
 		}
-		merged.Download.RouteKind = strings.TrimSpace(info.Kind)
+		kind := strings.TrimSpace(info.Kind)
+		probes.downloadKind = &kind
+	}
+	if patch.SingboxClashPort != nil && prev.clashPort != want.SingboxClashPort {
+		probes.clashPortMsg = validateClashPort(want.SingboxClashPort, want.Server.Port, h.clashPorts)
 	}
 
-	// Validate session TTL ONLY when the client explicitly sends it. An
-	// unrelated save must never fail on a pre-existing zero — e.g. a downgrade
-	// rewrote settings.json at the current schemaVersion without the field, so
-	// migrateToV29 never re-ran; the stored value self-heals to the default in
-	// SettingsStore.Load. When the patch omits the field, merged.SessionTtlHours
-	// carries the (healed) existing value and needs no re-validation.
-	if patch.SessionTtlHours != nil && (merged.SessionTtlHours < storage.MinSessionTTLHours || merged.SessionTtlHours > storage.MaxSessionTTLHours) {
-		response.ErrorWithStatus(w, http.StatusBadRequest,
-			"время жизни сессии должно быть от 1 до 720 часов",
-			"INVALID_SESSION_TTL")
+	if dErr := h.deriveSettingsTail(&want, &patch, prev, probes); dErr != nil {
+		respondSettingsError(w, dErr)
 		return
-	}
-
-	// Validate usageLevel after merge. Empty merged.UsageLevel is
-	// impossible because oldSettings always carries a value (default
-	// settings populate it; migration v15 backfills it), so we only
-	// reject explicit invalid values.
-	if storage.NormalizeUsageLevel(merged.UsageLevel) != merged.UsageLevel {
-		response.ErrorWithStatus(w, http.StatusBadRequest,
-			"invalid usageLevel: must be one of basic, advanced, expert",
-			"INVALID_USAGE_LEVEL")
-		return
-	}
-	if !storage.IsValidSingboxLogLevel(merged.Logging.SingboxLogLevel) {
-		response.ErrorWithStatus(
-			w,
-			http.StatusBadRequest,
-			"invalid singboxLogLevel: must be one of trace, debug, info, warn, error, fatal, panic",
-			"INVALID_SINGBOX_LOG_LEVEL",
-		)
-		return
-	}
-	merged.Logging.SingboxLogLevel = storage.NormalizeSingboxLogLevel(merged.Logging.SingboxLogLevel)
-
-	// Validate auto-install schedule fields only when the client sent an
-	// updates block (Updates is patched as a whole struct, not per-field —
-	// mirrors DNSRoute/GeoFile/PingCheck). An omitted block leaves
-	// merged.Updates carrying the already-valid stored value.
-	if patch.Updates != nil {
-		if merged.Updates.AutoInstallIntervalDays < 1 || merged.Updates.AutoInstallIntervalDays > 30 {
-			response.ErrorWithStatus(w, http.StatusBadRequest,
-				"updates.autoInstallIntervalDays must be between 1 and 30",
-				"INVALID_AUTO_INSTALL_INTERVAL")
-			return
-		}
-		if !autoInstallTimePattern.MatchString(merged.Updates.AutoInstallTime) {
-			response.ErrorWithStatus(w, http.StatusBadRequest,
-				"updates.autoInstallTime must be in HH:MM (24h) format",
-				"INVALID_AUTO_INSTALL_TIME")
-			return
-		}
 	}
 
 	// Detect ping check toggle change before saving
 	pingCheckWasEnabled := oldSettings.PingCheck.Enabled
-	pingCheckNowEnabled := merged.PingCheck.Enabled
+	pingCheckNowEnabled := want.PingCheck.Enabled
 	toggleEnabled := !pingCheckWasEnabled && pingCheckNowEnabled
 	toggleDisabled := pingCheckWasEnabled && !pingCheckNowEnabled
 
 	// Detect logging toggle change
 	loggingWasEnabled := oldSettings.Logging.Enabled
-	loggingNowEnabled := merged.Logging.Enabled
+	loggingNowEnabled := want.Logging.Enabled
 	oldSingboxLogLevel := storage.NormalizeSingboxLogLevel(oldSettings.Logging.SingboxLogLevel)
-	newSingboxLogLevel := storage.NormalizeSingboxLogLevel(merged.Logging.SingboxLogLevel)
+	newSingboxLogLevel := storage.NormalizeSingboxLogLevel(want.Logging.SingboxLogLevel)
 	singboxLogLevelChanged := oldSingboxLogLevel != newSingboxLogLevel
 	monitoringExcludedChanged := !equalExcludedTunnelIDs(
 		oldSettings.MonitoringExcludedTunnels,
-		merged.MonitoringExcludedTunnels,
+		want.MonitoringExcludedTunnels,
 	)
 
-	// Update tunnel configs if enabling
+	// Update tunnel configs if enabling. Пишет в туннели, настройки только
+	// читает — поэтому идёт до записи и вне лока стора (по атомарной записи
+	// файла на каждый туннель).
 	if h.tunnels != nil && toggleEnabled {
-		if err := h.enablePingCheckOnAllTunnels(&merged); err != nil {
+		if err := h.enablePingCheckOnAllTunnels(&want); err != nil {
 			response.Error(w, err.Error(), "TOGGLE_ENABLE_ERROR")
 			return
 		}
 	}
 
 	// Save settings BEFORE starting monitoring (so service reads new values)
-	if err := h.store.Save(&merged); err != nil {
+	// Выводим заново под локом стора: снимок, снятый выше, устарел на всё, что
+	// узкие мутаторы записали в кэш, пока мы ходили в downloader и по туннелям.
+	// Отказ деривации здесь МАЛОВЕРОЯТЕН (узкие мутаторы валидируемых полей не
+	// пишут, а конкурентный /settings/update сам прошёл валидацию), но не
+	// невозможен для будущих писателей — поэтому отдаётся кодом поля, а не
+	// глухим SETTINGS_SAVE_ERROR (F10).
+	if err := h.store.Update(func(cur *storage.Settings) error {
+		p, err := h.deriveSettingsHead(cur, &patch)
+		if err != nil {
+			return err
+		}
+		return h.deriveSettingsTail(cur, &patch, p, probes)
+	}); err != nil {
 		h.log.Warn("settings", "", "save failed: "+err.Error())
-		response.Error(w, err.Error(), "SETTINGS_SAVE_ERROR")
+		respondSettingsError(w, err)
 		return
 	}
 
@@ -412,6 +534,29 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			"",
 			fmt.Sprintf("Sing-box log level changed: %s -> %s", oldSingboxLogLevel, newSingboxLogLevel),
 		)
+	}
+
+	if oldSettings.SingboxBootstrapDNS != want.SingboxBootstrapDNS && h.applyBootstrapDNS != nil {
+		if err := h.applyBootstrapDNS(want.SingboxBootstrapDNS); err != nil {
+			h.log.Error("singbox-bootstrap-dns", "", "failed to apply bootstrap DNS: "+err.Error())
+			response.Error(w, err.Error(), "SINGBOX_BOOTSTRAP_DNS_APPLY_ERROR")
+			return
+		}
+		h.log.Info("singbox-bootstrap-dns", "",
+			fmt.Sprintf("Sing-box bootstrap DNS changed: %s -> %s",
+				orDefaultLabel(oldSettings.SingboxBootstrapDNS), orDefaultLabel(want.SingboxBootstrapDNS)))
+	}
+
+	if oldSettings.SingboxClashPort != want.SingboxClashPort && h.applyClashPort != nil {
+		if err := h.applyClashPort(want.SingboxClashPort); err != nil {
+			h.log.Error("singbox-clash-port", "", "failed to apply clash port: "+err.Error())
+			response.Error(w, err.Error(), "SINGBOX_CLASH_PORT_APPLY_ERROR")
+			return
+		}
+		h.log.Info("singbox-clash-port", "",
+			fmt.Sprintf("Sing-box Clash API port changed: %d -> %d",
+				singbox.EffectiveClashPort(oldSettings.SingboxClashPort),
+				singbox.EffectiveClashPort(want.SingboxClashPort)))
 	}
 
 	// Handle ping check toggle AFTER settings are saved
@@ -447,60 +592,67 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		h.log.Info("pingcheck", "", "Ping Check disabled")
 	}
 
-	if oldSettings.Server.Port != merged.Server.Port {
+	if oldSettings.Server.Port != want.Server.Port {
 		h.log.Info("update", "", "Server port changed")
 	}
-	if oldSettings.AuthEnabled != merged.AuthEnabled {
-		if merged.AuthEnabled {
+	if oldSettings.AuthEnabled != want.AuthEnabled {
+		if want.AuthEnabled {
 			h.log.Info("auth", "", "Authentication enabled")
 		} else {
 			h.log.Warn("auth", "", "Authentication disabled")
 		}
 	}
-	if oldSettings.EntwareAuthEnabled != merged.EntwareAuthEnabled {
-		if merged.EntwareAuthEnabled {
+	if oldSettings.EntwareAuthEnabled != want.EntwareAuthEnabled {
+		if want.EntwareAuthEnabled {
 			h.log.Info("auth", "", "Entware authentication enabled")
 		} else {
 			h.log.Info("auth", "", "Entware authentication disabled")
 		}
 	}
-	if oldSettings.SessionTtlHours != merged.SessionTtlHours {
-		h.log.Info("auth", "", fmt.Sprintf("Session TTL changed: %dh -> %dh", oldSettings.SessionTtlHours, merged.SessionTtlHours))
+	if oldSettings.McpEnabled != want.McpEnabled {
+		if want.McpEnabled {
+			h.log.Warn("mcp", "", "MCP endpoint enabled")
+		} else {
+			h.log.Info("mcp", "", "MCP endpoint disabled")
+		}
 	}
-	if oldSettings.DisableMemorySaving != merged.DisableMemorySaving {
-		if merged.DisableMemorySaving {
+	if oldSettings.SessionTtlHours != want.SessionTtlHours {
+		h.log.Info("auth", "", fmt.Sprintf("Session TTL changed: %dh -> %dh", oldSettings.SessionTtlHours, want.SessionTtlHours))
+	}
+	if oldSettings.DisableMemorySaving != want.DisableMemorySaving {
+		if want.DisableMemorySaving {
 			h.log.Info("memory-saving", "", "Memory saving disabled")
 		} else {
 			h.log.Info("memory-saving", "", "Memory saving enabled")
 		}
 	}
-	if oldSettings.ConnectivityCheckURL != merged.ConnectivityCheckURL {
-		h.log.Info("connectivity-check", "", fmt.Sprintf("Connectivity check URL changed: %s -> %s", oldSettings.ConnectivityCheckURL, merged.ConnectivityCheckURL))
+	if oldSettings.ConnectivityCheckURL != want.ConnectivityCheckURL {
+		h.log.Info("connectivity-check", "", fmt.Sprintf("Connectivity check URL changed: %s -> %s", oldSettings.ConnectivityCheckURL, want.ConnectivityCheckURL))
 	}
-	if oldSettings.Download != merged.Download {
-		h.log.Info("download-route", "", fmt.Sprintf("Download route changed: %s -> %s", formatDownloadRoute(oldSettings.Download), formatDownloadRoute(merged.Download)))
+	if oldSettings.Download != want.Download {
+		h.log.Info("download-route", "", fmt.Sprintf("Download route changed: %s -> %s", formatDownloadRoute(oldSettings.Download), formatDownloadRoute(want.Download)))
 	}
-	if oldSettings.UsageLevel != merged.UsageLevel {
-		h.log.Info("usage-level", "", fmt.Sprintf("Usage level changed: %s -> %s", oldSettings.UsageLevel, merged.UsageLevel))
+	if oldSettings.UsageLevel != want.UsageLevel {
+		h.log.Info("usage-level", "", fmt.Sprintf("Usage level changed: %s -> %s", oldSettings.UsageLevel, want.UsageLevel))
 	}
 	// Сравниваем отрендеренные расписания, а не структуры: правка поля,
 	// не влияющего на действующее расписание (интервал при выключенном
 	// авто-обновлении), не должна давать строку «off -> off».
 	if from, to := formatRefreshSchedule(oldSettings.DNSRoute.AutoRefreshEnabled, oldSettings.DNSRoute.RefreshMode, oldSettings.DNSRoute.RefreshIntervalHours, oldSettings.DNSRoute.RefreshDailyTime),
-		formatRefreshSchedule(merged.DNSRoute.AutoRefreshEnabled, merged.DNSRoute.RefreshMode, merged.DNSRoute.RefreshIntervalHours, merged.DNSRoute.RefreshDailyTime); from != to {
+		formatRefreshSchedule(want.DNSRoute.AutoRefreshEnabled, want.DNSRoute.RefreshMode, want.DNSRoute.RefreshIntervalHours, want.DNSRoute.RefreshDailyTime); from != to {
 		h.log.Info("dns-route-schedule", "", fmt.Sprintf("DNS route auto-refresh schedule changed: %s -> %s", from, to))
 	}
 	if from, to := formatRefreshSchedule(oldSettings.GeoFile.AutoRefreshEnabled, oldSettings.GeoFile.RefreshMode, oldSettings.GeoFile.RefreshIntervalHours, oldSettings.GeoFile.RefreshDailyTime),
-		formatRefreshSchedule(merged.GeoFile.AutoRefreshEnabled, merged.GeoFile.RefreshMode, merged.GeoFile.RefreshIntervalHours, merged.GeoFile.RefreshDailyTime); from != to {
+		formatRefreshSchedule(want.GeoFile.AutoRefreshEnabled, want.GeoFile.RefreshMode, want.GeoFile.RefreshIntervalHours, want.GeoFile.RefreshDailyTime); from != to {
 		h.log.Info("geo-file-schedule", "", fmt.Sprintf("Geo file auto-refresh schedule changed: %s -> %s", from, to))
 	}
-	if oldSettings.Logging.MaxAge != merged.Logging.MaxAge {
-		h.log.Info("logging", "", fmt.Sprintf("Log max age changed: %dh -> %dh", oldSettings.Logging.MaxAge, merged.Logging.MaxAge))
+	if oldSettings.Logging.MaxAge != want.Logging.MaxAge {
+		h.log.Info("logging", "", fmt.Sprintf("Log max age changed: %dh -> %dh", oldSettings.Logging.MaxAge, want.Logging.MaxAge))
 	}
-	if oldSettings.Logging.AppMaxEntries != merged.Logging.AppMaxEntries || oldSettings.Logging.SingboxMaxEntries != merged.Logging.SingboxMaxEntries {
+	if oldSettings.Logging.AppMaxEntries != want.Logging.AppMaxEntries || oldSettings.Logging.SingboxMaxEntries != want.Logging.SingboxMaxEntries {
 		h.log.Info("logging", "", fmt.Sprintf("Log max entries changed: app %d -> %d, singbox %d -> %d",
-			oldSettings.Logging.AppMaxEntries, merged.Logging.AppMaxEntries,
-			oldSettings.Logging.SingboxMaxEntries, merged.Logging.SingboxMaxEntries))
+			oldSettings.Logging.AppMaxEntries, want.Logging.AppMaxEntries,
+			oldSettings.Logging.SingboxMaxEntries, want.Logging.SingboxMaxEntries))
 	}
 
 	if h.pingCheckSnapshot != nil && (toggleEnabled || toggleDisabled) {
@@ -510,8 +662,24 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		h.logsSnapshot()
 	}
 
-	response.Success(w, merged)
-	publishInvalidated(h.bus, ResourceSettings, "updated")
+	// Наружу отдаём снапшот, а не want: Update опубликовал запись, выведенную
+	// из актуального состояния, и она может отличаться от черновика полями,
+	// которые этот путь не трогает. Черновик — запасной вариант на отказ
+	// снапшота. Вычистка одна на обе ветки: отдельный вызов на запасной
+	// ветке некому было бы держать красным — через HTTP она недостижима.
+	out, err := h.store.Snapshot()
+	if err != nil {
+		out = &want
+	}
+	response.Success(w, settingsResponse(out))
+	h.bus.PublishInvalidated(events.ResourceSettings, "updated")
+
+	// Порт мог смениться — перепроверяем экспозицию. В горутине с
+	// собственным контекстом: проверка ходит в NDMS, а контекст запроса
+	// умирает вместе с ответом.
+	if h.exposure != nil {
+		go h.exposure.Check(context.Background())
+	}
 }
 
 // RegenerateApiKey generates a fresh UUID v4 server-side, persists it
@@ -541,20 +709,19 @@ func (h *SettingsHandler) RegenerateApiKey(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	settings, err := h.store.Get()
+	if err := h.store.SetApiKey(key); err != nil {
+		response.Error(w, err.Error(), "SETTINGS_SAVE_ERROR")
+		return
+	}
+	settings, err := h.store.Snapshot()
 	if err != nil {
 		response.Error(w, err.Error(), "SETTINGS_LOAD_ERROR")
 		return
 	}
-	settings.ApiKey = key
-	if err := h.store.Save(settings); err != nil {
-		response.Error(w, err.Error(), "SETTINGS_SAVE_ERROR")
-		return
-	}
 
 	h.log.Info("api-key", "", "API key regenerated")
-	response.Success(w, settings)
-	publishInvalidated(h.bus, ResourceSettings, "api-key-rotated")
+	response.Success(w, settingsResponse(settings))
+	h.bus.PublishInvalidated(events.ResourceSettings, "api-key-rotated")
 }
 
 // generateUUIDv4 produces an RFC 4122 v4 UUID using crypto/rand.
@@ -674,23 +841,43 @@ func (h *SettingsHandler) enablePingCheckOnAllTunnels(settings *storage.Settings
 
 	defaults := settings.PingCheck.Defaults
 	for i := range tunnels {
-		tunnel := &tunnels[i]
-		if tunnel.PingCheck == nil {
-			tunnel.PingCheck = &storage.TunnelPingCheck{
-				Enabled:       true,
-				Method:        defaults.Method,
-				Target:        defaults.Target,
-				Interval:      defaults.Interval,
-				DeadInterval:  defaults.DeadInterval,
-				FailThreshold: defaults.FailThreshold,
-				MinSuccess:    1,
-				Timeout:       5,
-				Restart:       true,
-			}
-		} else {
-			tunnel.PingCheck.Enabled = true
+		// Снимок List выбирает, по каким id идти; решение о записи каждый
+		// мутатор принимает заново по свежей записи под локом.
+		if tunnels[i].Backend == backendWdttRaw {
+			continue
 		}
-		if err := h.tunnels.Save(tunnel); err != nil {
+		err := h.tunnels.Update(tunnels[i].ID, func(t *storage.AWGTunnel) error {
+			// Зеркальные записи прокси-выходов — не наши туннели, а проекции
+			// инстансов: «включить на всех туннелях» не должно заводить
+			// измерение там, где пользователь его не выбирал. Своя настройка
+			// у них есть на карточке (tunnels_crud.go, ветка backendWdttRaw).
+			// Бэкенд перепроверяется здесь: снимок List снят вне лока, и
+			// запись могла стать зеркальной, пока шёл цикл.
+			if t.Backend == backendWdttRaw {
+				return storage.ErrNoChange
+			}
+			if t.PingCheck == nil {
+				t.PingCheck = &storage.TunnelPingCheck{
+					Enabled:       true,
+					Method:        defaults.Method,
+					Target:        defaults.Target,
+					Interval:      defaults.Interval,
+					DeadInterval:  defaults.DeadInterval,
+					FailThreshold: defaults.FailThreshold,
+					MinSuccess:    1,
+					Timeout:       5,
+					Restart:       true,
+				}
+			} else {
+				t.PingCheck.Enabled = true
+			}
+			return nil
+		})
+		// Туннель удалили между List и Update — включать нечего.
+		if errors.Is(err, storage.ErrNotFound) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -705,12 +892,24 @@ func (h *SettingsHandler) disablePingCheckOnAllTunnels() error {
 	}
 
 	for i := range tunnels {
-		tunnel := &tunnels[i]
-		if tunnel.PingCheck != nil {
-			tunnel.PingCheck.Enabled = false
-			if err := h.tunnels.Save(tunnel); err != nil {
-				return err
+		if tunnels[i].Backend == backendWdttRaw {
+			continue
+		}
+		err := h.tunnels.Update(tunnels[i].ID, func(t *storage.AWGTunnel) error {
+			// Симметрично включению: чужие записи не трогаем ни в одну
+			// сторону, и бэкенд проверяем по свежей записи.
+			if t.Backend == backendWdttRaw || t.PingCheck == nil {
+				return storage.ErrNoChange
 			}
+			t.PingCheck.Enabled = false
+			return nil
+		})
+		// Туннель удалили между List и Update — выключать нечего.
+		if errors.Is(err, storage.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -753,4 +952,13 @@ func (h *SettingsHandler) triggerMonitoringRefresh() {
 		defer cancel()
 		h.monitoring.RefreshNow(ctx)
 	}()
+}
+
+// orDefaultLabel рисует пустую настройку bootstrap-DNS как «по умолчанию» —
+// в журнале пустая строка выглядела бы как потерянное значение.
+func orDefaultLabel(v string) string {
+	if v == "" {
+		return "по умолчанию"
+	}
+	return v
 }

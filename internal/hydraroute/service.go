@@ -35,6 +35,8 @@ type Service struct {
 	versionCached            string
 	versionFetchedAt         time.Time
 	versionBinaryFingerprint string
+	// probeForTest подменяет наблюдение сторожа (см. watchdog.go). Только тесты.
+	probeForTest func() ProcessState
 }
 
 const versionCacheTTL = 5 * time.Minute
@@ -54,6 +56,8 @@ func NewService(resolver KernelIfaceResolver, appLogger logging.AppLogger) *Serv
 }
 
 func (s *Service) HealInvalidRuntimeConfig() {
+	s.healBrokenDefaults()
+
 	changed, chosen, err := HealInvalidRuntimeConfig()
 	if err != nil {
 		s.appLog.Warn("config-heal", "", "failed to heal invalid config: "+err.Error())
@@ -65,6 +69,25 @@ func (s *Service) HealInvalidRuntimeConfig() {
 	s.appLog.Warn("config-heal", "IpsetMaxElem", fmt.Sprintf("invalid or duplicate IpsetMaxElem healed to %d", chosen))
 	if s.status.Installed && !s.status.Running {
 		s.scheduleRestart("config-heal")
+	}
+}
+
+// healBrokenDefaults чинит hrneo.conf, испорченный старыми дефолтами
+// AWGM (#767). Рестарт нужен всегда: демон уже прочитал испорченный
+// конфиг при своём старте, и без перезапуска правка не применится.
+func (s *Service) healBrokenDefaults() {
+	healed, err := HealBrokenDefaults()
+	if err != nil {
+		s.appLog.Warn("config-heal", "", "failed to heal AWGM defaults: "+err.Error())
+		return
+	}
+	if len(healed) == 0 {
+		return
+	}
+	s.appLog.Warn("config-heal", strings.Join(healed, ","),
+		"восстановлены встроенные дефолты HR Neo, затёртые старыми версиями AWGM")
+	if s.status.Installed {
+		s.scheduleRestart("config-heal-defaults")
 	}
 }
 

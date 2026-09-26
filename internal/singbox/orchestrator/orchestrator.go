@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -55,12 +56,31 @@ type Orchestrator struct {
 	// For T4 reload coalescing.
 	reloadTimer *time.Timer
 	reloading   bool
+	// timerWG считает прогоны callback'а reloadTimer, которые ещё не
+	// завершились (см. scheduleReload про Reset на выстрелившем таймере);
+	// Close ждёт их.
+	timerWG sync.WaitGroup
+	closed  bool // Close вызван: scheduleReload больше не взводит таймер
+
+	// holds > 0 подавляет debounce-reload: продюсер, записавший слот во время
+	// перехода режима, не должен дёргать движок посреди чужой транзакции (при
+	// живом tun на не пиннутом бинаре каждый такой reload — полный
+	// Stop+Start). Подавленная запись помечается в pendingReload и
+	// применяется одним reload'ом на release.
+	// ReloadNow под hold НЕ подавляется: он явный и сам применяет всё
+	// накопленное, поэтому сбрасывает pendingReload.
+	holds         int
+	pendingReload bool
 
 	// prevHasTun records whether the LAST applied config had a tun
 	// inbound. Reload compares it against the new config's tun presence:
-	// a toggle (added or removed) forces a restart because sing-box
-	// cannot add/remove a tun inbound via SIGHUP. Guarded by o.mu.
+	// a toggle (added or removed) forces a restart unless tunHotReload says
+	// the binary handles it via SIGHUP. Guarded by o.mu.
 	prevHasTun bool
+
+	// tunHotReload, when non-nil and true, lets a tun toggle go through
+	// SIGHUP (пиннутый бинарь, стенд 25.09.2026). Guarded by o.mu.
+	tunHotReload func() bool
 
 	// lastReloadValidation stores the ValidationResult of the most
 	// recent Reload that was SKIPPED because validateLocked failed
@@ -86,6 +106,14 @@ func (o *Orchestrator) SetLogger(fn func(level string, msg string)) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.logf = fn
+}
+
+// SetTunHotReload registers the predicate that lets a tun inbound toggle be
+// applied by SIGHUP instead of Stop+Start.
+func (o *Orchestrator) SetTunHotReload(fn func() bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.tunHotReload = fn
 }
 
 // SetShouldRun registers a predicate consulted before Reload starts a
@@ -115,8 +143,8 @@ func (o *Orchestrator) LastReloadValidation() *ValidationResult {
 }
 
 // CurrentHasTun reports whether the LAST applied config had a tun inbound.
-// Consumers (the Process reload path) use it to choose restart-over-SIGHUP:
-// sing-box cannot hot-reload a tun inbound. Safe for concurrent callers.
+// Consumers (the Process reload path) use it to choose restart-over-SIGHUP
+// for a binary that cannot hot-reload a tun inbound. Safe for concurrent callers.
 func (o *Orchestrator) CurrentHasTun() bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -137,10 +165,16 @@ func (o *Orchestrator) log(level, msg string) {
 // /opt/etc/sing-box/config.d). It does NOT touch disk — call Bootstrap
 // after construction to scan/migrate existing files.
 func New(configDir string, proc ProcessController) *Orchestrator {
+	return NewWithAppliedPath(configDir, proc, appliedStatePath)
+}
+
+// NewWithAppliedPath — New с явным путём applied-state breadcrumb'а. Тесты
+// других пакетов передают файл в t.TempDir(); прод идёт через New.
+func NewWithAppliedPath(configDir string, proc ProcessController, appliedPath string) *Orchestrator {
 	o := &Orchestrator{
 		configDir:   configDir,
 		proc:        proc,
-		appliedPath: appliedStatePath,
+		appliedPath: appliedPath,
 		slots:       make(map[Slot]SlotMeta),
 		enabled:     make(map[Slot]bool),
 	}
@@ -318,10 +352,101 @@ func (o *Orchestrator) sweepStaleTempFiles() error {
 
 // Save writes the slot's JSON atomically to whichever location matches
 // the slot's CURRENT enabled state, then schedules a debounced reload.
+//
+// Байт-в-байт та же запись reload НЕ планирует: продюсеры зовут Save
+// идемпотентно (device-proxy переписывает свой слот 8 раз за один переход
+// режима — стенд 2026-08-24, все восемь с одинаковым sha256), а при живом tun
+// каждый reload это полный Stop+Start движка. Скип-гейт по хешу в Reload такую
+// запись в итоге отсеет, но лишь ценой merged-мержа и `sing-box check` на
+// mipsel; дешевле не будить пайплайн вовсе. Гейт зеркалит уже имевшийся no-op
+// в setEnabledLocked — там повторный toggle тоже не планирует reload.
 func (o *Orchestrator) Save(slot Slot, jsonBytes []byte) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	unchanged, err := o.slotBytesUnchangedLocked(slot, jsonBytes)
+	if err != nil {
+		return err
+	}
+	if unchanged {
+		// На диске уже ровно эти байты: ни записи, ни reload'а. Гейт истинен
+		// только когда файл прочитался и совпал побайтово — отсутствие файла
+		// и любая ошибка чтения дают «изменилось», то есть запись.
+		return nil
+	}
 	if err := o.saveLocked(slot, jsonBytes); err != nil {
+		return err
+	}
+	o.scheduleReload()
+	return nil
+}
+
+// slotBytesUnchangedLocked сообщает, лежит ли на активном пути слота ровно то,
+// что собираются записать. Caller MUST hold o.mu. Отсутствие файла и любая
+// ошибка чтения — «изменилось»: пропустить нужный reload хуже, чем сделать
+// лишний. Сравнение побайтовое: продюсеры сериализуют детерминированно
+// (json.MarshalIndent по тем же структурам), поэтому нормализация не нужна.
+func (o *Orchestrator) slotBytesUnchangedLocked(slot Slot, jsonBytes []byte) (bool, error) {
+	meta, ok := o.slots[slot]
+	if !ok {
+		return false, ErrUnknownSlot
+	}
+	path := o.disabledPath(meta)
+	if o.enabled[slot] {
+		path = o.activePath(meta)
+	}
+	old, err := os.ReadFile(path)
+	if err != nil {
+		return false, nil
+	}
+	return bytes.Equal(old, jsonBytes), nil
+}
+
+// Mutate атомарно правит слот под локом: чтение с того же пути, куда пишет
+// saveLocked → мутатор → запись + debounce reload (unchanged-гейт как у Save).
+// Мутатор получает текущие байты слота и признак его наличия; nil в ответе —
+// «менять нечего», ни записи, ни reload. Ошибка мутатора отменяет запись.
+//
+// Зачем поверх Save: продюсер, читающий файл сам, а потом зовущий Save,
+// работает со снимком, взятым ВНЕ лока, — параллельная правка того же слота
+// теряется (дефект F41, 00-base.json). Приём тот же, что у
+// storage.SettingsStore.Update.
+//
+// Мутатор исполняется ПОД ЛОКОМ оркестратора: он обязан быть чистым и
+// быстрым. Любой метод оркестратора из него — дедлок (mu нерекурсивен),
+// любая блокирующая работа держит на себе всех продюсеров конфига.
+func (o *Orchestrator) Mutate(slot Slot, mut func(cur []byte, exists bool) ([]byte, error)) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	meta, ok := o.slots[slot]
+	if !ok {
+		return ErrUnknownSlot
+	}
+	path := o.disabledPath(meta)
+	if o.enabled[slot] {
+		path = o.activePath(meta)
+	}
+	cur, err := os.ReadFile(path)
+	exists := true
+	switch {
+	case os.IsNotExist(err):
+		cur, exists = nil, false
+	case err != nil:
+		// В отличие от байт-гейта Save, здесь ошибка чтения фатальна: отдать
+		// мутатору пустой cur значило бы дать ему затереть нечитаемый файл.
+		return fmt.Errorf("read %s: %w", meta.Filename, err)
+	}
+	next, err := mut(cur, exists)
+	if err != nil {
+		return err
+	}
+	if next == nil {
+		return nil
+	}
+	if exists && bytes.Equal(cur, next) {
+		// Мутатор вернул то же, что лежит на диске — см. гейт в Save.
+		return nil
+	}
+	if err := o.saveLocked(slot, next); err != nil {
 		return err
 	}
 	o.scheduleReload()
@@ -359,6 +484,37 @@ func (o *Orchestrator) saveLocked(slot Slot, jsonBytes []byte) error {
 		return fmt.Errorf("save %s: %w", slot, err)
 	}
 	return nil
+}
+
+// HoldReloads подавляет debounce-reload'ы до вызова возвращённой функции.
+// Нужен на время перехода режима: teardown и провижининг пишут слоты по
+// нескольку раз и дольше окна debounce, и без hold чужой reload прилетает
+// посреди транзакции. Возвращённый release идемпотентен (sync.Once); когда
+// снят последний hold, накопленная запись применяется одним отложенным
+// reload'ом.
+//
+// Взведённый таймер здесь НЕ отменяется: гасит себя он сам, увидев hold в
+// своём теле (см. scheduleReload). Отмена снаружи не закрывала окно между
+// срабатыванием таймера и взятием mu — Stop() в нём возвращает false, а
+// callback всё равно доходил до Reload уже под hold'ом.
+func (o *Orchestrator) HoldReloads() func() {
+	o.mu.Lock()
+	o.holds++
+	o.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			o.mu.Lock()
+			o.holds--
+			resume := o.holds == 0 && o.pendingReload
+			if resume {
+				o.pendingReload = false
+				o.scheduleReload()
+			}
+			o.mu.Unlock()
+		})
+	}
 }
 
 // SetEnabled toggles slot activity by renaming the file between

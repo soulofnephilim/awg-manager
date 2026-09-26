@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
 	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
+	"github.com/hoaxisr/awg-manager/internal/sys/appver"
 )
 
 type installerDownloaderAdapter struct {
@@ -31,6 +31,7 @@ func (a *dnsRouteDownloaderAdapter) ReadAll(
 		Timeout:       req.Timeout,
 		MaxBodyBytes:  req.MaxBodyBytes,
 		AllowedStatus: req.AllowedStatus,
+		RedirectGuard: req.RedirectGuard,
 	})
 	if err != nil {
 		return nil, dnsroute.SubscriptionDownloadMeta{}, err
@@ -45,9 +46,10 @@ func (a *installerDownloaderAdapter) DownloadFile(ctx context.Context, req insta
 
 	res, err := a.svc.DownloadFile(ctx, downloader.FileRequest{
 		Request: downloader.Request{
-			Purpose: "singbox-binary",
-			URL:     req.URL,
-			Timeout: req.Timeout,
+			Purpose:   "singbox-binary",
+			UserAgent: appver.UA(),
+			URL:       req.URL,
+			Timeout:   req.Timeout,
 		},
 		// Intentional: req.DestPath is already "<binary>.tmp" from installer.
 		// We keep temp == dest here, and activation of live binary is done
@@ -68,53 +70,4 @@ func (a *installerDownloaderAdapter) DownloadFile(ctx context.Context, req insta
 		Path: res.Path,
 		Size: res.Size,
 	}, nil
-}
-
-// freeturnDownloaderAdapter bridges childproc.Downloader onto the shared
-// downloader.Service (то же, что installerDownloaderAdapter для sing-box:
-// temp == dest, без atomic — активацию делает freeturn.installOne).
-type freeturnDownloaderAdapter struct {
-	svc *downloader.Service
-}
-
-func (a *freeturnDownloaderAdapter) DownloadFile(ctx context.Context, url, destPath string, maxBytes int64) error {
-	if a == nil || a.svc == nil {
-		return fmt.Errorf("downloader service is not configured")
-	}
-	_, err := a.svc.DownloadFile(ctx, downloader.FileRequest{
-		Request: downloader.Request{
-			Purpose: "freeturn-binary",
-			URL:     url,
-			Timeout: 5 * time.Minute,
-		},
-		DestPath:     destPath,
-		TempPath:     destPath,
-		MaxFileBytes: maxBytes,
-		Mode:         0o644,
-		Atomic:       false,
-	})
-	return err
-}
-
-type wdttDownloaderAdapter struct {
-	svc *downloader.Service
-}
-
-func (a *wdttDownloaderAdapter) DownloadFile(ctx context.Context, url, destPath string, maxBytes int64) error {
-	if a == nil || a.svc == nil {
-		return fmt.Errorf("downloader service is not configured")
-	}
-	_, err := a.svc.DownloadFile(ctx, downloader.FileRequest{
-		Request: downloader.Request{
-			Purpose: "wdtt-binary",
-			URL:     url,
-			Timeout: 5 * time.Minute,
-		},
-		DestPath:     destPath,
-		TempPath:     destPath,
-		MaxFileBytes: maxBytes,
-		Mode:         0o644,
-		Atomic:       false,
-	})
-	return err
 }

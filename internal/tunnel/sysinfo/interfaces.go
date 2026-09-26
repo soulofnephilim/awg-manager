@@ -19,8 +19,7 @@ var (
 	awgPattern     = regexp.MustCompile(`^awg(\d+)$`)
 
 	// awg-manager managed tunnel patterns
-	// OS 5.x uses opkgtun100+ (same pattern, just different numbers)
-	// OS 4.x uses awgmX
+	// OS 4.x uses awgmX; на 5.x наши туннели — те же opkgtunN выше
 	awgmPattern = regexp.MustCompile(`^awgm(\d+)$`)
 )
 
@@ -46,8 +45,17 @@ func ExtractInterfaceNumber(ifaceName string) (int, bool) {
 }
 
 // ListSystemInterfaces returns a list of tunnel interface numbers found in the system.
-// On OS 5.0+: scans for opkgtunX interfaces (external tunnels use 0-99, awg-manager uses 100+)
-// On OS 4.x: scans for awgX and awgmX interfaces (external use awgX, awg-manager uses awgmX)
+// На 5.x собирает номера opkgtunX, на 4.x — awgX и awgmX.
+//
+// Деления «наши/чужие» функция НЕ делает и делать не может: по номеру их не
+// различить — с #891 номер OpkgTun один на четыре подсистемы и выдаётся из
+// общего пула (internal/opkgtun), собственных окон у подсистем не осталось.
+// Кому деление нужно, тот делит сам, по своим записям: так поступает
+// external.List, вычитая номера управляемых туннелей.
+//
+// Потребителей два, и они разные: занятость пула (живая половина, router_adapters)
+// и список внешних туннелей (external.List). Второй на 4.x получает ещё и
+// awgX/awgmX, к пулу не относящиеся вовсе.
 func ListSystemInterfaces() ([]int, error) {
 	entries, err := os.ReadDir("/sys/class/net")
 	if err != nil {
@@ -69,8 +77,9 @@ func ListSystemInterfaces() ([]int, error) {
 		// Check awgm pattern (awg-manager on OS 4.x)
 		if matches := awgmPattern.FindStringSubmatch(name); matches != nil {
 			if num, err := strconv.Atoi(matches[1]); err == nil {
-				// Store as negative to distinguish from awgX
-				// This is just for enumeration, actual number extraction is separate
+				// ВНИМАНИЕ: awgmN и awgN дают НЕРАЗЛИЧИМЫЕ номера — класс имени
+				// здесь теряется. external.List это переживает (дедуплицирует),
+				// занятость пула на 4.x — тоже (интерфейсов OpkgTun там нет).
 				numbers = append(numbers, num)
 			}
 			continue
@@ -97,6 +106,29 @@ type ExternalTunnelInfo struct {
 	LastHandshake string `json:"lastHandshake,omitempty"`
 	RxBytes       int64  `json:"rxBytes"`
 	TxBytes       int64  `json:"txBytes"`
+
+	// Description — описание интерфейса в NDMS. Имена OpkgTun у всех одинаковой
+	// формы, и это единственное, по чему пользователь опознаёт, чей это
+	// интерфейс, прежде чем принять его или удалить.
+	Description string `json:"description,omitempty"`
+
+	// Addresses — адреса устройства в ядре, и ConflictsWith — имя ДЕЙСТВУЮЩЕГО
+	// туннеля, чей адрес совпал. Совпадение делает интерфейс не просто лишним,
+	// а заряженным конфликтом: он выстрелит, когда оба окажутся подняты.
+	Addresses     []string `json:"addresses,omitempty"`
+	ConflictsWith string   `json:"conflictsWith,omitempty"`
+
+	// Removable — интерфейс можно снести: аллокатор номеров не знает за ним ни
+	// одного владельца. Решает ОН, а не факт присутствия строки в списке: номер
+	// может держать владелец, которого стор туннелей не видит (половина прокси,
+	// режим роутера), и кнопка на такой строке врала бы.
+	Removable bool `json:"removable,omitempty"`
+
+	// NDMSRecord / KernelDevice — из каких половин интерфейс состоит. Половины
+	// существуют независимо: после `ip link del` запись NDMS живёт дальше, а
+	// устройство, поднятое мимо NDMS, записи не имеет вовсе.
+	NDMSRecord   bool `json:"ndmsRecord,omitempty"`
+	KernelDevice bool `json:"kernelDevice,omitempty"`
 }
 
 // IsAWGInterface checks if an interface is an AWG tunnel by running awg show.

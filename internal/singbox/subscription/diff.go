@@ -200,6 +200,17 @@ func assignTags(subID string, parsed []vlink.ParsedOutbound) []string {
 	return tags
 }
 
+// betterLabel: точнее ли имя кандидата, чем имя уже принятого дубликата.
+// Ранг — vlink.LabelRank: 0 (имя дал провайдер) лучше любого другого, а среди
+// выведенных лучше пришедшее из меньшего профиля — сводный профиль подписки
+// крупнее любого частного.
+func betterLabel(cand, prev int) bool {
+	if prev == 0 {
+		return false
+	}
+	return cand == 0 || cand < prev
+}
+
 // ApplyDiff classifies parsed outbounds against the stored MemberTags slice.
 func ApplyDiff(subID string, current []string, parsed []vlink.ParsedOutbound) DiffResult {
 	currSet := make(map[string]bool, len(current))
@@ -208,15 +219,33 @@ func ApplyDiff(subID string, current []string, parsed []vlink.ParsedOutbound) Di
 	}
 	out := DiffResult{}
 	tags := assignTags(subID, parsed)
-	parsedSet := make(map[string]bool, len(parsed))
+	// Представитель дубликата выбирается ДО классификации: подписки
+	// Happ/Remnawave отдают один и тот же сервер дважды — в сводном профиле
+	// («Авто», имя выдумано как «Авто #N») и отдельной записью с человеческим
+	// именем. Побеждает первый встреченный, поэтому у него переписывается имя,
+	// если своего он не имел. Берём ТОЛЬКО имя: тело аутбаунда остаётся от
+	// победителя, иначе дубликат молча подменил бы конфиг выхода полями,
+	// которых нет в ключе (flow, alpn, utls, multiplex).
+	winner := make(map[string]vlink.ParsedOutbound, len(parsed))
+	order := make([]string, 0, len(parsed))
 	for i, p := range parsed {
 		t := tags[i]
-		if parsedSet[t] {
-			out.SkippedDuplicate++
+		prev, dup := winner[t]
+		if !dup {
+			winner[t] = p
+			order = append(order, t)
 			continue
 		}
+		out.SkippedDuplicate++
+		if betterLabel(p.LabelRank, prev.LabelRank) {
+			prev.Label, prev.LabelRank = p.Label, p.LabelRank
+			winner[t] = prev
+		}
+	}
+	parsedSet := make(map[string]bool, len(order))
+	for _, t := range order {
 		parsedSet[t] = true
-		tagged := TaggedOutbound{Tag: t, Out: p}
+		tagged := TaggedOutbound{Tag: t, Out: winner[t]}
 		if currSet[t] {
 			out.Existing = append(out.Existing, tagged)
 		} else {
@@ -227,6 +256,86 @@ func ApplyDiff(subID string, current []string, parsed []vlink.ParsedOutbound) Di
 		if !parsedSet[t] {
 			out.Orphan = append(out.Orphan, t)
 		}
+	}
+	return out
+}
+
+// sameServer сравнивает метаданные двух членов: тот же ли это сервер.
+// Первым аргументом идёт сохранённая запись, вторым — кандидат из выдачи:
+// TransportKey сравнивается, только когда он есть у сохранённой (у записей,
+// сделанных до появления поля, оно пустое — см. MemberInfo).
+func sameServer(stored, candidate MemberInfo) bool {
+	if stored.Protocol != candidate.Protocol || stored.Server != candidate.Server ||
+		stored.Port != candidate.Port || stored.SNI != candidate.SNI ||
+		stored.Transport != candidate.Transport {
+		return false
+	}
+	return stored.TransportKey == "" || stored.TransportKey == candidate.TransportKey
+}
+
+// reassociateOrphans возвращает сироте её прежний тег, когда в выдаче есть тот
+// же сервер под новым тегом (issue #745). Ключ идентичности (chooseKeys)
+// выводится из полей выдачи и уровнем зависит от состава набора, поэтому тег
+// едет там, где сервер не менялся: панель ротирует reality short_id, или
+// провайдер убрал соседний эндпоинт и группа схлопнулась на ключ поуже. Тег —
+// пользовательские данные (ExcludedTags, ActiveMember, теги в конфиге
+// sing-box), поэтому сохраняем СТАРЫЙ: запись переезжает из New в Existing и
+// обновляется на месте.
+//
+// known — метаданные членов прошлого refresh (sub.Members): сироты приходят из
+// MemberTags, значит их описания лежат там же. Пересчитывать прежние ключи
+// нечем — на диске их нет, поэтому сравнение идёт по метаданным, как в
+// remapStaleTags. Сопоставляем строго 1:1 и только при единственном кандидате:
+// лучше оставить лишнюю сироту, чем склеить два разных сервера под одним тегом.
+func reassociateOrphans(diff DiffResult, known []MemberInfo) DiffResult {
+	if len(diff.Orphan) == 0 || len(diff.New) == 0 {
+		return diff
+	}
+	infoByTag := make(map[string]MemberInfo, len(known))
+	for _, m := range known {
+		infoByTag[m.Tag] = m
+	}
+	claimed := make(map[int]bool, len(diff.New))   // индексы New, уже забравшие тег
+	renamed := make(map[int]string, len(diff.New)) // индекс New → прежний тег
+	orphans := make([]string, 0, len(diff.Orphan))
+	for _, tag := range diff.Orphan {
+		mi, ok := infoByTag[tag]
+		if !ok {
+			orphans = append(orphans, tag) // нет метаданных — судить не о чем
+			continue
+		}
+		match := -1
+		for i, n := range diff.New {
+			if claimed[i] || !sameServer(mi, toMemberInfo(n.Tag, n.Out)) {
+				continue
+			}
+			if match >= 0 {
+				match = -1 // неоднозначно — оставляем сиротой
+				break
+			}
+			match = i
+		}
+		if match < 0 {
+			orphans = append(orphans, tag)
+			continue
+		}
+		claimed[match] = true
+		renamed[match] = tag
+	}
+	if len(renamed) == 0 {
+		return diff
+	}
+	out := diff
+	out.Orphan = orphans
+	out.New = make([]TaggedOutbound, 0, len(diff.New)-len(renamed))
+	out.Existing = append(make([]TaggedOutbound, 0, len(diff.Existing)+len(renamed)), diff.Existing...)
+	for i, n := range diff.New {
+		if old, ok := renamed[i]; ok {
+			n.Tag = old
+			out.Existing = append(out.Existing, n)
+			continue
+		}
+		out.New = append(out.New, n)
 	}
 	return out
 }

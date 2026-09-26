@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/singbox/configmerge"
 	"github.com/hoaxisr/awg-manager/internal/sys/env"
@@ -65,10 +66,10 @@ const (
 	singboxVersionProbeTimeout = 15 * time.Second
 
 	// singboxMetaSidecarSuffix is appended to the binary path to locate
-	// the persisted (version, features) JSON written after every
-	// successful `sing-box version` probe. The sidecar's mtime is
-	// compared against the binary's mtime — fresh sidecar ⇒ no subprocess
-	// on the next read. Survives router reboots and daemon restarts.
+	// the persisted version JSON, written by whichever source of
+	// resolveVersionLocked answered (pinned SHA, Clash API, subprocess).
+	// The sidecar's mtime is compared against the binary's mtime — fresh
+	// sidecar ⇒ no probe on the next read. Survives reboots and restarts.
 	singboxMetaSidecarSuffix = ".meta.json"
 )
 
@@ -220,12 +221,16 @@ func (o *Operator) handleExit(err error, stderrTail string, deliberate bool) {
 		o.recordCrash(now, safeMsg)
 		o.restartBackoff.NoteCrash(now)
 	}
-	if o.bus != nil {
-		o.bus.Publish("resource:invalidated", map[string]any{
-			"resource": "singbox.status",
-			"reason":   "exit",
-		})
-	}
+	o.bus.PublishInvalidated(events.ResourceSingboxStatus, "exit")
+	// ResourceSingboxTunnels отсюда НЕ публикуем, хотя карточки туннелей несут
+	// живое `running` и тоже устаревают. Этот ключ слушают не только сторы
+	// фронта: awgoutbounds перезаписывает файл выходов, а deviceproxy гоняет
+	// полный Reconcile с разбором config.d. Выход процесса случается на КАЖДУЮ
+	// смерть, то есть в крэш-лупе (OOM на 256 МБ — рабочий сценарий) эта
+	// публикация умножала бы дорогую работу ровно тогда, когда памяти и так
+	// нет. Карточки обновляет сторож (watchdog.go): он публикует только на
+	// СМЕНЕ живости, поэтому луп даёт одну публикацию, а не по одной на
+	// перезапуск. Цена — задержка до одного тика сторожа.
 }
 
 // exitedBySIGKILL reports whether the cmd.Wait error says the process
@@ -861,8 +866,7 @@ func (o *Operator) startAndWait(ctx context.Context) (spawned bool, err error) {
 		}
 		return false, err
 	}
-	// Конфиг без experimental.clash_api (пользователь удалил блок намеренно —
-	// patchBaseClashPort такое уважает) НЕ ждём по Clash: waitClashReady
+	// Конфиг без experimental.clash_api НЕ ждём по Clash: waitClashReady
 	// гарантированно упёрся бы в таймаут и убил живой процесс, а каждый цикл
 	// watchdog'а сжигал бы backoff-бюджет (issue #456 FIX-H). Мягкий старт:
 	// спавн уже проверен grace-периодом Process.Start.
@@ -899,10 +903,13 @@ func (o *Operator) startAndWait(ctx context.Context) (spawned bool, err error) {
 }
 
 // configDeclaresClashAPI reports whether the merged config.d declares an
-// experimental.clash_api block. Зеркалит допущение patchBaseClashPort:
-// отсутствие блока — осознанный выбор пользователя, который надо уважать.
-// Консервативно: любая ошибка чтения/парса → true (сохраняем легаси-гейт
-// по Clash, а не тихо ослабляем проверку готовности).
+// experimental.clash_api block.
+//
+// Отсутствие блока НЕ является выражением воли пользователя: блоком владеем
+// мы, и patchBaseClashPort его восстанавливает (ADR 0001). Проверка осталась
+// защитой от битого конфига — например, слот выше подсунул clash_api: null, —
+// чтобы старт не завис на таймауте готовности. Консервативно: любая ошибка
+// чтения/парса → true (не ослабляем проверку готовности молча).
 func (o *Operator) configDeclaresClashAPI() bool {
 	merged, err := configmerge.MergeDir(o.configPath)
 	if err != nil {

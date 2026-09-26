@@ -31,7 +31,7 @@ func TestIntegration_ParseAddValidate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", link, err)
 		}
-		if err := cfg.AddTunnel(p.Tag, p.Protocol, p.Server, int(p.Port), p.Outbound); err != nil {
+		if err := cfg.AddTunnelWithListenPort(p.Tag, p.Protocol, p.Server, int(p.Port), 0, p.Outbound); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -57,7 +57,7 @@ func TestIntegration_ParseAddValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := vlink.ParseLink("vless://u@nl.tld:443#Netherlands")
-	cfg.AddTunnel(p.Tag, p.Protocol, p.Server, int(p.Port), p.Outbound)
+	cfg.AddTunnelWithListenPort(p.Tag, p.Protocol, p.Server, int(p.Port), 0, p.Outbound)
 	var nl TunnelInfo
 	for _, ti := range cfg.Tunnels() {
 		if ti.Tag == "Netherlands" {
@@ -84,7 +84,7 @@ func TestIntegration_ParseAddValidate(t *testing.T) {
 	// Validate with mock exec (real sing-box not available in CI)
 	v := &Validator{
 		binary: "sing-box",
-		exec: func(bin string, args ...string) ([]byte, error) {
+		exec: func(_ context.Context, bin string, args ...string) ([]byte, error) {
 			// Check that the last arg is the absolute path to our config
 			if len(args) != 3 {
 				t.Errorf("args len: %v", args)
@@ -167,6 +167,7 @@ func (s *integrationSingbox) AutoRestartIfCrashed(_ context.Context) (bool, bool
 	return false, false, nil // integration env: никаких сайд-эффектов от reconcile
 }
 func (s *integrationSingbox) CrashStats() (int, string, time.Time) { return 0, "", time.Time{} }
+func (s *integrationSingbox) TunExternalConfig() (bool, bool)      { return false, true }
 
 // noopWANIPCollector is a test double that returns no WAN IPs. Wired
 // into router.Deps so NewService doesn't fall back to the production
@@ -205,7 +206,8 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	dir := t.TempDir()
 
 	proc := &integrationProc{running: true} // already running so ApplyStaging triggers Reload not Start
-	orch := orchestrator.New(dir, proc)
+	orch := orchestrator.NewWithAppliedPath(dir, proc, filepath.Join(t.TempDir(), "singbox-applied.json"))
+	t.Cleanup(orch.Close)
 
 	if err := orch.Register(orchestrator.SlotMeta{
 		Slot:     orchestrator.SlotBase,

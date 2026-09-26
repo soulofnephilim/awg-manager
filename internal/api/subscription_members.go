@@ -9,6 +9,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
+	sysfiles "github.com/hoaxisr/awg-manager/internal/sys/files"
 )
 
 // ActiveMember handles POST /api/singbox/subscriptions/active-member?id=
@@ -75,7 +76,9 @@ func (h *SubscriptionHandler) ActiveNow(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	h.log.Info("subscription-active-now", id, "requested via API")
+	// Debug, не Info: ручку дёргает опрос карточек подписок, то есть запись
+	// уходила бы в журнал по несколько раз в минуту на каждую подписку.
+	h.log.Debug("subscription-active-now", id, "requested via API")
 	now, err := h.svc.GetActiveNow(r.Context(), id)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -448,17 +451,18 @@ func (h *SubscriptionHandler) RestoreMembers(w http.ResponseWriter, r *http.Requ
 
 // PreviewURL handles POST /api/singbox/subscriptions/preview
 //
-//	@Summary		Preview a subscription URL without creating it
-//	@Description	Read-only fetch + parse of a subscription URL. Returns the
+//	@Summary		Preview a subscription source without creating it
+//	@Description	Read-only fetch + parse of a subscription URL, or of a file
+//	@Description	on the router when `path` is set instead of `url`. Returns the
 //	@Description	parsed members (with subID-independent keys) so the import
 //	@Description	wizard can offer per-server exclusion before creation.
 //	@Tags			subscriptions
 //	@Accept			json
 //	@Produce		json
 //	@Security		CookieAuth
-//	@Param			body	body		PreviewURLRequest	true	"URL and optional headers"
+//	@Param			body	body		PreviewURLRequest	true	"URL or router file path, plus optional headers"
 //	@Success		200		{object}	APIEnvelope
-//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		400		{object}	APIErrorEnvelope	"path outside the allowed roots (PATH_DENIED)"
 //	@Failure		502		{object}	APIErrorEnvelope	"fetch or parse failed"
 //	@Router			/singbox/subscriptions/preview [post]
 func (h *SubscriptionHandler) PreviewURL(w http.ResponseWriter, r *http.Request) {
@@ -471,10 +475,184 @@ func (h *SubscriptionHandler) PreviewURL(w http.ResponseWriter, r *http.Request)
 		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
 		return
 	}
-	members, err := h.svc.PreviewURL(r.Context(), req.URL, fromSubscriptionHeaders(req.Headers))
+	var members []subscription.PreviewMember
+	var err error
+	if req.Path != "" {
+		members, err = h.svc.PreviewPath(r.Context(), req.Path)
+	} else {
+		members, err = h.svc.PreviewURL(r.Context(), req.URL, fromSubscriptionHeaders(req.Headers))
+	}
 	if err != nil {
+		// Путь вне корней — ввод пользователя, а не сбой апстрима: 502
+		// увёл бы UI в «провайдер недоступен».
+		if errors.Is(err, sysfiles.ErrPathDenied) {
+			response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "PATH_DENIED")
+			return
+		}
 		response.ErrorWithStatus(w, http.StatusBadGateway, err.Error(), "PREVIEW_FAILED")
 		return
 	}
 	response.Success(w, members)
+}
+
+type DetectHeadersRequest struct {
+	URL     string               `json:"url"`
+	Headers []SubscriptionHeader `json:"headers"`
+}
+
+// DetectedProfileDTO is the auto-detection result for a subscription URL.
+type DetectedProfileDTO struct {
+	Kind          string               `json:"kind" example:"happ"`
+	DecryptedURL  string               `json:"decryptedUrl,omitempty" example:"https://provider.example/sub/abc"`
+	NormalizedURL string               `json:"normalizedUrl,omitempty" example:"https://provider.example/sub/abc"`
+	IsEncrypted   bool                 `json:"isEncrypted,omitempty"`
+	Headers       []SubscriptionHeader `json:"headers"`
+	HeadersText   string               `json:"headersText" example:"User-Agent: Happ/4.6.0/ios/1"`
+	Label         string               `json:"label" example:"HAPP iOS"`
+	ServerCount   int                  `json:"serverCount" example:"3"`
+}
+
+// DetectHeadersResponse is the envelope for the auto-detection result.
+type DetectHeadersResponse struct {
+	Success bool               `json:"success" example:"true"`
+	Data    DetectedProfileDTO `json:"data"`
+}
+
+// DetectHeaders handles POST /api/singbox/subscriptions/detect-headers
+//
+//	@Summary		Auto-detect required HTTP headers for a subscription URL
+//	@Description	Probes a subscription URL with different client profiles to auto-detect working headers
+//	@Tags			subscriptions
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		DetectHeadersRequest	true	"Subscription URL and user-configured headers"
+//	@Success		200		{object}	DetectHeadersResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		502		{object}	APIErrorEnvelope
+//	@Router			/singbox/subscriptions/detect-headers [post]
+func (h *SubscriptionHandler) DetectHeaders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var req DetectHeadersRequest
+	if err := decodeBody(r, &req); err != nil {
+		response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
+		return
+	}
+	profile, err := h.svc.DetectHeaders(r.Context(), req.URL, fromSubscriptionHeaders(req.Headers))
+	if err != nil {
+		response.ErrorWithStatus(w, http.StatusBadGateway, err.Error(), "DETECT_FAILED")
+		return
+	}
+	response.Success(w, profile)
+}
+
+// HeaderProfileDTO is one client fingerprint offered as a preset in the UI.
+type HeaderProfileDTO struct {
+	Kind        string `json:"kind" example:"happ"`
+	Label       string `json:"label" example:"HAPP iOS"`
+	HeadersText string `json:"headersText" example:"User-Agent: Happ/4.6.0/ios/1"`
+}
+
+// HeaderProfilesResponse is the envelope for the preset list.
+type HeaderProfilesResponse struct {
+	Success bool               `json:"success" example:"true"`
+	Data    []HeaderProfileDTO `json:"data"`
+}
+
+// HeaderProfiles handles GET /api/singbox/subscriptions/header-profiles
+//
+//	@Summary		List client header profiles
+//	@Description	Client fingerprints used by header auto-detection; the UI offers the same list as presets
+//	@Tags			subscriptions
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Success		200	{object}	HeaderProfilesResponse
+//	@Router			/singbox/subscriptions/header-profiles [get]
+func (h *SubscriptionHandler) HeaderProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		response.MethodNotAllowed(w)
+		return
+	}
+	profiles := subscription.HeaderProfiles()
+	out := make([]HeaderProfileDTO, 0, len(profiles))
+	for _, p := range profiles {
+		out = append(out, HeaderProfileDTO{Kind: p.Kind, Label: p.Label, HeadersText: p.HeadersText()})
+	}
+	response.Success(w, out)
+}
+
+type HappKeysRequest struct {
+	Keys []string `json:"keys,omitempty"`
+	Text string   `json:"text,omitempty"`
+}
+
+type HappKeysResponse struct {
+	Configured bool `json:"configured"`
+	Count      int  `json:"count"`
+}
+
+// HappKeys handles GET, POST, and DELETE /api/singbox/subscriptions/happ-keys
+//
+//	@Summary		Manage HAPP RSA decryption keys
+//	@Description	GET returns key status; POST saves user-provided RSA keys (JSON array or raw text); DELETE removes stored keys
+//	@Tags			subscriptions
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		HappKeysRequest	false	"RSA keys array or raw text (POST only)"
+//	@Success		200		{object}	APIEnvelope
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/singbox/subscriptions/happ-keys [get]
+//	@Router			/singbox/subscriptions/happ-keys [post]
+//	@Router			/singbox/subscriptions/happ-keys [delete]
+func (h *SubscriptionHandler) HappKeys(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		configured, count := h.svc.HappKeysStatus()
+		response.Success(w, HappKeysResponse{Configured: configured, Count: count})
+	case http.MethodPost:
+		var req HappKeysRequest
+		if err := decodeBody(r, &req); err != nil {
+			response.ErrorWithStatus(w, http.StatusBadRequest, "bad request body", "INVALID_JSON")
+			return
+		}
+		var keys []string
+		var err error
+		if len(req.Keys) > 0 {
+			keys = req.Keys
+		} else if strings.TrimSpace(req.Text) != "" {
+			keys, err = subscription.ParseHappKeysInput(req.Text)
+			if err != nil {
+				response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_KEYS")
+				return
+			}
+		}
+		if len(keys) == 0 {
+			response.ErrorWithStatus(w, http.StatusBadRequest, "no valid keys found in payload", "INVALID_KEYS")
+			return
+		}
+		if err := h.svc.SaveHappKeys(keys); err != nil {
+			response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "SAVE_KEYS_FAILED")
+			return
+		}
+		response.Success(w, HappKeysResponse{
+			Configured: true,
+			Count:      len(keys),
+		})
+	case http.MethodDelete:
+		if err := h.svc.ClearHappKeys(); err != nil {
+			response.InternalError(w, err.Error())
+			return
+		}
+		response.Success(w, HappKeysResponse{
+			Configured: false,
+			Count:      0,
+		})
+	default:
+		response.MethodNotAllowed(w)
+	}
 }

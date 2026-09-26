@@ -3,6 +3,8 @@ package awgoutbounds
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,7 @@ type AWGTunnelInfo struct {
 	ID           string
 	Name         string
 	BackendIface string // resolved kernel iface name (t2sN for kernel, nwgN for NativeWG)
+	DNS          string // AWGInterface.DNS as stored: comma-separated list, may be empty
 }
 
 // SystemTunnelInfo is the projection of one Keenetic-native (NDMS)
@@ -66,10 +69,11 @@ func (s *ServiceImpl) enumerate(ctx context.Context) ([]AWGEntry, error) {
 			}
 			seen[t.BackendIface] = true
 			out = append(out, AWGEntry{
-				Tag:   ManagedTag(t.ID),
-				Label: t.Name,
-				Kind:  "managed",
-				Iface: t.BackendIface,
+				Tag:      ManagedTag(t.ID),
+				Label:    t.Name,
+				Kind:     "managed",
+				Iface:    t.BackendIface,
+				Resolver: firstIP(t.DNS),
 			})
 		}
 	}
@@ -77,9 +81,15 @@ func (s *ServiceImpl) enumerate(ctx context.Context) ([]AWGEntry, error) {
 	if s.deps.SystemTunnels != nil {
 		tuns, err := s.deps.SystemTunnels.List(ctx)
 		if err != nil {
-			// System failure is not fatal — managed-only output is still
-			// useful. Caller can log via app log; we don't have it here.
-			return out, nil
+			// Отказ системного стора возвращается ВМЕСТЕ с уже собранной
+			// managed-частью: у двух потребителей enumerate разные требования.
+			// writeFile нужна ПОЛНОТА — он на ошибке прекращает запись, иначе
+			// транзиентный сбой NDMS переписал бы 15-awg.json без всех
+			// awg-sys-* и триггернул reload на усечённом конфиге (F83).
+			// ListTags нужно ЛУЧШЕЕ ИЗ ДОСТУПНОГО — глухой отказ уносил бы и
+			// managed-теги, роняя в fallback инстансы deviceproxy, которые к
+			// системным туннелям вообще не привязаны.
+			return out, fmt.Errorf("system tunnels: %w", err)
 		}
 
 		// Build a fast-lookup set of managed-server interface names so we can
@@ -132,6 +142,30 @@ func (s *ServiceImpl) enumerate(ctx context.Context) ([]AWGEntry, error) {
 	}
 
 	return out, nil
+}
+
+// firstIP возвращает адрес DNS-сервера для outbound'а из списка DNS
+// туннеля ("10.8.0.1, 1.0.0.1"). Сначала ищется первый IPv4 и только
+// при его отсутствии берётся первый IPv6: у роутера IPv6 в туннеле
+// чаще всего нет вовсе, а адрес уезжает в поле server DNS-сервера
+// sing-box. Не-IP (имя хоста, мусор) пропускаются — там нужен именно
+// IP. Пусто, если ничего не подошло.
+func firstIP(dns string) string {
+	var firstV6 string
+	for _, part := range strings.Split(dns, ",") {
+		part = strings.TrimSpace(part)
+		ip := net.ParseIP(part)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			return part
+		}
+		if firstV6 == "" {
+			firstV6 = part
+		}
+	}
+	return firstV6
 }
 
 // ifaceExists checks /sys/class/net/<name>. Override `sysClassNet`

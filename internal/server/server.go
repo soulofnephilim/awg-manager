@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,6 +35,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/routing"
 	"github.com/hoaxisr/awg-manager/internal/singbox"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/external"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
@@ -47,7 +49,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/terminal"
 	"github.com/hoaxisr/awg-manager/internal/testing"
 	"github.com/hoaxisr/awg-manager/internal/traffic"
-	"github.com/hoaxisr/awg-manager/internal/tunnel/backend"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/systemtunnel"
 	"github.com/hoaxisr/awg-manager/internal/updater"
@@ -67,9 +68,6 @@ type Config struct {
 	// PprofStandaloneAddr, if non-empty, starts an additional listener that
 	// serves only Go's /debug/pprof/* endpoints (recommended: 127.0.0.1:6060).
 	PprofStandaloneAddr string
-	// PprofOnMain mounts the same endpoints on the primary HTTP mux (reachable on
-	// every listen addr — LAN and loopback). Use sparingly when the API is exposed.
-	PprofOnMain bool
 	// SlowRequestThreshold, if positive, logs requests whose handler runs longer than
 	// this duration to stderr (via slog); long-lived SSE/WebSocket routes are skipped.
 	SlowRequestThreshold time.Duration
@@ -87,10 +85,8 @@ type Server struct {
 	settings                   *storage.SettingsStore
 	tunnels                    *storage.AWGTunnelStore
 	pingCheckService           api.PingCheckService
-	freeturnService            api.FreeTurnService
-	wdttService                api.WdttService
+	proxyRecords               api.ProxyRecordLister
 	loggingService             *logging.Service
-	activeBackend              backend.Backend
 	kmodLoader                 *kmod.Loader
 	updaterService             *updater.Service
 	ndmsQueries                *ndmsquery.Queries
@@ -109,6 +105,8 @@ type Server struct {
 	hydraService               *hydraroute.Service
 	orch                       *orchestrator.Orchestrator
 	bus                        *events.Bus
+	exposureGuard              *api.ExposureGuard
+	exposureGuardStop          context.CancelFunc
 	singboxHandler             *api.SingboxHandler
 	singboxConnsHandler        *api.SingboxConnectionsHandler
 	singboxRouterHandler       *api.SingboxRouterHandler
@@ -131,10 +129,17 @@ type Server struct {
 	downloadSvc                *downloader.Service
 	monitoringService          *monitoring.Service
 	singboxSubMembersFn        func() []diagnostics.SingboxSubMember
+	orphanIfacesFn             func(ctx context.Context) ([]external.OrphanIface, error)
+	orphanExclusiveFn          func(ctx context.Context) ([]external.OrphanIface, error)
 	singboxConfigPreviewFn     func() (string, error)
 	dnsCheckService            *dnscheck.Service
 	authMiddleware             *auth.Middleware
-	httpServer                 *http.Server
+	mcpKeys                    *storage.McpKeyStore
+	// mcpCalls is cancelled by Shutdown so in-flight MCP tool calls stop
+	// instead of holding httpServer.Shutdown for their full grace period.
+	mcpCalls       context.Context
+	mcpCallsCancel context.CancelFunc
+	httpServer     *http.Server
 
 	// listen владеет всеми HTTP-листенерами (по адресам из ListenSpec +
 	// безусловный loopback) и confirm-окном живой смены адреса. См. listen.go.
@@ -152,11 +157,23 @@ type Server struct {
 
 	bootStatusFn func() bool // returns true if boot still in progress
 
-	proxyClientAutostart api.ProxyClientAutostart
+	proxyRuntimeNudge api.ProxyRuntimeNudge
+
+	// proxyRuntime — менеджер прокси-рантайма за узким срезом: тумблер
+	// намерения инстанса (карточка зеркальной записи wdtt-raw) и глушение
+	// детей на время бэкапа. Проводка ставит его ПОСЛЕ server.New — менеджер
+	// строится позже.
+	proxyRuntime ProxyRuntime
+
+	// proxyRt — ручки прокси-рантайма; собирает проводка (cmd/awg-manager).
+	// Нулевое значение означает «рантайм не проведён»: маршруты не
+	// регистрируются вовсе, а не отвечают пустотой.
+	proxyRt ProxyRtSurface
 
 	// Restart lifecycle
-	restartOnce   sync.Once // prevents multiple restart goroutines
-	shutdownHooks []func()  // cleanup functions called before syscall.Exec
+	restartOnce   sync.Once  // prevents multiple restart goroutines
+	hooksMu       sync.Mutex // пишет проводка, читает горутина рестарта
+	shutdownHooks []func()   // cleanup functions called before syscall.Exec
 }
 
 // Deps groups all New() construction-time dependencies into a named
@@ -176,10 +193,8 @@ type Deps struct {
 	Settings             *storage.SettingsStore
 	Tunnels              *storage.AWGTunnelStore
 	PingCheckService     api.PingCheckService
-	FreeTurnService      api.FreeTurnService
-	WdttService          api.WdttService
+	ProxyRecords         api.ProxyRecordLister
 	LoggingService       *logging.Service
-	ActiveBackend        backend.Backend
 	KmodLoader           *kmod.Loader
 	UpdaterService       *updater.Service
 	NdmsQueries          *ndmsquery.Queries
@@ -205,6 +220,17 @@ type Deps struct {
 	MonitoringService    *monitoring.Service
 	SingboxSubMembers    func() []diagnostics.SingboxSubMember
 	SingboxConfigPreview func() (string, error)
+
+	// OrphanIfaces — интерфейсы OpkgTun без записи владельца, для списка
+	// внешних туннелей и ручки их удаления. Nil выключает и то, и другое.
+	OrphanIfaces func(ctx context.Context) ([]external.OrphanIface, error)
+	// OrphanIfacesExclusive — то же под семафором выбора, для перепроверки
+	// перед сносом (см. opkgtun.Pool.OrphansExclusive).
+	OrphanIfacesExclusive func(ctx context.Context) ([]external.OrphanIface, error)
+
+	// McpKeys holds the MCP API keys. Nil disables the /mcp endpoint and
+	// its key-management routes entirely (they are never registered).
+	McpKeys *storage.McpKeyStore
 }
 
 // authLoggerAdapter narrows ScopedLogger to the AuthLogger interface
@@ -237,10 +263,8 @@ func New(cfg Config, deps Deps) *Server {
 		settings:               deps.Settings,
 		tunnels:                deps.Tunnels,
 		pingCheckService:       deps.PingCheckService,
-		freeturnService:        deps.FreeTurnService,
-		wdttService:            deps.WdttService,
+		proxyRecords:           deps.ProxyRecords,
 		loggingService:         deps.LoggingService,
-		activeBackend:          deps.ActiveBackend,
 		kmodLoader:             deps.KmodLoader,
 		updaterService:         deps.UpdaterService,
 		ndmsQueries:            deps.NdmsQueries,
@@ -265,8 +289,11 @@ func New(cfg Config, deps Deps) *Server {
 		clashProxy:             deps.ClashProxy,
 		monitoringService:      deps.MonitoringService,
 		singboxSubMembersFn:    deps.SingboxSubMembers,
+		orphanIfacesFn:         deps.OrphanIfaces,
+		orphanExclusiveFn:      deps.OrphanIfacesExclusive,
 		singboxConfigPreviewFn: deps.SingboxConfigPreview,
 		authMiddleware:         auth.NewMiddleware(deps.Sessions, deps.Settings, &authLoggerAdapter{log: appLog}),
+		mcpKeys:                deps.McpKeys,
 		instanceID:             id,
 	}
 }
@@ -380,6 +407,33 @@ func (s *Server) SetSingboxProxiesHandler(h *api.SingboxProxiesHandler) {
 	s.singboxProxiesHandler = h
 }
 
+// ProxyRtSurface — поверхность прокси-рантайма под /api/proxyrt/*.
+//
+// Функциями, а не хендлерами: собирают её пакеты internal/proxyapp/* и
+// internal/api, и тянуть их сюда значило бы завести шестую зависимость ради
+// одной строки регистрации у каждой. Instances обслуживает ВЕСЬ подпуть
+// /api/proxyrt/instances[/...] — хвост разбирает диспетчер проводки, потому
+// что подпути инстанса (users, link, captcha, allowlist) в http.ServeMux без
+// wildcard-паттернов не выразимы.
+type ProxyRtSurface struct {
+	Instances http.HandlerFunc
+	// ListenMoves — снятие уведомлений о переезде listen-порта при посеве.
+	ListenMoves        http.HandlerFunc
+	WdttLinkDecode     http.HandlerFunc
+	WdttLinkImport     http.HandlerFunc
+	FreeTurnLinkDecode http.HandlerFunc
+	CaptchaStatus      http.HandlerFunc
+	InstallStatus      http.HandlerFunc
+	Install            http.HandlerFunc
+	Uninstall          http.HandlerFunc
+}
+
+// SetProxyRtSurface wires the proxy-runtime handlers so /api/proxyrt/*
+// routes can be registered.
+func (s *Server) SetProxyRtSurface(h ProxyRtSurface) {
+	s.proxyRt = h
+}
+
 // SetBypassSetHandler wires the geoip bypass-set handler so
 // /api/singbox/router/bypass-set/* routes can be registered.
 func (s *Server) SetBypassSetHandler(h *api.BypassSetHandler) {
@@ -451,9 +505,25 @@ func (s *Server) SetBootStatusFunc(fn func() bool) {
 	s.bootStatusFn = fn
 }
 
-// SetProxyClientAutostart wires WAN-up retry for FreeTurn/WDTT autostart.
-func (s *Server) SetProxyClientAutostart(fn api.ProxyClientAutostart) {
-	s.proxyClientAutostart = fn
+// SetProxyRuntimeNudge wires the WAN-up callback of the proxy runtime
+// (seed retry plus worker wake-up).
+func (s *Server) SetProxyRuntimeNudge(fn api.ProxyRuntimeNudge) {
+	s.proxyRuntimeNudge = fn
+}
+
+// ProxyRuntime — то, что серверу нужно от менеджера прокси-рантайма:
+// тумблер намерения одного инстанса и пара «погасить/поднять» для бэкапа.
+// *manager.Manager удовлетворяет как есть.
+type ProxyRuntime interface {
+	SetEnabled(ctx context.Context, key string, on bool) error
+	Boot(ctx context.Context) error
+	Shutdown()
+}
+
+// SetProxyRuntime wires the proxy-runtime manager. Called from the wiring
+// after the manager is built (server.New runs earlier).
+func (s *Server) SetProxyRuntime(rt ProxyRuntime) {
+	s.proxyRuntime = rt
 }
 
 // Start starts the HTTP server.
@@ -476,10 +546,15 @@ func (s *Server) Start() error {
 	}
 
 	mux := http.NewServeMux()
-	if s.config.PprofOnMain {
-		registerPprofRoutes(mux)
-	}
 	s.registerRoutes(mux)
+
+	// Фоновая проверка «не открыты ли мы наружу без пароля» — гвард
+	// конструируется в registerRoutes, поэтому запускается сразу после.
+	if s.exposureGuard != nil {
+		guardCtx, cancel := context.WithCancel(context.Background())
+		s.exposureGuardStop = cancel
+		s.exposureGuard.Start(guardCtx)
+	}
 
 	core := http.Handler(mux)
 	if s.config.SlowRequestThreshold > 0 {
@@ -528,6 +603,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.clearPendingLocked()
 	s.listen.mu.Unlock()
 
+	if s.exposureGuardStop != nil {
+		s.exposureGuardStop()
+		s.exposureGuardStop = nil
+	}
+
+	if s.mcpCallsCancel != nil {
+		s.mcpCallsCancel()
+	}
+
 	if s.pprofServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		_ = s.pprofServer.Shutdown(shutdownCtx)
@@ -547,8 +631,23 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // AddShutdownHook registers a function to call before syscall.Exec restart.
+//
+// Именно перед exec, а не на любом завершении: образ процесса там переживает
+// смену, поэтому открытые сокеты и воркеры надо снять руками. На обычном
+// выходе (SIGTERM) их закрывает ядро, а уборка, которая обязана идти всегда,
+// регистрируется через app.deferOnExit.
 func (s *Server) AddShutdownHook(fn func()) {
+	s.hooksMu.Lock()
+	defer s.hooksMu.Unlock()
 	s.shutdownHooks = append(s.shutdownHooks, fn)
+}
+
+// shutdownHooksSnapshot отдаёт копию ведомости: исполняются хуки в отдельной
+// горутине, регистрируются в проводке, и читать срез без снимка — гонка.
+func (s *Server) shutdownHooksSnapshot() []func() {
+	s.hooksMu.Lock()
+	defer s.hooksMu.Unlock()
+	return append([]func(){}, s.shutdownHooks...)
 }
 
 // ScheduleRestart schedules a self-restart of the daemon after a short delay.
@@ -571,7 +670,7 @@ func (s *Server) ScheduleRestart() {
 			s.appLog.Info("restart", executable, "restarting daemon")
 
 			// Run shutdown hooks (stop PingCheck, sessions, log buffer, etc.)
-			for _, fn := range s.shutdownHooks {
+			for _, fn := range s.shutdownHooksSnapshot() {
 				fn()
 			}
 
@@ -596,6 +695,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	s.registerDiagnosticsRoutes(mux, h)
 	s.wireCrossHandlers(mux, h)
 	s.registerSingboxRoutes(mux, h)
+	s.registerProxyRtRoutes(mux, h)
+	s.registerMcpRoutes(mux, h)
 	s.registerStaticRoutes(mux, h)
 }
 
@@ -717,13 +818,37 @@ func (a *diagLogAdapter) GetBucketStats(bucket logging.Bucket) logging.BufferSta
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Panic recovery
+		// Panic recovery.
+		//
+		// Ответ 500 отдаётся ВМЕСТЕ с записью в журнал, и порядок именно
+		// такой: раньше обработчик молча превращал панику в 500, и в app-логе
+		// не оставалось ни строки — авария выглядела для пользователя как
+		// «внутренняя ошибка», а для нас не выглядела никак. Стек нужен
+		// целиком: паника в обработчике приходит из чужого кадра, и одно её
+		// значение («runtime error: invalid memory address») места не
+		// называет.
 		defer func() {
-			if err := recover(); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(`{"error":true,"message":"internal server error","code":"PANIC"}`))
+			err := recover()
+			if err == nil {
+				return
 			}
+			// ErrAbortHandler — не авария, а штатный способ оборвать
+			// обработчик, и net/http свою панику этим значением из
+			// логирования стека исключает тем же образом. Так обрывается
+			// httputil.ReverseProxy, когда клиент ушёл после отдачи
+			// заголовков: у нас это прокси капчи, смонтированный на тот же
+			// mux. Без этой проверки закрытая вкладка капчи писала бы в
+			// кольцо журнала пару килобайт стека — на роутере со 128 МБ такая
+			// запись вытесняет полезные, а коалесцирование повторов не
+			// спасает: идентификатор горутины и адреса в стеке каждый раз
+			// разные.
+			if err != http.ErrAbortHandler {
+				s.appLog.Error("panic", r.URL.Path,
+					fmt.Sprintf("%s %s: %v\n%s", r.Method, r.URL.Path, err, debug.Stack()))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":true,"message":"internal server error","code":"PANIC"}`))
 		}()
 
 		next.ServeHTTP(w, r)

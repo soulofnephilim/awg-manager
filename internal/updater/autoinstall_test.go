@@ -307,7 +307,7 @@ func TestRunAutoInstallSlot_SingboxBusy_SkipsWithoutStamp(t *testing.T) {
 
 func TestRunAutoInstallSlot_SingboxNoOp_NotJournaledAsUpdate(t *testing.T) {
 	// Update() returns nil but the version never actually changed
-	// (no-space / MatchesRequired no-op case) — must not be reported as
+	// (no-space / already-pinned no-op case) — must not be reported as
 	// a successful update, but the attempt is still stamped.
 	su := &fakeSingboxUpdater{
 		installed:       true,
@@ -594,7 +594,7 @@ func newAutoInstallTestSettings(t *testing.T, enabled bool) *storage.SettingsSto
 	settings.Updates.AutoInstallEnabled = enabled
 	settings.Updates.AutoInstallIntervalDays = 7
 	settings.Updates.AutoInstallTime = "05:00"
-	if err := store.Save(settings); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = *settings; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	return store

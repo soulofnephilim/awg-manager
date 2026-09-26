@@ -41,7 +41,7 @@ func newCacheTestService(t *testing.T, mgr *countingState, ttl time.Duration) *S
 		t.Fatal(err)
 	}
 	store := storage.NewAWGTunnelStoreWithLockDir(dir, lockDir)
-	if err := store.Save(&storage.AWGTunnel{ID: "t1", Name: "t1", Enabled: true}); err != nil {
+	if err := store.Create(&storage.AWGTunnel{ID: "t1", Name: "t1", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	s := &ServiceImpl{store: store, state: mgr}
@@ -52,7 +52,7 @@ func newCacheTestService(t *testing.T, mgr *countingState, ttl time.Duration) *S
 func TestFetchRawStateByID_SkipsWdttRawBackend(t *testing.T) {
 	mgr := &countingState{}
 	s := newCacheTestService(t, mgr, 2*time.Second)
-	if err := s.store.Save(&storage.AWGTunnel{
+	if err := s.store.Create(&storage.AWGTunnel{
 		ID:      "wdttraw-default",
 		Name:    "WDTT Raw",
 		Backend: "wdtt-raw",
@@ -136,6 +136,7 @@ func TestStateCache_BusEventInvalidates(t *testing.T) {
 	s := newCacheTestService(t, mgr, 2*time.Second)
 	bus := events.NewBus()
 	s.SetEventBus(bus)
+	t.Cleanup(s.Close)
 
 	s.GetState(context.Background(), "t1")
 	bus.Publish("tunnel:state", events.TunnelStateEvent{ID: "t1", State: "stopped"})
@@ -148,4 +149,30 @@ func TestStateCache_BusEventInvalidates(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("manager calls = %d, want >= 2 после tunnel:state", mgr.calls.Load())
+}
+
+type fakeNWGState struct{ info tunnel.StateInfo }
+
+func (f fakeNWGState) GetState(context.Context, *storage.AWGTunnel) tunnel.StateInfo { return f.info }
+
+// Состояние nativewg-туннеля читается у nativewg-оператора, а не по
+// kernel-матрице чужого имени: иначе карточка врёт. Мутант «ветка снята» был
+// зелёным — шва не было.
+func TestFetchRawStateByID_NativeWGUsesNativeReader(t *testing.T) {
+	mgr := &countingState{}
+	s := newCacheTestService(t, mgr, 2*time.Second)
+	s.nwgState = fakeNWGState{info: tunnel.StateInfo{State: tunnel.StateStopped, BackendType: "nativewg"}}
+	if err := s.store.Create(&storage.AWGTunnel{ID: "awg0", Name: "n", Backend: "nativewg", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := s.fetchRawStateByID(context.Background(), "awg0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.State != tunnel.StateStopped || info.BackendType != "nativewg" {
+		t.Fatalf("state=%v backend=%q — ответ не от nativewg-оператора", info.State, info.BackendType)
+	}
+	if got := mgr.calls.Load(); got != 0 {
+		t.Fatalf("kernel-матрица опрошена %d раз для nativewg", got)
+	}
 }

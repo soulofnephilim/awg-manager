@@ -49,6 +49,7 @@
 			onToggleOnOff={() => ctx.handleToggleOnOff(item.tunnel.id)}
 			ondelete={() => ctx.requestDelete(item.tunnel.id)}
 			ondetail={(id) => ctx.openDetail(id)}
+			onLockClick={() => ctx.handleLockClick(item.tunnel.id)}
 		/>
 	{:else if item.kind === 'awg-system'}
 		<SystemTunnelCard
@@ -63,6 +64,7 @@
 			tunnel={item.tunnel}
 			view={ctx.effectiveAwgRenderMode === 'list-card' ? 'list' : ctx.effectiveAwgCardViewMode}
 			onadopt={(name) => ctx.handleAdoptClick(name)}
+			ondelete={(name) => ctx.handleExternalDelete(name)}
 		/>
 	{:else if item.kind === 'awg3'}
 		<Awg3TunnelCard
@@ -176,24 +178,6 @@
 			>
 				{#snippet actions()}
 					<StoreStatusBadge store={tunnels} />
-					{#if ctx.freeturnAvailable}
-						<Button
-							variant={ctx.freeturnOpen ? 'primary' : 'secondary'}
-							size="md"
-							onclick={ctx.toggleFreeturn}
-						>
-							FreeTurn
-						</Button>
-					{/if}
-					{#if ctx.wdttAvailable}
-						<Button
-							variant={ctx.wdttOpen ? 'primary' : 'secondary'}
-							size="md"
-							onclick={ctx.toggleWdtt}
-						>
-							WDTT
-						</Button>
-					{/if}
 					<Button variant="secondary" size="md" onclick={ctx.handleExportAll} disabled={ctx.exporting} iconBefore={exportIcon}>
 						Экспорт
 					</Button>

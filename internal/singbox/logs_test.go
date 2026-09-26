@@ -38,7 +38,7 @@ func (c *captureLogger) snapshot() []captured {
 
 func TestLogForwarder_LevelMapping(t *testing.T) {
 	cap := &captureLogger{}
-	f := NewLogForwarder("unused", cap)
+	f := NewLogForwarder(func() string { return "unused" }, cap)
 
 	cases := []struct {
 		name string
@@ -50,8 +50,15 @@ func TestLogForwarder_LevelMapping(t *testing.T) {
 		{"warn", `{"type":"warning","payload":"slow"}`, logging.LevelWarn, "slow"},
 		{"error", `{"type":"error","payload":"boom"}`, logging.LevelError, "boom"},
 		{"fatal", `{"type":"fatal","payload":"cfg bad"}`, logging.LevelError, "cfg bad"},
-		{"debug", `{"type":"debug","payload":"tick"}`, logging.LevelDebug, "tick"},
-		{"unknown-falls-to-full", `{"type":"trace","payload":"trace msg"}`, logging.LevelFull, "trace msg"},
+		{"debug-as-full", `{"type":"debug","payload":"tick"}`, logging.LevelFull, "tick"},
+		// Монотонно по подробности: info < debug < trace у движка ложится на
+		// info < full < debug у нас. Прежнее trace→LevelFull переворачивало
+		// подробность: при пороге «full» было видно trace и не видно debug.
+		{"trace-as-debug", `{"type":"trace","payload":"trace msg"}`, logging.LevelDebug, "trace msg"},
+		// Неизвестный ярлык не прячем: движок умеет отдать "unknown", и при
+		// заводском пороге info самый подробный уровень означал бы «скрыть» —
+		// fail-closed там, где журнал существует ради разбора аварий.
+		{"unknown-visible", `{"type":"unknown","payload":"strange"}`, logging.LevelWarn, "strange"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,7 +172,7 @@ func TestLogForwarder_SubgroupClassification(t *testing.T) {
 
 func TestLogForwarder_DropsEmptyAndMalformed(t *testing.T) {
 	cap := &captureLogger{}
-	f := NewLogForwarder("unused", cap)
+	f := NewLogForwarder(func() string { return "unused" }, cap)
 
 	f.forward(nil)
 	f.forward([]byte(""))
@@ -179,7 +186,7 @@ func TestLogForwarder_DropsEmptyAndMalformed(t *testing.T) {
 }
 
 func TestLogForwarder_NilAppLoggerIsSafe(t *testing.T) {
-	f := NewLogForwarder("unused", nil)
+	f := NewLogForwarder(func() string { return "unused" }, nil)
 	f.forward([]byte(`{"type":"info","payload":"hello"}`))
 }
 
@@ -226,7 +233,7 @@ func TestSanitizeSingboxLogText_RedactsDomainsAndIPs(t *testing.T) {
 
 func TestLogForwarder_PreservesSensitiveHostsBeforeOutputMasking(t *testing.T) {
 	cap := &captureLogger{}
-	f := NewLogForwarder("unused", cap)
+	f := NewLogForwarder(func() string { return "unused" }, cap)
 
 	f.forward([]byte(`{"type":"debug","payload":"dns: lookup succeed for node.example.org: 203.0.113.77"}`))
 
@@ -257,7 +264,7 @@ func TestLogForwarder_PreservesSensitiveHosts_AllLevels(t *testing.T) {
 	for _, lvl := range cases {
 		t.Run(lvl, func(t *testing.T) {
 			cap := &captureLogger{}
-			f := NewLogForwarder("unused", cap)
+			f := NewLogForwarder(func() string { return "unused" }, cap)
 			line := `{"type":"` + lvl + `","payload":"dns: lookup succeed for node.example.org: 203.0.113.77 and [2606:2800:220:1:248:1893:25c8:1946]:443"}`
 			f.forward([]byte(line))
 

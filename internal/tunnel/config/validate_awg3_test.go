@@ -39,6 +39,16 @@ func TestValidateAWG3(t *testing.T) {
 			},
 			wantErr: "S4 = 11",
 		},
+		{
+			name: "malformed header protection key — not a 32-byte base64 key",
+			obf: storage.AWGObfuscation{
+				HeaderProtectionKey: "dGVzdA==", // base64 "test" — 4 bytes, not 32
+				S1:                  12, S2: 12, S3: 12, S4: 12,
+			},
+			// Must be a hard error, else pubKeyToHex drops it to "" and the
+			// tunnel comes up with header protection silently OFF.
+			wantErr: "HeaderProtectionKey",
+		},
 	}
 
 	for _, tt := range tests {
@@ -95,5 +105,53 @@ Endpoint = 192.0.2.1:51820
 	}
 	if ranged.Interface.ContentPaddingAddition != "0-80" {
 		t.Fatalf("range starting at zero must survive, got %q", ranged.Interface.ContentPaddingAddition)
+	}
+}
+
+// TestValidateAWG3FlagsAreIndependent pins that the two 3.1 flags do not
+// interact with the header-protection rule: they are device policy, not
+// padding, and refusing them next to a key would be an invented restriction.
+func TestValidateAWG3FlagsAreIndependent(t *testing.T) {
+	o := &storage.AWGObfuscation{
+		HeaderProtectionKey: "ceaFRw/bcsvnr9I5fmZqPY1HTuUhhdkYjSxgUH0ixRc=",
+		S1:                  12, S2: 12, S3: 12, S4: 12,
+		RandomTrailers: true,
+		DisableCookies: true,
+	}
+	if err := ValidateAWG3(o); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateAWG3FlagsStillEnforceSxFloor keeps the existing Sx>=12 rule
+// reachable when the new flags are set, so adding them cannot shadow it.
+func TestValidateAWG3FlagsStillEnforceSxFloor(t *testing.T) {
+	o := &storage.AWGObfuscation{
+		HeaderProtectionKey: "ceaFRw/bcsvnr9I5fmZqPY1HTuUhhdkYjSxgUH0ixRc=",
+		S1:                  11, S2: 12, S3: 12, S4: 12,
+		RandomTrailers: true,
+	}
+	if err := ValidateAWG3(o); err == nil {
+		t.Fatal("expected S1 = 11 to be refused next to a header protection key")
+	}
+}
+
+// Форма полей 3.x — как у фронта (isU16Range): иначе импорт и прямой API
+// пропускали мусор, а старт туннеля молча не слал ASC (nwg.ascAWG3JSON).
+func TestValidateAWG3_RangeFields(t *testing.T) {
+	for v, ok := range map[string]bool{
+		"": true, "0": true, "80": true, "0-80": true, "65535": true, "120-120": true,
+		"abc": false, "5-": false, "-5": false, "120-150-180": false, "65536": false,
+		"150-120": false, " 5": false, "5 - 7": false, "000001": false,
+	} {
+		for name, o := range map[string]storage.AWGObfuscation{
+			"ContentPaddingAddition": {ContentPaddingAddition: v}, "RekeyAfterTime": {RekeyAfterTime: v},
+			"RekeyTimeout": {RekeyTimeout: v}, "RejectAfterTime": {RejectAfterTime: v},
+			"KeepaliveTimeout": {KeepaliveTimeout: v}, "MaxHandshakeAttempts": {MaxHandshakeAttempts: v},
+		} {
+			if err := ValidateAWG3(&o); (err == nil) != ok {
+				t.Errorf("%s=%q: err=%v, want ok=%v", name, v, err, ok)
+			}
+		}
 	}
 }

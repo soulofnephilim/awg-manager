@@ -62,11 +62,22 @@ func parseRelease(release string) parsedVersion {
 }
 
 // Get returns the OS version from cached NDMS version info.
-// Returns Version4x if info is not available (safe fallback).
+//
+// Версия неизвестна — считаем 5.x. Прежний фолбэк на 4.x был подписан «safe»,
+// но безопасен ровно обратный выбор, потому что цена ошибки несимметрична:
+//   - оператор OS5 на роутере 4.x падает ГРОМКО, NDMS отвечает
+//     `unsupported interface type: "OpkgTun"` (наблюдалось на стенде, пока он
+//     был на 4.03);
+//   - оператор OS4 на роутере 5.x молча делает прямые ip-команды мимо модели
+//     NDMS — ровно это и воспроизводилось в F197.
+//
+// Громкий отказ на старой и редкой платформе лучше тихой поломки на текущей.
+// Сюда вообще нельзя доходить: версию добывают два независимых канала
+// (RCI и ndmc, см. internal/sys/ndmsinfo), это последний рубеж.
 func Get() Version {
 	info := ndmsinfo.Get()
 	if info == nil || info.Release == "" {
-		return Version4x
+		return Version5
 	}
 	if len(info.Release) > 0 && info.Release[0] >= '5' {
 		return Version5
@@ -95,6 +106,27 @@ func AtLeast(major, minor int) bool {
 	}
 	return v.minor >= minor
 }
+
+// opkgTunMinMajor — интерфейсы OpkgTun появились только в KeeneticOS 5.x.
+// На 4.x NDMS отвечает на их создание HTTP 200 с вложенной ошибкой, интерфейс
+// не появляется, и провижининг tun-режимов падает шагом позже (issue #768).
+const opkgTunMinMajor = 5
+
+// SupportsOpkgTunRelease сообщает, умеет ли прошивка интерфейсы OpkgTun.
+//
+// Нераспознанная версия трактуется как поддерживаемая: кэш ndmsinfo может быть
+// ещё не прогрет, а ложная блокировка на живом OS5-роутере хуже, чем внятная
+// ошибка от NDMS на редком OS4.
+func SupportsOpkgTunRelease(release string) bool {
+	v := parseRelease(strings.TrimSpace(release))
+	if !v.valid {
+		return true
+	}
+	return v.major >= opkgTunMinMajor
+}
+
+// SupportsOpkgTun — SupportsOpkgTunRelease для текущей прошивки.
+func SupportsOpkgTun() bool { return SupportsOpkgTunRelease(ReleaseString()) }
 
 // ReleaseString returns the raw release string from NDMS, or "" if unavailable.
 func ReleaseString() string {

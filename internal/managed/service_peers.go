@@ -2,12 +2,41 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 
+	"github.com/hoaxisr/awg-manager/internal/managed/peerip"
+	"github.com/hoaxisr/awg-manager/internal/signature"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
+
+// ErrInvalidPeerDNS is returned when a peer's DNS is not a plain list of
+// IP addresses. The value is rendered verbatim into the client .conf as
+// "DNS = …", so anything else — a hostname, a second line, a "PostUp ="
+// smuggled after a newline — is a config injection that wg-quick would
+// execute on the user's machine when they import the file.
+var ErrInvalidPeerDNS = errors.New("peer DNS must be a comma-separated list of IP addresses")
+
+// ValidatePeerDNS checks and canonicalises a peer DNS list. Empty is
+// allowed (the server default applies). Each entry must parse as an IP;
+// the result is re-joined with ", " so no original bytes survive.
+func ValidatePeerDNS(dns string) (string, error) {
+	if strings.TrimSpace(dns) == "" {
+		return "", nil
+	}
+	parts := strings.Split(dns, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		ip := net.ParseIP(strings.TrimSpace(p))
+		if ip == nil {
+			return "", fmt.Errorf("%w: %q", ErrInvalidPeerDNS, p)
+		}
+		out = append(out, ip.String())
+	}
+	return strings.Join(out, ", "), nil
+}
 
 // AddPeer adds a new client peer to the managed server identified by id.
 // Returns the created peer (including private key for .conf generation).
@@ -17,10 +46,29 @@ func (s *Service) AddPeer(ctx context.Context, id string, req AddPeerRequest) (*
 		return nil, fmt.Errorf("managed server not found: %s", id)
 	}
 
+	// An empty TunnelIP means "allocate": the first free host address in
+	// the server's subnet. The MCP tools rely on this — an address invented
+	// by a model either collides or lands outside the subnet.
+	if strings.TrimSpace(req.TunnelIP) == "" {
+		used := make([]string, 0, len(server.Peers))
+		for _, p := range server.Peers {
+			used = append(used, p.TunnelIP)
+		}
+		req.TunnelIP = peerip.NextFree(server.Address, used)
+		if req.TunnelIP == "" {
+			return nil, peerip.ErrNoFree
+		}
+	}
+
 	// Validate tunnel IP
 	if err := s.validateTunnelIP(server, req.TunnelIP); err != nil {
 		return nil, err
 	}
+	dns, err := ValidatePeerDNS(req.DNS)
+	if err != nil {
+		return nil, err
+	}
+	req.DNS = dns
 
 	// Check tunnel IP not already used
 	for _, p := range server.Peers {
@@ -30,14 +78,22 @@ func (s *Service) AddPeer(ctx context.Context, id string, req AddPeerRequest) (*
 	}
 
 	// Generate keys
-	privKey, pubKey, err := GenerateKeyPair(ctx)
+	privKey, pubKey, err := s.keyGen.GenerateKeyPair(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("generate keypair: %w", err)
 	}
 
-	psk, err := GeneratePresharedKey(ctx)
+	psk, err := s.keyGen.GeneratePresharedKey(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("generate PSK: %w", err)
+	}
+
+	// Сигнатура принадлежит пиру: генерируем по дефолтному профилю. Отказ
+	// генерации — отказ создания пира (fail closed), молча выдавать пира
+	// без имитации нельзя.
+	sig, err := signature.Generate(signature.DefaultProfile)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSignatureGenerate, err)
 	}
 
 	// Parse tunnel IP
@@ -63,8 +119,24 @@ func (s *Service) AddPeer(ctx context.Context, id string, req AddPeerRequest) (*
 		TunnelIP:     req.TunnelIP,
 		DNS:          req.DNS,
 		Enabled:      true,
+
+		I1:               sig.Packets.I1,
+		I2:               sig.Packets.I2,
+		I3:               sig.Packets.I3,
+		I4:               sig.Packets.I4,
+		I5:               sig.Packets.I5,
+		SignatureProfile: sig.Profile,
 	}
 	if err := s.settings.UpdateManagedServer(id, func(sv *storage.ManagedServer) error {
+		// The "already in use" check above ran on a snapshot. Two
+		// concurrent adds without an explicit address both allocate the
+		// same one; re-checking under the store lock is what stops the
+		// second from persisting a duplicate.
+		for _, p := range sv.Peers {
+			if p.TunnelIP == req.TunnelIP {
+				return fmt.Errorf("tunnel IP %s already in use", req.TunnelIP)
+			}
+		}
 		sv.Peers = append(sv.Peers, peer)
 		return nil
 	}); err != nil {
@@ -91,6 +163,29 @@ func (s *Service) UpdatePeer(ctx context.Context, id, pubkey string, req UpdateP
 	iface := server.InterfaceName
 
 	// Validate inputs BEFORE touching RCI or storage so we can fail clean.
+	dns, err := ValidatePeerDNS(req.DNS)
+	if err != nil {
+		return err
+	}
+	req.DNS = dns
+	sigProfile := ""
+	if req.Signature != nil {
+		var err error
+		if sigProfile, err = signature.ValidateProfileAndSize(req.Signature.Profile, req.Signature.packets()); err != nil {
+			switch {
+			case errors.Is(err, signature.ErrUnknownProtocol):
+				return fmt.Errorf("%w: %s", ErrUnknownSignatureProfile, req.Signature.Profile)
+			case errors.Is(err, signature.ErrPacketsTooLarge):
+				return ErrSignatureTooLarge
+			case errors.Is(err, signature.ErrInvalidPacketTag):
+				return ErrInvalidSignatureTag
+			default:
+				// Чужую ошибку не переклеиваем в «слишком большая»: вызывающий
+				// не должен показывать пользователю неверную причину.
+				return fmt.Errorf("validate signature: %w", err)
+			}
+		}
+	}
 	wantTunnelChange := req.TunnelIP != "" && req.TunnelIP != peer.TunnelIP
 	if wantTunnelChange {
 		if err := s.validateTunnelIP(server, req.TunnelIP); err != nil {
@@ -139,12 +234,22 @@ func (s *Service) UpdatePeer(ctx context.Context, id, pubkey string, req UpdateP
 		}
 		sv.Peers[i].Description = req.Description
 		sv.Peers[i].DNS = req.DNS
+		if req.Signature != nil {
+			sv.Peers[i].I1 = req.Signature.I1
+			sv.Peers[i].I2 = req.Signature.I2
+			sv.Peers[i].I3 = req.Signature.I3
+			sv.Peers[i].I4 = req.Signature.I4
+			sv.Peers[i].I5 = req.Signature.I5
+			// Канонический ключ, не то, что прислали: валидация выше
+			// принимает " SIP " — хранить такое нельзя.
+			sv.Peers[i].SignatureProfile = sigProfile
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("save to storage: %w", err)
 	}
 
-	s.log.Info("peer updated", "interface", iface, "pubkey", pubkey[:8]+"...")
+	s.log.Info("peer updated", "interface", iface, "pubkey", shortKey(pubkey))
 	s.appLog.Info("update-peer", req.Description, fmt.Sprintf("Peer %s updated", req.Description))
 	return nil
 }
@@ -164,9 +269,12 @@ func (s *Service) DeletePeer(ctx context.Context, id, pubkey string) error {
 	peerName := server.Peers[idx].Description
 	iface := server.InterfaceName
 
-	// Remove via RCI
+	// Remove via RCI — fail-closed: a peer that stayed on the router while the
+	// card says "revoked" keeps the client connected. No tolerance for "already
+	// gone" (owner decision 2026-09-05): the NDMS reply form for that case has
+	// not been captured on a live router yet.
 	if err := s.rciRemovePeer(ctx, iface, pubkey); err != nil {
-		s.log.Warn("failed to remove peer via RCI", "error", err)
+		return fmt.Errorf("remove peer via RCI: %w", err)
 	}
 
 	// Remove from storage
@@ -183,7 +291,7 @@ func (s *Service) DeletePeer(ctx context.Context, id, pubkey string) error {
 		return fmt.Errorf("save to storage: %w", err)
 	}
 
-	s.log.Info("peer deleted", "interface", iface, "pubkey", pubkey[:8]+"...")
+	s.log.Info("peer deleted", "interface", iface, "pubkey", shortKey(pubkey))
 	s.appLog.Info("delete-peer", peerName, fmt.Sprintf("Peer %s deleted", peerName))
 	return nil
 }
@@ -220,13 +328,22 @@ func (s *Service) TogglePeer(ctx context.Context, id, pubkey string, enabled boo
 		return fmt.Errorf("save to storage: %w", err)
 	}
 
-	s.log.Info("peer toggled", "interface", iface, "pubkey", pubkey[:8]+"...", "enabled", enabled)
+	s.log.Info("peer toggled", "interface", iface, "pubkey", shortKey(pubkey), "enabled", enabled)
 	state := "disabled"
 	if enabled {
 		state = "enabled"
 	}
 	s.appLog.Info("toggle-peer", peerName, fmt.Sprintf("Peer %s %s", peerName, state))
 	return nil
+}
+
+// shortKey — префикс ключа для журнала. Импортированный ключ может быть
+// короче 8 символов, и pubkey[:8] на нём паниковал уже после записи в NDMS.
+func shortKey(k string) string {
+	if len(k) > 8 {
+		return k[:8] + "..."
+	}
+	return k
 }
 
 func (s *Service) findPeerIndex(server *storage.ManagedServer, pubkey string) int {

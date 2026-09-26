@@ -16,7 +16,6 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/ndms/payloads"
 	"github.com/hoaxisr/awg-manager/internal/storage"
-	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 )
 
 // SyncDNS reconciles DNS servers for a NativeWG tunnel: clears oldDNS
@@ -54,11 +53,18 @@ func (o *OperatorNativeWG) SyncDNS(ctx context.Context, stored *storage.AWGTunne
 // interface down for ASC changes), failures bubble up so the caller
 // can log a Warn and instruct the user to restart the tunnel.
 func (o *OperatorNativeWG) SyncAWGParams(ctx context.Context, stored *storage.AWGTunnel) error {
-	if !ndmsinfo.SupportsWireguardASC() {
+	if !o.supportsASC() {
 		return fmt.Errorf("ASC not supported by firmware; restart tunnel to apply")
 	}
+	// Туннель 3.x на прошивке с ASC 2.0 идёт через awg_proxy — параметры ему
+	// довозит SyncKmodSlot, а не эта запись. Слать их в NDMS нельзя: прошивка
+	// обфусцирует сама, kmod наложит обфускацию поверх, и на выходе мусор.
+	if !o.useASC(&stored.Interface) {
+		return nil
+	}
 	names := NewNWGNames(stored.NWGIndex)
-	ascJSON, err := buildASCJSON(&stored.Interface)
+	o.logSignatureSplit("sync-asc", stored.Name, &stored.Interface)
+	ascJSON, err := buildASCJSON(&stored.Interface, o.asc3())
 	if err != nil {
 		return fmt.Errorf("build ASC params: %w", err)
 	}
@@ -169,7 +175,7 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 			v4Confirmed = !strings.Contains(host, ":")
 		default:
 			if ip, port, err := o.resolveEndpointFresh(stored.Peer.Endpoint); err == nil {
-				if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() == nil {
+				if isV6Literal(ip) {
 					kernelEndpoint = net.JoinHostPort(ip, strconv.Itoa(port))
 					kernelV6 = true
 				} else {
@@ -177,7 +183,7 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 					resolvedV4 = net.JoinHostPort(ip, strconv.Itoa(port))
 					rciEndpoint = resolvedV4
 				}
-			} else if !o.supportsASC() {
+			} else if !o.useASC(&stored.Interface) {
 				// Proxy-путь: endpoint в конфиге NDMS всё равно не наш —
 				// см. общее правило ниже. Неудача резолва здесь ничего
 				// не решает, ошибку не поднимаем.
@@ -194,7 +200,7 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 				// поломки.
 				return fmt.Errorf("sync peer: резолв %s не удался, смена ключа пира не применена: %w",
 					stored.Peer.Endpoint, err)
-			} else if e, guarded := o.guardGet(stored.ID); guarded && !e.viaNDMS && !e.viaKmod &&
+			} else if e, guarded := o.guardGet(stored.ID); guarded && e.mode == guardKernel &&
 				e.spec != stored.Peer.Endpoint {
 				// v6-история: в конфиге NDMS лежит заглушка 127.0.0.1:1,
 				// а не рабочий адрес (запись v6-стража — единственное
@@ -229,17 +235,18 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 	// Раньше сюда уходило доменное имя, и правка полей пира, которых нет
 	// в kmodShapingChanged (AllowedIPs, keepalive, preshared-key), уводила
 	// ядро слать хендшейки мимо прокси — без обфускации и без лечения.
-	if !o.supportsASC() {
+	if !o.useASC(&stored.Interface) {
 		rciEndpoint = ""
 	}
 	peerCfg := payloads.PeerConfig{
 		PublicKey: stored.Peer.PublicKey,
 		Endpoint:  rciEndpoint,
 	}
-	// NDMS принимает keepalive числом; диапазон AWG 3.0 сюда попасть не должен
-	// (запрещён валидацией), а если попал — оставляем поле пустым, чтобы не
-	// подсунуть прошивке мусор.
-	if n, ok := stored.Peer.PersistentKeepalive.Single(); ok && n > 0 {
+	// NDMS принимает keepalive числом: диапазон AWG 3.0 схлопывается в нижнюю
+	// границу. На выключенный и нечитаемый keepalive команда не отправляется
+	// вовсе — поле пира в RCI инкрементальное, поэтому в прошивке останется
+	// прежнее значение интервала, а не «выключено».
+	if n, ok := stored.Peer.PersistentKeepalive.Effective(); ok {
 		peerCfg.KeepaliveInterval = n
 	}
 	if stored.Peer.PresharedKey != "" {
@@ -296,7 +303,7 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 	// обновиться (устаревшая запись не просто восстановит старые значения:
 	// wg set по старому ключу ВОСКРЕШАЕТ удалённого RCI-батчем пира).
 	switch {
-	case kernelV6 && !o.supportsASC():
+	case kernelV6 && !o.useASC(&stored.Interface):
 		// Proxy-путь: v6-адрес живёт в слоте awg_proxy.ko (kmod умеет v6
 		// с 1.3.0), а не в ядре. Писать его через wg set значило бы гнать
 		// хендшейки мимо прокси — без обфускации. Endpoint в конфиге NDMS
@@ -316,7 +323,7 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 				endpoint: cur.endpoint,
 				spec:     stored.Peer.Endpoint,
 				name:     ndmsName,
-				viaKmod:  true,
+				mode:     guardKmod,
 			})
 		}
 	case kernelV6:
@@ -357,9 +364,9 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 		// 127.0.0.1:<порт слота> (его держат SyncKmodSlot и RestoreKmodTunnel,
 		// operator.go:807/849) — страж, доводящий туда реальный адрес сервера,
 		// сломал бы proxy-туннель. Non-ASC вне объёма этого плана.
-		guard, viaNDMS := guardModeForEndpoint(stored.Peer.Endpoint, false)
-		if guard && !o.supportsASC() {
-			// Proxy-путь: за адресом следит режим viaKmod (Task A2), его
+		guard, mode := guardModeForEndpoint(stored.Peer.Endpoint, false)
+		if guard && !o.useASC(&stored.Interface) {
+			// Proxy-путь: за адресом следит режим guardKmod (Task A2), его
 			// ставит startProxy. Здесь только освежаем запись — ключ или
 			// имя могли смениться, а протухший spec в реестре заставил бы
 			// стража резолвить не тот домен. Снимать стража нельзя:
@@ -383,11 +390,11 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 				endpoint: cur.endpoint, // прежний резолв — он же в слоте
 				spec:     stored.Peer.Endpoint,
 				name:     ndmsName,
-				viaKmod:  true,
+				mode:     guardKmod,
 			})
 			break
 		}
-		if guard && o.supportsASC() {
+		if guard && o.useASC(&stored.Interface) {
 			// Hostname→v4: адрес за именем может смениться, а NDMS
 			// хранит литерал — оставляем под стражем в режиме NDMS (#702).
 			entry := guardEntry{
@@ -396,19 +403,22 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 				endpoint: resolvedV4, // резолв, НЕ rciEndpoint (там имя)
 				spec:     stored.Peer.Endpoint,
 				name:     ndmsName,
-				viaNDMS:  viaNDMS,
+				mode:     mode,
 			}
 			// Register безусловный — в отличие от v6-ветки выше, где он
 			// воскресил бы запись, снятую параллельным Stop/Delete, и страж
 			// начал бы делать wg set по мёртвому устройству. Здесь цена
-			// гонки другая: viaNDMS правит конфиг NDMS, а он у остановленного
+			// гонки другая: guardNDMS правит конфиг NDMS, а он у остановленного
 			// туннеля живёт и должен быть актуален. Delete снимает запись
 			// (operator.go:561-568), так что вечной она не станет.
 			o.guardRegister(stored.ID, entry)
 			break
 		}
-		// v4-литерал — резолвить нечего, стражу тут делать нечего.
-		if o.guardHas(stored.ID) {
+		// v4-литерал — резолвить нечего, стражу тут делать нечего. Кроме
+		// записи про target релея: у обфусцированного туннеля endpoint ВСЕГДА
+		// литерал 127.0.0.1:<порт>, и снимать по нему слежку за DDNS-именем
+		// target'а — значит выключать её при любой правке пира.
+		if e, ok := o.guardGet(stored.ID); ok && e.mode != guardRelay {
 			o.guardUnregister(stored.ID)
 			o.appLog.Info("sync-peer", ndmsName, "endpoint теперь v4-литерал — endpoint-страж снят, адресом управляет NDMS")
 		}
@@ -417,7 +427,7 @@ func (o *OperatorNativeWG) SyncPeer(ctx context.Context, stored *storage.AWGTunn
 		// или endpoint изменились, реестр стража устарел — снять, иначе он
 		// воскресит старого пира. При неизменном пире транзиентный сбой
 		// DNS защиту не снимает.
-		if e, ok := o.guardGet(stored.ID); ok &&
+		if e, ok := o.guardGet(stored.ID); ok && e.mode != guardRelay &&
 			(e.pubkey != stored.Peer.PublicKey || e.spec != stored.Peer.Endpoint) {
 			o.guardUnregister(stored.ID)
 			o.appLog.Warn("sync-peer", ndmsName,

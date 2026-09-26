@@ -8,6 +8,7 @@ import (
 	"reflect"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
 // cloneRouterConfig returns a deep copy of cfg via a JSON round-trip.
@@ -206,8 +207,10 @@ func (s *ServiceImpl) captureFakeIPRealServerEdit(before, after *RouterConfig) e
 	if settings.SingboxRouter.FakeIPRealServer == norm {
 		return nil
 	}
-	settings.SingboxRouter.FakeIPRealServer = norm
-	if err := s.deps.Settings.Save(settings); err != nil {
+	if err := s.deps.Settings.Update(func(cur *storage.Settings) error {
+		cur.SingboxRouter.FakeIPRealServer = norm
+		return nil
+	}); err != nil {
 		return fmt.Errorf("fakeip real server: save settings: %w", err)
 	}
 	s.appLog.Info("fakeip-dns", "real", "upstream resolver changed to "+norm)
@@ -222,12 +225,34 @@ func (s *ServiceImpl) ensureFakeIPOverlayFromState(cfg *RouterConfig) error {
 	if err != nil {
 		return fmt.Errorf("fakeip overlay: load settings: %w", err)
 	}
-	if settings == nil || settings.FakeIP == nil {
-		return fmt.Errorf("fakeip overlay: FakeIPState not provisioned (nil)")
+	st, _ := opkgTunOwned(settings, stateFakeIPTun)
+	if st == nil {
+		return fmt.Errorf("fakeip overlay: OpkgTun ownership record not provisioned (nil)")
 	}
-	p := resolveFakeIPParams(s.deps.FakeIPTun, settings.SingboxRouter)
+	// Настройки в оверлей идут НОРМАЛИЗОВАННЫМИ — как во всех остальных
+	// потребителях (enable, реап, статус). На достижимых путях хранимое уже
+	// normalized (enable завершает Save нормализованного sr), так что это
+	// выравнивание инварианта, а не фикс наблюдаемого бага.
+	sr, err := NormalizeSingboxRouterSettings(settings.SingboxRouter)
+	if err != nil {
+		return fmt.Errorf("fakeip overlay: normalize settings: %w", err)
+	}
+	p := s.fakeIPParamsWithCache(sr)
+	// Флаг external_configuration переносится из слота как есть: переключает
+	// его только тик (healTunSettings → completeExternalFlip). Иначе правка
+	// пользователя включила бы флаг под живым инстансом без флага, тот снял
+	// бы адрес на SIGHUP, а вернуть его было бы некому до следующего тика.
+	external, found := false, false
+	for _, in := range cfg.Inbounds {
+		if in.Tag == "tun-in" {
+			external, found = in.ExternalConfiguration, true
+		}
+	}
+	if !found { // проба версии дорогая на холодном пути — только когда нужна
+		external = s.tunExternalWant()
+	}
 	spec := FakeIPTunSpec{
-		Iface:      fakeIPIfaceName(settings.FakeIP.Index),
+		Iface:      tunIfaceName(st.Index),
 		TunAddr4:   p.TunAddr4,
 		TunAddr6:   p.TunAddr6,
 		MTU:        p.MTU,
@@ -235,8 +260,11 @@ func (s *ServiceImpl) ensureFakeIPOverlayFromState(cfg *RouterConfig) error {
 		Inet6Range: p.Inet6Range,
 		CachePath:  p.CachePath,
 		RealServer: p.RealServer,
-		Stack:      settings.SingboxRouter.FakeIPStack,
-		UDPTimeout: settings.SingboxRouter.UDPTimeout,
+		Stack:      sr.FakeIPStack,
+		UDPTimeout: sr.UDPTimeout,
+		UDPNATMax:  sr.UDPNATMax,
+
+		ExternalConfiguration: external,
 	}
 	ensureFakeIPOverlay(cfg, spec)
 	return nil
@@ -286,9 +314,21 @@ func (s *ServiceImpl) fakeipWithConfig(ctx context.Context, event string, fn fun
 	}
 	// Sync specific CIDR routes to the tun for proxy-routed dst CIDRs.
 	// Best-effort; never fails the CRUD. fakeipWithConfig runs only when
-	// provisioned (ensureFakeIPOverlayFromState above errors on nil FakeIP).
-	if settings, serr := s.deps.Settings.Load(); serr == nil && settings != nil && settings.FakeIP != nil {
-		s.syncTunCIDRRoutes(ctx, fakeIPNDMSName(settings.FakeIP.Index), before, cfg)
+	// provisioned (ensureFakeIPOverlayFromState above errors on a nil record).
+	//
+	// Имя берётся из записи владения, поэтому доказанно чужой интерфейс на нашем
+	// индексе (наш умер, номер занял посторонний) обязан быть пропущен: это не
+	// снос, но правка ЕГО маршрутов. «Недоступный скан ≠ чужой» — без скана и на
+	// его ошибке синхронизируем как раньше.
+	if settings, serr := s.deps.Settings.Load(); serr == nil {
+		if st, ok := opkgTunOwned(settings, stateFakeIPTun); ok {
+			ndmsName := tunNDMSName(st.Index)
+			if s.provenForeignOpkgTun(ctx, ndmsName, fakeIPTunDescription) {
+				s.appLog.Warn("fakeip-cidr", ndmsName, "на этом номере нет нашего OpkgTun — CIDR-маршруты не тронуты")
+			} else {
+				s.syncTunCIDRRoutes(ctx, ndmsName, before, cfg)
+			}
+		}
 	}
 	s.emitCfgEvent(event, cfg)
 	return nil

@@ -6,14 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/hoaxisr/awg-manager/internal/obfuscator"
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/response"
+	"github.com/hoaxisr/awg-manager/internal/signature"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/traffic"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
@@ -21,16 +22,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/netutil"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/service"
-	"github.com/hoaxisr/awg-manager/internal/wdtt"
 )
-
-// writeConfigFile writes config content to file.
-func writeConfigFile(path, content string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(content), 0600)
-}
 
 // List returns all tunnels.
 //
@@ -190,7 +182,7 @@ func (h *TunnelsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if stored, err := h.store.Get(id); err == nil && stored != nil && stored.Backend == wdtt.BackendWdttRaw {
+	if stored, err := h.store.Get(id); err == nil && stored != nil && stored.Backend == backendWdttRaw {
 		response.Success(w, h.buildWdttRawResponse(stored))
 		return
 	}
@@ -203,129 +195,17 @@ func (h *TunnelsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, resp)
 }
 
-// Create creates a new tunnel.
-//
-//	@Summary		Create tunnel
-//	@Tags			tunnels
-//	@Accept			json
-//	@Produce		json
-//	@Security		CookieAuth
-//	@Success		200	{object}	APIEnvelope
-//	@Failure		400	{object}	APIErrorEnvelope
-//	@Failure		500	{object}	APIErrorEnvelope
-//	@Router			/tunnels/create [post]
-func (h *TunnelsHandler) Create(w http.ResponseWriter, r *http.Request) {
-	req, ok := parseJSON[storage.AWGTunnel](w, r, http.MethodPost)
-	if !ok {
-		return
+// awg3ErrorCode отделяет отказы по сигнатуре от прочих отказов гейта
+// config.ValidateObfuscation: карточка показывает их на полях I1-I5.
+func awg3ErrorCode(err error) string {
+	switch {
+	case errors.Is(err, signature.ErrPacketsTooLarge):
+		return "SIGNATURE_TOO_LARGE"
+	case errors.Is(err, signature.ErrInvalidPacketTag):
+		return "SIGNATURE_INVALID_TAG"
+	default:
+		return "INVALID_AWG3"
 	}
-
-	if err := config.ValidateKeepaliveForBackend(req.Peer.PersistentKeepalive, req.Backend); err != nil {
-		response.Error(w, err.Error(), "INVALID_KEEPALIVE")
-		return
-	}
-
-	// Validate endpoint resolves
-	if err := config.ValidateAWG3(&req.Interface.AWGObfuscation); err != nil {
-		response.Error(w, err.Error(), "INVALID_AWG3")
-		return
-	}
-	if req.Peer.Endpoint != "" {
-		if _, _, err := netutil.ResolveEndpoint(req.Peer.Endpoint); err != nil {
-			response.Error(w, "endpoint не резолвится: "+err.Error(), "INVALID_ENDPOINT")
-			return
-		}
-	}
-
-	// Generate ID if not provided
-	tunnelID := req.ID
-	if tunnelID == "" {
-		var err error
-		tunnelID, err = h.store.NextAvailableID(req.Backend)
-		if err != nil {
-			response.Error(w, "failed to generate tunnel ID", "CREATE_FAILED")
-			return
-		}
-	} else if !isValidTunnelID(tunnelID) {
-		response.Error(w, "invalid tunnel ID", "INVALID_ID")
-		return
-	}
-
-	// Prepare tunnel data
-	req.ID = tunnelID
-	req.Type = "awg"
-	req.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	if !req.Enabled {
-		req.Enabled = true
-	}
-	req.ISPInterface = "" // auto mode: NDMS picks default gateway
-	req.ISPInterfaceLabel = "Определяет роутер"
-
-	// Create NDMS/system resources via service (OS5: OpkgTun, OS4: no-op).
-	// Must be called before store.Save so the service's Exists check passes.
-	cfg := tunnel.Config{
-		ID:      tunnelID,
-		Name:    req.Name,
-		Address: req.Interface.Address,
-		MTU:     req.Interface.MTU,
-	}
-	// Gate from before the NDMS Create call through publishTunnelList so
-	// the hook-driven snapshot rebroadcast sees the finalized store state.
-	// Only relevant for NativeWG (kernel backend doesn't touch NDMS at
-	// Create time), but always entering is cheap and keeps the flow
-	// symmetric. The final publishTunnelList at the bottom triggers its
-	// own snapshot refresh AFTER gate exit.
-	if h.selfCreateGate != nil {
-		h.selfCreateGate.EnterSelfCreate()
-		defer h.selfCreateGate.ExitSelfCreate()
-	}
-	if err := h.svc.Create(r.Context(), tunnelID, req.Name, cfg, &req); err != nil {
-		h.log.Warn("create", req.Name, "Service create failed: "+err.Error())
-		response.Error(w, err.Error(), "CREATE_FAILED")
-		return
-	}
-
-	// Add per-tunnel ping check defaults if not specified
-	if req.PingCheck == nil && h.pingCheck != nil {
-		req.PingCheck = &storage.TunnelPingCheck{
-			Enabled:       false,
-			Method:        "icmp",
-			Target:        "8.8.8.8",
-			Interval:      45,
-			DeadInterval:  120,
-			FailThreshold: 3,
-			MinSuccess:    1,
-			Timeout:       5,
-			Restart:       true,
-		}
-	}
-
-	// Save to storage
-	if err := h.store.Save(&req); err != nil {
-		h.log.Warn("create", req.Name, "Failed to save tunnel: "+err.Error())
-		response.Error(w, err.Error(), "CREATE_FAILED")
-		return
-	}
-
-	// Write config file
-	confPath := "/opt/etc/awg-manager/" + tunnelID + ".conf"
-	confContent := config.Generate(&req)
-	if err := writeConfigFile(confPath, confContent); err != nil {
-		_ = h.store.Delete(tunnelID)
-		response.Error(w, err.Error(), "CREATE_FAILED")
-		return
-	}
-
-	h.log.Info("create", req.Name, "Tunnel created")
-	h.publishTunnelList(r.Context())
-
-	// Return the created tunnel
-	resp, err := BuildTunnelResponse(r, h.svc, h.store, tunnelID, h.quiescentFor(tunnelID))
-	if err != nil {
-		response.Error(w, err.Error(), "CREATE_FAILED")
-		return
-	}
-	response.Success(w, resp)
 }
 
 // Update updates an existing tunnel.
@@ -338,6 +218,8 @@ func (h *TunnelsHandler) Create(w http.ResponseWriter, r *http.Request) {
 //	@Param			id	query	string	true	"Tunnel id"
 //	@Success		200	{object}	APIEnvelope
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		403	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/tunnels/update [post]
 func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -365,7 +247,49 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if existing.Backend == wdtt.BackendWdttRaw {
+	// Защита (#818) отвергает правку до всякого побочного действия: и до
+	// ветки зеркальной записи, которая пишет сама, и до svc.Update.
+	if existing.Locked {
+		response.ErrorWithStatus(w, http.StatusForbidden, tunnelLockedMessage, "TUNNEL_LOCKED")
+		return
+	}
+
+	if existing.Backend == backendWdttRaw {
+		if req.Name != "" && req.Name != existing.Name {
+			// Имя зеркальной записи — производная конфига инстанса: зеркало
+			// перезаписывает его на каждом объявлении (exitreg/mirror.go:105).
+			// Принять переименование здесь значит подтвердить правку, которую
+			// ближайшее объявление молча откатит.
+			response.Error(w, "имя raw-записи задаётся инстансом WDTT — переименуйте инстанс", "WDTT_RAW_NAME_READONLY")
+			return
+		}
+		// Маршрутизацией raw-выхода распоряжается прокси-рантайм: и маршрут
+		// по умолчанию, и WAN-подключение он выставляет сам по конфигу
+		// инстанса. Правка отсюда не применится никогда — отказ по образцу
+		// имени вместо молчаливой потери.
+		//
+		// Условия «поле прислали» обязательны: запрос парсится в полную
+		// AWGTunnel, и непришедшее поле приходит нулевым. Присылку булева
+		// маршрута видно только по компаньону DefaultRouteSet, строкового
+		// WAN — по непустоте. Без них частичный PATCH (форма связности шлёт
+		// один connectivityCheck) ловил бы ложный отказ, и это было бы хуже
+		// исходной потери.
+		if req.DefaultRouteSet && req.DefaultRoute != existing.DefaultRoute {
+			response.Error(w, "маршрут по умолчанию raw-записи ведёт прокси-рантайм — меняйте в настройках инстанса WDTT", "WDTT_RAW_ROUTING_READONLY")
+			return
+		}
+		if req.ISPInterface != "" {
+			// "auto" — это способ прислать пустое значение (нормализация
+			// обычной ветки, :425), а не отдельный интерфейс.
+			wantISP := req.ISPInterface
+			if wantISP == tunnel.ISPInterfaceAuto {
+				wantISP = ""
+			}
+			if wantISP != existing.ISPInterface {
+				response.Error(w, "WAN-подключение raw-записи ведёт прокси-рантайм — меняйте в настройках инстанса WDTT", "WDTT_RAW_WAN_READONLY")
+				return
+			}
+		}
 		updated := *existing
 		if req.ConnectivityCheck != nil {
 			updated.ConnectivityCheck = req.ConnectivityCheck
@@ -373,13 +297,40 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 				updated.ConnectivityCheck.Method = "http"
 			}
 		}
-		if req.Name != "" {
-			updated.Name = req.Name
+		// Измерение зеркальной записи разрешено — запрещено только автолечение
+		// (pingcheck/monitor.go:118), значит настройка измерения обязана
+		// сохраняться, а не теряться молча.
+		if req.PingCheck != nil {
+			updated.PingCheck = req.PingCheck
 		}
-		h.syncWdttRawLiveFields(&updated)
-		if err := h.store.Save(&updated); err != nil {
+		// Ту же запись переписывает волна зеркала (exitreg/mirror.go): правка
+		// карточки ложится на свежую запись под локом стора, а не поверх
+		// снимка existing, снятого до всех проверок выше.
+		if err := h.store.Update(id, func(t *storage.AWGTunnel) error {
+			if req.ConnectivityCheck != nil {
+				t.ConnectivityCheck = updated.ConnectivityCheck
+			}
+			if req.PingCheck != nil {
+				t.PingCheck = updated.PingCheck
+			}
+			return nil
+		}); err != nil {
 			response.Error(w, err.Error(), "UPDATE_FAILED")
 			return
+		}
+		// Монитор поднимается ЗДЕСЬ, как и у обычных туннелей (:543-550):
+		// иначе включённая пользователем проверка легла бы на диск и молчала
+		// до перезапуска демона или постороннего события.
+		if h.pingCheck != nil {
+			oldOn := existing.PingCheck != nil && existing.PingCheck.Enabled
+			newOn := updated.PingCheck != nil && updated.PingCheck.Enabled
+			if oldOn != newOn {
+				if newOn && h.svc.GetState(r.Context(), id).State == tunnel.StateRunning {
+					h.pingCheck.StartMonitoring(id, updated.Name)
+				} else if !newOn {
+					h.pingCheck.StopMonitoring(id)
+				}
+			}
 		}
 		h.log.Info("update", updated.Name, "WDTT raw metadata updated")
 		h.publishTunnelList(r.Context())
@@ -387,55 +338,16 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Detect changes before merge
+	// Detect changes before applying the patch.
 	oldPingCheckEnabled := existing.PingCheck != nil && existing.PingCheck.Enabled
-	newPingCheckEnabled := req.PingCheck != nil && req.PingCheck.Enabled
 	oldISPInterface := existing.ISPInterface
 
-	// Merge changes — preserve fields not sent by partial updates (e.g. routing page).
-	req.ID = existing.ID
-	req.CreatedAt = existing.CreatedAt
-	req.Type = existing.Type
-	req.Enabled = existing.Enabled
-	req.ActiveWAN = existing.ActiveWAN
-	req.Backend = existing.Backend
-	req.NWGIndex = existing.NWGIndex
-	if req.Name == "" {
-		req.Name = existing.Name
-	}
-	mergeInterfaceWhitelist(&req, existing)
-	mergePeerWhitelist(&req, existing)
-	if err := config.ValidateKeepaliveForBackend(req.Peer.PersistentKeepalive, req.Backend); err != nil {
-		response.Error(w, err.Error(), "INVALID_KEEPALIVE")
-		return
-	}
-	if err := config.ValidateAWG3(&req.Interface.AWGObfuscation); err != nil {
-		response.Error(w, err.Error(), "INVALID_AWG3")
-		return
-	}
-	// Кэш резолва валиден только для endpoint'а, под которым был получен:
-	// перенос через смену endpoint'а подставлял бы DNS-фолбэкам адрес
-	// ПРЕЖНЕГО имени. Сравнение — после mergePeerWhitelist (partial-update
-	// без Peer наследует endpoint из existing).
-	if req.Peer.Endpoint == existing.Peer.Endpoint {
-		req.ResolvedEndpointIP = existing.ResolvedEndpointIP
-	}
-	if !req.DefaultRouteSet {
-		req.DefaultRoute = existing.DefaultRoute
-		req.DefaultRouteSet = existing.DefaultRouteSet
-	}
-	if req.ISPInterface == tunnel.ISPInterfaceAuto {
-		// Routing page explicitly set "auto-detect" — normalize to empty string.
-		req.ISPInterface = ""
-		req.ISPInterfaceLabel = ""
-	} else if req.ISPInterface == "" {
-		// Field not sent (partial update from edit page) — preserve existing.
-		req.ISPInterface = existing.ISPInterface
-		req.ISPInterfaceLabel = existing.ISPInterfaceLabel
-	}
 	// NativeWG: convert ISPInterface to NDMS name for "connect via".
 	// Frontend sends kernel names (from WAN model), but NDMS needs NDMS IDs.
-	if req.Backend == "nativewg" && req.ISPInterface != "" {
+	// Конверсия идёт ДО применения правки: она ходит в стор и в WAN-модель, а
+	// внутри мутатора стора это запрещено контрактом (dir-lock нерекурсивен).
+	// "auto" — сентинел очистки, конвертировать в нём нечего.
+	if existing.Backend == "nativewg" && req.ISPInterface != "" && req.ISPInterface != tunnel.ISPInterfaceAuto {
 		if tunnel.IsTunnelRoute(req.ISPInterface) {
 			// Tunnel chaining: resolve parent tunnel's NDMS interface name.
 			parentID := tunnel.TunnelRouteID(req.ISPInterface)
@@ -451,42 +363,100 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.PingCheck == nil {
-		req.PingCheck = existing.PingCheck
-		newPingCheckEnabled = oldPingCheckEnabled // no change
+	// Правка ложится на копию снимка — по ней идут валидации и diff для RCI.
+	// На СВЕЖУЮ запись та же функция ляжет внутри транзакции стора ниже.
+	merged := *existing
+	applyTunnelUpdate(&merged, &req)
+	newPingCheckEnabled := merged.PingCheck != nil && merged.PingCheck.Enabled
+
+	if err := config.ValidateKeepalive(merged.Peer.PersistentKeepalive); err != nil {
+		response.Error(w, err.Error(), "INVALID_KEEPALIVE")
+		return
 	}
-	if req.ConnectivityCheck == nil {
-		req.ConnectivityCheck = existing.ConnectivityCheck
-	} else if req.ConnectivityCheck.Method == "" && (req.ConnectivityCheck.PingTarget == "" || req.ConnectivityCheck.Method != "ping") {
-		// Если поля пустые или метод не "ping", использовать существующие настройки
-		if existing.ConnectivityCheck != nil {
-			req.ConnectivityCheck = existing.ConnectivityCheck
+	// Запрет нулевой нижней границы — только на ПРИСЛАННОМ значении: на слитой
+	// записи он запер бы туннель, сохранённый с "0-80" до запрета. Признак
+	// «блок пира прислали» — тот же, по которому его применяет mergedPeer.
+	if req.Peer.PublicKey != "" {
+		if err := config.ValidateKeepaliveSubmitted(req.Peer.PersistentKeepalive); err != nil {
+			response.Error(w, err.Error(), "INVALID_KEEPALIVE")
+			return
+		}
+	}
+	if err := config.ValidateObfuscation(&merged.Interface.AWGObfuscation); err != nil {
+		response.Error(w, err.Error(), awg3ErrorCode(err))
+		return
+	}
+	if err := obfuscator.Validate(merged.Obfuscator); err != nil {
+		response.Error(w, err.Error(), "INVALID_OBFUSCATOR")
+		return
+	}
+	// UI этого не шлёт (endpoint disabled, вкладка «Обфускация» скрыта), а
+	// MCP/curl — может: чужой endpoint увёл бы WG мимо релея, а AWG-параметры
+	// легли бы ASC-обфускацией поверх обфускации релея.
+	if existing.Obfuscator != nil {
+		if merged.Peer.Endpoint != existing.Peer.Endpoint {
+			response.Error(w, "endpoint обфусцированного туннеля не правится", "INVALID_OBFUSCATOR")
+			return
+		}
+		// Сравнение с записью, а не абсолютное состояние: ручной импорт
+		// ClusterM принимает любой .conf, в том числе с AWG-параметрами, и
+		// такой туннель иначе стал бы вечно нередактируемым.
+		if config.IsAWGObfuscated(&merged.Interface) &&
+			merged.Interface.AWGObfuscation != existing.Interface.AWGObfuscation {
+			response.Error(w, "параметры AWG несовместимы с обфускатором", "INVALID_OBFUSCATOR")
+			return
 		}
 	}
 
 	// Validate endpoint resolves (only if changed)
-	if req.Peer.Endpoint != existing.Peer.Endpoint {
-		if _, _, err := netutil.ResolveEndpoint(req.Peer.Endpoint); err != nil {
+	if merged.Peer.Endpoint != existing.Peer.Endpoint {
+		if _, _, err := netutil.ResolveEndpoint(merged.Peer.Endpoint); err != nil {
 			response.Error(w, "endpoint не резолвится: "+err.Error(), "INVALID_ENDPOINT")
 			return
 		}
 	}
 
 	// Service handles runtime RCI based on the diff between existing
-	// (pre-merge snapshot) and req (post-merge state). Storage save
-	// happens AFTER service runs — handler is the sole writer. Fail-closed:
-	// if the service can't apply the change to the running interface,
-	// we don't persist it either, otherwise on-disk state would diverge
-	// from the live state.
-	if err := h.svc.Update(r.Context(), existing, &req); err != nil {
-		h.log.Warn("update", req.Name, "Service update failed: "+err.Error())
+	// (pre-patch snapshot) and merged (post-patch state). Storage save
+	// happens AFTER service runs. Fail-closed: if the service can't apply
+	// the change to the running interface, we don't persist it either,
+	// otherwise on-disk state would diverge from the live state.
+	if err := h.svc.Update(r.Context(), existing, &merged); err != nil {
+		if errors.Is(err, tunnel.ErrOperationInProgress) {
+			// Занятый per-tunnel замок — ретраибельный конфликт, а не отказ
+			// правки: карточка цела, туннель просто занят своим действием
+			// (WAN-up, рестарт по ping-check). Тот же контракт, что у
+			// delete выше и у start/stop/restart в control.go.
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+			return
+		}
+		h.log.Warn("update", merged.Name, "Service update failed: "+err.Error())
 		response.Error(w, err.Error(), "UPDATE_FAILED")
 		return
 	}
 
-	// Save updated tunnel
-	if err := h.store.Save(&req); err != nil {
-		h.log.Warn("update", req.Name, "Failed to update tunnel: "+err.Error())
+	// svc.Update выше — секунды RCI-обменов; за это время запись могли
+	// переписать оркестратор, pingcheck, wdttlink. Транзакция читает её
+	// заново под локом, и та же функция кладёт на неё ТОЛЬКО присланные
+	// поля — всё остальное остаётся таким, каким его оставил сосед.
+	if err := h.store.Update(id, func(t *storage.AWGTunnel) error {
+		applyTunnelUpdate(t, &req)
+		// svc.Update, настраивая маршрут до нового endpoint'а, попутно
+		// резолвит его адрес и кладёт в merged. Это РЕЗУЛЬТАТ сервиса, а не
+		// поле запроса, поэтому applyTunnelUpdate его не переносит: без этой
+		// строки свежерезолвленный IP не доехал бы до записи, и ближайшему
+		// Delete пришлось бы резолвить заново (F55).
+		if merged.ResolvedEndpointIP != "" && merged.ResolvedEndpointIP != existing.ResolvedEndpointIP {
+			t.ResolvedEndpointIP = merged.ResolvedEndpointIP
+		}
+		return nil
+	}); err != nil {
+		h.log.Warn("update", merged.Name, "Failed to update tunnel: "+err.Error())
+		if errors.Is(err, storage.ErrNotFound) {
+			// Туннель удалили, пока шёл RCI-обмен svc.Update.
+			response.Error(w, "tunnel not found", "NOT_FOUND")
+			return
+		}
 		response.Error(w, err.Error(), "UPDATE_FAILED")
 		return
 	}
@@ -507,7 +477,7 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		if oldPingCheckEnabled != newPingCheckEnabled {
 			// Toggle: start or stop monitoring
 			if newPingCheckEnabled && isRunning {
-				h.pingCheck.StartMonitoring(id, req.Name)
+				h.pingCheck.StartMonitoring(id, merged.Name)
 			} else if !newPingCheckEnabled {
 				h.pingCheck.StopMonitoring(id)
 			}
@@ -516,31 +486,23 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		// automatically by the monitor loop on each tick via getCheckConfig().
 	}
 
-	// Regenerate config file
-	confPath := "/opt/etc/awg-manager/" + id + ".conf"
-	confContent := config.Generate(&req)
-	if err := writeConfigFile(confPath, confContent); err != nil {
-		response.Error(w, err.Error(), "UPDATE_FAILED")
-		return
-	}
-
 	// Handle primary connection / ISP interface route changes for running tunnels.
 	// Routing is only applied during Start, so restart the tunnel to pick up changes.
-	routeChanged := req.ISPInterface != oldISPInterface
+	routeChanged := merged.ISPInterface != oldISPInterface
 	if routeChanged {
 		stateInfo := h.svc.GetState(r.Context(), id)
 		if stateInfo.State == tunnel.StateRunning {
 			if err := h.orch.HandleEvent(r.Context(), orchestrator.Event{
 				Type: orchestrator.EventRestart, Tunnel: id,
 			}); err != nil {
-				h.log.Warn("update", req.Name, "Restart for routing changes failed: "+err.Error())
+				h.log.Warn("update", merged.Name, "Restart for routing changes failed: "+err.Error())
 			} else {
-				h.log.Info("update", req.Name, "Tunnel restarted to apply routing changes")
+				h.log.Info("update", merged.Name, "Tunnel restarted to apply routing changes")
 			}
 		}
 	}
 
-	h.log.Info("update", req.Name, "Tunnel updated")
+	h.log.Info("update", merged.Name, "Tunnel updated")
 	h.publishTunnelList(r.Context())
 
 	resp, err := BuildTunnelResponse(r, h.svc, h.store, id, h.quiescentFor(id))
@@ -554,15 +516,101 @@ func (h *TunnelsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, resp)
 }
 
+// tunnelLockedMessage — текст 403 у всех шести защищённых операций (#818).
+// Один на всех, чтобы пользователь везде читал одну и ту же подсказку.
+const tunnelLockedMessage = "туннель защищён от изменений — снимите защиту на карточке"
+
+// SetLock включает и снимает защиту туннеля от изменений (#818).
+//
+//	@Summary		Set tunnel lock
+//	@Description	Включает или снимает защиту туннеля от изменений: у защищённого туннеля Stop, ToggleEnabled,
+//	@Description	ToggleDefaultRoute, Update, Delete и Replace отвечают 403. Постановка замка на зеркальную запись
+//	@Description	wdtt-raw отвергается 409 (WDTT_RAW_OWNED, WDTT_RAW_OWNER_UNKNOWN) — замок ставится на инстансе;
+//	@Description	снятие проходит.
+//	@Tags			tunnels
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			id		query	string	true	"Tunnel id"
+//	@Param			locked	query	bool	true	"Включить (true) или снять (false) защиту"
+//	@Success		200	{object}	TunnelLockResponse
+//	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
+//	@Failure		500	{object}	APIErrorEnvelope
+//	@Router			/tunnels/lock [post]
+func (h *TunnelsHandler) SetLock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	id, ok := requireQueryID(w, r)
+	if !ok {
+		return
+	}
+	if !isValidTunnelID(id) {
+		response.Error(w, "invalid tunnel ID", "INVALID_ID")
+		return
+	}
+	// Желаемое состояние приходит явно, а не переключением: две вкладки,
+	// нажавшие замок одновременно, придут к одному и тому же результату,
+	// а не к взаимной отмене.
+	locked, err := strconv.ParseBool(r.URL.Query().Get("locked"))
+	if err != nil {
+		response.Error(w, "параметр locked должен быть true или false", "INVALID_LOCKED")
+		return
+	}
+	// Замок на зеркальной записи ничего не держит: инстанс выключают и удаляют
+	// мимо ручек туннеля (exitreg/mirror.go, /api/proxyrt/instances/…), а сама
+	// запись — проекция конфига инстанса. Отказ по образцу Delete вместо
+	// декоративной галки (F95). Снятие (locked=false) не отвергаем.
+	if stored, err := h.store.Get(id); locked && err == nil && stored != nil && stored.Backend == backendWdttRaw {
+		owner, ownErr := h.mirrorOwnerKey(stored)
+		switch {
+		case ownErr != nil:
+			h.log.Warn("lock", stored.Name, "Refused: владелец raw-записи не проверен: "+ownErr.Error())
+			response.ErrorWithStatus(w, http.StatusConflict,
+				"владелец raw-записи не проверен: "+ownErr.Error(), "WDTT_RAW_OWNER_UNKNOWN")
+			return
+		case owner != "":
+			h.log.Info("lock", stored.Name, "Refused: запись принадлежит инстансу "+owner)
+			response.ErrorWithStatus(w, http.StatusConflict,
+				"запись принадлежит прокси-инстансу "+owner+"; замок ставится на инстансе", "WDTT_RAW_OWNED")
+			return
+		}
+	}
+	// Повторный запрос того же значения не переписывает файл: ErrNoChange
+	// гасит запись внутри Update, ответ остаётся успешным.
+	if err := h.store.Update(id, func(t *storage.AWGTunnel) error {
+		if t.Locked == locked {
+			return storage.ErrNoChange
+		}
+		t.Locked = locked
+		return nil
+	}); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			response.Error(w, "tunnel not found", "NOT_FOUND")
+			return
+		}
+		response.Error(w, err.Error(), "UPDATE_FAILED")
+		return
+	}
+	h.publishTunnelList(r.Context())
+	response.Success(w, TunnelLockResultData{ID: id, Locked: locked})
+}
+
 // Delete deletes a tunnel.
 //
 //	@Summary		Delete tunnel
+//	@Description	409 приходит в двух формах. tunnel_referenced (тело TunnelReferencedResponse) —
+//	@Description	туннель кем-то используется. Обычный конверт ошибки с кодом WDTT_RAW_OWNED или
+//	@Description	WDTT_RAW_OWNER_UNKNOWN — запись есть проекция прокси-инстанса и удаляется только
+//	@Description	вместе с ним.
 //	@Tags			tunnels
 //	@Produce		json
 //	@Security		CookieAuth
 //	@Param			id	query	string	true	"Tunnel id"
 //	@Success		200	{object}	TunnelDeleteResponse
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		403	{object}	APIErrorEnvelope
 //	@Failure		409	{object}	TunnelReferencedResponse
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/tunnels/delete [post]
@@ -581,7 +629,30 @@ func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if stored, err := h.store.Get(id); err == nil && stored != nil && stored.Backend == wdtt.BackendWdttRaw {
+	// Защита (#818) отвергает удаление до всякого побочного действия.
+	if stored, err := h.store.Get(id); err == nil && stored != nil && stored.Locked {
+		response.ErrorWithStatus(w, http.StatusForbidden, tunnelLockedMessage, "TUNNEL_LOCKED")
+		return
+	}
+
+	if stored, err := h.store.Get(id); err == nil && stored != nil && stored.Backend == backendWdttRaw {
+		// Зеркальная запись — не самостоятельная сущность, а проекция
+		// прокси-инстанса: пока инстанс жив, удалять её отдельно нельзя.
+		// Ближайшее объявление создало бы её заново с дефолтами, и потеря
+		// настроек карточки прошла бы молча (амендмент F2).
+		owner, ownErr := h.mirrorOwnerKey(stored)
+		switch {
+		case ownErr != nil:
+			h.log.Warn("delete", stored.Name, "Refused: владелец raw-записи не проверен: "+ownErr.Error())
+			response.ErrorWithStatus(w, http.StatusConflict,
+				"владелец raw-записи не проверен: "+ownErr.Error(), "WDTT_RAW_OWNER_UNKNOWN")
+			return
+		case owner != "":
+			h.log.Info("delete", stored.Name, "Refused: запись принадлежит инстансу "+owner)
+			response.ErrorWithStatus(w, http.StatusConflict,
+				"запись принадлежит прокси-инстансу "+owner+"; удалите инстанс", "WDTT_RAW_OWNED")
+			return
+		}
 		tunnelName := stored.Name
 		if err := h.store.Delete(id); err != nil {
 			response.Error(w, err.Error(), "DELETE_FAILED")
@@ -624,6 +695,12 @@ func (h *TunnelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 					RouterOther: refErr.RouterOther,
 				},
 			})
+			return
+		}
+		if errors.Is(err, tunnel.ErrOperationInProgress) {
+			// Занятый замок — ретраибельный конфликт, не отказ удаления.
+			// Тот же контракт, что у start/stop/restart в control.go.
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
 			return
 		}
 		h.log.Warn("delete", tunnelName, "Failed to delete tunnel: "+err.Error())
@@ -679,6 +756,9 @@ func (h *TunnelsHandler) Export(w http.ResponseWriter, r *http.Request) {
 	}
 
 	content := config.GenerateForExport(stored)
+	if stored.Obfuscator != nil {
+		content += "\n" + obfuscator.RenderInstance(stored.Obfuscator)
+	}
 	filename := stored.Name + ".conf"
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -747,6 +827,8 @@ func (h *TunnelsHandler) ExportAll(w http.ResponseWriter, r *http.Request) {
 //	@Param			id	query	string	true	"Tunnel id"
 //	@Success		200	{object}	APIEnvelope
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		403	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/tunnels/replace [post]
 func (h *TunnelsHandler) ReplaceConf(w http.ResponseWriter, r *http.Request) {
@@ -765,6 +847,11 @@ func (h *TunnelsHandler) ReplaceConf(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseJSON[struct {
 		Content string `json:"content"`
 		Name    string `json:"name"`
+		// AmneziaCountry — страна подписки Amnezia Premium, из которой взята
+		// НОВАЯ конфигурация. Поле шлёт мастер; замена файлом его не шлёт, и
+		// прежняя метка обязана исчезнуть — иначе пользователь видел бы
+		// привязку к стране у конфигурации, к подписке не относящейся.
+		AmneziaCountry string `json:"amneziaCountry"`
 	}](w, r, http.MethodPost)
 	if !ok {
 		return
@@ -776,8 +863,16 @@ func (h *TunnelsHandler) ReplaceConf(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check tunnel exists
-	if _, err := h.store.Get(id); err != nil {
+	stored, err := h.store.Get(id)
+	if err != nil {
 		response.ErrorWithStatus(w, http.StatusNotFound, "tunnel not found", "NOT_FOUND")
+		return
+	}
+
+	// Защита (#818) отвергает замену конфига до всякого побочного действия:
+	// и до svc.Stop, и до самой записи конфига.
+	if stored.Locked {
+		response.ErrorWithStatus(w, http.StatusForbidden, tunnelLockedMessage, "TUNNEL_LOCKED")
 		return
 	}
 
@@ -787,20 +882,36 @@ func (h *TunnelsHandler) ReplaceConf(w http.ResponseWriter, r *http.Request) {
 
 	if wasRunning {
 		if err := h.svc.Stop(r.Context(), id); err != nil {
+			if errors.Is(err, tunnel.ErrOperationInProgress) {
+				// Замок занят — конфиг не тронут, повтор через несколько
+				// секунд пройдёт. Ветка ловит только случай «туннель виден
+				// работающим»: если залипшая операция уже уронила видимое
+				// состояние, Stop пропускается и замена идёт мимо замка
+				// оркестратора — отдельная дыра, не эта.
+				response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "OPERATION_IN_PROGRESS")
+				return
+			}
 			response.InternalError(w, "failed to stop tunnel before config replace: "+err.Error())
 			return
 		}
 	}
 
-	// Replace config
+	// Replace config. Страна едет в ту же запись, что и сама конфигурация:
+	// отдельного сохранения из handler'а здесь нет — оно было бы вторым
+	// циклом записи на флеш и окном рассогласования.
 	var warnings []string
-	if err := h.svc.ReplaceConfig(r.Context(), id, req.Content, req.Name); err != nil {
+	opts := service.ReplaceOptions{AmneziaCountry: &req.AmneziaCountry}
+	if err := h.svc.ReplaceConfig(r.Context(), id, req.Content, req.Name, opts); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "NOT_FOUND")
 			return
 		}
 		if strings.Contains(err.Error(), "parse conf") {
 			response.BadRequest(w, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "validate conf") {
+			response.Error(w, err.Error(), awg3ErrorCode(err))
 			return
 		}
 		response.InternalError(w, err.Error())
@@ -830,50 +941,123 @@ func (h *TunnelsHandler) ReplaceConf(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, resp)
 }
 
-// mergeInterfaceWhitelist applies the edit-form whitelist on top of
-// existing.Interface. Address, MTU, DNS, and the AmneziaWG obfuscation
-// block (Qlen, Jc, Jmin, Jmax, S1-S4, H1-H4, I1-I5) are taken from req;
-// PrivateKey is taken from req only when non-empty so a save without a
-// fresh key keeps the existing one.
+// applyTunnelUpdate накладывает декодированное тело PATCH req на запись t.
 //
-// Partial-update safety net: when req.Interface.Address is empty the
-// entire Interface is treated as missing (routing-page calls that only
-// touch ispInterface) and fully preserved from existing. Callers that
-// send Address MUST send the rest of the interface body too, otherwise
-// the empty fields will overwrite existing values — the frontend's
-// buildUpdatePayload spreads ...tunnel.interface for that reason.
-func mergeInterfaceWhitelist(req *storage.AWGTunnel, existing *storage.AWGTunnel) {
-	if req.Interface.Address == "" {
-		req.Interface = existing.Interface
-		return
+// ЕДИНСТВЕННОЕ место, определяющее, что правится через /api/tunnels/update:
+// поле без присваивания здесь этим handler'ом не правится вовсе. Новое поле
+// AWGTunnel по умолчанию неправимо — отказ фейлится закрыто («моё поле не
+// сохраняется»), а не молчаливой потерей чужих данных. Классификацию всех
+// полей пинит TestTunnelUpdate_FieldInventoryComplete.
+//
+// Чистая: req не мутирует и в его указуемые объекты не пишет — функция
+// применяется дважды (к копии снимка для валидаций и diff, и к свежей записи
+// внутри мутатора стора, где по контракту K10 §1.1 позволены только
+// присваивания заранее вычисленных значений).
+func applyTunnelUpdate(t *storage.AWGTunnel, req *storage.AWGTunnel) {
+	if req.Name != "" {
+		// "" — и «ключ не прислали», и явная пустая строка: оба значат
+		// «имя не менять», различить их в этом контракте нечем.
+		t.Name = req.Name
 	}
-	preserved := existing.Interface
-	preserved.Address = req.Interface.Address
-	preserved.MTU = req.Interface.MTU
-	preserved.DNS = req.Interface.DNS
-	if req.Interface.PrivateKey != "" {
-		preserved.PrivateKey = req.Interface.PrivateKey
+	t.Interface = mergedInterface(t.Interface, req.Interface)
+	if req.Peer.PublicKey != "" && req.Peer.Endpoint != t.Peer.Endpoint {
+		// Кэш резолва валиден только для endpoint'а, под которым получен:
+		// перенос через смену endpoint'а подставлял бы DNS-фолбэкам адрес
+		// ПРЕЖНЕГО имени. Сравнение — с endpoint'ом самой записи t.
+		t.ResolvedEndpointIP = ""
+	}
+	t.Peer = mergedPeer(t.Peer, req.Peer)
+	if req.DefaultRouteSet {
+		// DefaultRouteSet — компаньон «поле прислали»: модалки эхо-шлют
+		// defaultRoute из GET-ответа, где компаньона нет, и без гарда
+		// протухшее эхо перебивало бы тумблер.
+		t.DefaultRoute, t.DefaultRouteSet = req.DefaultRoute, true
+	}
+	switch {
+	case req.ISPInterface == tunnel.ISPInterfaceAuto:
+		// Страница маршрутизации так шлёт «авто» — это очистка, не «не прислали».
+		t.ISPInterface, t.ISPInterfaceLabel = "", ""
+	case req.ISPInterface != "":
+		t.ISPInterface, t.ISPInterfaceLabel = req.ISPInterface, req.ISPInterfaceLabel
+	}
+	// Обфускатор: только пользовательские поля и только у туннеля, который
+	// уже обфусцирован (Q26: обычный туннель в обфусцированный не превращается;
+	// Flavor и LocalPort — не пользовательские).
+	if req.Obfuscator != nil && t.Obfuscator != nil {
+		merged := mergedObfuscator(*t.Obfuscator, *req.Obfuscator)
+		t.Obfuscator = &merged
+	}
+	if req.PingCheck != nil {
+		t.PingCheck = req.PingCheck
+	}
+	if req.ConnectivityCheck != nil && req.ConnectivityCheck.Method != "" {
+		t.ConnectivityCheck = req.ConnectivityCheck
+	}
+}
+
+// mergedInterface applies the edit-form whitelist of req on top of base.
+// Address, MTU, DNS, and the AmneziaWG obfuscation block (Qlen, Jc, Jmin,
+// Jmax, S1-S4, H1-H4, I1-I5) are taken from req; PrivateKey is taken from req
+// only when non-empty so a save without a fresh key keeps the existing one.
+//
+// Partial-update safety net: when req.Address is empty the entire Interface is
+// treated as missing (routing-page calls that only touch ispInterface) and
+// base is returned untouched. Callers that send Address MUST send the rest of
+// the interface body too, otherwise the empty fields will overwrite existing
+// values — the frontend's buildUpdatePayload spreads ...tunnel.interface for
+// that reason.
+func mergedInterface(base, req storage.AWGInterface) storage.AWGInterface {
+	if req.Address == "" {
+		return base
+	}
+	base.Address = req.Address
+	base.MTU = req.MTU
+	base.DNS = req.DNS
+	if req.PrivateKey != "" {
+		base.PrivateKey = req.PrivateKey
 	}
 	// AWG obfuscation block (issue #131): editable in the full edit form,
 	// so req is the source of truth — including explicit clears (i1 -> "").
-	preserved.AWGObfuscation = req.Interface.AWGObfuscation
-	req.Interface = preserved
+	base.AWGObfuscation = req.AWGObfuscation
+	return base
 }
 
-// mergePeerWhitelist applies the edit-form whitelist on top of
-// existing.Peer. Five fields (PublicKey, PresharedKey, Endpoint,
-// AllowedIPs, PersistentKeepalive) are taken from req when PublicKey
-// is non-empty; otherwise the entire Peer preserves from existing.
-func mergePeerWhitelist(req *storage.AWGTunnel, existing *storage.AWGTunnel) {
-	if req.Peer.PublicKey == "" {
-		req.Peer = existing.Peer
-		return
+// mergedObfuscator накладывает пользовательские поля req на base; Flavor и
+// LocalPort остаются от base. Пустой Target = «не прислали».
+func mergedObfuscator(base, req storage.Obfuscator) storage.Obfuscator {
+	if req.Target == "" {
+		return base
 	}
-	preserved := existing.Peer
-	preserved.PublicKey = req.Peer.PublicKey
-	preserved.PresharedKey = req.Peer.PresharedKey
-	preserved.Endpoint = req.Peer.Endpoint
-	preserved.AllowedIPs = req.Peer.AllowedIPs
-	preserved.PersistentKeepalive = req.Peer.PersistentKeepalive
-	req.Peer = preserved
+	base.Target = req.Target
+	if req.Key != "" {
+		base.Key = req.Key
+	}
+	base.Masking = req.Masking
+	base.MaxDummy = req.MaxDummy
+	base.IdleTimeout = req.IdleTimeout
+	base.ObfuscateBytes = req.ObfuscateBytes
+	return base
+}
+
+// mergedPeer applies the edit-form whitelist of req on top of base. Five
+// fields (PublicKey, PresharedKey, Endpoint, AllowedIPs, PersistentKeepalive)
+// are taken from req when PublicKey is non-empty; otherwise the entire Peer
+// preserves from base (partial update without peer).
+func mergedPeer(base, req storage.AWGPeer) storage.AWGPeer {
+	if req.PublicKey == "" {
+		return base
+	}
+	base.PublicKey = req.PublicKey
+	if req.PresharedKey != "" {
+		// Пусто = «оставить прежний», как у PrivateKey в mergedInterface: GET
+		// больше не отдаёт PSK, и эхо трёх модалок шлёт пустоту. ОСОЗНАННАЯ
+		// ПОТЕРЯ (решение владельца, F70): очистить PSK через API теперь
+		// нельзя — нужен явный контракт (компаньон-флаг вроде DefaultRouteSet
+		// или отдельная ручка), если очистка когда-нибудь понадобится.
+		base.PresharedKey = req.PresharedKey
+	}
+	base.Endpoint = req.Endpoint
+	base.AllowedIPs = req.AllowedIPs
+	base.PersistentKeepalive = req.PersistentKeepalive
+	return base
 }

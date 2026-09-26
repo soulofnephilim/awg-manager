@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hoaxisr/awg-manager/internal/signature"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -44,10 +45,10 @@ func writeAWGParams(b *strings.Builder, iface *storage.AWGInterface) {
 	b.WriteString(fmt.Sprintf("Jmax = %d\n", iface.Jmax))
 	b.WriteString(fmt.Sprintf("S1 = %d\n", iface.S1))
 	b.WriteString(fmt.Sprintf("S2 = %d\n", iface.S2))
-	b.WriteString(fmt.Sprintf("H1 = %s\n", iface.H1))
-	b.WriteString(fmt.Sprintf("H2 = %s\n", iface.H2))
-	b.WriteString(fmt.Sprintf("H3 = %s\n", iface.H3))
-	b.WriteString(fmt.Sprintf("H4 = %s\n", iface.H4))
+	b.WriteString(fmt.Sprintf("H1 = %s\n", signature.HeaderOrDefault(iface.H1, 1)))
+	b.WriteString(fmt.Sprintf("H2 = %s\n", signature.HeaderOrDefault(iface.H2, 2)))
+	b.WriteString(fmt.Sprintf("H3 = %s\n", signature.HeaderOrDefault(iface.H3, 3)))
+	b.WriteString(fmt.Sprintf("H4 = %s\n", signature.HeaderOrDefault(iface.H4, 4)))
 	// Extended params (S3, S4, I1-I5) - only if any extended param is set
 	if iface.S3 > 0 || iface.S4 > 0 || hasAnySignaturePacket(iface) {
 		b.WriteString(fmt.Sprintf("S3 = %d\n", iface.S3))
@@ -87,6 +88,16 @@ func writeAWG3Params(b *strings.Builder, iface *storage.AWGInterface) {
 	writeIfSet("RejectAfterTime", iface.RejectAfterTime)
 	writeIfSet("KeepaliveTimeout", iface.KeepaliveTimeout)
 	writeIfSet("MaxHandshakeAttempts", iface.MaxHandshakeAttempts)
+	// `awg` reads these through parse_bool, which takes on/off (or a number)
+	// and rejects "true" outright. Only the enabled state is written: off is
+	// the device default, and emitting it would make a showconf round-trip of
+	// a plain tunnel look like an awg3 config.
+	if iface.RandomTrailers {
+		b.WriteString("RandomTrailers = on\n")
+	}
+	if iface.DisableCookies {
+		b.WriteString("DisableCookies = on\n")
+	}
 }
 
 // Generate generates WireGuard .conf content from tunnel metadata.
@@ -331,7 +342,35 @@ func parseInterfaceField(tunnel *storage.AWGTunnel, key, value string) {
 		iface.KeepaliveTimeout = awg3Range(value)
 	case "maxhandshakeattempts":
 		iface.MaxHandshakeAttempts = awg3Range(value)
+	case "randomtrailers":
+		iface.RandomTrailers = awg3Bool(value)
+	case "disablecookies":
+		iface.DisableCookies = awg3Bool(value)
 	}
+}
+
+// awg3Bool разбирает булев ключ AWG 3.1: "on", "true", "yes" без учёта
+// регистра либо ненулевое число. Всё остальное, включая "off", "false", "no"
+// и пустую строку, — выключено.
+//
+// На вход принимаем шире, чем сам awg: parse_bool в amneziawg-tools знает
+// только on/off, и Generate поэтому всегда пишет "on" — единственную форму,
+// которую .conf доедет до утилиты. Но конфиги пишут руками и генераторами, а
+// true/yes для булева ключа — привычная запись, отвергать её на импорте не за
+// что.
+//
+// Отдельная функция, а не strconv.ParseBool: `awg showconf` печатает on/off,
+// которых ParseBool не знает, и печатает их ВСЕГДА — ядро кладёт оба флага в
+// дамп безусловно. Считать "off" отсутствием значения обязательно, иначе
+// импорт showconf-вывода пометил бы обычный туннель как awg3. Та же ловушка,
+// от которой защищает awg3Range.
+func awg3Bool(value string) bool {
+	v := strings.TrimSpace(value)
+	if strings.EqualFold(v, "on") || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+		return true
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	return err == nil && n != 0
 }
 
 // awg3Range нормализует значение AWG 3.0 диапазона из .conf. `awg showconf`

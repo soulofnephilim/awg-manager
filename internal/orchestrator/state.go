@@ -5,6 +5,7 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/config"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
 )
 
@@ -25,6 +26,24 @@ type tunnelState struct {
 	// endpoint может жить только в ядре (wg set), а конфиг NDMS — нести
 	// заглушку: после ребута нужен полный Start (decideBoot).
 	EndpointMayV6 bool
+
+	// ViaProxy: туннель идёт через awg_proxy.ko, а не через нативный ASC
+	// прошивки. Так бывает и на ASC-прошивке до 5.02.A.11: её ASC знает
+	// AmneziaWG только до 2.0, а конфиг 3.0/3.1 обслуживает kmod (nwg.UsesProxyPath). От этого
+	// зависит, поднимать ли туннель после ребута роутера и снимать ли слот при
+	// падении WAN: NDMS сам умеет только свою половину, про слот он не знает.
+	ViaProxy bool
+
+	// AWG3: конфиг AmneziaWG 3.0/3.1. На прошивке с ASC3 такой туннель мог
+	// работать через awg_proxy до обновления прошивки: startProxy снял ASC и
+	// поставил endpoint на 127.0.0.1 слота. Поднятый NDMS из своего конфига,
+	// после ребута он мёртв — нужен полный Start (decideBoot).
+	AWG3 bool
+
+	// Obfuscated: nativewg-туннель через wg-obfuscator. Ни ASC, ни kmod:
+	// после ребута/рестарта демона всегда полный StartNativeWG (релей,
+	// host-route, endpoint) — Reconcile/RestoreKmod для него бессмысленны.
+	Obfuscated bool
 
 	// quiescentUntil: while now < this, a conf=disabled edge for this tunnel
 	// is treated as transient NDMS settling (do not stop). Set on (re)start.
@@ -57,6 +76,14 @@ type State struct {
 	tunnels     map[string]*tunnelState // tunnelID → state
 	anyWANUpFn  func() bool             // delegates to wanModel.AnyUp()
 	supportsASC bool
+	// bootPending — загрузка прошла с неподнятым WAN, и EventBoot не
+	// выстрелил. Первый WAN-up отдаёт decideBoot вместо decideWANUp: бут
+	// не состоялся, и это его момент. Без этого на такой загрузке молча
+	// пропадала вся боотовая работа — не только старт туннелей, но и
+	// глобальный sweep маршрутов, возврат endpoint'а v6-туннелю из
+	// заглушки NDMS и регистрация endpoint-стража у hostname-туннелей
+	// (он живёт в памяти демона и наполняется только стартом).
+	bootPending bool
 }
 
 // newState creates an empty state.
@@ -94,6 +121,12 @@ func (s *State) ensureTunnel(tunnelID string, store *storage.AWGTunnelStore) boo
 	if err != nil {
 		return false
 	}
+	// Тот же фильтр, что в loadFromStore, и по той же причине: зеркальная
+	// запись прокси-выхода оркестратору не принадлежит. Второй путь загрузки
+	// без этой проверки сводил бы первую на нет.
+	if stored.Backend == "wdtt-raw" {
+		return false
+	}
 	s.tunnels[tunnelID] = tunnelStateFromStored(stored)
 	return true
 }
@@ -110,6 +143,9 @@ func tunnelStateFromStored(t *storage.AWGTunnel) *tunnelState {
 		ISPInterface:  t.ISPInterface,
 		ActiveWAN:     t.ActiveWAN,
 		EndpointMayV6: nwg.EndpointMayResolveIPv6(t.Peer.Endpoint),
+		Obfuscated:    t.Backend == "nativewg" && t.Obfuscator != nil,
+		ViaProxy:      t.Backend == "nativewg" && t.Obfuscator == nil && nwg.UsesProxyPath(&t.Interface),
+		AWG3:          isAWG3(&t.Interface),
 	}
 }
 
@@ -120,6 +156,19 @@ func (s *State) loadFromStore(store *storage.AWGTunnelStore) {
 		return
 	}
 	for _, t := range tunnels {
+		// Зеркальные записи raw-выходов — проекции прокси-инстансов, а не наши
+		// туннели: их жизненным циклом целиком ведает прокси-рантайм. Сегодня
+		// они безвредны лишь потому, что каждый switch по Backend перечисляет
+		// бэкенды поимённо и не имеет ветки default — первая же такая ветка
+		// начала бы стартовать и останавливать чужой ресурс. Не грузим вовсе.
+		if t.Backend == "wdtt-raw" {
+			continue
+		}
 		s.tunnels[t.ID] = tunnelStateFromStored(&t)
 	}
+}
+
+func isAWG3(iface *storage.AWGInterface) bool {
+	v := config.ClassifyAWGVersion(iface)
+	return v == "awg3" || v == "awg3.1"
 }

@@ -2,6 +2,7 @@ package singbox
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,13 +28,33 @@ const (
 	// is always used instead of a user-installed sing-box on PATH.
 	defaultBinary = installer.DefaultBinaryPath
 
-	// clashAPIAddr is the Clash API endpoint baked into our generated
-	// config.json. Port 9099 is chosen to not collide with a user-managed
-	// sing-box instance that might already be bound to the default 9090
-	// — otherwise our log forwarder / traffic aggregator would latch onto
-	// their process and stream their tunnels into our UI.
-	clashAPIAddr = "127.0.0.1:9099"
+	// DefaultClashPort is the Clash API port baked into our generated
+	// config.json when the user has not chosen one. 9099 is chosen to not
+	// collide with a user-managed sing-box instance that might already be
+	// bound to the default 9090 — otherwise our log forwarder / traffic
+	// aggregator would latch onto their process and stream their tunnels
+	// into our UI.
+	DefaultClashPort = 9099
+
+	// clashHost — хост Clash API. Не настраивается: это служебный канал
+	// управления awg-manager, а не публичный интерфейс (ADR 0001), и
+	// наружу он ходит только через авторизованный /api/singbox/clash/*.
+	clashHost = "127.0.0.1"
 )
+
+// EffectiveClashPort resolves a stored setting to the port actually used:
+// 0 (and any non-positive value) means "not configured" → DefaultClashPort.
+func EffectiveClashPort(port int) int {
+	if port <= 0 {
+		return DefaultClashPort
+	}
+	return port
+}
+
+// ClashAddr returns the Clash API endpoint for a port. Port 0 means "default".
+func ClashAddr(port int) string {
+	return fmt.Sprintf("%s:%d", clashHost, EffectiveClashPort(port))
+}
 
 // defaultDir is the directory of the managed binary. var (not const) so
 // it stays in lockstep with installer.DefaultBinaryPath if that ever moves.
@@ -57,37 +78,51 @@ func normalizeSingboxLogLevel(v string) string {
 	return "info"
 }
 
-// hasFeature reports whether the installed sing-box binary declares the
-// given build tag in its `sing-box version` output. Empty features means
-// probe failed — treat it conservatively as "feature NOT present" so we
-// don't gate soft-fail and leave it for sing-box check.
-func (o *Operator) hasFeature(feature string) bool {
+// SingboxFeatures — теги сборки установленного sing-box (см.
+// featuresForVersion: pinned-версия ⇒ installer.RequiredTags, иначе nil =
+// «неизвестно»). Безопасно для горячих вызовов (flush() Pass 1 адаптера
+// подписок): версия кэширована по отпечатку mtime+size бинаря, обычный
+// путь — один stat (~10 µс). Пустой список: бинаря нет, версия не
+// определена или не pinned.
+func (o *Operator) SingboxFeatures() []string { return o.singboxFeaturesCached() }
+
+// TunExternalConfig — для router: писать ли external_configuration (want) и
+// определилась ли версия бинаря вообще (known). Пустая версия — не «чужой
+// бинарь», а «пока неизвестно»: флаг в этом случае трогать нельзя.
+func (o *Operator) TunExternalConfig() (want, known bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), singboxVersionProbeTimeout)
 	defer cancel()
-	_, features := o.detectVersionAndFeaturesCached(ctx)
-	for _, f := range features {
-		if f == feature {
-			return true
+	if v, _ := o.detectVersionAndFeaturesCached(ctx); v == "" {
+		// «Неизвестно» имеет смысл только пока процесс из этого файла жив, то
+		// есть бинарь конфиг с флагом принял. Не запущен — возможно, как раз
+		// потому, что отверг незнакомый ключ: тогда флаг обязан сняться, иначе
+		// движок так и не поднимется.
+		if running, pid := o.proc.IsRunning(); running && o.exeIs(pid, o.binary) {
+			return false, false
 		}
+		return false, true
 	}
-	return false
+	return o.TunHotReload(), true
 }
 
-// supportsOutbound reports whether the installed sing-box binary supports
-// the given outbound type. Returns true for core types (no feature tag
-// required) and unknown types — sing-box check still catches unknown
-// type strings.
-func (o *Operator) supportsOutbound(obType string) bool {
-	return OutboundSupportedByFeatures(o.singboxFeaturesCached(), obType)
+// TunHotReload: установлен пиннутый бинарь. Он знает `external_configuration`
+// (адрес tun'а держит NDMS) и переживает SIGHUP с tun-инбаундом, в том числе
+// добавление/удаление инбаунда (стенд 25.09.2026). Чужой или старый бинарь —
+// false: для него остаётся Stop+Start (на 1.14 SIGHUP падал в TUNSETIFF busy).
+//
+// Гейт двойной: пиннутый файл на диске И запущенный процесс — из этого же
+// файла. Иначе при подмене файла под живым чужим процессом SIGHUP получил бы
+// процесс, не знающий ключа: он отверг бы конфиг, а оркестратор счёл бы его
+// применённым.
+func (o *Operator) TunHotReload() bool {
+	if len(o.singboxFeaturesCached()) == 0 {
+		return false
+	}
+	if running, pid := o.proc.IsRunning(); running && !o.exeIs(pid, o.binary) {
+		return false
+	}
+	return true
 }
-
-// SingboxFeatures returns the latest cached list of build tags from the
-// installed sing-box binary's `sing-box version` output. Safe for hot
-// callers (e.g. flush() Pass 1 of the subscription adapter): the probe
-// is cached under a mtime+size fingerprint — stat-only check costs ~10µs
-// on a router, no subprocess spawning unless the binary actually changed
-// on disk. Empty slice means probe failed or no binary installed.
-func (o *Operator) SingboxFeatures() []string { return o.singboxFeaturesCached() }
 
 func (o *Operator) singboxFeaturesCached() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), singboxVersionProbeTimeout)
@@ -98,15 +133,28 @@ func (o *Operator) singboxFeaturesCached() []string {
 
 // Operator is the high-level facade for sing-box integration.
 type Operator struct {
-	log        *slog.Logger
-	dir        string
-	binary     string
-	configPath string
-	pidPath    string
+	log    *slog.Logger
+	dir    string
+	binary string
+	// bootstrapDNS — живой доступ к Settings.SingboxBootstrapDNS. Нужен не
+	// только на буте: mutateBase восстанавливает пропавший 00-base.json, и
+	// без этого поля подставил бы исторический дефолт, потеряв настройку.
+	bootstrapDNS func() string
+	// clashPort — живой доступ к Settings.SingboxClashPort, по той же причине,
+	// что и bootstrapDNS: пересоздание 00-base.json не должно терять настройку.
+	clashPort func() int
+	// singboxLogLevel — то же для log.level. Раньше уровень знал только
+	// ApplyLogLevel (из аргумента), поэтому пересоздать базу умел лишь он, а
+	// mutateBase на пропавшем файле молча выходил.
+	singboxLogLevel func() string
+	// cacheFileLocation — живой доступ к Settings.SingboxRouter.CacheFileLocation (issue #842).
+	cacheFileLocation func() string
+	configPath        string
+	pidPath           string
 
 	proc      *Process
 	validator *Validator
-	proxyMgr  *ProxyManager
+	proxyMgr  ndmsProxies
 	clash     *ClashClient
 	bus       *events.Bus
 
@@ -154,14 +202,19 @@ type Operator struct {
 	// reports are silently dropped (used by unit tests).
 	installProgress InstallProgressFn
 
-	// versionProbeMu guards the in-memory cache of `sing-box version`
-	// output. Cache key is versionProbeFingerprint = "<mtime>_<size>"
-	// of the binary; stat() on every read is ~10µs, so we never re-spawn
-	// when the binary hasn't moved.
+	// versionProbeMu guards the in-memory version cache filled by
+	// resolveVersionLocked. Cache key is versionProbeFingerprint =
+	// "<mtime>_<size>" of the binary; stat() on every read is ~10µs, so
+	// no source is consulted again while the binary hasn't moved.
 	versionProbeMu          sync.Mutex
 	versionProbeValue       string
-	versionProbeFeatures    []string
 	versionProbeFingerprint string
+	// versionProbeRetryAt — пустая версия не кэшируется навсегда (она бывает
+	// временной: Clash ещё не поднялся), но и не перепробуется на каждом
+	// вызове: TunHotReload зовут тик reconcile и каждый Process.Reload.
+	versionProbeRetryAt time.Time
+	// exeMatches — шов для тестов поверх processExeIs (nil = processExeIs).
+	exeMatches func(pid int, binary string) bool
 
 	// manuallyStopped is the sticky-stop intent: true means Control("stop")
 	// was called and Reconcile must skip starting the daemon until
@@ -279,6 +332,22 @@ type OperatorDeps struct {
 	// SingboxLogLevel returns desired sing-box log.level from settings.
 	// Optional; defaults to "info".
 	SingboxLogLevel func() string
+	// BootstrapDNS returns the desired dns-bootstrap address from settings
+	// (Settings.SingboxBootstrapDNS). Optional; empty result means "do not
+	// touch 00-base.json" — see patchBaseBootstrapDNS.
+	BootstrapDNS func() string
+	// ClashPort returns the desired Clash API port from settings
+	// (Settings.SingboxClashPort). Optional; 0 means DefaultClashPort.
+	// Issue #788, ADR 0001.
+	ClashPort func() int
+	// CacheFileLocation returns the desired cache.db location from settings
+	// ("flash" or "tmp") (issue #842). Optional; empty means "not configured":
+	// an absolute path in 00-base.json stays, a relative or legacy one is
+	// replaced by the flash default (see cacheDBPathFor).
+	CacheFileLocation func() string
+	// Bus is the event bus for publishing resource changes (SSE). Optional:
+	// every call site guards on nil (Bus.Publish itself would panic).
+	Bus *events.Bus
 }
 
 func NewOperator(d OperatorDeps) *Operator {
@@ -303,20 +372,34 @@ func NewOperator(d OperatorDeps) *Operator {
 		desiredSingboxLogLevel = normalizeSingboxLogLevel(d.SingboxLogLevel())
 	}
 
+	desiredBootstrapDNS := ""
+	if d.BootstrapDNS != nil {
+		desiredBootstrapDNS = d.BootstrapDNS()
+	}
+
+	desiredClashPort := 0
+	if d.ClashPort != nil {
+		desiredClashPort = d.ClashPort()
+	}
+
+	desiredCacheLocation := ""
+	if d.CacheFileLocation != nil {
+		desiredCacheLocation = d.CacheFileLocation()
+	}
+
 	configPath := filepath.Join(dir, "config.d")
 	pidPath := filepath.Join(dir, "sing-box.pid")
 
-	ensureBaseConfigWithLogLevel(configPath, desiredSingboxLogLevel, log)
-	ensureLegacyConfigMigrated(dir)
-	patchTunnelsSlotStripBaseOwnedBlocks(filepath.Join(configPath, "10-tunnels.json"))
-	patchTunnelsSlotEnsureNaiveUDPOverTCP(filepath.Join(configPath, "10-tunnels.json"))
-	patchTunnelsSlotEnsureHysteria2ChromeParrot(filepath.Join(configPath, "10-tunnels.json"))
-	stripStrayDirectPlaceholder(configPath)
-	removeFinalFromBase(filepath.Join(configPath, "00-base.json"), log)
-	removeDNSFinalFromBase(filepath.Join(configPath, "00-base.json"), log)
+	for _, s := range reconcileConfigSteps(dir, configPath, desiredSingboxLogLevel, desiredBootstrapDNS, desiredClashPort, desiredCacheLocation, log) {
+		s.run()
+	}
 
 	op := &Operator{
 		log:               log,
+		bootstrapDNS:      d.BootstrapDNS,
+		clashPort:         d.ClashPort,
+		singboxLogLevel:   d.SingboxLogLevel,
+		cacheFileLocation: d.CacheFileLocation,
 		dir:               dir,
 		binary:            binary,
 		configPath:        configPath,
@@ -324,10 +407,11 @@ func NewOperator(d OperatorDeps) *Operator {
 		proc:              NewProcess(binary, configPath, pidPath),
 		validator:         NewValidator(binary),
 		proxyMgr:          NewProxyManager(d.Queries, d.Commands),
-		clash:             NewClashClient(clashAPIAddr),
+		clash:             NewClashClient(ClashAddr(desiredClashPort)),
 		processLogger:     logging.NewScopedLogger(d.AppLogger, logging.GroupSingbox, logging.SubSBProcess),
 		runtimeLogger:     logging.NewScopedLogger(d.AppLogger, logging.GroupSingbox, logging.SubSBRuntime),
 		persistManualStop: d.SetManuallyStopped,
+		bus:               d.Bus,
 	}
 	op.manuallyStopped.Store(d.InitialManuallyStopped)
 	op.ndmsProxyEnabledFn = d.IsNDMSProxyEnabled
@@ -337,20 +421,16 @@ func NewOperator(d OperatorDeps) *Operator {
 	if adopted, pid := op.proc.AttachIfRunning(); adopted {
 		op.log.Info("reconnected to running sing-box", "pid", pid)
 	}
-	// A tun inbound cannot survive SIGHUP — every reload path (scheduler
-	// rule-set refresh, tunnel ApplyConfig, orchestrator) routes through
-	// proc.Reload, which consults this to restart instead. o.orch is wired
-	// later via SetOrch; the closure reads it at reload time, so nil-now is fine.
+	// Не пиннутый бинарь не переживает SIGHUP с tun-инбаундом — every reload
+	// path (scheduler rule-set refresh, tunnel ApplyConfig, orchestrator) routes
+	// through proc.Reload, which consults this to restart instead. o.orch is
+	// wired later via SetOrch; the closure reads it at reload time, so nil-now
+	// is fine.
 	op.proc.ReloadNeedsRestart = func() bool {
-		return op.orch != nil && op.orch.CurrentHasTun()
+		return op.orch != nil && op.orch.CurrentHasTun() && !op.TunHotReload()
 	}
 	return op
 }
-
-// SetEventBus wires the event bus so Operator can publish tunnel-set
-// change events consumed by deviceproxy.Service (and potentially
-// other subscribers in the future).
-func (o *Operator) SetEventBus(bus *events.Bus) { o.bus = bus }
 
 // Process exposes the underlying *Process so the orchestrator can
 // drive lifecycle (Start / Stop / Reload / IsRunning). The Process
@@ -360,7 +440,12 @@ func (o *Operator) Process() *Process { return o.proc }
 // SetOrch wires the config.d orchestrator after construction. ApplyConfig
 // uses it (when non-nil) to write 10-tunnels.json through the slot
 // writer instead of the legacy direct-write path.
-func (o *Operator) SetOrch(orch *orchestrator.Orchestrator) { o.orch = orch }
+func (o *Operator) SetOrch(orch *orchestrator.Orchestrator) {
+	o.orch = orch
+	if orch != nil {
+		orch.SetTunHotReload(o.TunHotReload)
+	}
+}
 
 // SetActiveWorkFn wires the orchestrator's "has active work" predicate
 // (wired in main.go after both Operator and orchestrator exist — the

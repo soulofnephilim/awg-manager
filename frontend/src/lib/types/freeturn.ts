@@ -12,12 +12,12 @@ export interface FreeTurnClientConfig {
 	streams: number;
 	transport: 'tcp' | 'udp';
 	mode: 'udp' | 'tcp';
-	bond: boolean;
-	turnHost?: string;
-	turnPort?: number;
 	obfProfile: 'none' | 'rtpopus' | 'rtpopus2' | 'rtpopus3';
 	obfKey?: string;
+	/** Ключ обфускации задан на бэкенде — значение наружу не отдаётся (Н5). */
+	obfKeySet?: boolean;
 	streamsPerCred: number;
+	kcp?: FreeTurnKCP;
 	platform: 'desktop' | 'mobile';
 	dnsMode: 'plain' | 'doh' | 'auto';
 	dnsServers?: string;
@@ -30,9 +30,17 @@ export interface FreeTurnServerConfig {
 	enabled: boolean;
 	listen: string;
 	connect: string;
+	/**
+	 * Адрес, который уезжает в ссылку абоненту (#933): DNS-имя роутера или его
+	 * внешний IP, при желании с портом. Пусто — бэкенд подставит внешний IP,
+	 * а он DNS-имя не отдаёт никогда.
+	 */
+	linkPeer?: string;
 	mode: 'udp' | 'tcp';
 	obfProfile: 'none' | 'rtpopus' | 'rtpopus2' | 'rtpopus3';
 	obfKey?: string;
+	/** Ключ обфускации задан на бэкенде — значение наружу не отдаётся (Н5). */
+	obfKeySet?: boolean;
 	clientsFile?: string;
 	debug: boolean;
 	/** Открыть listen-порт в firewall Keenetic (INPUT). undefined = true */
@@ -43,12 +51,16 @@ export interface FreeTurnClientInstance {
 	id: string;
 	name: string;
 	config: FreeTurnClientConfig;
+	/** Имя старого конфига, из которого запись перенёс посев; пусто у заведённых через UI. */
+	seededFrom?: string;
 }
 
 export interface FreeTurnServerInstance {
 	id: string;
 	name: string;
 	config: FreeTurnServerConfig;
+	/** Имя старого конфига, из которого запись перенёс посев; пусто у заведённых через UI. */
+	seededFrom?: string;
 }
 
 export interface FreeTurnConfig {
@@ -66,6 +78,11 @@ export interface FreeTurnProcessStatus {
 	dtlsConnections?: number;
 	binary: string;
 	binaryPresent: boolean;
+	/**
+	 * Процесс наш и живой, но pid-файл унаследован. Производителя больше нет:
+	 * усыновление по pid-файлу заменил управляющий сокет. Поле всегда пусто.
+	 */
+	orphanedPid?: boolean;
 }
 
 export interface FreeTurnInstanceStatus {
@@ -81,6 +98,8 @@ export interface FreeTurnStatus {
 	client: FreeTurnProcessStatus;
 	/** Legacy mirror of default server instance */
 	server: FreeTurnProcessStatus;
+	/** Бинари подсистемы на диске. Принадлежит ПОДСИСТЕМЕ, а не инстансу. */
+	binariesPresent?: boolean;
 	installAvailable: boolean;
 	installVersion?: string;
 	installedVersion?: string;
@@ -90,13 +109,24 @@ export interface FreeTurnStatus {
 	routerClock?: string;
 }
 
+/** Профиль KCP tcp-режима (upstream 3.2+): приезжает ссылкой, редактора нет. */
+export interface FreeTurnKCP {
+	nodelay: number;
+	interval: number;
+	resend: number;
+	nc: number;
+	sndwnd: number;
+	rcvwnd: number;
+	mtu: number;
+	acknodelay: boolean;
+}
+
 export interface FreeTurnLinkPayload {
 	v: number;
 	provider?: string;
 	peer?: string;
 	transport?: string;
 	mode?: string;
-	bond?: boolean;
 	obf?: string;
 	key?: string;
 	n?: number;
@@ -109,6 +139,7 @@ export interface FreeTurnLinkPayload {
 	name?: string;
 	mtu?: number;
 	wg?: string;
+	kcp?: FreeTurnKCP;
 }
 
 export interface FreeTurnGenerateLinkRequest {
@@ -132,6 +163,8 @@ export interface FreeTurnGenerateLinkResult {
 export interface FreeTurnAllowlistEntry {
 	clientId: string;
 	comment?: string;
+	/** Выданная абоненту ссылка, если она сохранялась (#919). */
+	link?: string;
 }
 
 export interface FreeTurnAllowlistStatus {
@@ -165,7 +198,6 @@ export interface FreeTurnCaptchaOverview {
 }
 
 export interface FreeTurnDeleteClientResult {
-	message?: string;
 	deletedTunnels?: string[];
 	tunnelErrors?: string[];
 }

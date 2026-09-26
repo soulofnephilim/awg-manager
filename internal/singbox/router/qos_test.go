@@ -142,7 +142,7 @@ func TestEnsureQoSInbounds_AddsCanonicalPairs(t *testing.T) {
 	classes := activeQoSClasses([]storage.SingboxQoSClass{
 		{DSCP: 46, Outbound: "vpn", Enabled: true},
 	})
-	got, changed := ensureQoSInbounds(base, classes, "10m0s")
+	got, changed := ensureQoSInbounds(base, classes, "10m0s", 0)
 	if !changed {
 		t.Fatal("expected changed=true when adding class inbounds")
 	}
@@ -176,7 +176,7 @@ func TestEnsureQoSInbounds_RemovesStaleAndConverges(t *testing.T) {
 	classes := activeQoSClasses([]storage.SingboxQoSClass{
 		{DSCP: 46, Outbound: "vpn", Enabled: true},
 	})
-	got, changed := ensureQoSInbounds(in, classes, "")
+	got, changed := ensureQoSInbounds(in, classes, "", 0)
 	if !changed {
 		t.Fatal("expected changed=true")
 	}
@@ -193,7 +193,7 @@ func TestEnsureQoSInbounds_RemovesStaleAndConverges(t *testing.T) {
 	}
 
 	// Second pass over the converged result: no change.
-	again, changed2 := ensureQoSInbounds(got, classes, "")
+	again, changed2 := ensureQoSInbounds(got, classes, "", 0)
 	if changed2 {
 		t.Errorf("expected idempotent second pass, got change: %+v", again)
 	}
@@ -205,7 +205,7 @@ func TestEnsureQoSInbounds_NoClasses_RemovesAll(t *testing.T) {
 		{Type: "tproxy", Tag: "tproxy-qos-46"},
 		{Type: "redirect", Tag: "redirect-qos-46"},
 	}
-	got, changed := ensureQoSInbounds(in, nil, "")
+	got, changed := ensureQoSInbounds(in, nil, "", 0)
 	if !changed {
 		t.Fatal("expected changed=true when removing stale qos inbounds")
 	}
@@ -214,10 +214,10 @@ func TestEnsureQoSInbounds_NoClasses_RemovesAll(t *testing.T) {
 	}
 
 	// Empty in, no classes → no phantom change.
-	if _, changed := ensureQoSInbounds(nil, nil, ""); changed {
+	if _, changed := ensureQoSInbounds(nil, nil, "", 0); changed {
 		t.Error("nil inbounds + no classes must not report change")
 	}
-	if _, changed := ensureQoSInbounds([]Inbound{}, nil, ""); changed {
+	if _, changed := ensureQoSInbounds([]Inbound{}, nil, "", 0); changed {
 		t.Error("empty inbounds + no classes must not report change")
 	}
 }
@@ -460,7 +460,8 @@ func TestMarshalQoSRoutesSlot_RouteOnly(t *testing.T) {
 func newQoSSlotTestService(t *testing.T, outbounds ...string) (*ServiceImpl, string) {
 	t.Helper()
 	dir := t.TempDir()
-	orch := orchestrator.New(dir, nil)
+	orch := orchestrator.NewWithAppliedPath(dir, nil, filepath.Join(t.TempDir(), "singbox-applied.json"))
+	t.Cleanup(orch.Close)
 	if err := orch.Register(orchestrator.SlotMeta{Slot: orchestrator.SlotRouter, Filename: "20-router.json"}); err != nil {
 		t.Fatal(err)
 	}
@@ -734,6 +735,8 @@ func TestNormalizeSingboxRouterSettings_TrimsQoSFields(t *testing.T) {
 // ── Reconcile wiring ──────────────────────────────────────────────
 
 func TestReconcile_QoSClassesChanged_Reinstalls(t *testing.T) {
+	stubEnsureKernelModule(t)
+	stubNoLANBridges(t)
 	stubListeningProbe(t, func() bool { return true })
 	restoreCalls := 0
 	var lastRestore string
@@ -753,9 +756,7 @@ func TestReconcile_QoSClassesChanged_Reinstalls(t *testing.T) {
 			NetfilterPreflight: func(context.Context) error { return nil },
 			XtDscpProbe:        func(context.Context) bool { return true },
 		},
-		currentMark:         "0xffffaaa",
-		currentWANIPs:       []string{"203.0.113.207/32"},
-		currentQoSClasses:   nil, // was off, now one class
+		appliedSpec:         &RestoreInputSpec{PolicyMark: "0xffffaaa", WANIPs: []string{"203.0.113.207/32"}},
 		netfilterStateKnown: true,
 	}
 	if err := svc.reconcileInstalled(context.Background(), storage.SingboxRouterSettings{
@@ -775,8 +776,8 @@ func TestReconcile_QoSClassesChanged_Reinstalls(t *testing.T) {
 		t.Errorf("restore input missing dscp rule:\n%s", lastRestore)
 	}
 	want := []QoSClassSpec{{DSCP: 46, TProxyPort: 51281, RedirectPort: 51301}}
-	if !slices.Equal(svc.currentQoSClasses, want) {
-		t.Errorf("currentQoSClasses not updated: %+v", svc.currentQoSClasses)
+	if !slices.Equal(appliedQoSOf(svc), want) {
+		t.Errorf("применённые классы QoS не обновились: %+v", appliedQoSOf(svc))
 	}
 }
 
@@ -787,6 +788,8 @@ func TestReconcile_QoSClassesChanged_Reinstalls(t *testing.T) {
 // otherwise marked traffic blackholes onto ports nothing listens on. This
 // is the same config→wait→install order Enable uses.
 func TestReconcile_QoSPortChange_HealsConfigBeforeInstall(t *testing.T) {
+	stubEnsureKernelModule(t)
+	stubNoLANBridges(t)
 	stubListeningProbe(t, func() bool { return true })
 	singbox := newTestSingbox(t)
 	singbox.isRunningFn = func() (bool, int) { return true, 1234 }
@@ -814,9 +817,7 @@ func TestReconcile_QoSPortChange_HealsConfigBeforeInstall(t *testing.T) {
 			NetfilterPreflight: func(context.Context) error { return nil },
 			XtDscpProbe:        func(context.Context) bool { return true },
 		},
-		currentMark:         "0xffffaaa",
-		currentWANIPs:       []string{"203.0.113.207/32"},
-		currentQoSClasses:   nil, // port set is about to change
+		appliedSpec:         &RestoreInputSpec{PolicyMark: "0xffffaaa", WANIPs: []string{"203.0.113.207/32"}},
 		netfilterStateKnown: true,
 	}
 	if err := svc.reconcileInstalled(context.Background(), storage.SingboxRouterSettings{
@@ -838,6 +839,8 @@ func TestReconcile_QoSPortChange_HealsConfigBeforeInstall(t *testing.T) {
 }
 
 func TestReconcile_QoSClassesSame_NoReinstall(t *testing.T) {
+	stubEnsureKernelModule(t)
+	stubNoLANBridges(t)
 	restoreCalls := 0
 	ipt := newStubIPTables(func(_ context.Context, _ string) error {
 		restoreCalls++
@@ -845,16 +848,20 @@ func TestReconcile_QoSClassesSame_NoReinstall(t *testing.T) {
 	})
 	svc := &ServiceImpl{
 		deps: Deps{
-			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
-			IPTables:           ipt,
-			WANIPCollector:     &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}},
-			Singbox:            newTestSingbox(t),
+			Policies:       &fakeAccessPolicyProvider{mark: "0xffffaaa"},
+			IPTables:       ipt,
+			WANIPCollector: &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}},
+			// Движок ЖИВОЙ: с мёртвым установку глушит гейт готовности и «ноль
+			// Install» не доказывал бы совпадения классов.
+			Singbox:            newReadyTestSingbox(t),
 			NetfilterPreflight: func(context.Context) error { return nil },
 			XtDscpProbe:        func(context.Context) bool { return true },
 		},
-		currentMark:         "0xffffaaa",
-		currentWANIPs:       []string{"203.0.113.207/32"},
-		currentQoSClasses:   []QoSClassSpec{{DSCP: 46, TProxyPort: 51281, RedirectPort: 51301}},
+		appliedSpec: &RestoreInputSpec{
+			PolicyMark: "0xffffaaa",
+			WANIPs:     []string{"203.0.113.207/32"},
+			QoSClasses: []QoSClassSpec{{DSCP: 46, TProxyPort: 51281, RedirectPort: 51301}},
+		},
 		netfilterStateKnown: true,
 	}
 	if err := svc.reconcileInstalled(context.Background(), storage.SingboxRouterSettings{
@@ -873,6 +880,7 @@ func TestReconcile_QoSClassesSame_NoReinstall(t *testing.T) {
 }
 
 func TestReconcile_QoSXtDscpUnavailable_DegradesWithoutFailing(t *testing.T) {
+	stubNoLANBridges(t)
 	// xt_dscp missing: reconcile must neither fail nor churn — the desired
 	// dispatch set degrades to empty, which equals the installed state.
 	restoreCalls := 0
@@ -893,9 +901,7 @@ func TestReconcile_QoSXtDscpUnavailable_DegradesWithoutFailing(t *testing.T) {
 			NetfilterPreflight: func(context.Context) error { return nil },
 			XtDscpProbe:        func(context.Context) bool { return false },
 		},
-		currentMark:         "0xffffaaa",
-		currentWANIPs:       []string{"203.0.113.207/32"},
-		currentQoSClasses:   nil,
+		appliedSpec:         &RestoreInputSpec{PolicyMark: "0xffffaaa", WANIPs: []string{"203.0.113.207/32"}},
 		netfilterStateKnown: true,
 	}
 	if err := svc.reconcileInstalled(context.Background(), storage.SingboxRouterSettings{
@@ -911,8 +917,8 @@ func TestReconcile_QoSXtDscpUnavailable_DegradesWithoutFailing(t *testing.T) {
 	if restoreCalls != 0 {
 		t.Errorf("expected no Install churn while xt_dscp unavailable, got %d", restoreCalls)
 	}
-	if svc.currentQoSClasses != nil {
-		t.Errorf("currentQoSClasses must stay empty, got %+v", svc.currentQoSClasses)
+	if appliedQoSOf(svc) != nil {
+		t.Errorf("применённые классы QoS обязаны остаться пустыми, got %+v", appliedQoSOf(svc))
 	}
 }
 
@@ -958,8 +964,8 @@ func TestEnable_Tproxy_QoSClasses_WiresConfigAndIPTables(t *testing.T) {
 		t.Errorf("disabled class must not be dispatched:\n%s", restoreInput)
 	}
 	want := []QoSClassSpec{{DSCP: 46, TProxyPort: 51281, RedirectPort: 51301}}
-	if !slices.Equal(svc.currentQoSClasses, want) {
-		t.Errorf("currentQoSClasses = %+v, want %+v", svc.currentQoSClasses, want)
+	if !slices.Equal(appliedQoSOf(svc), want) {
+		t.Errorf("применённые классы QoS = %+v, want %+v", appliedQoSOf(svc), want)
 	}
 
 	// sing-box side: persisted config carries the class inbound pair. The
@@ -1003,6 +1009,7 @@ func TestEnable_Tproxy_QoSClasses_WiresConfigAndIPTables(t *testing.T) {
 // Enable must materialize the managed rules into 18-qos-routes.json and keep
 // 20-router.json free of them.
 func TestEnable_Tproxy_QoS_WritesRoutesSlot(t *testing.T) {
+	stubEnsureKernelModule(t)
 	svc, dir := newQoSSlotTestService(t, "vpn-a")
 	settingsStore := newTestSettingsStore(t, storage.SingboxRouterSettings{
 		RoutingMode:   "tproxy",
@@ -1094,8 +1101,8 @@ func TestEnable_Tproxy_QoSXtDscpMissing_DegradesWithoutFailing(t *testing.T) {
 	if strings.Contains(restoreInput, "-m dscp") {
 		t.Errorf("dscp rules must be skipped when xt_dscp unavailable:\n%s", restoreInput)
 	}
-	if svc.currentQoSClasses != nil {
-		t.Errorf("currentQoSClasses must stay empty when degraded, got %+v", svc.currentQoSClasses)
+	if appliedQoSOf(svc) != nil {
+		t.Errorf("применённые классы QoS обязаны остаться пустыми при деградации, got %+v", appliedQoSOf(svc))
 	}
 }
 
@@ -1229,9 +1236,16 @@ func noopNotInstalledIPTables() *IPTables {
 		runIPTables:    func(_ context.Context, _ ...string) error { return errors.New("chain missing") },
 		runIPTablesOut: func(_ context.Context, _ ...string) (string, error) { return "", nil },
 		runIP:          func(_ context.Context, _ ...string) error { return nil },
+		runIPOut:       func(_ context.Context, _ ...string) (string, error) { return "", nil },
 		persistRules:   func(_, _, _ string) error { return nil },
 		persistHook:    func(bool) error { return nil },
 		cleanupHook:    func() {},
+
+		persistPolicyTunDNSHook: func(string) error { return nil },
+		cleanupPolicyTunDNSHook: func() {},
+		persistBlackhole:        func(string) error { return nil },
+		cleanupBlackhole:        func() {},
+		runCtClean:              func(context.Context) {},
 	}
 }
 
@@ -1441,4 +1455,183 @@ func TestGetStatus_ReportsQoSOutboundMissing(t *testing.T) {
 	if hits[0].Tag != "vpn-ghost" || !strings.Contains(hits[0].Message, "vpn-ghost") {
 		t.Errorf("issue must name the missing outbound: %+v", hits[0])
 	}
+}
+
+// appliedQoSOf — применённые классы QoS из снимка; в проде это читается
+// инлайном в одном месте, тестам нужен короткий доступ.
+func appliedQoSOf(s *ServiceImpl) []QoSClassSpec {
+	if s.appliedSpec == nil {
+		return nil
+	}
+	return s.appliedSpec.QoSClasses
+}
+
+// F20: провал Install оставлял appliedSpec и netfilterStateKnown=true
+// нетронутыми. iptables-restore коммитит по таблицам, поэтому часть правил
+// могла примениться — а если желаемый спек затем возвращался к применённому,
+// тик не переустанавливал ничего, и частично закоммиченный netfilter жил до
+// случайного расхождения спеков.
+//
+// Сценарий: applied = спек A → тик хочет B, Install падает → тик снова хочет A.
+// Старый код: спеки равны, джампы на месте → no-op. Новый: known=false → force.
+func TestReconcile_FailedInstallForcesReinstallOnRevertedSpec(t *testing.T) {
+	stubEnsureKernelModule(t)
+	stubNoLANBridges(t)
+	stubListeningProbe(t, func() bool { return true })
+	installOK := false
+	restoreCalls := 0
+	ipt := newStubIPTables(func(context.Context, string) error {
+		restoreCalls++
+		if !installOK {
+			return errors.New("injected: iptables-restore")
+		}
+		return nil
+	})
+	singbox := newTestSingbox(t)
+	singbox.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := &ServiceImpl{
+		deps: Deps{
+			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
+			IPTables:           ipt,
+			WANIPCollector:     &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}},
+			Singbox:            singbox,
+			NetfilterPreflight: func(context.Context) error { return nil },
+			XtDscpProbe:        func(context.Context) bool { return true },
+		},
+		appliedSpec:         &RestoreInputSpec{PolicyMark: "0xffffaaa", WANIPs: []string{"203.0.113.207/32"}},
+		netfilterStateKnown: true,
+	}
+	specA := storage.SingboxRouterSettings{Enabled: true, PolicyName: "Policy0", WANAutoDetect: true}
+	specB := specA
+	specB.QoSClasses = []storage.SingboxQoSClass{{DSCP: 46, Outbound: "vpn", Enabled: true}}
+
+	// Тик 1: желаемый спек B, Install падает.
+	if err := svc.reconcileInstalled(context.Background(), specB); err == nil {
+		t.Fatal("ожидался провал Install")
+	}
+	if restoreCalls != 1 {
+		t.Fatalf("Install вызван %d раз на первом тике, want 1", restoreCalls)
+	}
+
+	// Тик 2: желаемый спек снова A — совпадает с applied, джампы живы.
+	installOK = true
+	if err := svc.reconcileInstalled(context.Background(), specA); err != nil {
+		t.Fatalf("reconcileInstalled: %v", err)
+	}
+	if restoreCalls != 2 {
+		t.Fatalf("Install вызван %d раз всего, want 2 (снимок после провала обязан считаться неизвестным)", restoreCalls)
+	}
+}
+
+// F21: reconcilePolicyTunQoS, снимая netfilter при исчезнувших классах, сбрасывал
+// три поля группы из четырёх — состав geoip-тегов оставался. Как баг сегодня
+// недостижимо (теги к этому моменту уже пусты), но дисциплина «четыре поля
+// сбрасываются вместе», объявленная в policytun_disable.go, была нарушена
+// ровно здесь.
+//
+// Мутация для пина: убрать `s.currentBypassGeoIPTags = nil` из ветки want==nil —
+// тест краснеет.
+func TestReconcilePolicyTunQoS_UninstallResetsWholeGroup(t *testing.T) {
+	ipt := newStubIPTables(func(context.Context, string) error { return nil })
+	singbox := newTestSingbox(t)
+	singbox.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := &ServiceImpl{
+		deps: Deps{
+			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
+			IPTables:           ipt,
+			WANIPCollector:     &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}},
+			Singbox:            singbox,
+			NetfilterPreflight: func(context.Context) error { return nil },
+			XtDscpProbe:        func(context.Context) bool { return true },
+		},
+		appliedSpec:            &RestoreInputSpec{PolicyMark: "0xffffaaa"},
+		appliedBlackhole:       &RestoreInputSpec{},
+		currentBypassGeoIPTags: []string{"ru"},
+		netfilterStateKnown:    true,
+	}
+
+	// Классов QoS нет → want == nil → Uninstall и сброс группы.
+	svc.reconcilePolicyTunQoS(context.Background(), storage.SingboxRouterSettings{
+		Enabled: true, PolicyName: "Policy0", WANAutoDetect: true,
+	})
+
+	if svc.appliedSpec != nil {
+		t.Errorf("appliedSpec обязан обнулиться: %+v", svc.appliedSpec)
+	}
+	if svc.appliedBlackhole != nil {
+		t.Error("appliedBlackhole обязан обнулиться")
+	}
+	if svc.currentBypassGeoIPTags != nil {
+		t.Errorf("состав geoip-тегов — четвёртый член группы, обязан обнулиться: %v", svc.currentBypassGeoIPTags)
+	}
+}
+
+// F20: тот же инвариант на reconcile-пути QoS. Мутация для пина: убрать
+// `s.netfilterStateKnown = false` из ветки ошибки Install в
+// reconcilePolicyTunQoS — тест краснеет.
+func TestReconcilePolicyTunQoS_FailedInstallMarksNetfilterUnknown(t *testing.T) {
+	stubEnsureKernelModule(t)
+	ipt := newStubIPTables(func(context.Context, string) error {
+		return errors.New("injected: iptables-restore")
+	})
+	singbox := newTestSingbox(t)
+	singbox.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := &ServiceImpl{
+		deps: Deps{
+			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
+			IPTables:           ipt,
+			WANIPCollector:     &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}},
+			Singbox:            singbox,
+			NetfilterPreflight: func(context.Context) error { return nil },
+			XtDscpProbe:        func(context.Context) bool { return true },
+		},
+		appliedSpec:         &RestoreInputSpec{PolicyMark: "0xffffaaa"},
+		netfilterStateKnown: true,
+	}
+
+	svc.reconcilePolicyTunQoS(context.Background(), storage.SingboxRouterSettings{
+		Enabled: true, PolicyName: "Policy0", WANAutoDetect: true,
+		QoSClasses: []storage.SingboxQoSClass{{DSCP: 46, Outbound: "vpn", Enabled: true}},
+	})
+
+	if svc.netfilterStateKnown {
+		t.Error("снимок netfilter остался известным после провала Install")
+	}
+}
+
+// Вторая точка выхода из режима: ветка `want == nil` реконсиляции QoS снимает
+// перехват тем же Uninstall — значит и набор обязана снести тем же порядком.
+// Первый круг правки закрыл только policy-tun Disable, и мутация «снять
+// teardownBypassSet отсюда» оставалась зелёной (найдено ревью).
+func TestReconcilePolicyTunQoS_UninstallTearsDownBypassSet(t *testing.T) {
+	ipt := newStubIPTables(func(context.Context, string) error { return nil })
+	seq := &orderLog{}
+	ipt.runIP = func(_ context.Context, args ...string) error {
+		seq.mark(strings.Join(args, " "))
+		return nil
+	}
+	singbox := newTestSingbox(t)
+	singbox.isRunningFn = func() (bool, int) { return true, 1234 }
+	svc := &ServiceImpl{
+		deps: Deps{
+			Policies:           &fakeAccessPolicyProvider{mark: "0xffffaaa"},
+			IPTables:           ipt,
+			WANIPCollector:     &fakeWANIPCollector{ips: []string{"203.0.113.207/32"}},
+			Singbox:            singbox,
+			NetfilterPreflight: func(context.Context) error { return nil },
+			XtDscpProbe:        func(context.Context) bool { return true },
+		},
+		appliedSpec:         &RestoreInputSpec{PolicyMark: "0xffffaaa"},
+		netfilterStateKnown: true,
+	}
+	// Как после рестарта демона: набор в ядре есть, снимка тегов в памяти нет.
+	svc.currentBypassGeoIPTags = nil
+	svc.teardownBypassSetFn = func(context.Context) { seq.mark("teardown") }
+
+	// Классов QoS нет → want == nil → Uninstall.
+	svc.reconcilePolicyTunQoS(context.Background(), storage.SingboxRouterSettings{
+		Enabled: true, PolicyName: "Policy0", WANAutoDetect: true,
+	})
+
+	seq.requireTeardownAfterUninstall(t)
 }

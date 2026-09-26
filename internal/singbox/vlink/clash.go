@@ -82,6 +82,10 @@ func clashFieldsToValues(p map[string]any) url.Values {
 		if asBool(ws["v2ray-http-upgrade"]) {
 			v.Set("type", "httpupgrade")
 		}
+		if n, ok := asInt(ws["max-early-data"]); ok && n > 0 {
+			v.Set("ed", strconv.Itoa(n))
+			v.Set("eh", asString(ws["early-data-header-name"]))
+		}
 	case "grpc":
 		gp := nestedMap(p, "grpc-opts")
 		if name := asString(gp["grpc-service-name"]); name != "" {
@@ -89,13 +93,23 @@ func clashFieldsToValues(p map[string]any) url.Values {
 		}
 	case "http":
 		hp := nestedMap(p, "http-opts")
-		// http-opts.path and http-opts.host are []string per Clash spec.
-		// Take the first non-empty entry to mirror h2-opts handling above.
+		// network: http у mihomo — это не h2, а обфускация заголовком поверх
+		// tcp (StreamHTTPConn), то же самое, что headerType=http у ссылки.
+		// Отдаём её тем же ключом, чтобы решение о транспорте принималось в
+		// одном месте — в BuildStreamFromQuery, вместе с запретом на TLS.
+		v.Set("type", "tcp")
+		v.Set("headerType", "http")
+		// mihomo: HTTPOptions{method, path []string, headers map[string][]string}
+		// — ключа host здесь нет, Host приезжает заголовком (adapter/outbound/
+		// vmess.go). Берём первый непустой элемент, как у h2-opts выше.
 		if paths := asStringSlice(hp["path"]); len(paths) > 0 {
 			v.Set("path", paths[0])
 		}
-		if hosts := asStringSlice(hp["host"]); len(hosts) > 0 {
+		if hosts := asStringSlice(nestedMap(hp, "headers")["Host"]); len(hosts) > 0 {
 			v.Set("host", hosts[0])
+		}
+		if m := asString(hp["method"]); m != "" {
+			v.Set("method", m)
 		}
 	case "h2":
 		hp := nestedMap(p, "h2-opts")
@@ -109,7 +123,8 @@ func clashFieldsToValues(p map[string]any) url.Values {
 	case "xhttp", "splithttp":
 		// mihomo carries xhttp under xhttp-opts with top-level string path/host
 		// (not []string) plus a mode. We don't run mihomo — convert to our
-		// sing-box xhttp transport. x_padding_bytes is defaulted downstream.
+		// sing-box xhttp transport. The remaining options, xmux among them,
+		// go through the share-link extra= path (#797).
 		xh := nestedMap(p, "xhttp-opts")
 		if path := asString(xh["path"]); path != "" {
 			v.Set("path", path)
@@ -120,6 +135,14 @@ func clashFieldsToValues(p map[string]any) url.Values {
 		if mode := asString(xh["mode"]); mode != "" {
 			v.Set("mode", mode)
 		}
+		if extra := xhttpExtraFromClash(xh); extra != "" {
+			v.Set("extra", extra)
+		}
+	}
+
+	// mihomo привязывает исходящий интерфейс per-proxy через interface-name.
+	if iface := asString(p["interface-name"]); iface != "" {
+		v.Set("bind_interface", iface)
 	}
 
 	// TLS / Reality
@@ -132,6 +155,9 @@ func clashFieldsToValues(p map[string]any) url.Values {
 		}
 		if sid := asString(reality["short-id"]); sid != "" {
 			v.Set("sid", sid)
+		}
+		if asBool(reality["support-x25519mlkem768"]) {
+			v.Set("support-x25519mlkem768", "true")
 		}
 	case asBool(p["tls"]):
 		v.Set("security", "tls")
@@ -261,6 +287,7 @@ func ParseClashBody(body []byte) BatchResult {
 			LineIdx: 0,
 			Scheme:  "clash",
 			Message: fmt.Sprintf("yaml parse: %s", err.Error()),
+			Node:    true,
 		})
 		return out
 	}
@@ -292,6 +319,7 @@ func ParseClashBody(body []byte) BatchResult {
 				LineIdx: i,
 				Scheme:  "clash:" + t,
 				Message: fmt.Sprintf("unsupported clash type %q", t),
+				Node:    true,
 			})
 			continue
 		}
@@ -300,6 +328,7 @@ func ParseClashBody(body []byte) BatchResult {
 				LineIdx: i,
 				Scheme:  "clash:" + t,
 				Message: err.Error(),
+				Node:    true,
 			})
 			continue
 		}

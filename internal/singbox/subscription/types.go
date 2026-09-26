@@ -57,13 +57,14 @@ func DefaultURLTestConfig() URLTestConfig {
 }
 
 // Subscription is the persisted shape of a VPN subscription. A
-// subscription is either URL-backed (Inline == "") or inline (URL == "");
-// IsInline is the canonical predicate.
+// subscription is either URL-backed, inline, or file-backed; IsInline
+// and IsFile are the canonical predicates.
 type Subscription struct {
 	ID               string                 `json:"id"`               // uuid
 	Label            string                 `json:"label"`            // user-facing
 	URL              string                 `json:"url"`              // subscription URL ("" when inline)
 	Inline           string                 `json:"inline,omitempty"` // raw paste of share-links / clash YAML / sing-box JSON
+	Path             string                 `json:"path,omitempty"`   // absolute path on the router; "" unless file-backed
 	Headers          []Header               `json:"headers"`          // custom HTTP headers for fetch (URL-backed only)
 	RefreshHours     int                    `json:"refreshHours"`     // 0 = manual only; ignored for inline
 	LastFetched      time.Time              `json:"lastFetched"`
@@ -87,6 +88,8 @@ type Subscription struct {
 	Enabled          bool                   `json:"enabled"`
 	Mode             SubscriptionMode       `json:"mode,omitempty"`    // "" treated as ModeSelector for back-compat
 	URLTest          *URLTestConfig         `json:"urlTest,omitempty"` // populated when Mode == ModeURLTest
+	// BindInterface — kernel iface for dialing all member outbounds (modem/WAN/Wi‑Fi).
+	BindInterface string `json:"bindInterface,omitempty"`
 }
 
 // IsInline reports whether the subscription's content is paste-supplied
@@ -95,6 +98,12 @@ type Subscription struct {
 // lifetime of the subscription (Update rejects switching).
 func (s Subscription) IsInline() bool {
 	return s.URL == "" && s.Inline != ""
+}
+
+// IsFile reports whether the subscription's content is read from a file
+// on the router rather than fetched from a remote URL or pasted inline.
+func (s Subscription) IsFile() bool {
+	return s.URL == "" && s.Inline == "" && s.Path != ""
 }
 
 // EffectiveMode returns the subscription's mode with the empty-string
@@ -134,12 +143,13 @@ type Header struct {
 	Value string `json:"value"`
 }
 
-// CreateInput is the input to Service.Create. Exactly one of URL or
-// Inline must be set; setting both or neither is rejected.
+// CreateInput is the input to Service.Create. Exactly one of URL, Inline
+// or Path must be set; setting several or none is rejected.
 type CreateInput struct {
 	Label         string
 	URL           string
 	Inline        string
+	Path          string
 	Headers       []Header
 	RefreshHours  int
 	Enabled       bool
@@ -148,6 +158,7 @@ type CreateInput struct {
 	ExcludedKeys  []string         // суффиксы тегов из превью (suffixOf, узкий или расширенный) для исключения на первичном refresh
 	FilterInclude string           // regex-фильтр «включать только» (валидируется в Service.Create)
 	FilterExclude string           // regex-фильтр «исключать» (валидируется в Service.Create)
+	BindInterface string           // egress kernel iface for all members; "" = default route
 }
 
 // UpdatePatch is partial update; nil pointers mean "leave as-is".
@@ -161,6 +172,7 @@ type UpdatePatch struct {
 	URLTest       *URLTestConfig // overwrites stored URLTest when non-nil
 	FilterInclude *string        // regex-фильтр «включать только»; "" = снять фильтр
 	FilterExclude *string        // regex-фильтр «исключать»; "" = снять фильтр
+	BindInterface *string        // egress kernel iface; "" clears bind
 }
 
 // RefreshResult is the outcome of a single refresh cycle.

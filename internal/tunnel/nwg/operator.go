@@ -24,6 +24,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/ndms/payloads"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/obfuscator"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
@@ -68,11 +69,24 @@ type OperatorNativeWG struct {
 	// ndmsinfo.SupportsWireguardASC; overridable in tests.
 	supportsASC func() bool
 
+	// supportsASC3 reports whether that ASC understands AWG 3.0/3.1 device
+	// params. Default: ndmsinfo.SupportsWireguardASC3; overridable in tests.
+	supportsASC3 func() bool
+
 	// Endpoint-страж v6-туннелей на ASC (endpoint_guard.go): реестр
 	// «kernel-имя → ожидаемый endpoint», фоновая сверка wg show/set.
-	guardMu   sync.Mutex
-	guard     map[string]guardEntry
-	guardOnce sync.Once
+	guardMu     sync.Mutex
+	guard       map[string]guardEntry
+	guardOnce   sync.Once
+	guardCtx    context.Context    // контекст guardLoop и его sweep'ов
+	guardCancel context.CancelFunc // Close; nil, пока guardLoop не заведён
+	guardDone   chan struct{}      // закрывает guardLoop на выходе
+	guardNudge  chan struct{}      // внеочередной проход; заводится в guardRegister
+	// tunnelLock — per-tunnel замок оркестратора; nil = работать без него
+	// (тесты и конфигурации без оркестратора).
+	tunnelLock func(ctx context.Context, tunnelID, owner string, work func() error) error
+	// persistResolvedIP кладёт адрес target'а в запись туннеля.
+	persistResolvedIP func(tunnelID, ip string)
 	// hasProxySlot reports a live kmod proxy slot on a listen port. Default:
 	// kmod.HasSlotListening; overridable in tests.
 	hasProxySlot func(listenPort int) bool
@@ -81,18 +95,44 @@ type OperatorNativeWG struct {
 	// proxy-пути: пересборка слота обязана идти по актуальным ключам и
 	// параметрам обфускации, а не по снимку времён регистрации (#702).
 	tunnelLookup func(tunnelID string) (*storage.AWGTunnel, error)
+
+	// obf — релей wg-obfuscator для туннелей с stored.Obfuscator != nil
+	// (obfuscated.go). nil на путях, где обфускация не заведена.
+	obf ObfuscatorRunner
+
+	// obfRouteHeldByOther — «host-route до ip нужен ещё кому-то, кроме
+	// excludeID»: у двух обфусцированных туннелей target может резолвиться в
+	// один IP, и снятие маршрута на Stop одного обрубало бы второй. nil =
+	// прежнее поведение (снимаем безусловно).
+	obfRouteHeldByOther func(excludeID, ip string) bool
+
+	// obfRouteErr — причина, по которой host-route до target НЕ стоит, по ID
+	// туннеля. Start из-за маршрута не валится (на WAN-up оркестратор всё
+	// равно перезапустит туннель, а отказ дал бы ложный broken), но состояние
+	// обязано это показывать: без маршрута трафик релея уходит в сам туннель.
+	obfRouteMu  sync.Mutex
+	obfRouteErr map[string]string
+
+	// obfRoutedWAN — WAN (имя NDMS), под которым host-route был поставлен, по
+	// ID туннеля. Сверять не с чем другим: запись NDMS ключуется парой
+	// (host, interface), а ActiveWAN в сторе держит KERNEL-имя (ResolveActiveWAN
+	// переводит peer.via в ppp0) и обновляется по своим правилам. Карта живёт
+	// в памяти: после рестарта демона WAN неизвестен, и прежняя запись
+	// снимается вслепую — заодно уходит мусор прошлой жизни.
+	obfRoutedWAN map[string]string
 }
 
 // NewOperator creates a new NativeWG operator.
 func NewOperator(queries *query.Queries, commands *command.Commands, tr *transport.Client, appLogger logging.AppLogger) *OperatorNativeWG {
 	op := &OperatorNativeWG{
-		queries:     queries,
-		commands:    commands,
-		transport:   tr,
-		kmod:        NewKmodManager(appLogger),
-		appLog:      logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubOps),
-		resolveFn:   netutil.ResolveEndpoint,
-		supportsASC: ndmsinfo.SupportsWireguardASC,
+		queries:      queries,
+		commands:     commands,
+		transport:    tr,
+		kmod:         NewKmodManager(appLogger),
+		appLog:       logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubOps),
+		resolveFn:    netutil.ResolveEndpoint,
+		supportsASC:  ndmsinfo.SupportsWireguardASC,
+		supportsASC3: ndmsinfo.SupportsWireguardASC3,
 	}
 	op.hasProxySlot = op.kmod.HasSlotListening
 	return op
@@ -106,6 +146,18 @@ func (o *OperatorNativeWG) SetHookNotifier(hn tunnel.HookNotifier) {
 // SetTunnelLookup задаёт доступ к хранилищу туннелей.
 func (o *OperatorNativeWG) SetTunnelLookup(fn func(tunnelID string) (*storage.AWGTunnel, error)) {
 	o.tunnelLookup = fn
+}
+
+// SetTunnelLock подключает per-tunnel замок оркестратора: страж правит
+// host-route и состояние релея — то же, что действия оркестратора.
+func (o *OperatorNativeWG) SetTunnelLock(fn func(ctx context.Context, tunnelID, owner string, work func() error) error) {
+	o.tunnelLock = fn
+}
+
+// SetResolvedIPPersister подключает запись адреса target'а в стор туннеля:
+// стора у оператора нет, писать умеет только владелец проводки.
+func (o *OperatorNativeWG) SetResolvedIPPersister(fn func(tunnelID, ip string)) {
+	o.persistResolvedIP = fn
 }
 
 // Create creates a NativeWG tunnel in NDMS.
@@ -122,8 +174,12 @@ func (o *OperatorNativeWG) Create(ctx context.Context, stored *storage.AWGTunnel
 // createViaImport creates a tunnel by importing a .conf file (firmware >= 5.01.A.3).
 // NDMS fully parses AWG params (Jc, Jmin, S1, H1 etc.) from the .conf file.
 func (o *OperatorNativeWG) createViaImport(ctx context.Context, stored *storage.AWGTunnel) (int, error) {
-	// Generate .conf with all AWG params
-	confData := config.GenerateForExport(stored)
+	// Generate .conf with all AWG params. Oversized <r>/<rc>/<rd> tokens in
+	// I1-I5 are split here: NDMS parses the file with the strict AmneziaWG
+	// parser and rejects the whole import otherwise (see
+	// signature_normalize.go).
+	confData, splitNote := ndmsImportConf(stored, o.useASC(&stored.Interface))
+	o.logSplitNote("create", stored.Name, splitNote)
 
 	// NDMS RCI-импорт отвергает IPv6-endpoint в .conf («"WireguardN": invalid
 	// endpoint format») и создание падает целиком, а доменное имя он принимает,
@@ -244,7 +300,7 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 	// 127.0.0.1:proxy или реальный); IPv6-литерал NDMS в create-команде не
 	// принимает — заглушка, как в createViaImport.
 	peerEndpoint := fmt.Sprintf("%s:%d", endpointIP, endpointPort)
-	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+	if isV6Literal(endpointIP) {
 		peerEndpoint = ndmsEndpointPlaceholder
 	}
 	peerCfg := payloads.PeerConfig{
@@ -255,10 +311,11 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 	if hasIPv6AllowedIPs(stored.Peer.AllowedIPs) {
 		peerCfg.AllowedIPv6 = []payloads.AllowedIP{{Address: "::", Mask: "0"}}
 	}
-	// NDMS принимает keepalive числом; диапазон AWG 3.0 сюда попасть не должен
-	// (запрещён валидацией), а если попал — оставляем поле пустым, чтобы не
-	// подсунуть прошивке мусор.
-	if n, ok := stored.Peer.PersistentKeepalive.Single(); ok && n > 0 {
+	// NDMS принимает keepalive числом: диапазон AWG 3.0 схлопывается в нижнюю
+	// границу. На выключенный и нечитаемый keepalive команда не отправляется
+	// вовсе — поле пира в RCI инкрементальное, поэтому в прошивке останется
+	// прежнее значение интервала, а не «выключено».
+	if n, ok := stored.Peer.PersistentKeepalive.Effective(); ok {
 		peerCfg.KeepaliveInterval = n
 	}
 	if stored.Peer.PresharedKey != "" {
@@ -278,8 +335,11 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 
 	// Set AWG obfuscation params via RCI (firmware >= 5.1Alpha4).
 	// Non-fatal: kmod proxy handles actual obfuscation regardless.
-	if ndmsinfo.SupportsWireguardASC() {
-		if ascJSON, err := buildASCJSON(&stored.Interface); err == nil && ascJSON != nil {
+	if o.useASC(&stored.Interface) {
+		o.logSignatureSplit("create", stored.Name, &stored.Interface)
+		if ascJSON, err := buildASCJSON(&stored.Interface, o.asc3()); err != nil {
+			o.appLog.Warn("set-asc-params", stored.Name, err.Error())
+		} else if ascJSON != nil {
 			if err := o.commands.Wireguard.SetASCParams(ctx, ndmsName, ascJSON); err != nil {
 				o.appLog.Warn("set-asc-params", "", "RCI failed (non-fatal): "+err.Error())
 			}
@@ -296,6 +356,45 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 	return idx, nil
 }
 
+// useASC сообщает, идёт ли ИМЕННО ЭТОТ туннель нативным путём ASC.
+//
+// Прошивочный ASC до 5.02.A.11 останавливается на AWG 2.0: параметры 3.0/3.1
+// (защита заголовков, случайные хвосты) он не моделирует — туннель встал бы
+// как 2.0 против сервера, который ждёт 3.1, и молча не поднялся. Такие
+// туннели идут через awg_proxy.ko, который эти параметры умеет, даже если
+// прошивка ASC-способная.
+func (o *OperatorNativeWG) useASC(iface *storage.AWGInterface) bool {
+	// Без явного признака ASC 3.x считаем, что прошивка их не умеет, и уходим
+	// на kmod: там параметры хотя бы применяются.
+	return ascCoversConfig(iface, o.supportsASC(), o.asc3())
+}
+
+// asc3 — ASC прошивки понимает параметры AWG 3.x (ndmsinfo.SupportsWireguardASC3).
+func (o *OperatorNativeWG) asc3() bool {
+	return o.supportsASC3 != nil && o.supportsASC3()
+}
+
+// UsesProxyPath сообщает, идёт ли туннель через awg_proxy.ko на ТЕКУЩЕЙ
+// прошивке: либо ASC нет вовсе, либо конфиг 3.x, которого ASC не знает.
+// Оркестратору тот же признак нужен без оператора: по нему он решает, надо ли
+// поднимать туннель после ребута роутера и снимать слот при падении WAN.
+func UsesProxyPath(iface *storage.AWGInterface) bool {
+	return !ascCoversConfig(iface, ndmsinfo.SupportsWireguardASC(), ndmsinfo.SupportsWireguardASC3())
+}
+
+// ascCoversConfig — тот же предикат в чистом виде: покрывает ли ASC прошивки
+// параметры этого конфига.
+func ascCoversConfig(iface *storage.AWGInterface, supportsASC, ascKnowsAWG3 bool) bool {
+	if !supportsASC {
+		return false
+	}
+	switch config.ClassifyAWGVersion(iface) {
+	case "awg3", "awg3.1":
+		return ascKnowsAWG3
+	}
+	return true
+}
+
 // Start starts a NativeWG tunnel.
 //
 // Requires AWG obfuscation parameters to be set — plain WireGuard configs
@@ -308,12 +407,18 @@ func (o *OperatorNativeWG) createViaBatch(ctx context.Context, stored *storage.A
 // On older firmware: awg_proxy.ko creates a local UDP proxy, peer endpoint is
 // set to 127.0.0.1:proxy_port, and the proxy forwards obfuscated traffic.
 func (o *OperatorNativeWG) Start(ctx context.Context, stored *storage.AWGTunnel) error {
+	// Обфускацию делает userspace-релей, WireGuard под ним обычный — гейт
+	// по AWG-параметрам к этому пути не относится.
+	if stored.Obfuscator != nil {
+		return o.startObfuscated(ctx, stored)
+	}
+
 	// Block plain WireGuard configs — user must add AWG obfuscation params first
 	if !config.IsAWGObfuscated(&stored.Interface) {
 		return tunnel.ErrNotObfuscated
 	}
 
-	if ndmsinfo.SupportsWireguardASC() {
+	if o.useASC(&stored.Interface) {
 		return o.startNative(ctx, stored)
 	}
 	return o.startProxy(ctx, stored)
@@ -335,7 +440,14 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 	// Sync ASC params from storage to NDMS — they may have been added/changed
 	// via the edit form after the initial Create (e.g. imported as plain WG, then edited).
 	o.appLog.Full("start", stored.Name, "Syncing ASC params to NDMS")
-	if ascJSON, err := buildASCJSON(&stored.Interface); err == nil && ascJSON != nil {
+	o.logSignatureSplit("start", stored.Name, &stored.Interface)
+	// Не собрался ASC — не стартуем: туннель встал бы с прежним ASC из NDMS
+	// («запущен, но не работает»).
+	ascJSON, err := buildASCJSON(&stored.Interface, o.asc3())
+	if err != nil {
+		return fmt.Errorf("build ASC params: %w", err)
+	}
+	if ascJSON != nil {
 		if err := o.commands.Wireguard.SetASCParams(ctx, names.NDMSName, ascJSON); err != nil {
 			o.appLog.Warn("sync-asc", names.NDMSName, err.Error())
 		}
@@ -348,13 +460,18 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 	}
 	o.appLog.Full("start", stored.Name, fmt.Sprintf("Resolving endpoint %s -> %s:%d", stored.Peer.Endpoint, endpointIP, endpointPort))
 
+	// На ASC3-прошивке законных слотов awg_proxy нет (KmodManager.DropAllSlots).
+	if o.kmod != nil && o.asc3() {
+		o.kmod.DropAllSlots()
+	}
+
 	// v4 — исторический "%s:%d" через RCI байт-в-байт. v6 через RCI NDMS не
 	// принимает вовсе (ни импорт, ни peer-команды — подтверждено автором на
 	// устройстве): endpoint выставляется напрямую в ядро через
 	// wireguard-tools по kernel-имени nwgN, ПОСЛЕ поднятия интерфейса —
 	// up/down у NDMS сбрасывает kernel-endpoint на значение из его конфига.
 	endpointIsV6 := false
-	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+	if isV6Literal(endpointIP) {
 		endpointIsV6 = true
 		// hostname→v6-only резолв: прекчек по литералу выше не сработал.
 		if wgToolLookup() == "" {
@@ -425,7 +542,7 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 		})
 		o.appLog.Info("start", names.NDMSName,
 			fmt.Sprintf("IPv6 endpoint %s выставлен в ядро через wg set %s (RCI NDMS v6 не принимает); endpoint-страж следит за сбросами NDMS", realEndpoint, names.IfaceName))
-	} else if guard, viaNDMS := guardModeForEndpoint(stored.Peer.Endpoint, false); guard {
+	} else if guard, mode := guardModeForEndpoint(stored.Peer.Endpoint, false); guard {
 		// Hostname→v4: endpoint в конфиге NDMS — литерал, и NDMS его
 		// никогда не перерезолвит. Страж следит за сменой адреса за
 		// именем и доводит его в конфиг (#702).
@@ -435,7 +552,7 @@ func (o *OperatorNativeWG) startNative(ctx context.Context, stored *storage.AWGT
 			endpoint: realEndpoint,
 			spec:     stored.Peer.Endpoint,
 			name:     names.NDMSName,
-			viaNDMS:  viaNDMS,
+			mode:     mode,
 		})
 	} else {
 		o.guardUnregister(stored.ID)
@@ -460,6 +577,19 @@ func (o *OperatorNativeWG) startProxy(ctx context.Context, stored *storage.AWGTu
 	endpointIP, endpointPort, err := o.resolveEndpointWithFallback(stored)
 	if err != nil {
 		return err
+	}
+
+	// Снять параметры ASC, если они там есть: на прошивке с ASC туннель мог
+	// стоять на нативном пути (2.0), а теперь уезжает на awg_proxy — иначе
+	// прошивка обфусцирует сама, а kmod наложит свою обфускацию поверх.
+	if o.supportsASC() {
+		// Fail-closed: не сняли — не поднимаем. Туннель с оставшимися
+		// параметрами ASC прошивка обфусцирует сама, а kmod наложит свою
+		// обфускацию поверх; на выходе мусор, который снаружи выглядит как
+		// живой туннель без единого прошедшего пакета.
+		if err := o.commands.Wireguard.ResetASCParams(ctx, names.NDMSName); err != nil {
+			return fmt.Errorf("снять параметры ASC перед переходом на awg_proxy: %w", err)
+		}
 	}
 
 	// Ensure kernel module is loaded
@@ -582,11 +712,18 @@ func (o *OperatorNativeWG) Stop(ctx context.Context, stored *storage.AWGTunnel) 
 	}
 	o.appLog.Full("stop", stored.Name, "DNS cleared")
 
-	// Only remove kmod proxy entry on older firmware
-	if !ndmsinfo.SupportsWireguardASC() {
-		_ = o.kmod.RemoveTunnel(stored.ID)
-	}
+	// Слот снимаем всегда: на ASC-прошивке туннель мог идти через прокси
+	// (конфиг 3.x, см. useASC), а конфиг с тех пор мог смениться — гейт по
+	// текущему конфигу оставил бы слот-сироту. Для туннеля без слота
+	// RemoveTunnel — безопасный no-op, а брошенный слот держит порт, ест пул
+	// из kmodMaxSlots и навсегда откладывает апгрейд модуля: EnsureLoaded не
+	// делает rmmod, пока в /proc есть живые слоты.
+	_ = o.kmod.RemoveTunnel(stored.ID)
 	o.guardUnregister(stored.ID)
+
+	if stored.Obfuscator != nil {
+		o.stopObfuscated(ctx, stored)
+	}
 
 	o.appLog.Info("stop", names.NDMSName, "tunnel stopped")
 	return nil
@@ -596,11 +733,15 @@ func (o *OperatorNativeWG) Stop(ctx context.Context, stored *storage.AWGTunnel) 
 func (o *OperatorNativeWG) Delete(ctx context.Context, stored *storage.AWGTunnel) error {
 	names := NewNWGNames(stored.NWGIndex)
 
-	// 1. Remove kmod proxy entry (older firmware only, before interface deletion)
-	if !ndmsinfo.SupportsWireguardASC() {
-		_ = o.kmod.RemoveTunnel(stored.ID)
-	}
+	// 1. Remove kmod proxy entry (before interface deletion) — безусловно,
+	// по той же причине, что и в Stop.
+	_ = o.kmod.RemoveTunnel(stored.ID)
 	o.guardUnregister(stored.ID)
+
+	if stored.Obfuscator != nil {
+		o.stopObfuscated(ctx, stored)
+		obfuscator.RemoveConf(stored.ID)
+	}
 
 	// 2. Remove ping-check profile (before interface deletion)
 	if stored.PingCheck != nil && stored.PingCheck.Enabled {
@@ -743,7 +884,8 @@ func (o *OperatorNativeWG) GetState(ctx context.Context, stored *storage.AWGTunn
 	//   running & peer offline & ASC & stalled        -> Broken
 	//   running & peer offline (coherent / ASC young) -> Starting
 	//   disabled                                       -> Stopped
-	info.State = classifyNWGState(rciState, o.supportsASC(), o.hasProxySlot, time.Now())
+	info.State = classifyNWGState(rciState, o.useASC(&stored.Interface), o.obfSlotPredicate(stored), time.Now())
+	o.overlayObfuscatorState(stored, &info)
 
 	return info
 }
@@ -857,6 +999,9 @@ func (o *OperatorNativeWG) EnsureKmodLoaded() error {
 // the NDMS peer endpoint to use the proxy address (127.0.0.1:listen_port).
 // Called at boot for enabled tunnels that are already running in NDMS.
 func (o *OperatorNativeWG) RestoreKmodTunnel(ctx context.Context, stored *storage.AWGTunnel) error {
+	if stored.Obfuscator != nil {
+		return nil // релей вместо kmod-слота; слот на loopback увёл бы WG в awg_proxy
+	}
 	bindIface := o.ResolveActiveWAN(ctx, stored)
 
 	// Resolve with retry + cached IP fallback — boot DNS on the router may be
@@ -901,7 +1046,10 @@ func (o *OperatorNativeWG) RestoreKmodTunnel(ctx context.Context, stored *storag
 //
 // No-op on ASC-native firmware (no kmod slot exists).
 func (o *OperatorNativeWG) SyncKmodSlot(ctx context.Context, stored *storage.AWGTunnel) error {
-	if o.supportsASC() {
+	if stored.Obfuscator != nil {
+		return nil // релей вместо kmod-слота; слот на loopback увёл бы WG в awg_proxy
+	}
+	if o.useASC(&stored.Interface) {
 		return nil
 	}
 	bindIface := o.ResolveActiveWAN(ctx, stored)
@@ -915,6 +1063,11 @@ func (o *OperatorNativeWG) SyncKmodSlot(ctx context.Context, stored *storage.AWG
 	// живой слот ради заведомо провальной пересборки нельзя.
 	if strings.Contains(endpointIP, ":") && !o.kmod.SupportsIPv6() {
 		return fmt.Errorf("sync kmod slot: IPv6-endpoint %s требует awg_proxy.ko >= %s", endpointIP, kmodVersionIPv6)
+	}
+
+	// То же и для AWG 3.1: старый парсер молча проглотит HP_KEY/RT.
+	if (stored.Interface.HeaderProtectionKey != "" || stored.Interface.RandomTrailers) && !o.kmod.SupportsAWG31() {
+		return fmt.Errorf("sync kmod slot: AWG 3.1 требует awg_proxy.ko >= %s", kmodVersionAWG31)
 	}
 
 	kmodCfg, err := buildKmodConfigResolved(stored, endpointIP, endpointPort, bindIface)
@@ -1013,6 +1166,10 @@ func (o *OperatorNativeWG) nextFreeIndex(ctx context.Context) (int, error) {
 // buildKmodConfigResolved builds a KmodConfig with a pre-resolved endpoint IP.
 // bindIface is the kernel interface name for SO_BINDTODEVICE (empty = no binding).
 func buildKmodConfigResolved(stored *storage.AWGTunnel, endpointIP string, endpointPort int, bindIface string) (KmodConfig, error) {
+	// S1-S4 pass through verbatim: header protection needs them >= 12 (the
+	// ChaCha20 nonce length), but that is enforced fail-closed by
+	// config.ValidateAWG3 at create/update — and these bytes must byte-match
+	// the server config, so this is not the place to silently adjust them.
 	return KmodConfig{
 		EndpointIP:   endpointIP,
 		EndpointPort: endpointPort,
@@ -1025,7 +1182,9 @@ func buildKmodConfigResolved(stored *storage.AWGTunnel, endpointIP string, endpo
 		PubClientHex: pubKeyToHex(clientPubKeyFromPrivate(stored.Interface.PrivateKey)),
 		I1:           stored.Interface.I1, I2: stored.Interface.I2,
 		I3: stored.Interface.I3, I4: stored.Interface.I4, I5: stored.Interface.I5,
-		BindIface: bindIface,
+		BindIface:              bindIface,
+		HeaderProtectionKeyHex: pubKeyToHex(stored.Interface.HeaderProtectionKey),
+		RandomTrailers:         stored.Interface.RandomTrailers,
 	}, nil
 }
 
@@ -1109,7 +1268,21 @@ func (o *OperatorNativeWG) resolveOnce(endpoint string, timeout time.Duration) (
 
 // trackEndpointIP records a freshly-resolved endpoint IP for a tunnel.
 // Lazy-inits the map so struct-literal construction (tests) is safe.
+//
+// Адрес, до которого host-route не ставят, не трекаем. Туда попадает
+// Peer.Endpoint обфусцированного туннеля (127.0.0.1:<порт> локального релея —
+// его резолвит createViaBatch) и связанных туннелей wdtt/freeturn в WG-режиме
+// (их резолвят startNative/startProxy). Оркестратор сохраняет
+// GetTrackedEndpointIP в ResolvedEndpointIP (execute.go), а это поле означает
+// адрес, до которого ставится host-route: петля затирала бы там адрес target'а
+// релея. F230.
+//
+// Прежнее значение при этом сохраняется: карта отражает последний адрес, под
+// которым маршрут действительно ставился.
 func (o *OperatorNativeWG) trackEndpointIP(tunnelID, ip string) {
+	if netutil.SkipHostRoute(ip) {
+		return
+	}
 	o.trackedMu.Lock()
 	defer o.trackedMu.Unlock()
 	if o.trackedIP == nil {
@@ -1205,16 +1378,19 @@ func hasIPv6AllowedIPs(allowedIPs []string) bool {
 
 // buildASCJSON builds a json.RawMessage for SetASCParams from stored interface fields.
 // Returns nil if the config is plain WireGuard (no obfuscation).
-func buildASCJSON(iface *storage.AWGInterface) (json.RawMessage, error) {
+// asc3 — прошивка понимает ASC 3.x: только тогда конфиг 3.x несёт параметры
+// устройства (без ASC3 они ушли бы на прошивку, которая их не знает).
+func buildASCJSON(iface *storage.AWGInterface, asc3 bool) (json.RawMessage, error) {
 	if !config.IsAWGObfuscated(iface) {
 		return nil, nil
 	}
+	// Same per-tag limit as the import path: this payload goes to the very
+	// same NDMS parser, so an oversized token would be rejected here too.
+	split, _ := splitSignatureTags(iface)
+	iface = &split
 
 	ver := config.ClassifyAWGVersion(iface)
-	// awg3 is included here so the extended block (S3/S4, I1-I5) still reaches
-	// NDMS. Firmware ASC does not model the awg3-specific device params, so
-	// those are simply not sent — the kernel backend (awg setconf) applies them.
-	if ver == "awg1.5" || ver == "awg2.0" || ver == "awg3" {
+	if ver == "awg1.5" || ver == "awg2.0" || ver == "awg3" || ver == "awg3.1" {
 		params := ndms.ASCParamsExtended{
 			ASCParams: ndms.ASCParams{
 				Jc: iface.Jc, Jmin: iface.Jmin, Jmax: iface.Jmax,
@@ -1223,6 +1399,9 @@ func buildASCJSON(iface *storage.AWGInterface) (json.RawMessage, error) {
 			},
 			S3: iface.S3, S4: iface.S4,
 			I1: iface.I1, I2: iface.I2, I3: iface.I3, I4: iface.I4, I5: iface.I5,
+		}
+		if asc3 && (ver == "awg3" || ver == "awg3.1") {
+			return ascAWG3JSON(params, iface)
 		}
 		return json.Marshal(params)
 	}
@@ -1233,6 +1412,45 @@ func buildASCJSON(iface *storage.AWGInterface) (json.RawMessage, error) {
 		H1: iface.H1, H2: iface.H2, H3: iface.H3, H4: iface.H4,
 	}
 	return json.Marshal(params)
+}
+
+// ascAWG3JSON дополняет ASC параметрами устройства 3.0/3.1: "N" или "N-M"
+// (config.ValidateObfuscation), незаданное — ноль.
+func ascAWG3JSON(base ndms.ASCParamsExtended, iface *storage.AWGInterface) (json.RawMessage, error) {
+	p := ndms.ASCParamsAWG3{ASCParamsExtended: base, HeaderProtectionKey: iface.HeaderProtectionKey}
+	for _, f := range []struct {
+		name       string
+		v          string
+		start, end *int
+	}{
+		{"ContentPaddingAddition", iface.ContentPaddingAddition, &p.ContentPaddingStart, &p.ContentPaddingEnd},
+		{"RekeyAfterTime", iface.RekeyAfterTime, &p.RekeyAfterTimeStart, &p.RekeyAfterTimeEnd},
+		{"RekeyTimeout", iface.RekeyTimeout, &p.RekeyTimeoutStart, &p.RekeyTimeoutEnd},
+		{"RejectAfterTime", iface.RejectAfterTime, &p.RejectAfterTimeStart, &p.RejectAfterTimeEnd},
+		{"KeepaliveTimeout", iface.KeepaliveTimeout, &p.KeepaliveTimeoutStart, &p.KeepaliveTimeoutEnd},
+		{"MaxHandshakeAttempts", iface.MaxHandshakeAttempts, &p.MaxHandshakeAttemptsStart, &p.MaxHandshakeAttemptsEnd},
+	} {
+		if f.v == "" {
+			continue
+		}
+		lo, hi, isRange := strings.Cut(f.v, "-")
+		if !isRange {
+			hi = lo
+		}
+		var err1, err2 error
+		*f.start, err1 = strconv.Atoi(strings.TrimSpace(lo))
+		*f.end, err2 = strconv.Atoi(strings.TrimSpace(hi))
+		if err1 != nil || err2 != nil {
+			return nil, fmt.Errorf("%s: неверное значение %q", f.name, f.v)
+		}
+	}
+	if iface.RandomTrailers {
+		p.RandomTrailers = 1
+	}
+	if iface.DisableCookies {
+		p.DisableCookies = 1
+	}
+	return json.Marshal(p)
 }
 
 // clientPubKeyFromPrivate derives WireGuard public key from a base64 private key.

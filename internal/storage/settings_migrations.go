@@ -339,10 +339,8 @@ func (s *SettingsStore) migrateToV32(settings *Settings) {
 	settings.SchemaVersion = 32
 }
 
-// migrateToV33 enables the keendns bypass preset by default. The preset
-// now drives a managed DNS rewrite of the router's own KeenDNS FQDN →
-// LAN IP (not an iptables exclusion of the shared cloud IP 78.47.125.180).
-// Append only when missing so an existing keendns entry is left intact.
+// migrateToV33 enables the keendns bypass preset by default. Append only
+// when missing so an existing keendns entry is left intact.
 func (s *SettingsStore) migrateToV33(settings *Settings) {
 	has := false
 	for _, name := range settings.SingboxRouter.BypassPresets {
@@ -359,16 +357,20 @@ func (s *SettingsStore) migrateToV33(settings *Settings) {
 
 // migrateManagedServers moves a legacy singular managedServer into the
 // new ManagedServers slice. Idempotent. Caller holds s.mu.
-func (s *SettingsStore) migrateManagedServers() {
-	if s.settings == nil || s.settings.ManagedServer == nil {
+func (s *SettingsStore) migrateManagedServers() { migrateManagedServersIn(s.settings) }
+
+// migrateManagedServersIn — та же миграция, но от произвольной записи: мутаторы
+// применяют её к КОПИИ настроек внутри updateUnlocked (F3), а не к живому кэшу.
+func migrateManagedServersIn(settings *Settings) {
+	if settings == nil || settings.ManagedServer == nil {
 		return
 	}
 	// Prepend so an existing slice (theoretically already migrated) keeps
 	// its order — but in practice mass migration only fires once, when
 	// the slice is empty.
-	migrated := append([]ManagedServer{*s.settings.ManagedServer}, s.settings.ManagedServers...)
-	s.settings.ManagedServers = migrated
-	s.settings.ManagedServer = nil
+	migrated := append([]ManagedServer{*settings.ManagedServer}, settings.ManagedServers...)
+	settings.ManagedServers = migrated
+	settings.ManagedServer = nil
 }
 
 // migratePortFile reads port from old port file and removes it.
@@ -386,4 +388,119 @@ func (s *SettingsStore) migratePortFile(settings *Settings) {
 
 	// Remove old port file after successful migration
 	os.Remove(portFile)
+}
+
+// migrateToV34 сливает зеркальные записи владения OpkgTun (ключи fakeip и
+// policyTun) в единую opkgTun. Конфликт «обе записи» разрешается активным
+// RoutingMode; NAT-записи проигравшей policy-записи не выбрасываются — они
+// переезжают в payload (реап восстановит их и вне режима policy-tun).
+// Потеря payload'а проигравшей fakeip-записи безопасна: пустой prev-диапазон
+// заставляет FakeIPCacheNeedsReset сработать в сторону лишнего сброса кэша.
+func (s *SettingsStore) migrateToV34(settings *Settings) {
+	fk, pt := settings.LegacyFakeIP, settings.LegacyPolicyTun
+	settings.LegacyFakeIP, settings.LegacyPolicyTun = nil, nil
+	switch {
+	case fk == nil && pt == nil:
+		return
+	case pt == nil, fk != nil && settings.SingboxRouter.RoutingMode == OpkgTunModeFakeIP:
+		st := &OpkgTunState{Mode: OpkgTunModeFakeIP, Provisioned: fk.Provisioned, Index: fk.Index,
+			FakeIP: &OpkgTunFakeIPData{Inet4Range: fk.Inet4Range, Inet6Range: fk.Inet6Range}}
+		if pt != nil && len(pt.NATSegments) > 0 {
+			st.PolicyTun = &OpkgTunPolicyData{NATSegments: pt.NATSegments}
+		}
+		settings.OpkgTun = st
+	default:
+		st := &OpkgTunState{Mode: OpkgTunModePolicyTun, Provisioned: pt.Provisioned, Index: pt.Index}
+		if len(pt.NATSegments) > 0 {
+			st.PolicyTun = &OpkgTunPolicyData{NATSegments: pt.NATSegments}
+		}
+		settings.OpkgTun = st
+	}
+}
+
+// migrateToV35 материализует пустой FakeIPPool6 в явный дефолт: до v35
+// нормализация дефолтила "" на каждом чтении, с v35 "" означает «v6 выключен».
+// Литерал ЗАМОРОЖЕН намеренно (дубль DefaultFakeIPTunParams — миграции не
+// дрейфуют с будущими дефолтами).
+func (s *SettingsStore) migrateToV35(settings *Settings) {
+	if settings.SingboxRouter.FakeIPPool6 == "" {
+		settings.SingboxRouter.FakeIPPool6 = "fc00::/18"
+	}
+}
+
+// migrateToV36 переносит сигнатуру I1–I5 с сервера на его пиров: до схемы 36
+// одна сигнатура на сервер копировалась в .conf каждого пира. Байты не
+// меняются — уже выданные конфиги остаются валидными. Пир со своей
+// сигнатурой не трогается. Идемпотентно.
+func (s *SettingsStore) migrateToV36(settings *Settings) {
+	for i := range settings.ManagedServers {
+		MovePeerSignaturesFromServer(&settings.ManagedServers[i])
+	}
+}
+
+// MovePeerSignaturesFromServer раздаёт серверную сигнатуру LegacyI1..LegacyI5
+// пирам, у которых своей нет, и очищает поля сервера. Байты копируются как
+// есть; профиль остаётся пустым — по унаследованным байтам его не восстановить.
+// Используется миграцией V36 и разбором старых бэкапов и ASC-снимков.
+// Идемпотентна: без непустых legacy-полей ничего не делает.
+func MovePeerSignaturesFromServer(sv *ManagedServer) {
+	if sv.LegacyI1 == "" && sv.LegacyI2 == "" && sv.LegacyI3 == "" && sv.LegacyI4 == "" && sv.LegacyI5 == "" {
+		return
+	}
+	for j := range sv.Peers {
+		p := &sv.Peers[j]
+		if p.I1 != "" || p.I2 != "" || p.I3 != "" || p.I4 != "" || p.I5 != "" {
+			continue
+		}
+		p.I1, p.I2, p.I3, p.I4, p.I5 = sv.LegacyI1, sv.LegacyI2, sv.LegacyI3, sv.LegacyI4, sv.LegacyI5
+	}
+	sv.LegacyI1, sv.LegacyI2, sv.LegacyI3, sv.LegacyI4, sv.LegacyI5 = "", "", "", "", ""
+}
+
+// migrateToV37 переводит цель пробы связи с gstatic на cp.cloudflare у тех,
+// кто адрес НЕ ТРОГАЛ. Прежний дефолт систематически не отвечает с выходов
+// коммерческих VPN (замер на стенде 2026-09-12: 1 ответ из 3 через живой
+// туннель Amnezia против 3 из 3 с WAN), из-за чего исправный туннель
+// показывался как «Нет связи». Новые установки берут адрес из
+// DefaultConnectivityCheckURL; этой миграцией правка доходит до уже
+// установленных панелей.
+//
+// Сравнение со СТАРЫМ дефолтом, а не «перезаписать всегда»: выбранный
+// пользователем адрес — его решение, и молча заменить его значило бы отобрать
+// настройку. Пустое значение тоже заполняется: пустым его читает
+// pingcheck.checkURL как «взять дефолт», и оставлять дыру в файле незачем.
+// Идемпотентна.
+func (s *SettingsStore) migrateToV37(settings *Settings) {
+	if settings.ConnectivityCheckURL == "" || settings.ConnectivityCheckURL == legacyGstaticCheckURL {
+		settings.ConnectivityCheckURL = DefaultConnectivityCheckURL
+	}
+}
+
+// migrateToV38 снимает вшитый "gvisor" у тех, кто стек НЕ ВЫБИРАЛ. До v38
+// нормализация дефолтила пустое значение в "gvisor", поэтому оно лежит в файле
+// у каждой установки. С sing-box 1.15 пустое значение означает «ключ stack не
+// писать» — движок берёт собственный стек sing-tun, который и стал дефолтом;
+// legacy-стеки удаляются в 1.17.
+//
+// Сравнение со СТАРЫМ дефолтом, как в migrateToV37: "system" и "mixed" — это
+// осознанный выбор, его не трогаем. Оборотная сторона известна и принята:
+// у того, кто выбрал "gvisor" руками, выбор снимется — в файле он неотличим от
+// подставленного дефолта. Идемпотентна.
+func (s *SettingsStore) migrateToV38(settings *Settings) {
+	if settings.SingboxRouter.FakeIPStack == "gvisor" {
+		settings.SingboxRouter.FakeIPStack = ""
+	}
+}
+
+// migrateToV39 снимает стеки, которых в движке больше НЕТ: наш sing-box
+// собирается без тега with_gvisor, и sing-tun на "gvisor" и "mixed" отвечает
+// "gVisor is not included in this build" — туннель просто не поднимется.
+// В отличие от migrateToV38 это касается и осознанного выбора: выбор,
+// который движок не исполнит, дороже сохранённого намерения. "system" жив.
+// Идемпотентна.
+func (s *SettingsStore) migrateToV39(settings *Settings) {
+	switch settings.SingboxRouter.FakeIPStack {
+	case "gvisor", "mixed":
+		settings.SingboxRouter.FakeIPStack = ""
+	}
 }

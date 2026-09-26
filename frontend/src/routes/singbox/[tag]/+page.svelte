@@ -20,6 +20,7 @@
 		Zap
 	} from 'lucide-svelte';
 	import { Button, Dropdown } from '$lib/components/ui';
+	import { BindInterfacePicker } from '$lib/components/singbox';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import { notifications } from '$lib/stores/notifications';
 
@@ -152,6 +153,16 @@
 			.map((v) => v.trim())
 			.filter(Boolean);
 		return parts.length > 0 ? parts : undefined;
+	}
+
+	function setBindInterface(value: string): void {
+		if (!outbound) return;
+		if (!value.trim()) {
+			const { bind_interface: _removed, ...rest } = outbound;
+			outbound = rest;
+			return;
+		}
+		setField(['bind_interface'], value.trim());
 	}
 
 	function outboundFingerprint(value: JsonRecord | null): string {
@@ -312,6 +323,15 @@
 								oninput={(e) => setField(['tls', 'reality', 'short_id'], (e.target as HTMLInputElement).value)}
 							/>
 						</div>
+
+						<label class="checkbox-label">
+							<input
+								type="checkbox"
+								checked={getFieldBool(['tls', 'reality', 'support_x25519mlkem768'])}
+								onchange={(e) => setField(['tls', 'reality', 'support_x25519mlkem768'], (e.target as HTMLInputElement).checked)}
+							/>
+							<span>X25519MLKEM768 (нужен серверам Xray 26.9.8+, только fingerprint chrome)</span>
+						</label>
 					</section>
 				{/if}
 
@@ -664,11 +684,78 @@
 						></textarea>
 					</div>
 				</section>
+			{:else if protocol === 'trusttunnel'}
+				<section class="card tunnel-section">
+					<SettingsSectionLabel label="TrustTunnel" icon={UserRound} tone="green" header />
+
+					<div class="form-group">
+						<label class="label" for="tt_username">Пользователь</label>
+						<input
+							id="tt_username"
+							class="input"
+							value={getFieldString(['username'])}
+							oninput={(e) => setField(['username'], (e.target as HTMLInputElement).value)}
+						/>
+					</div>
+
+					<div class="form-group">
+						<label class="label" for="tt_password">Пароль</label>
+						<input
+							id="tt_password"
+							class="input"
+							type="password"
+							value={getFieldString(['password'])}
+							oninput={(e) => setField(['password'], (e.target as HTMLInputElement).value)}
+						/>
+					</div>
+				</section>
+
+				<section class="card tunnel-section">
+					<SettingsSectionLabel label="TLS" icon={Lock} tone="blue" header />
+
+					<div class="form-group">
+						<label class="label" for="tt_sni">SNI</label>
+						<input
+							id="tt_sni"
+							class="input"
+							value={getFieldString(['tls', 'server_name'])}
+							oninput={(e) => setField(['tls', 'server_name'], (e.target as HTMLInputElement).value)}
+						/>
+					</div>
+
+					<label class="checkbox-label">
+						<input
+							type="checkbox"
+							checked={getFieldBool(['tls', 'insecure'])}
+							onchange={(e) => setField(['tls', 'insecure'], (e.target as HTMLInputElement).checked)}
+						/>
+						<span>Insecure (пропустить проверку сертификата)</span>
+					</label>
+
+					<label class="checkbox-label">
+						<input
+							type="checkbox"
+							checked={getFieldBool(['tls', 'fragment'])}
+							onchange={(e) => setField(['tls', 'fragment'], (e.target as HTMLInputElement).checked)}
+						/>
+						<span>Anti-DPI (фрагментация ClientHello)</span>
+					</label>
+				</section>
 			{/if}
 
 			{#if error}
 				<div class="error-msg">{error}</div>
 			{/if}
+
+			<section class="card tunnel-section egress-section">
+				<SettingsSectionLabel label="Исходящий интерфейс" icon={Waypoints} tone="slate" header />
+				<BindInterfacePicker
+					label=""
+					value={getFieldString(['bind_interface'])}
+					onchange={setBindInterface}
+					hint="Принудительно направляет dial этого прокси через выбранный uplink (модем, WAN, Wi‑Fi)."
+				/>
+			</section>
 
 			<div class="form-actions">
 				<Button variant="secondary" size="sm" onclick={() => goto('/?tab=singbox')}>Отмена</Button>

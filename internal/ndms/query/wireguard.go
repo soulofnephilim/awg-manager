@@ -56,7 +56,6 @@ const (
 	// noHandshakeMarker: RCI sentinel for "no handshake ever".
 	noHandshakeMarker = int64(math.MaxInt32) // 2147483647
 
-	builtInVPNServerDescription = "Wireguard VPN Server"
 )
 
 // --- wire types (private) ----------------------------------------------------
@@ -146,6 +145,12 @@ type WGServerStore struct {
 	rc *cache.KeyedStore[string, *ndms.WireguardServerConfig]
 	// ASC params (raw JSON, per-name, keyed by name+shape).
 	asc *cache.KeyedStore[string, json.RawMessage]
+	// Список СИСТЕМНЫХ (не наших) WG-туннелей. Кэш тут не украшение:
+	// поллер метрик спрашивает состав на КАЖДОМ тике, а выборка — это
+	// `/show/interface/` целиком, самый тяжёлый RCI-запрос. Без кэша при
+	// открытой панели мы запрашивали всё дерево интерфейсов четыре раза в
+	// минуту, только чтобы решить, что опрашивать (F364).
+	sysList *cache.ListStore[[]ndms.SystemWireguardTunnel]
 }
 
 // NewWGServerStore constructs the store with production TTLs. Takes
@@ -169,6 +174,7 @@ func NewWGServerStoreWithTTL(g Getter, log Logger, ifaces *InterfaceStore, listT
 	s.rc = cache.NewKeyedStore(rcTTL, log, "wg server config", s.fetchConfig)
 	s.asc = cache.NewKeyedStore(rcTTL, log, "wg asc", s.fetchASCByKey)
 	s.ListStore = cache.NewListStore(listTTL, log, "wg server list", s.fetchAll)
+	s.sysList = cache.NewListStore(listTTL, log, "system wg list", s.fetchSystemTunnels)
 	return s
 }
 
@@ -228,8 +234,15 @@ func (s *WGServerStore) GetASCParams(ctx context.Context, name string, extended 
 	return s.asc.Get(ctx, ascKey(name, extended))
 }
 
-// ListSystemTunnels returns all system WG tunnels (excluding the built-in VPN server).
+// ListSystemTunnels returns all system WG tunnels (excluding the built-in VPN
+// server). Читает из кэша: состав меняется по хукам NDMS, и они его сбрасывают
+// (InvalidateAll в диспетчере на ifcreated/ifdestroyed/iflayerchanged), а TTL —
+// та же подстраховка, что у списка серверов рядом.
 func (s *WGServerStore) ListSystemTunnels(ctx context.Context) ([]ndms.SystemWireguardTunnel, error) {
+	return s.sysList.List(ctx)
+}
+
+func (s *WGServerStore) fetchSystemTunnels(ctx context.Context) ([]ndms.SystemWireguardTunnel, error) {
 	var raw map[string]json.RawMessage
 	if err := s.getter.Get(ctx, "/show/interface/", &raw); err != nil {
 		return nil, fmt.Errorf("list system wireguard: %w", err)
@@ -246,7 +259,7 @@ func (s *WGServerStore) ListSystemTunnels(ctx context.Context) ([]ndms.SystemWir
 		if !strings.EqualFold(typeCheck.Type, "Wireguard") {
 			continue
 		}
-		if typeCheck.Description == builtInVPNServerDescription {
+		if typeCheck.Description == ndms.BuiltInVPNServerDescription {
 			continue
 		}
 		var detail rciWireguardDetail
@@ -299,6 +312,7 @@ func (s *WGServerStore) InvalidateAll() {
 	s.items.InvalidateAll()
 	s.rc.InvalidateAll()
 	s.asc.InvalidateAll()
+	s.sysList.InvalidateAll()
 }
 
 // --- fetchers ---------------------------------------------------------------
@@ -439,10 +453,20 @@ func (s *WGServerStore) fetchConfig(ctx context.Context, name string) (*ndms.Wir
 }
 
 func (s *WGServerStore) fetchASC(ctx context.Context, name string, extended bool) (json.RawMessage, error) {
-	var raw map[string]string
+	var fields map[string]json.RawMessage
 	path := "/show/rc/interface/" + name + "/wireguard/asc"
-	if err := s.getter.Get(ctx, path, &raw); err != nil {
+	if err := s.getter.Get(ctx, path, &fields); err != nil {
 		return nil, fmt.Errorf("get ASC params %s: %w", name, err)
+	}
+	// 5.02.A.11 отдаёт числа ("jc": 4), а не строки: разбор в map[string]string
+	// падал целиком. Принимаем обе формы.
+	raw := make(map[string]string, len(fields))
+	for k, v := range fields {
+		var str string
+		if json.Unmarshal(v, &str) != nil {
+			str = string(v)
+		}
+		raw[k] = str
 	}
 	if extended {
 		params := struct {
@@ -487,6 +511,22 @@ func (s *WGServerStore) fetchASC(ctx context.Context, name string, extended bool
 		H1: raw["h1"], H2: raw["h2"], H3: raw["h3"], H4: raw["h4"],
 	}
 	return json.Marshal(params)
+}
+
+// ASC3Fields читает с роутера (мимо кэша) параметры ASC 3.x интерфейса —
+// ключи ndms.ASC3Keys, какие есть; до 5.02.A.11 их нет вовсе.
+func (s *WGServerStore) ASC3Fields(ctx context.Context, name string) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := s.getter.Get(ctx, "/show/rc/interface/"+name+"/wireguard/asc", &fields); err != nil {
+		return nil, fmt.Errorf("get ASC params %s: %w", name, err)
+	}
+	out := make(map[string]json.RawMessage)
+	for _, k := range ndms.ASC3Keys {
+		if v, ok := fields[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, nil
 }
 
 // resolveSystemName delegates to InterfaceStore so kernel-name resolution

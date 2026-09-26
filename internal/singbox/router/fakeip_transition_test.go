@@ -55,7 +55,7 @@ func newTransitionHarness(t *testing.T) *transitionHarness {
 	svc.deps.StaticRoutes = &recStaticRoutes{log: log}
 	svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{}}
 	svc.deps.FakeIPTun = DefaultFakeIPTunParams()
-	svc.deps.FakeIPTun.CachePath = filepath.Join(dir, "cache.db")
+	svc.deps.CacheDBPath = func() string { return filepath.Join(dir, "cache.db") }
 
 	// policy-tun deps (общий с fakeip OpkgTun/индексы + парковка дефолта).
 	svc.deps.DefaultRoute = &recDefaultRoute{log: log}
@@ -78,9 +78,7 @@ func newTransitionHarness(t *testing.T) *transitionHarness {
 	stubListeningProbe(t, func() bool { return true })
 	stubTunReadyProbe(t, func(string) bool { return true })
 	stubFakeIPDNSProbe(t, func(context.Context, string, netip.Prefix) bool { return true })
-	oldFlush := fakeIPAddrFlush
-	fakeIPAddrFlush = func(context.Context, string) error { return nil }
-	t.Cleanup(func() { fakeIPAddrFlush = oldFlush })
+	stubLinkAbsent(t)
 
 	// Drain the fakeip drain-schedule synchronously so Disable tests don't leak
 	// goroutines and the reject route gets removed deterministically.
@@ -127,8 +125,9 @@ func (h *transitionHarness) seedState(t *testing.T, mode string, enabled bool) {
 		Enabled:       enabled,
 		DeviceMode:    "all", // tproxy: no policy required
 		WANAutoDetect: true,
+		FakeIPPool6:   DefaultFakeIPTunParams().Inet6Range,
 	}
-	if err := h.store.Save(all); err != nil {
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 }
@@ -266,7 +265,7 @@ func TestSwitch_FakeIPToOff(t *testing.T) {
 		t.Fatalf("seed Enable(fakeip): %v", err)
 	}
 	// fakeip persist must exist before teardown.
-	if all, _ := h.store.Load(); all.FakeIP == nil || !all.FakeIP.Provisioned {
+	if all, _ := h.store.Load(); all.OpkgTun == nil || !all.OpkgTun.Provisioned {
 		t.Fatalf("expected provisioned fakeip persist before switch")
 	}
 	stop := h.subscribe(t)
@@ -280,8 +279,8 @@ func TestSwitch_FakeIPToOff(t *testing.T) {
 	if enabled {
 		t.Fatalf("expected disabled after →off")
 	}
-	if all, _ := h.store.Load(); all.FakeIP != nil {
-		t.Fatalf("fakeip persist not cleared: %+v", all.FakeIP)
+	if all, _ := h.store.Load(); all.OpkgTun != nil {
+		t.Fatalf("fakeip persist not cleared: %+v", all.OpkgTun)
 	}
 	want := []string{"start:current", "teardown:current", "teardown:done", "ready:done"}
 	assertSteps(t, h.steps(), want)

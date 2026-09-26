@@ -60,6 +60,7 @@ const api_AWGTunnelDTO: v.GenericSchema = v.looseObject({
 	interface: v.optional(v.nullable(v.lazy(() => api_AWGInterfaceDTO))),
 	interfaceName: v.optional(v.nullable(v.string())),
 	name: v.optional(v.nullable(v.string())),
+	obfuscator: v.optional(v.nullable(v.lazy(() => api_ObfuscatorDTO))),
 	peer: v.optional(v.nullable(v.lazy(() => api_AWGPeerDTO))),
 	state: v.optional(v.nullable(v.string())),
 	stateInfo: v.optional(v.nullable(v.lazy(() => api_TunnelStateInfoDTO))),
@@ -101,26 +102,78 @@ const api_AllInterfacesResponse: v.GenericSchema = v.looseObject({
 	success: v.optional(v.nullable(v.boolean())),
 });
 
-const api_AmneziaPremiumAccountInfoResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.unknown())),
+const api_AmneziaPremiumCatalogData: v.GenericSchema = v.looseObject({
+	activeDeviceCount: v.optional(v.nullable(v.number())),
+	countries: v.optional(v.nullable(v.array(v.lazy(() => api_AmneziaPremiumCountry)))),
+	issuedConfigs: v.optional(v.nullable(v.array(v.lazy(() => api_AmneziaPremiumIssuedConfig)))),
+	maxDeviceCount: v.optional(v.nullable(v.number())),
+	planName: v.optional(v.nullable(v.string())),
+	subscriptionEndDate: v.optional(v.nullable(v.string())),
+});
+
+const api_AmneziaPremiumCatalogResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumCatalogData))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
-const api_AmneziaPremiumDownloadConfigData: v.GenericSchema = v.looseObject({
+const api_AmneziaPremiumConfigData: v.GenericSchema = v.looseObject({
 	config: v.optional(v.nullable(v.string())),
+	countryCode: v.optional(v.nullable(v.string())),
 });
 
-const api_AmneziaPremiumDownloadConfigResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumDownloadConfigData))),
+const api_AmneziaPremiumConfigResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumConfigData))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
-const api_AmneziaPremiumLoginData: v.GenericSchema = v.looseObject({
-	sid: v.optional(v.nullable(v.string())),
+const api_AmneziaPremiumCountry: v.GenericSchema = v.looseObject({
+	code: v.optional(v.nullable(v.string())),
+	name: v.optional(v.nullable(v.string())),
+	protocols: v.optional(v.nullable(v.array(v.string()))),
 });
 
-const api_AmneziaPremiumLoginResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumLoginData))),
+const api_AmneziaPremiumDeclaredCountryData: v.GenericSchema = v.looseObject({
+	declaredCountryCode: v.optional(v.nullable(v.string())),
+});
+
+const api_AmneziaPremiumDeclaredCountryResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumDeclaredCountryData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_AmneziaPremiumIssuedConfig: v.GenericSchema = v.looseObject({
+	countryCode: v.optional(v.nullable(v.string())),
+	lastIssuedAt: v.optional(v.nullable(v.string())),
+	portalUpdatedAt: v.optional(v.nullable(v.string())),
+	sourceType: v.optional(v.nullable(v.string())),
+});
+
+const api_AmneziaPremiumKeyData: v.GenericSchema = v.looseObject({
+	saveError: v.optional(v.nullable(v.string())),
+	stored: v.optional(v.nullable(v.boolean())),
+	usable: v.optional(v.nullable(v.boolean())),
+});
+
+const api_AmneziaPremiumKeyResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumKeyData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_AmneziaPremiumMirrorData: v.GenericSchema = v.looseObject({
+	mirrorUrl: v.optional(v.nullable(v.string())),
+});
+
+const api_AmneziaPremiumMirrorResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumMirrorData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_AmneziaPremiumRevokeData: v.GenericSchema = v.looseObject({
+	countryCode: v.optional(v.nullable(v.string())),
+});
+
+const api_AmneziaPremiumRevokeResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_AmneziaPremiumRevokeData))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
@@ -138,15 +191,77 @@ const api_Awg3ListResponse: v.GenericSchema = v.looseObject({
 });
 
 const api_Awg3TunnelDTO: v.GenericSchema = v.looseObject({
+	disableCookies: v.optional(v.nullable(v.boolean())),
 	headerProtection: v.optional(v.nullable(v.boolean())),
 	host: v.optional(v.nullable(v.string())),
 	id: v.optional(v.nullable(v.string())),
 	keepaliveTimeout: v.optional(v.nullable(v.string())),
 	maxHandshakeAttempts: v.optional(v.nullable(v.string())),
+	randomTrailers: v.optional(v.nullable(v.boolean())),
 	rejectAfterTime: v.optional(v.nullable(v.string())),
 	rekeyAfterTime: v.optional(v.nullable(v.string())),
 	rekeyTimeout: v.optional(v.nullable(v.string())),
 	tag: v.optional(v.nullable(v.string())),
+});
+
+const api_AwgAnalyzeData: v.GenericSchema = v.looseObject({
+	errors: v.optional(v.nullable(v.array(v.lazy(() => api_AwgAnalyzeIssue)))),
+	interface: v.optional(v.nullable(v.lazy(() => api_AwgAnalyzeInterface))),
+	peer: v.optional(v.nullable(v.lazy(() => api_AwgAnalyzePeer))),
+	version: v.optional(v.nullable(v.string())),
+	warnings: v.optional(v.nullable(v.array(v.lazy(() => api_AwgAnalyzeIssue)))),
+});
+
+const api_AwgAnalyzeInterface: v.GenericSchema = v.looseObject({
+	address: v.optional(v.nullable(v.string())),
+	contentPaddingAddition: v.optional(v.nullable(v.string())),
+	disableCookies: v.optional(v.nullable(v.boolean())),
+	dns: v.optional(v.nullable(v.string())),
+	h1: v.optional(v.nullable(v.string())),
+	h2: v.optional(v.nullable(v.string())),
+	h3: v.optional(v.nullable(v.string())),
+	h4: v.optional(v.nullable(v.string())),
+	headerProtection: v.optional(v.nullable(v.boolean())),
+	i1: v.optional(v.nullable(v.string())),
+	i2: v.optional(v.nullable(v.string())),
+	i3: v.optional(v.nullable(v.string())),
+	i4: v.optional(v.nullable(v.string())),
+	i5: v.optional(v.nullable(v.string())),
+	jc: v.optional(v.nullable(v.number())),
+	jmax: v.optional(v.nullable(v.number())),
+	jmin: v.optional(v.nullable(v.number())),
+	keepaliveTimeout: v.optional(v.nullable(v.string())),
+	maxHandshakeAttempts: v.optional(v.nullable(v.string())),
+	mtu: v.optional(v.nullable(v.number())),
+	mtuSet: v.optional(v.nullable(v.boolean())),
+	randomTrailers: v.optional(v.nullable(v.boolean())),
+	rejectAfterTime: v.optional(v.nullable(v.string())),
+	rekeyAfterTime: v.optional(v.nullable(v.string())),
+	rekeyTimeout: v.optional(v.nullable(v.string())),
+	s1: v.optional(v.nullable(v.number())),
+	s2: v.optional(v.nullable(v.number())),
+	s3: v.optional(v.nullable(v.number())),
+	s4: v.optional(v.nullable(v.number())),
+});
+
+const api_AwgAnalyzeIssue: v.GenericSchema = v.looseObject({
+	code: v.optional(v.nullable(v.string())),
+	message: v.optional(v.nullable(v.string())),
+});
+
+const api_AwgAnalyzePeer: v.GenericSchema = v.looseObject({
+	allowedIPs: v.optional(v.nullable(v.array(v.string()))),
+	allowedIPsSet: v.optional(v.nullable(v.boolean())),
+	endpoint: v.optional(v.nullable(v.string())),
+	hasPresharedKey: v.optional(v.nullable(v.boolean())),
+	keepaliveSet: v.optional(v.nullable(v.boolean())),
+	persistentKeepalive: v.optional(v.nullable(v.string())),
+	presharedKeyFromStore: v.optional(v.nullable(v.boolean())),
+});
+
+const api_AwgAnalyzeResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_AwgAnalyzeData))),
+	success: v.optional(v.nullable(v.boolean())),
 });
 
 const api_BackupWarningDTO: v.GenericSchema = v.looseObject({
@@ -334,9 +449,20 @@ const api_DNSRouteSettingsDTO: v.GenericSchema = v.looseObject({
 	refreshMode: v.optional(v.nullable(v.string())),
 });
 
-const api_DecodeLinkResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => freeturn_LinkPayload))),
+const api_DetectHeadersResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_DetectedProfileDTO))),
 	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_DetectedProfileDTO: v.GenericSchema = v.looseObject({
+	decryptedUrl: v.optional(v.nullable(v.string())),
+	headers: v.optional(v.nullable(v.array(v.lazy(() => api_SubscriptionHeader)))),
+	headersText: v.optional(v.nullable(v.string())),
+	isEncrypted: v.optional(v.nullable(v.boolean())),
+	kind: v.optional(v.nullable(v.string())),
+	label: v.optional(v.nullable(v.string())),
+	normalizedUrl: v.optional(v.nullable(v.string())),
+	serverCount: v.optional(v.nullable(v.number())),
 });
 
 const api_DeviceProxyAuthDTO: v.GenericSchema = v.looseObject({
@@ -493,17 +619,15 @@ const api_DownloadSettingsDTO: v.GenericSchema = v.looseObject({
 	routeTag: v.optional(v.nullable(v.string())),
 });
 
-const api_EnsureWGTunnelResponse: v.GenericSchema = v.looseObject({
-	created: v.optional(v.nullable(v.boolean())),
-	message: v.optional(v.nullable(v.string())),
-	tunnelId: v.optional(v.nullable(v.string())),
-	tunnelName: v.optional(v.nullable(v.string())),
-});
-
 const api_ExternalTunnelDTO: v.GenericSchema = v.looseObject({
+	addresses: v.optional(v.nullable(v.array(v.string()))),
+	conflictsWith: v.optional(v.nullable(v.string())),
+	description: v.optional(v.nullable(v.string())),
 	endpoint: v.optional(v.nullable(v.string())),
 	interfaceName: v.optional(v.nullable(v.string())),
 	isAWG: v.optional(v.nullable(v.boolean())),
+	kernelDevice: v.optional(v.nullable(v.boolean())),
+	ndmsRecord: v.optional(v.nullable(v.boolean())),
 	publicKey: v.optional(v.nullable(v.string())),
 	rxBytes: v.optional(v.nullable(v.number())),
 	tunnelNumber: v.optional(v.nullable(v.number())),
@@ -512,45 +636,6 @@ const api_ExternalTunnelDTO: v.GenericSchema = v.looseObject({
 
 const api_ExternalTunnelsResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.array(v.lazy(() => api_ExternalTunnelDTO)))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_FreeTurnAllowlistResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => freeturn_AllowlistStatus))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_FreeTurnCaptchaStatusResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => freeturn_CaptchaOverview))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_FreeTurnClientInstanceResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => freeturn_ClientInstance))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_FreeTurnConfigResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => freeturn_Config))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_FreeTurnServerInstanceResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => freeturn_ServerInstance))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_FreeTurnStatusResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => freeturn_Status))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_GenerateLinkResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.looseObject({
-	clientId: v.optional(v.nullable(v.string())),
-	link: v.optional(v.nullable(v.string())),
-	peer: v.optional(v.nullable(v.string())),
-}))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
@@ -614,6 +699,17 @@ const api_GeoTagDTO: v.GenericSchema = v.looseObject({
 
 const api_GeoTagsResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.array(v.lazy(() => api_GeoTagDTO)))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_HeaderProfileDTO: v.GenericSchema = v.looseObject({
+	headersText: v.optional(v.nullable(v.string())),
+	kind: v.optional(v.nullable(v.string())),
+	label: v.optional(v.nullable(v.string())),
+});
+
+const api_HeaderProfilesResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.array(v.lazy(() => api_HeaderProfileDTO)))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
@@ -755,9 +851,15 @@ const api_ManagedPeerDTO: v.GenericSchema = v.looseObject({
 	description: v.optional(v.nullable(v.string())),
 	dns: v.optional(v.nullable(v.string())),
 	enabled: v.optional(v.nullable(v.boolean())),
+	i1: v.optional(v.nullable(v.string())),
+	i2: v.optional(v.nullable(v.string())),
+	i3: v.optional(v.nullable(v.string())),
+	i4: v.optional(v.nullable(v.string())),
+	i5: v.optional(v.nullable(v.string())),
 	presharedKey: v.optional(v.nullable(v.string())),
 	privateKey: v.optional(v.nullable(v.string())),
 	publicKey: v.optional(v.nullable(v.string())),
+	signatureProfile: v.optional(v.nullable(v.string())),
 	tunnelIP: v.optional(v.nullable(v.string())),
 });
 
@@ -808,6 +910,7 @@ const api_ManagedServerDTO: v.GenericSchema = v.looseObject({
 	address: v.optional(v.nullable(v.string())),
 	dns: v.optional(v.nullable(v.string())),
 	endpoint: v.optional(v.nullable(v.string())),
+	foreignAcls: v.optional(v.nullable(v.array(v.string()))),
 	interfaceName: v.optional(v.nullable(v.string())),
 	lanSegments: v.optional(v.nullable(v.array(v.string()))),
 	listenPort: v.optional(v.nullable(v.number())),
@@ -859,6 +962,45 @@ const api_ManagedServerStatsResponse: v.GenericSchema = v.looseObject({
 
 const api_ManagedServersListResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.array(v.lazy(() => api_ManagedServerDTO)))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_McpKeyCreatedData: v.GenericSchema = v.looseObject({
+	createdAt: v.optional(v.nullable(v.string())),
+	id: v.optional(v.nullable(v.string())),
+	key: v.optional(v.nullable(v.string())),
+	name: v.optional(v.nullable(v.string())),
+	readOnly: v.optional(v.nullable(v.boolean())),
+});
+
+const api_McpKeyCreatedResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_McpKeyCreatedData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_McpKeyDTO: v.GenericSchema = v.looseObject({
+	createdAt: v.optional(v.nullable(v.string())),
+	id: v.optional(v.nullable(v.string())),
+	lastUsedAt: v.optional(v.nullable(v.string())),
+	name: v.optional(v.nullable(v.string())),
+	readOnly: v.optional(v.nullable(v.boolean())),
+});
+
+const api_McpKeyRevokedData: v.GenericSchema = v.looseObject({
+	revoked: v.optional(v.nullable(v.boolean())),
+});
+
+const api_McpKeyRevokedResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_McpKeyRevokedData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_McpKeysListData: v.GenericSchema = v.looseObject({
+	keys: v.optional(v.nullable(v.array(v.lazy(() => api_McpKeyDTO)))),
+});
+
+const api_McpKeysListResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_McpKeysListData))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
@@ -917,6 +1059,23 @@ const api_NativePingCheckStatusDTO: v.GenericSchema = v.looseObject({
 const api_NativePingCheckStatusResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.lazy(() => api_NativePingCheckStatusDTO))),
 	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_ObfuscatorDTO: v.GenericSchema = v.looseObject({
+	flavor: v.optional(v.nullable(v.string())),
+	idleTimeout: v.optional(v.nullable(v.number())),
+	key: v.optional(v.nullable(v.string())),
+	localPort: v.optional(v.nullable(v.number())),
+	masking: v.optional(v.nullable(v.string())),
+	maxDummy: v.optional(v.nullable(v.number())),
+	obfuscateBytes: v.optional(v.nullable(v.number())),
+	target: v.optional(v.nullable(v.string())),
+});
+
+const api_ObfuscatorItemDTO: v.GenericSchema = v.looseObject({
+	flavor: v.optional(v.nullable(v.string())),
+	localPort: v.optional(v.nullable(v.number())),
+	target: v.optional(v.nullable(v.string())),
 });
 
 const api_OkData: v.GenericSchema = v.looseObject({
@@ -1043,8 +1202,33 @@ const api_PresetsListResponse: v.GenericSchema = v.looseObject({
 	presets: v.optional(v.nullable(v.array(v.lazy(() => presets_Preset)))),
 });
 
+const api_ProcessView: v.GenericSchema = v.looseObject({
+	address: v.optional(v.nullable(v.string())),
+	binary: v.optional(v.nullable(v.string())),
+	binaryPresent: v.optional(v.nullable(v.boolean())),
+	clients: v.optional(v.nullable(v.number())),
+	lastError: v.optional(v.nullable(v.string())),
+	log: v.optional(v.nullable(v.string())),
+	mode: v.optional(v.nullable(v.string())),
+	pid: v.optional(v.nullable(v.number())),
+	running: v.optional(v.nullable(v.boolean())),
+	uptimeS: v.optional(v.nullable(v.number())),
+	wgConfig: v.optional(v.nullable(v.string())),
+});
+
 const api_ProxyConfigResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.lazy(() => api_DeviceProxyConfigData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_ProxyDeleteData: v.GenericSchema = v.looseObject({
+	deletedTunnels: v.optional(v.nullable(v.array(v.string()))),
+	ok: v.optional(v.nullable(v.boolean())),
+	tunnelErrors: v.optional(v.nullable(v.array(v.string()))),
+});
+
+const api_ProxyDeleteResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_ProxyDeleteData))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
@@ -1071,6 +1255,83 @@ const api_ProxyListenChoicesResponse: v.GenericSchema = v.looseObject({
 const api_ProxyOutboundsResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.array(v.lazy(() => api_DeviceProxyOutboundDTO)))),
 	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_ProxyRtInstanceResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_ProxyRtInstanceView))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_ProxyRtInstanceView: v.GenericSchema = v.looseObject({
+	config: v.optional(v.nullable(v.unknown())),
+	createdAt: v.optional(v.nullable(v.string())),
+	enabled: v.optional(v.nullable(v.boolean())),
+	id: v.optional(v.nullable(v.string())),
+	key: v.optional(v.nullable(v.string())),
+	kind: v.optional(v.nullable(v.string())),
+	linkPeer: v.optional(v.nullable(v.string())),
+	linkVkHashes: v.optional(v.nullable(v.string())),
+	name: v.optional(v.nullable(v.string())),
+	peerRaw: v.optional(v.nullable(v.string())),
+	peerWg: v.optional(v.nullable(v.string())),
+	process: v.optional(v.nullable(v.lazy(() => api_ProcessView))),
+	seededFrom: v.optional(v.nullable(v.string())),
+	state: v.optional(v.nullable(v.lazy(() => api_ProxyRtStateView))),
+	statsLog: v.optional(v.nullable(v.string())),
+	sub: v.optional(v.nullable(v.string())),
+});
+
+const api_ProxyRtListData: v.GenericSchema = v.looseObject({
+	instances: v.optional(v.nullable(v.array(v.lazy(() => api_ProxyRtInstanceView)))),
+	seed: v.optional(v.nullable(v.lazy(() => api_ProxyRtSeedView))),
+});
+
+const api_ProxyRtListResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_ProxyRtListData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_ProxyRtListenMoveView: v.GenericSchema = v.looseObject({
+	from: v.optional(v.nullable(v.string())),
+	instance: v.optional(v.nullable(v.string())),
+	name: v.optional(v.nullable(v.string())),
+	to: v.optional(v.nullable(v.string())),
+});
+
+const api_ProxyRtResourceView: v.GenericSchema = v.looseObject({
+	attrs: v.optional(v.nullable(v.record(v.string(), v.string()))),
+	detail: v.optional(v.nullable(v.string())),
+	error: v.optional(v.nullable(v.string())),
+	id: v.optional(v.nullable(v.string())),
+	status: v.optional(v.nullable(v.string())),
+});
+
+const api_ProxyRtSeedView: v.GenericSchema = v.looseObject({
+	certified: v.optional(v.nullable(v.boolean())),
+	error: v.optional(v.nullable(v.string())),
+	movedListen: v.optional(v.nullable(v.array(v.lazy(() => api_ProxyRtListenMoveView)))),
+	seeded: v.optional(v.nullable(v.boolean())),
+	skipped: v.optional(v.nullable(v.array(v.lazy(() => api_ProxyRtSkippedSourceView)))),
+});
+
+const api_ProxyRtSkippedSourceView: v.GenericSchema = v.looseObject({
+	file: v.optional(v.nullable(v.string())),
+	reason: v.optional(v.nullable(v.string())),
+});
+
+const api_ProxyRtStateView: v.GenericSchema = v.looseObject({
+	intent: v.optional(v.nullable(v.string())),
+	lastPlan: v.optional(v.nullable(v.array(v.lazy(() => api_ProxyRtStepView)))),
+	phase: v.optional(v.nullable(v.string())),
+	resources: v.optional(v.nullable(v.array(v.lazy(() => api_ProxyRtResourceView)))),
+	updatedAt: v.optional(v.nullable(v.string())),
+});
+
+const api_ProxyRtStepView: v.GenericSchema = v.looseObject({
+	args: v.optional(v.nullable(v.record(v.string(), v.string()))),
+	op: v.optional(v.nullable(v.string())),
+	reason: v.optional(v.nullable(v.string())),
+	resource: v.optional(v.nullable(v.string())),
 });
 
 const api_ProxyRuntimeResponse: v.GenericSchema = v.looseObject({
@@ -1175,6 +1436,17 @@ const api_SaveStatusDTO: v.GenericSchema = v.looseObject({
 	state: v.optional(v.nullable(v.string())),
 });
 
+const api_ScriptStatusDTO: v.GenericSchema = v.looseObject({
+	canExecute: v.optional(v.nullable(v.boolean())),
+	isScript: v.optional(v.nullable(v.boolean())),
+	isService: v.optional(v.nullable(v.boolean())),
+	path: v.optional(v.nullable(v.string())),
+	pids: v.optional(v.nullable(v.array(v.number()))),
+	running: v.optional(v.nullable(v.boolean())),
+	serviceName: v.optional(v.nullable(v.string())),
+	statusText: v.optional(v.nullable(v.string())),
+});
+
 const api_ServerListenChangeData: v.GenericSchema = v.looseObject({
 	boundAddrs: v.optional(v.nullable(v.array(v.string()))),
 	confirmDeadline: v.optional(v.nullable(v.string())),
@@ -1217,6 +1489,7 @@ const api_ServersAllResponse: v.GenericSchema = v.looseObject({
 });
 
 const api_SettingsData: v.GenericSchema = v.looseObject({
+	apiKey: v.optional(v.nullable(v.string())),
 	authEnabled: v.optional(v.nullable(v.boolean())),
 	connectivityCheckUrl: v.optional(v.nullable(v.string())),
 	disableMemorySaving: v.optional(v.nullable(v.boolean())),
@@ -1225,11 +1498,14 @@ const api_SettingsData: v.GenericSchema = v.looseObject({
 	entwareAuthEnabled: v.optional(v.nullable(v.boolean())),
 	geoFile: v.optional(v.nullable(v.lazy(() => api_GeoFileSettingsDTO))),
 	logging: v.optional(v.nullable(v.lazy(() => api_LoggingSettingsDTO))),
+	mcpEnabled: v.optional(v.nullable(v.boolean())),
 	monitoringExcludedTunnels: v.optional(v.nullable(v.array(v.string()))),
 	pingCheck: v.optional(v.nullable(v.lazy(() => api_PingCheckSettingsDTO))),
 	schemaVersion: v.optional(v.nullable(v.number())),
 	server: v.optional(v.nullable(v.lazy(() => api_ServerSettingsDTO))),
 	sessionTtlHours: v.optional(v.nullable(v.number())),
+	singboxBootstrapDNS: v.optional(v.nullable(v.string())),
+	singboxClashPort: v.optional(v.nullable(v.number())),
 	updates: v.optional(v.nullable(v.lazy(() => api_UpdateSettingsDTO))),
 	usageLevel: v.optional(v.nullable(v.string())),
 });
@@ -1316,6 +1592,7 @@ const api_SingboxDNSClientTLSOptionsDTO: v.GenericSchema = v.looseObject({
 const api_SingboxDNSGlobalsData: v.GenericSchema = v.looseObject({
 	final: v.optional(v.nullable(v.string())),
 	strategy: v.optional(v.nullable(v.string())),
+	timeout: v.optional(v.nullable(v.string())),
 });
 
 const api_SingboxDNSGlobalsResponse: v.GenericSchema = v.looseObject({
@@ -1620,6 +1897,7 @@ const api_SingboxRouterQoSClassDTO: v.GenericSchema = v.looseObject({
 
 const api_SingboxRouterRuleDTO: v.GenericSchema = v.looseObject({
 	action: v.optional(v.nullable(v.string())),
+	awgm_managed: v.optional(v.nullable(v.string())),
 	domain_suffix: v.optional(v.nullable(v.array(v.string()))),
 	inbound: v.optional(v.nullable(v.array(v.string()))),
 	ip_cidr: v.optional(v.nullable(v.array(v.string()))),
@@ -1628,6 +1906,7 @@ const api_SingboxRouterRuleDTO: v.GenericSchema = v.looseObject({
 	protocol: v.optional(v.nullable(v.string())),
 	rule_set: v.optional(v.nullable(v.array(v.string()))),
 	source_ip_cidr: v.optional(v.nullable(v.array(v.string()))),
+	source_mac_address: v.optional(v.nullable(v.array(v.string()))),
 });
 
 const api_SingboxRouterRuleSetDTO: v.GenericSchema = v.looseObject({
@@ -1657,6 +1936,7 @@ const api_SingboxRouterSettingsData: v.GenericSchema = v.looseObject({
 	bypassExtraSubnets: v.optional(v.nullable(v.string())),
 	bypassGeoipTags: v.optional(v.nullable(v.array(v.string()))),
 	bypassPresets: v.optional(v.nullable(v.array(v.string()))),
+	cacheFileLocation: v.optional(v.nullable(v.string())),
 	deviceMode: v.optional(v.nullable(v.string())),
 	enabled: v.optional(v.nullable(v.boolean())),
 	fakeipMtu: v.optional(v.nullable(v.number())),
@@ -1671,6 +1951,7 @@ const api_SingboxRouterSettingsData: v.GenericSchema = v.looseObject({
 	qosClasses: v.optional(v.nullable(v.array(v.lazy(() => api_SingboxRouterQoSClassDTO)))),
 	routingMode: v.optional(v.nullable(v.string())),
 	snifferEnabled: v.optional(v.nullable(v.boolean())),
+	udpNatMax: v.optional(v.nullable(v.number())),
 	udpTimeout: v.optional(v.nullable(v.string())),
 	wanAutoDetect: v.optional(v.nullable(v.boolean())),
 	wanInterface: v.optional(v.nullable(v.string())),
@@ -1683,6 +1964,7 @@ const api_SingboxRouterSettingsResponse: v.GenericSchema = v.looseObject({
 
 const api_SingboxRouterStatusData: v.GenericSchema = v.looseObject({
 	active: v.optional(v.nullable(v.boolean())),
+	cacheDbPath: v.optional(v.nullable(v.string())),
 	crashCount: v.optional(v.nullable(v.number())),
 	deviceCount: v.optional(v.nullable(v.number())),
 	deviceMode: v.optional(v.nullable(v.string())),
@@ -1850,6 +2132,7 @@ const api_SubgroupsResponseEnvelope: v.GenericSchema = v.looseObject({
 
 const api_SubscriptionDTO: v.GenericSchema = v.looseObject({
 	activeMember: v.optional(v.nullable(v.string())),
+	bindInterface: v.optional(v.nullable(v.string())),
 	enabled: v.optional(v.nullable(v.boolean())),
 	excludedMembers: v.optional(v.nullable(v.array(v.lazy(() => api_SubscriptionMemberDTO)))),
 	excludedTags: v.optional(v.nullable(v.array(v.string()))),
@@ -1860,6 +2143,7 @@ const api_SubscriptionDTO: v.GenericSchema = v.looseObject({
 	id: v.optional(v.nullable(v.string())),
 	inboundTag: v.optional(v.nullable(v.string())),
 	infoItems: v.optional(v.nullable(v.array(v.lazy(() => api_SubscriptionInfoItemDTO)))),
+	isFile: v.optional(v.nullable(v.boolean())),
 	isInline: v.optional(v.nullable(v.boolean())),
 	label: v.optional(v.nullable(v.string())),
 	lastError: v.optional(v.nullable(v.string())),
@@ -1869,6 +2153,7 @@ const api_SubscriptionDTO: v.GenericSchema = v.looseObject({
 	members: v.optional(v.nullable(v.array(v.lazy(() => api_SubscriptionMemberDTO)))),
 	mode: v.optional(v.nullable(v.string())),
 	orphanTags: v.optional(v.nullable(v.array(v.string()))),
+	path: v.optional(v.nullable(v.string())),
 	proxyIndex: v.optional(v.nullable(v.number())),
 	refreshHours: v.optional(v.nullable(v.number())),
 	rejectedMembers: v.optional(v.nullable(v.array(v.lazy(() => api_SubscriptionRejectedDTO)))),
@@ -1978,6 +2263,50 @@ const api_SuggestAddressResponse: v.GenericSchema = v.looseObject({
 	success: v.optional(v.nullable(v.boolean())),
 });
 
+const api_SystemFileChecksumData: v.GenericSchema = v.looseObject({
+	algo: v.optional(v.nullable(v.string())),
+	checksum: v.optional(v.nullable(v.string())),
+	info: v.optional(v.nullable(v.lazy(() => files_Entry))),
+	path: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemFileChecksumResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemFileChecksumData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemFileReadData: v.GenericSchema = v.looseObject({
+	content: v.optional(v.nullable(v.string())),
+	info: v.optional(v.nullable(v.lazy(() => files_Entry))),
+	path: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemFileReadResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemFileReadData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemFileRootDTO: v.GenericSchema = v.looseObject({
+	label: v.optional(v.nullable(v.string())),
+	path: v.optional(v.nullable(v.string())),
+	readOnly: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemFileRootsResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.array(v.lazy(() => api_SystemFileRootDTO)))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemFilesListData: v.GenericSchema = v.looseObject({
+	entries: v.optional(v.nullable(v.array(v.lazy(() => files_Entry)))),
+	path: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemFilesListResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemFilesListData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
 const api_SystemInfoBackendAvailability: v.GenericSchema = v.looseObject({
 	kernel: v.optional(v.nullable(v.boolean())),
 	nativewg: v.optional(v.nullable(v.boolean())),
@@ -1985,6 +2314,8 @@ const api_SystemInfoBackendAvailability: v.GenericSchema = v.looseObject({
 
 const api_SystemInfoData: v.GenericSchema = v.looseObject({
 	activeBackend: v.optional(v.nullable(v.string())),
+	awgProxyExpectedVersion: v.optional(v.nullable(v.string())),
+	awgProxyVersion: v.optional(v.nullable(v.string())),
 	backendAvailability: v.optional(v.nullable(v.lazy(() => api_SystemInfoBackendAvailability))),
 	bootInProgress: v.optional(v.nullable(v.boolean())),
 	disableMemorySaving: v.optional(v.nullable(v.boolean())),
@@ -2012,7 +2343,9 @@ const api_SystemInfoData: v.GenericSchema = v.looseObject({
 	slowRequestThresholdMs: v.optional(v.nullable(v.number())),
 	supportsExtendedASC: v.optional(v.nullable(v.boolean())),
 	supportsHRanges: v.optional(v.nullable(v.boolean())),
+	supportsOpkgTun: v.optional(v.nullable(v.boolean())),
 	supportsPingCheck: v.optional(v.nullable(v.boolean())),
+	supportsWireguardASC3: v.optional(v.nullable(v.boolean())),
 	totalMemoryMB: v.optional(v.nullable(v.number())),
 	version: v.optional(v.nullable(v.string())),
 });
@@ -2027,9 +2360,147 @@ const api_SystemInfoSingbox: v.GenericSchema = v.looseObject({
 	version: v.optional(v.nullable(v.string())),
 });
 
+const api_SystemKillData: v.GenericSchema = v.looseObject({
+	ok: v.optional(v.nullable(v.boolean())),
+	pid: v.optional(v.nullable(v.number())),
+	signal: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemKillResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemKillData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemOKFlagData: v.GenericSchema = v.looseObject({
+	ok: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemOKFlagResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemOKFlagData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemOKResponse: v.GenericSchema = v.looseObject({
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemOpkgAvailableData: v.GenericSchema = v.looseObject({
+	items: v.optional(v.nullable(v.array(v.lazy(() => opkg_Package)))),
+	limit: v.optional(v.nullable(v.number())),
+	offset: v.optional(v.nullable(v.number())),
+	total: v.optional(v.nullable(v.number())),
+});
+
+const api_SystemOpkgAvailableResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemOpkgAvailableData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemOpkgPackagesResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.array(v.lazy(() => opkg_Package)))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemOutputData: v.GenericSchema = v.looseObject({
+	output: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemOutputResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemOutputData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemPortInspectData: v.GenericSchema = v.looseObject({
+	bindings: v.optional(v.nullable(v.array(v.lazy(() => ports_Binding)))),
+	occupied: v.optional(v.nullable(v.boolean())),
+	port: v.optional(v.nullable(v.number())),
+	proto: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemPortInspectResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemPortInspectData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemPortsListResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.array(v.lazy(() => ports_Binding)))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemProcSnapshotResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => procmon_SystemSnapshot))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemScriptActionData: v.GenericSchema = v.looseObject({
+	error: v.optional(v.nullable(v.string())),
+	ok: v.optional(v.nullable(v.boolean())),
+	output: v.optional(v.nullable(v.string())),
+	pids: v.optional(v.nullable(v.array(v.number()))),
+	running: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemScriptActionResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemScriptActionData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemScriptStatusResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_ScriptStatusDTO))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemServiceActionData: v.GenericSchema = v.looseObject({
+	error: v.optional(v.nullable(v.string())),
+	ok: v.optional(v.nullable(v.boolean())),
+	output: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemServiceActionResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemServiceActionData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemServiceSavedData: v.GenericSchema = v.looseObject({
+	ok: v.optional(v.nullable(v.boolean())),
+	script: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemServiceSavedResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemServiceSavedData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemServiceScriptData: v.GenericSchema = v.looseObject({
+	content: v.optional(v.nullable(v.string())),
+	script: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemServiceScriptResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemServiceScriptData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemServiceToggleEnableData: v.GenericSchema = v.looseObject({
+	enabled: v.optional(v.nullable(v.boolean())),
+	newScript: v.optional(v.nullable(v.string())),
+	ok: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemServiceToggleEnableResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemServiceToggleEnableData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemServicesListResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.array(v.lazy(() => services_Item)))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
 const api_SystemTunnelDTO: v.GenericSchema = v.looseObject({
 	connected: v.optional(v.nullable(v.boolean())),
 	description: v.optional(v.nullable(v.string())),
+	external: v.optional(v.nullable(v.string())),
 	id: v.optional(v.nullable(v.string())),
 	interfaceName: v.optional(v.nullable(v.string())),
 	mtu: v.optional(v.nullable(v.number())),
@@ -2048,6 +2519,15 @@ const api_SystemTunnelPeerDTO: v.GenericSchema = v.looseObject({
 
 const api_SystemTunnelsResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.array(v.lazy(() => api_SystemTunnelDTO)))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_SystemUploadData: v.GenericSchema = v.looseObject({
+	path: v.optional(v.nullable(v.string())),
+});
+
+const api_SystemUploadResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_SystemUploadData))),
 	success: v.optional(v.nullable(v.boolean())),
 });
 
@@ -2109,28 +2589,43 @@ const api_TunnelListItemDTO: v.GenericSchema = v.looseObject({
 	defaultRoute: v.optional(v.nullable(v.boolean())),
 	enabled: v.optional(v.nullable(v.boolean())),
 	endpoint: v.optional(v.nullable(v.string())),
+	freeTurnClientId: v.optional(v.nullable(v.string())),
 	hasAddressConflict: v.optional(v.nullable(v.boolean())),
 	id: v.optional(v.nullable(v.string())),
 	interfaceName: v.optional(v.nullable(v.string())),
 	ispInterface: v.optional(v.nullable(v.string())),
 	ispInterfaceLabel: v.optional(v.nullable(v.string())),
 	lastHandshake: v.optional(v.nullable(v.string())),
+	locked: v.optional(v.nullable(v.boolean())),
 	mtu: v.optional(v.nullable(v.number())),
 	name: v.optional(v.nullable(v.string())),
 	ndmsName: v.optional(v.nullable(v.string())),
+	obfuscator: v.optional(v.nullable(v.lazy(() => api_ObfuscatorItemDTO))),
 	pingCheck: v.optional(v.nullable(v.lazy(() => api_TunnelPingCheckStatus))),
 	resolvedIspInterface: v.optional(v.nullable(v.string())),
 	resolvedIspInterfaceLabel: v.optional(v.nullable(v.string())),
 	rxBytes: v.optional(v.nullable(v.number())),
 	startedAt: v.optional(v.nullable(v.string())),
 	status: v.optional(v.nullable(v.string())),
+	statusDetails: v.optional(v.nullable(v.string())),
 	txBytes: v.optional(v.nullable(v.number())),
 	type: v.optional(v.nullable(v.string())),
+	wdttClientId: v.optional(v.nullable(v.string())),
 });
 
 const api_TunnelListResponse: v.GenericSchema = v.looseObject({
 	data: v.optional(v.nullable(v.array(v.lazy(() => api_TunnelListItemDTO)))),
 	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_TunnelLockResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => api_TunnelLockResultData))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const api_TunnelLockResultData: v.GenericSchema = v.looseObject({
+	id: v.optional(v.nullable(v.string())),
+	locked: v.optional(v.nullable(v.boolean())),
 });
 
 const api_TunnelPingCheckStatus: v.GenericSchema = v.looseObject({
@@ -2152,6 +2647,7 @@ const api_TunnelPingStatusDTO: v.GenericSchema = v.looseObject({
 	status: v.optional(v.nullable(v.string())),
 	tunnelId: v.optional(v.nullable(v.string())),
 	tunnelName: v.optional(v.nullable(v.string())),
+	tunnelRunning: v.optional(v.nullable(v.boolean())),
 });
 
 const api_TunnelStateInfoDTO: v.GenericSchema = v.looseObject({
@@ -2272,31 +2768,6 @@ const api_WANStatusEnvelope: v.GenericSchema = v.looseObject({
 	success: v.optional(v.nullable(v.boolean())),
 });
 
-const api_WdttClientInstanceResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => wdtt_ClientInstance))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_WdttConfigResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => wdtt_Config))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_WdttDecodeLinkResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => wdtt_LinkDecodeResult))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_WdttEnsureWGTunnelResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => api_EnsureWGTunnelResponse))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
-const api_WdttStatusResponse: v.GenericSchema = v.looseObject({
-	data: v.optional(v.nullable(v.lazy(() => wdtt_Status))),
-	success: v.optional(v.nullable(v.boolean())),
-});
-
 const api_WireguardServerDTO: v.GenericSchema = v.looseObject({
 	address: v.optional(v.nullable(v.string())),
 	builtIn: v.optional(v.nullable(v.boolean())),
@@ -2325,13 +2796,45 @@ const api_WireguardServerPeerDTO: v.GenericSchema = v.looseObject({
 	allowedIPs: v.optional(v.nullable(v.array(v.string()))),
 	confAvailable: v.optional(v.nullable(v.boolean())),
 	description: v.optional(v.nullable(v.string())),
+	dns: v.optional(v.nullable(v.string())),
 	enabled: v.optional(v.nullable(v.boolean())),
 	endpoint: v.optional(v.nullable(v.string())),
+	i1: v.optional(v.nullable(v.string())),
+	i2: v.optional(v.nullable(v.string())),
+	i3: v.optional(v.nullable(v.string())),
+	i4: v.optional(v.nullable(v.string())),
+	i5: v.optional(v.nullable(v.string())),
 	lastHandshake: v.optional(v.nullable(v.string())),
 	online: v.optional(v.nullable(v.boolean())),
 	publicKey: v.optional(v.nullable(v.string())),
 	rxBytes: v.optional(v.nullable(v.number())),
+	signatureProfile: v.optional(v.nullable(v.string())),
 	txBytes: v.optional(v.nullable(v.number())),
+});
+
+const captcha_ClientStatus: v.GenericSchema = v.looseObject({
+	active: v.optional(v.nullable(v.boolean())),
+	canOpen: v.optional(v.nullable(v.boolean())),
+	captchaSession: v.optional(v.nullable(v.number())),
+	clientId: v.optional(v.nullable(v.string())),
+	clientName: v.optional(v.nullable(v.string())),
+	pendingStreams: v.optional(v.nullable(v.number())),
+	portContention: v.optional(v.nullable(v.boolean())),
+	queued: v.optional(v.nullable(v.boolean())),
+	url: v.optional(v.nullable(v.string())),
+	waiting: v.optional(v.nullable(v.boolean())),
+});
+
+const captcha_Overview: v.GenericSchema = v.looseObject({
+	clients: v.optional(v.nullable(v.array(v.lazy(() => captcha_ClientStatus)))),
+	ownerClientId: v.optional(v.nullable(v.string())),
+	ownerName: v.optional(v.nullable(v.string())),
+	portOpen: v.optional(v.nullable(v.boolean())),
+});
+
+const captcha_OverviewResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => captcha_Overview))),
+	success: v.optional(v.nullable(v.boolean())),
 });
 
 const diagnostics_DNSProxy: v.GenericSchema = v.looseObject({
@@ -2380,85 +2883,36 @@ const diagnostics_DNSUpstream: v.GenericSchema = v.looseObject({
 	sni: v.optional(v.nullable(v.string())),
 });
 
-const freeturn_AllowlistEntry: v.GenericSchema = v.looseObject({
-	clientId: v.optional(v.nullable(v.string())),
-	comment: v.optional(v.nullable(v.string())),
-});
-
-const freeturn_AllowlistStatus: v.GenericSchema = v.looseObject({
-	clients: v.optional(v.nullable(v.array(v.lazy(() => freeturn_AllowlistEntry)))),
-	clientsFile: v.optional(v.nullable(v.string())),
-	enabled: v.optional(v.nullable(v.boolean())),
-});
-
-const freeturn_CaptchaClientStatus: v.GenericSchema = v.looseObject({
-	active: v.optional(v.nullable(v.boolean())),
-	canOpen: v.optional(v.nullable(v.boolean())),
-	captchaSession: v.optional(v.nullable(v.number())),
-	clientId: v.optional(v.nullable(v.string())),
-	clientName: v.optional(v.nullable(v.string())),
-	pendingStreams: v.optional(v.nullable(v.number())),
-	portContention: v.optional(v.nullable(v.boolean())),
-	queued: v.optional(v.nullable(v.boolean())),
-	url: v.optional(v.nullable(v.string())),
-	waiting: v.optional(v.nullable(v.boolean())),
-});
-
-const freeturn_CaptchaOverview: v.GenericSchema = v.looseObject({
-	clients: v.optional(v.nullable(v.array(v.lazy(() => freeturn_CaptchaClientStatus)))),
-	ownerClientId: v.optional(v.nullable(v.string())),
-	ownerName: v.optional(v.nullable(v.string())),
-	portOpen: v.optional(v.nullable(v.boolean())),
-});
-
-const freeturn_ClientConfig: v.GenericSchema = v.looseObject({
-	bond: v.optional(v.nullable(v.boolean())),
-	clientId: v.optional(v.nullable(v.string())),
-	debug: v.optional(v.nullable(v.boolean())),
-	dnsMode: v.optional(v.nullable(v.string())),
-	dnsServers: v.optional(v.nullable(v.string())),
-	enabled: v.optional(v.nullable(v.boolean())),
-	links: v.optional(v.nullable(v.string())),
-	listen: v.optional(v.nullable(v.string())),
+const files_Entry: v.GenericSchema = v.looseObject({
+	isDir: v.optional(v.nullable(v.boolean())),
+	modTime: v.optional(v.nullable(v.string())),
 	mode: v.optional(v.nullable(v.string())),
-	obfKey: v.optional(v.nullable(v.string())),
-	obfProfile: v.optional(v.nullable(v.string())),
-	peer: v.optional(v.nullable(v.string())),
-	platform: v.optional(v.nullable(v.string())),
-	provider: v.optional(v.nullable(v.string())),
-	streams: v.optional(v.nullable(v.number())),
-	streamsPerCred: v.optional(v.nullable(v.number())),
-	sub: v.optional(v.nullable(v.string())),
-	transport: v.optional(v.nullable(v.string())),
-	turnHost: v.optional(v.nullable(v.string())),
-	turnPort: v.optional(v.nullable(v.number())),
-});
-
-const freeturn_ClientInstance: v.GenericSchema = v.looseObject({
-	config: v.optional(v.nullable(v.lazy(() => freeturn_ClientConfig))),
-	id: v.optional(v.nullable(v.string())),
 	name: v.optional(v.nullable(v.string())),
+	path: v.optional(v.nullable(v.string())),
+	size: v.optional(v.nullable(v.number())),
 });
 
-const freeturn_Config: v.GenericSchema = v.looseObject({
-	client: v.optional(v.nullable(v.lazy(() => freeturn_ClientConfig))),
-	clients: v.optional(v.nullable(v.array(v.lazy(() => freeturn_ClientInstance)))),
-	server: v.optional(v.nullable(v.lazy(() => freeturn_ServerConfig))),
-	servers: v.optional(v.nullable(v.array(v.lazy(() => freeturn_ServerInstance)))),
-	version: v.optional(v.nullable(v.number())),
+const ftlink_DecodeResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => ftlink_LinkPayload))),
+	success: v.optional(v.nullable(v.boolean())),
 });
 
-const freeturn_InstanceStatus: v.GenericSchema = v.looseObject({
-	id: v.optional(v.nullable(v.string())),
-	name: v.optional(v.nullable(v.string())),
-	status: v.optional(v.nullable(v.lazy(() => freeturn_ProcessStatus))),
+const ftlink_KCP: v.GenericSchema = v.looseObject({
+	acknodelay: v.optional(v.nullable(v.boolean())),
+	interval: v.optional(v.nullable(v.number())),
+	mtu: v.optional(v.nullable(v.number())),
+	nc: v.optional(v.nullable(v.number())),
+	nodelay: v.optional(v.nullable(v.number())),
+	rcvwnd: v.optional(v.nullable(v.number())),
+	resend: v.optional(v.nullable(v.number())),
+	sndwnd: v.optional(v.nullable(v.number())),
 });
 
-const freeturn_LinkPayload: v.GenericSchema = v.looseObject({
-	bond: v.optional(v.nullable(v.boolean())),
+const ftlink_LinkPayload: v.GenericSchema = v.looseObject({
 	cid: v.optional(v.nullable(v.string())),
 	dns: v.optional(v.nullable(v.string())),
 	dnss: v.optional(v.nullable(v.string())),
+	kcp: v.optional(v.nullable(v.lazy(() => ftlink_KCP))),
 	key: v.optional(v.nullable(v.string())),
 	listen: v.optional(v.nullable(v.string())),
 	mcap: v.optional(v.nullable(v.boolean())),
@@ -2475,46 +2929,54 @@ const freeturn_LinkPayload: v.GenericSchema = v.looseObject({
 	wg: v.optional(v.nullable(v.string())),
 });
 
-const freeturn_ProcessStatus: v.GenericSchema = v.looseObject({
-	binary: v.optional(v.nullable(v.string())),
-	binaryPresent: v.optional(v.nullable(v.boolean())),
-	dtlsConnections: v.optional(v.nullable(v.number())),
-	lastError: v.optional(v.nullable(v.string())),
-	log: v.optional(v.nullable(v.string())),
-	pid: v.optional(v.nullable(v.number())),
-	running: v.optional(v.nullable(v.boolean())),
-	startedAt: v.optional(v.nullable(v.string())),
+const install_InstallMessage: v.GenericSchema = v.looseObject({
+	message: v.optional(v.nullable(v.string())),
 });
 
-const freeturn_ServerConfig: v.GenericSchema = v.looseObject({
-	clientsFile: v.optional(v.nullable(v.string())),
-	connect: v.optional(v.nullable(v.string())),
-	debug: v.optional(v.nullable(v.boolean())),
-	enabled: v.optional(v.nullable(v.boolean())),
-	listen: v.optional(v.nullable(v.string())),
-	mode: v.optional(v.nullable(v.string())),
-	obfKey: v.optional(v.nullable(v.string())),
-	obfProfile: v.optional(v.nullable(v.string())),
-	openFirewall: v.optional(v.nullable(v.boolean())),
+const install_InstallResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => install_InstallMessage))),
+	success: v.optional(v.nullable(v.boolean())),
 });
 
-const freeturn_ServerInstance: v.GenericSchema = v.looseObject({
-	config: v.optional(v.nullable(v.lazy(() => freeturn_ServerConfig))),
-	id: v.optional(v.nullable(v.string())),
-	name: v.optional(v.nullable(v.string())),
-});
-
-const freeturn_Status: v.GenericSchema = v.looseObject({
-	client: v.optional(v.nullable(v.lazy(() => freeturn_ProcessStatus))),
-	clients: v.optional(v.nullable(v.array(v.lazy(() => freeturn_InstanceStatus)))),
+const install_InstallStatus: v.GenericSchema = v.looseObject({
+	binariesPresent: v.optional(v.nullable(v.boolean())),
 	installAvailable: v.optional(v.nullable(v.boolean())),
 	installVersion: v.optional(v.nullable(v.string())),
 	installedVersion: v.optional(v.nullable(v.string())),
 	installing: v.optional(v.nullable(v.boolean())),
+	instances: v.optional(v.nullable(v.number())),
 	routerClock: v.optional(v.nullable(v.string())),
-	server: v.optional(v.nullable(v.lazy(() => freeturn_ProcessStatus))),
-	servers: v.optional(v.nullable(v.array(v.lazy(() => freeturn_InstanceStatus)))),
+	serverSupported: v.optional(v.nullable(v.boolean())),
 	updateAvailable: v.optional(v.nullable(v.boolean())),
+});
+
+const install_InstallStatusResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => install_InstallStatus))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const opkg_Package: v.GenericSchema = v.looseObject({
+	description: v.optional(v.nullable(v.string())),
+	installedAt: v.optional(v.nullable(v.string())),
+	name: v.optional(v.nullable(v.string())),
+	upgradeVersion: v.optional(v.nullable(v.string())),
+	version: v.optional(v.nullable(v.string())),
+});
+
+const ports_Binding: v.GenericSchema = v.looseObject({
+	cmdline: v.optional(v.nullable(v.string())),
+	exe: v.optional(v.nullable(v.string())),
+	inode: v.optional(v.nullable(v.number())),
+	ip: v.optional(v.nullable(v.string())),
+	isCritical: v.optional(v.nullable(v.boolean())),
+	isSelf: v.optional(v.nullable(v.boolean())),
+	pid: v.optional(v.nullable(v.number())),
+	port: v.optional(v.nullable(v.number())),
+	processName: v.optional(v.nullable(v.string())),
+	proto: v.optional(v.nullable(v.string())),
+	service: v.optional(v.nullable(v.string())),
+	state: v.optional(v.nullable(v.string())),
+	user: v.optional(v.nullable(v.string())),
 });
 
 const presets_DNSEngine: v.GenericSchema = v.looseObject({
@@ -2558,43 +3020,112 @@ const presets_SingboxEngine: v.GenericSchema = v.looseObject({
 	ruleSets: v.optional(v.nullable(v.array(v.lazy(() => presets_RuleRef)))),
 });
 
-const wdtt_ClientConfig: v.GenericSchema = v.looseObject({
-	captchaMode: v.optional(v.nullable(v.string())),
-	connMode: v.optional(v.nullable(v.string())),
-	debug: v.optional(v.nullable(v.boolean())),
-	deviceId: v.optional(v.nullable(v.string())),
-	enabled: v.optional(v.nullable(v.boolean())),
-	fingerprint: v.optional(v.nullable(v.string())),
-	listen: v.optional(v.nullable(v.string())),
-	ndmsIface: v.optional(v.nullable(v.string())),
-	obfs: v.optional(v.nullable(v.string())),
-	password: v.optional(v.nullable(v.string())),
-	peer: v.optional(v.nullable(v.string())),
-	peerRaw: v.optional(v.nullable(v.string())),
-	peerWg: v.optional(v.nullable(v.string())),
-	policyPermits: v.optional(v.nullable(v.array(v.lazy(() => wdtt_OpkgPolicyPermit)))),
-	rawClientIp: v.optional(v.nullable(v.string())),
-	rawClientMTU: v.optional(v.nullable(v.number())),
-	rawIface: v.optional(v.nullable(v.string())),
-	sub: v.optional(v.nullable(v.string())),
-	vkAuthMode: v.optional(v.nullable(v.string())),
-	vkHashes: v.optional(v.nullable(v.string())),
-	workers: v.optional(v.nullable(v.number())),
-});
-
-const wdtt_ClientInstance: v.GenericSchema = v.looseObject({
-	config: v.optional(v.nullable(v.lazy(() => wdtt_ClientConfig))),
+const procmon_CpuCore: v.GenericSchema = v.looseObject({
 	id: v.optional(v.nullable(v.string())),
+	idle: v.optional(v.nullable(v.number())),
+	iowait: v.optional(v.nullable(v.number())),
+	nice: v.optional(v.nullable(v.number())),
+	system: v.optional(v.nullable(v.number())),
+	usage: v.optional(v.nullable(v.number())),
+	user: v.optional(v.nullable(v.number())),
+});
+
+const procmon_MemoryInfo: v.GenericSchema = v.looseObject({
+	available: v.optional(v.nullable(v.number())),
+	buffers: v.optional(v.nullable(v.number())),
+	cached: v.optional(v.nullable(v.number())),
+	free: v.optional(v.nullable(v.number())),
+	swapFree: v.optional(v.nullable(v.number())),
+	swapTotal: v.optional(v.nullable(v.number())),
+	swapUsed: v.optional(v.nullable(v.number())),
+	total: v.optional(v.nullable(v.number())),
+	usagePercent: v.optional(v.nullable(v.number())),
+	used: v.optional(v.nullable(v.number())),
+});
+
+const procmon_ProcSummary: v.GenericSchema = v.looseObject({
+	running: v.optional(v.nullable(v.number())),
+	sleeping: v.optional(v.nullable(v.number())),
+	stopped: v.optional(v.nullable(v.number())),
+	threads: v.optional(v.nullable(v.number())),
+	total: v.optional(v.nullable(v.number())),
+	zombie: v.optional(v.nullable(v.number())),
+});
+
+const procmon_ProcessItem: v.GenericSchema = v.looseObject({
+	cmdline: v.optional(v.nullable(v.string())),
+	cpuPercent: v.optional(v.nullable(v.number())),
+	exe: v.optional(v.nullable(v.string())),
+	isCritical: v.optional(v.nullable(v.boolean())),
+	isKernel: v.optional(v.nullable(v.boolean())),
+	isSelf: v.optional(v.nullable(v.boolean())),
+	memoryPercent: v.optional(v.nullable(v.number())),
+	memoryRss: v.optional(v.nullable(v.number())),
+	memoryVsize: v.optional(v.nullable(v.number())),
 	name: v.optional(v.nullable(v.string())),
+	nice: v.optional(v.nullable(v.number())),
+	pid: v.optional(v.nullable(v.number())),
+	ppid: v.optional(v.nullable(v.number())),
+	priority: v.optional(v.nullable(v.number())),
+	service: v.optional(v.nullable(v.string())),
+	state: v.optional(v.nullable(v.string())),
+	threads: v.optional(v.nullable(v.number())),
+	user: v.optional(v.nullable(v.string())),
 });
 
-const wdtt_Config: v.GenericSchema = v.looseObject({
-	clients: v.optional(v.nullable(v.array(v.lazy(() => wdtt_ClientInstance)))),
-	servers: v.optional(v.nullable(v.array(v.lazy(() => wdtt_ServerInstance)))),
-	version: v.optional(v.nullable(v.number())),
+const procmon_SystemSnapshot: v.GenericSchema = v.looseObject({
+	cores: v.optional(v.nullable(v.array(v.lazy(() => procmon_CpuCore)))),
+	cpuArchitecture: v.optional(v.nullable(v.string())),
+	cpuCount: v.optional(v.nullable(v.number())),
+	cpuModel: v.optional(v.nullable(v.string())),
+	loadAvg: v.optional(v.nullable(v.array(v.number()))),
+	memory: v.optional(v.nullable(v.lazy(() => procmon_MemoryInfo))),
+	processSummary: v.optional(v.nullable(v.lazy(() => procmon_ProcSummary))),
+	processes: v.optional(v.nullable(v.array(v.lazy(() => procmon_ProcessItem)))),
+	timestamp: v.optional(v.nullable(v.string())),
+	uptimeSeconds: v.optional(v.nullable(v.number())),
 });
 
-const wdtt_ImportPayload: v.GenericSchema = v.looseObject({
+const services_Item: v.GenericSchema = v.looseObject({
+	enabled: v.optional(v.nullable(v.boolean())),
+	logPath: v.optional(v.nullable(v.string())),
+	managed: v.optional(v.nullable(v.boolean())),
+	managedHint: v.optional(v.nullable(v.string())),
+	name: v.optional(v.nullable(v.string())),
+	running: v.optional(v.nullable(v.boolean())),
+	script: v.optional(v.nullable(v.string())),
+	statusText: v.optional(v.nullable(v.string())),
+});
+
+const subscription_RefreshResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => subscription_RefreshResult))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const subscription_RefreshResult: v.GenericSchema = v.looseObject({
+	key: v.optional(v.nullable(v.string())),
+	message: v.optional(v.nullable(v.string())),
+	payload: v.optional(v.nullable(v.lazy(() => wdttlink_ImportPayload))),
+});
+
+const wdttlink_DecodeResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => wdttlink_LinkDecodeResult))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const wdttlink_EnsureWGResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => wdttlink_EnsureWGTunnelResponse))),
+	success: v.optional(v.nullable(v.boolean())),
+});
+
+const wdttlink_EnsureWGTunnelResponse: v.GenericSchema = v.looseObject({
+	created: v.optional(v.nullable(v.boolean())),
+	message: v.optional(v.nullable(v.string())),
+	tunnelId: v.optional(v.nullable(v.string())),
+	tunnelName: v.optional(v.nullable(v.string())),
+});
+
+const wdttlink_ImportPayload: v.GenericSchema = v.looseObject({
 	connMode: v.optional(v.nullable(v.string())),
 	deviceId: v.optional(v.nullable(v.string())),
 	listen: v.optional(v.nullable(v.string())),
@@ -2607,98 +3138,61 @@ const wdtt_ImportPayload: v.GenericSchema = v.looseObject({
 	workers: v.optional(v.nullable(v.number())),
 });
 
-const wdtt_InstanceStatus: v.GenericSchema = v.looseObject({
-	id: v.optional(v.nullable(v.string())),
-	name: v.optional(v.nullable(v.string())),
-	status: v.optional(v.nullable(v.lazy(() => wdtt_ProcessStatus))),
+const wdttlink_ImportResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => wdttlink_ImportResult))),
+	success: v.optional(v.nullable(v.boolean())),
 });
 
-const wdtt_LinkDecodeResult: v.GenericSchema = v.looseObject({
-	profile: v.optional(v.nullable(v.lazy(() => wdtt_ImportPayload))),
-	subscription: v.optional(v.nullable(v.lazy(() => wdtt_SubscriptionPreview))),
+const wdttlink_ImportResult: v.GenericSchema = v.looseObject({
+	key: v.optional(v.nullable(v.string())),
+	payload: v.optional(v.nullable(v.lazy(() => wdttlink_ImportPayload))),
 });
 
-const wdtt_OpkgPolicyPermit: v.GenericSchema = v.looseObject({
-	name: v.optional(v.nullable(v.string())),
-	order: v.optional(v.nullable(v.number())),
+const wdttlink_LinkDecodeResult: v.GenericSchema = v.looseObject({
+	profile: v.optional(v.nullable(v.lazy(() => wdttlink_ImportPayload))),
+	subscription: v.optional(v.nullable(v.lazy(() => wdttlink_SubscriptionPreview))),
 });
 
-const wdtt_ProcessStatus: v.GenericSchema = v.looseObject({
-	binary: v.optional(v.nullable(v.string())),
-	binaryPresent: v.optional(v.nullable(v.boolean())),
-	dtlsConnections: v.optional(v.nullable(v.number())),
-	lastError: v.optional(v.nullable(v.string())),
-	log: v.optional(v.nullable(v.string())),
-	ndmsIface: v.optional(v.nullable(v.string())),
-	pid: v.optional(v.nullable(v.number())),
-	rawClientIp: v.optional(v.nullable(v.string())),
-	rawIface: v.optional(v.nullable(v.string())),
-	running: v.optional(v.nullable(v.boolean())),
-	startedAt: v.optional(v.nullable(v.string())),
-	wgConfig: v.optional(v.nullable(v.string())),
+const wdttlink_LinkResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => wdttlink_LinkResult))),
+	success: v.optional(v.nullable(v.boolean())),
 });
 
-const wdtt_ServerClient: v.GenericSchema = v.looseObject({
-	comment: v.optional(v.nullable(v.string())),
-	password: v.optional(v.nullable(v.string())),
-	vkHash: v.optional(v.nullable(v.string())),
+const wdttlink_LinkResult: v.GenericSchema = v.looseObject({
+	clientId: v.optional(v.nullable(v.string())),
+	link: v.optional(v.nullable(v.string())),
+	linkQwdtt: v.optional(v.nullable(v.string())),
+	peer: v.optional(v.nullable(v.string())),
 });
 
-const wdtt_ServerConfig: v.GenericSchema = v.looseObject({
-	adminId: v.optional(v.nullable(v.string())),
-	botToken: v.optional(v.nullable(v.string())),
-	clients: v.optional(v.nullable(v.array(v.lazy(() => wdtt_ServerClient)))),
-	configDir: v.optional(v.nullable(v.string())),
-	debug: v.optional(v.nullable(v.boolean())),
-	directListen: v.optional(v.nullable(v.string())),
-	enabled: v.optional(v.nullable(v.boolean())),
-	ingressEnabled: v.optional(v.nullable(v.boolean())),
-	lanSegments: v.optional(v.nullable(v.array(v.string()))),
-	linkPeer: v.optional(v.nullable(v.string())),
-	linkVkHashes: v.optional(v.nullable(v.string())),
-	listen: v.optional(v.nullable(v.string())),
-	natIface: v.optional(v.nullable(v.string())),
-	natMode: v.optional(v.nullable(v.string())),
-	natStaticWan: v.optional(v.nullable(v.string())),
-	ndmsIface: v.optional(v.nullable(v.string())),
-	openFirewall: v.optional(v.nullable(v.boolean())),
-	password: v.optional(v.nullable(v.string())),
-	policy: v.optional(v.nullable(v.string())),
-	rawListen: v.optional(v.nullable(v.string())),
-	relayMode: v.optional(v.nullable(v.string())),
-	statsLog: v.optional(v.nullable(v.string())),
-	wgIface: v.optional(v.nullable(v.string())),
-	wgPort: v.optional(v.nullable(v.number())),
-});
-
-const wdtt_ServerInstance: v.GenericSchema = v.looseObject({
-	config: v.optional(v.nullable(v.lazy(() => wdtt_ServerConfig))),
-	id: v.optional(v.nullable(v.string())),
-	name: v.optional(v.nullable(v.string())),
-});
-
-const wdtt_Status: v.GenericSchema = v.looseObject({
-	client: v.optional(v.nullable(v.lazy(() => wdtt_ProcessStatus))),
-	clients: v.optional(v.nullable(v.array(v.lazy(() => wdtt_InstanceStatus)))),
-	installAvailable: v.optional(v.nullable(v.boolean())),
-	installVersion: v.optional(v.nullable(v.string())),
-	installedVersion: v.optional(v.nullable(v.string())),
-	installing: v.optional(v.nullable(v.boolean())),
-	routerClock: v.optional(v.nullable(v.string())),
-	server: v.optional(v.nullable(v.lazy(() => wdtt_ProcessStatus))),
-	serverSupported: v.optional(v.nullable(v.boolean())),
-	servers: v.optional(v.nullable(v.array(v.lazy(() => wdtt_InstanceStatus)))),
-	updateAvailable: v.optional(v.nullable(v.boolean())),
-});
-
-const wdtt_SubscriptionPreview: v.GenericSchema = v.looseObject({
+const wdttlink_SubscriptionPreview: v.GenericSchema = v.looseObject({
 	description: v.optional(v.nullable(v.string())),
 	name: v.optional(v.nullable(v.string())),
-	profiles: v.optional(v.nullable(v.array(v.lazy(() => wdtt_ImportPayload)))),
+	profiles: v.optional(v.nullable(v.array(v.lazy(() => wdttlink_ImportPayload)))),
 	subUrl: v.optional(v.nullable(v.string())),
 	trafficLimitMb: v.optional(v.nullable(v.number())),
 	trafficUsedMb: v.optional(v.nullable(v.number())),
 	updatedAt: v.optional(v.nullable(v.string())),
+});
+
+const wdttusers_Reload: v.GenericSchema = v.string();
+
+const wdttusers_UserEntry: v.GenericSchema = v.looseObject({
+	comment: v.optional(v.nullable(v.string())),
+	isAuto: v.optional(v.nullable(v.boolean())),
+	password: v.optional(v.nullable(v.string())),
+	vkHash: v.optional(v.nullable(v.string())),
+});
+
+const wdttusers_UsersStatus: v.GenericSchema = v.looseObject({
+	available: v.optional(v.nullable(v.boolean())),
+	reload: v.optional(v.nullable(v.lazy(() => wdttusers_Reload))),
+	users: v.optional(v.nullable(v.array(v.lazy(() => wdttusers_UserEntry)))),
+});
+
+const wdttusers_UsersStatusResponse: v.GenericSchema = v.looseObject({
+	data: v.optional(v.nullable(v.lazy(() => wdttusers_UsersStatus))),
+	success: v.optional(v.nullable(v.boolean())),
 });
 
 /**
@@ -2709,26 +3203,29 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"DELETE /access-policies/assign": v.lazy(() => api_OkResponse),
 	"DELETE /access-policies/delete": v.lazy(() => api_OkResponse),
 	"DELETE /access-policies/permit": v.lazy(() => api_OkResponse),
+	"DELETE /amnezia/premium/key": v.lazy(() => api_AmneziaPremiumKeyResponse),
 	"DELETE /awg3-endpoints/{id}": v.lazy(() => api_Awg3ListResponse),
 	"DELETE /connections": v.lazy(() => api_ConnectionKillEnvelope),
-	"DELETE /freeturn/clients/{id}": v.lazy(() => api_APIEnvelope),
-	"DELETE /freeturn/servers/{id}": v.lazy(() => api_APIEnvelope),
-	"DELETE /freeturn/servers/{id}/allowlist": v.lazy(() => api_FreeTurnAllowlistResponse),
-	"DELETE /freeturn/servers/{id}/allowlist/{clientId}": v.lazy(() => api_FreeTurnAllowlistResponse),
 	"DELETE /hydraroute/geo-files/delete": v.lazy(() => api_OkResponse),
 	"DELETE /managed-servers/{id}": v.lazy(() => api_ServersAllResponse),
 	"DELETE /managed-servers/{id}/peers/{pubkey}": v.lazy(() => api_ServersAllResponse),
 	"DELETE /proxy/instance": v.lazy(() => api_APIEnvelope),
+	"DELETE /proxyrt/instances/{key}": v.lazy(() => api_ProxyDeleteResponse),
+	"DELETE /proxyrt/instances/{key}/users": v.lazy(() => wdttusers_UsersStatusResponse),
+	"DELETE /proxyrt/instances/{key}/users/{password}": v.lazy(() => wdttusers_UsersStatusResponse),
+	"DELETE /proxyrt/seed/listen-moves": v.lazy(() => api_OkResponse),
 	"DELETE /servers/{name}/peers/{pubkey}": v.lazy(() => api_ServersAllResponse),
 	"DELETE /servers/mark": v.lazy(() => api_ServersAllResponse),
 	"DELETE /singbox/subscriptions/delete": v.lazy(() => api_APIEnvelope),
+	"DELETE /singbox/subscriptions/happ-keys": v.lazy(() => api_APIEnvelope),
 	"DELETE /singbox/tunnels": v.lazy(() => api_SingboxTunnelsResponse),
-	"DELETE /wdtt/clients/{id}": v.lazy(() => api_APIEnvelope),
-	"DELETE /wdtt/servers/{id}": v.lazy(() => api_APIEnvelope),
-	"DELETE /wdtt/servers/{id}/users/{password}": v.lazy(() => api_APIEnvelope),
 	"GET /access-policies": v.lazy(() => api_AccessPoliciesListResponse),
 	"GET /access-policies/devices": v.lazy(() => api_PolicyDevicesListResponse),
 	"GET /access-policies/interfaces": v.lazy(() => api_PolicyInterfacesListResponse),
+	"GET /amnezia/premium/catalog": v.lazy(() => api_AmneziaPremiumCatalogResponse),
+	"GET /amnezia/premium/declared-country": v.lazy(() => api_AmneziaPremiumDeclaredCountryResponse),
+	"GET /amnezia/premium/key": v.lazy(() => api_AmneziaPremiumKeyResponse),
+	"GET /amnezia/premium/mirror": v.lazy(() => api_AmneziaPremiumMirrorResponse),
 	"GET /auth/status": v.lazy(() => api_AuthStatusResponse),
 	"GET /awg3-endpoints": v.lazy(() => api_Awg3ListResponse),
 	"GET /boot-status": v.lazy(() => api_BootStatusResponse),
@@ -2742,10 +3239,6 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /dns-routes/list": v.lazy(() => api_DnsRoutesListResponse),
 	"GET /download/outbounds": v.lazy(() => api_DownloadOutboundsResponse),
 	"GET /external-tunnels": v.lazy(() => api_ExternalTunnelsResponse),
-	"GET /freeturn/captcha/status": v.lazy(() => api_FreeTurnCaptchaStatusResponse),
-	"GET /freeturn/config": v.lazy(() => api_FreeTurnConfigResponse),
-	"GET /freeturn/servers/{id}/allowlist": v.lazy(() => api_FreeTurnAllowlistResponse),
-	"GET /freeturn/status": v.lazy(() => api_FreeTurnStatusResponse),
 	"GET /health": v.lazy(() => api_HealthResponse),
 	"GET /hydraroute/config": v.lazy(() => api_HydraRouteConfigResponse),
 	"GET /hydraroute/geo-expand": v.intersect([v.lazy(() => api_APIEnvelope), v.looseObject({
@@ -2767,6 +3260,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /managed-servers/suggest-address": v.lazy(() => api_SuggestAddressResponse),
 	"GET /managed/drift": v.lazy(() => api_ManagedServerDriftEnvelope),
 	"GET /managed/export": v.lazy(() => api_ManagedServerExportEnvelope),
+	"GET /mcp/keys": v.lazy(() => api_McpKeysListResponse),
 	"GET /monitoring/matrix": v.lazy(() => api_MonitoringSnapshotResponse),
 	"GET /ndms/save-status": v.intersect([v.lazy(() => api_APIEnvelope), v.looseObject({
 	data: v.optional(v.nullable(v.lazy(() => api_SaveStatusDTO))),
@@ -2785,6 +3279,11 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /proxy/listener": v.lazy(() => api_APIEnvelope),
 	"GET /proxy/outbounds": v.lazy(() => api_ProxyOutboundsResponse),
 	"GET /proxy/runtime": v.lazy(() => api_ProxyRuntimeResponse),
+	"GET /proxyrt/freeturn/captcha/status": v.lazy(() => captcha_OverviewResponse),
+	"GET /proxyrt/install/status": v.lazy(() => install_InstallStatusResponse),
+	"GET /proxyrt/instances": v.lazy(() => api_ProxyRtListResponse),
+	"GET /proxyrt/instances/{key}": v.lazy(() => api_ProxyRtInstanceResponse),
+	"GET /proxyrt/instances/{key}/users": v.lazy(() => wdttusers_UsersStatusResponse),
 	"GET /routing/access-policies": v.lazy(() => api_AccessPoliciesListResponse),
 	"GET /routing/client-routes": v.lazy(() => api_ClientRoutesListResponse),
 	"GET /routing/dns-routes": v.lazy(() => api_DnsRoutesListResponse),
@@ -2860,6 +3359,8 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 })]),
 	"GET /singbox/subscriptions/get": v.lazy(() => api_SubscriptionResponse),
 	"GET /singbox/subscriptions/groups": v.lazy(() => api_SubscriptionGroupListResponse),
+	"GET /singbox/subscriptions/happ-keys": v.lazy(() => api_APIEnvelope),
+	"GET /singbox/subscriptions/header-profiles": v.lazy(() => api_HeaderProfilesResponse),
 	"GET /singbox/tunnels": v.lazy(() => api_SingboxTunnelsResponse),
 	"GET /singbox/tunnels/get": v.lazy(() => api_SingboxTunnelGetResponse),
 	"GET /singbox/tunnels/test/connectivity": v.lazy(() => api_APIEnvelope),
@@ -2868,8 +3369,22 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /system-tunnels": v.lazy(() => api_SystemTunnelsResponse),
 	"GET /system-tunnels/asc": v.lazy(() => api_ASCParamsResponse),
 	"GET /system/all-interfaces": v.lazy(() => api_AllInterfacesResponse),
+	"GET /system/files/checksum": v.lazy(() => api_SystemFileChecksumResponse),
+	"GET /system/files/list": v.lazy(() => api_SystemFilesListResponse),
+	"GET /system/files/read": v.lazy(() => api_SystemFileReadResponse),
+	"GET /system/files/roots": v.lazy(() => api_SystemFileRootsResponse),
+	"GET /system/files/script-status": v.lazy(() => api_SystemScriptStatusResponse),
 	"GET /system/hydraroute-status": v.lazy(() => api_HydraRouteStatusResponse),
 	"GET /system/info": v.lazy(() => api_SystemInfoResponse),
+	"GET /system/opkg/available": v.lazy(() => api_SystemOpkgAvailableResponse),
+	"GET /system/opkg/installed": v.lazy(() => api_SystemOpkgPackagesResponse),
+	"GET /system/opkg/search": v.lazy(() => api_SystemOpkgPackagesResponse),
+	"GET /system/opkg/upgradable": v.lazy(() => api_SystemOpkgPackagesResponse),
+	"GET /system/ports/inspect": v.lazy(() => api_SystemPortInspectResponse),
+	"GET /system/ports/list": v.lazy(() => api_SystemPortsListResponse),
+	"GET /system/proc/snapshot": v.lazy(() => api_SystemProcSnapshotResponse),
+	"GET /system/services/get": v.lazy(() => api_SystemServiceScriptResponse),
+	"GET /system/services/list": v.lazy(() => api_SystemServicesListResponse),
 	"GET /system/update/changelog": v.lazy(() => api_ChangelogResponse),
 	"GET /system/update/check": v.lazy(() => api_UpdateCheckResponse),
 	"GET /system/wan-interfaces": v.lazy(() => api_WANInterfacesResponse),
@@ -2887,26 +3402,24 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"GET /tunnels/pingcheck": v.lazy(() => api_NativePingCheckStatusResponse),
 	"GET /tunnels/traffic": v.lazy(() => api_TunnelTrafficResponse),
 	"GET /wan/status": v.lazy(() => api_WANStatusEnvelope),
-	"GET /wdtt/config": v.lazy(() => api_WdttConfigResponse),
-	"GET /wdtt/servers/{id}/users": v.lazy(() => api_APIEnvelope),
-	"GET /wdtt/status": v.lazy(() => api_WdttStatusResponse),
 	"PATCH /awg3-endpoints/{id}": v.lazy(() => api_Awg3ListResponse),
-	"PATCH /freeturn/clients/{id}": v.lazy(() => api_APIEnvelope),
-	"PATCH /freeturn/servers/{id}": v.lazy(() => api_APIEnvelope),
+	"PATCH /proxyrt/instances/{key}": v.lazy(() => api_ProxyRtInstanceResponse),
+	"PATCH /proxyrt/instances/{key}/users/{password}": v.lazy(() => wdttusers_UsersStatusResponse),
 	"PATCH /singbox/tunnels/rename": v.lazy(() => api_SingboxTunnelsResponse),
-	"PATCH /wdtt/clients/{id}": v.lazy(() => api_APIEnvelope),
-	"PATCH /wdtt/servers/{id}": v.lazy(() => api_APIEnvelope),
 	"POST /access-policies/assign": v.lazy(() => api_OkResponse),
 	"POST /access-policies/create": v.lazy(() => api_AccessPolicyResponse),
 	"POST /access-policies/description": v.lazy(() => api_OkResponse),
 	"POST /access-policies/interface-up": v.lazy(() => api_OkResponse),
 	"POST /access-policies/permit": v.lazy(() => api_OkResponse),
 	"POST /access-policies/standalone": v.lazy(() => api_OkResponse),
-	"POST /amnezia-premium/account-info": v.lazy(() => api_AmneziaPremiumAccountInfoResponse),
-	"POST /amnezia-premium/download-config": v.lazy(() => api_AmneziaPremiumDownloadConfigResponse),
-	"POST /amnezia-premium/login": v.lazy(() => api_AmneziaPremiumLoginResponse),
+	"POST /amnezia/premium/config": v.lazy(() => api_AmneziaPremiumConfigResponse),
+	"POST /amnezia/premium/declared-country": v.lazy(() => api_AmneziaPremiumDeclaredCountryResponse),
+	"POST /amnezia/premium/key": v.lazy(() => api_AmneziaPremiumKeyResponse),
+	"POST /amnezia/premium/mirror": v.lazy(() => api_AmneziaPremiumMirrorResponse),
+	"POST /amnezia/premium/revoke": v.lazy(() => api_AmneziaPremiumRevokeResponse),
 	"POST /auth/login": v.lazy(() => api_LoginResponseRaw),
 	"POST /auth/logout": v.lazy(() => api_APIEnvelope),
+	"POST /awg/analyze": v.lazy(() => api_AwgAnalyzeResponse),
 	"POST /awg3-endpoints": v.lazy(() => api_Awg3ListResponse),
 	"POST /client-routes/create": v.intersect([v.lazy(() => api_APIEnvelope), v.looseObject({
 	data: v.optional(v.nullable(v.lazy(() => api_ClientRouteDTO))),
@@ -2935,17 +3448,6 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /dns-routes/set-enabled": v.lazy(() => api_APIEnvelope),
 	"POST /dns-routes/update": v.lazy(() => api_DnsRouteResponse),
 	"POST /external-tunnels/adopt": v.lazy(() => api_APIEnvelope),
-	"POST /freeturn/clients": v.lazy(() => api_FreeTurnClientInstanceResponse),
-	"POST /freeturn/clients/{id}/start": v.lazy(() => api_APIEnvelope),
-	"POST /freeturn/clients/{id}/stop": v.lazy(() => api_APIEnvelope),
-	"POST /freeturn/install": v.lazy(() => api_APIEnvelope),
-	"POST /freeturn/link/decode": v.lazy(() => api_DecodeLinkResponse),
-	"POST /freeturn/server/link": v.lazy(() => api_GenerateLinkResponse),
-	"POST /freeturn/servers": v.lazy(() => api_FreeTurnServerInstanceResponse),
-	"POST /freeturn/servers/{id}/allowlist": v.lazy(() => api_FreeTurnAllowlistResponse),
-	"POST /freeturn/servers/{id}/link": v.lazy(() => api_GenerateLinkResponse),
-	"POST /freeturn/servers/{id}/start": v.lazy(() => api_APIEnvelope),
-	"POST /freeturn/servers/{id}/stop": v.lazy(() => api_APIEnvelope),
 	"POST /hook/ndms": v.lazy(() => api_APIEnvelope),
 	"POST /hydraroute/geo-files/add": v.lazy(() => api_GeoFileResponse),
 	"POST /hydraroute/geo-files/rescan": v.lazy(() => api_GeoFilesRescannedResponse),
@@ -2964,6 +3466,8 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /managed-servers/{id}/restart": v.lazy(() => api_APIEnvelope),
 	"POST /managed/import": v.lazy(() => api_ManagedServerImportEnvelope),
 	"POST /managed/restore-drift": v.lazy(() => api_ManagedServerImportEnvelope),
+	"POST /mcp/keys/create": v.lazy(() => api_McpKeyCreatedResponse),
+	"POST /mcp/keys/revoke": v.lazy(() => api_McpKeyRevokedResponse),
 	"POST /pingcheck/check-now": v.lazy(() => api_APIEnvelope),
 	"POST /pingcheck/logs/clear": v.lazy(() => api_APIEnvelope),
 	"POST /proxy/apply": v.lazy(() => api_APIEnvelope),
@@ -2971,6 +3475,17 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /proxy/instances/apply": v.lazy(() => api_APIEnvelope),
 	"POST /proxy/kill-listener": v.lazy(() => api_APIEnvelope),
 	"POST /proxy/runtime/select": v.lazy(() => api_ProxyRuntimeResponse),
+	"POST /proxyrt/freeturn/link/decode": v.lazy(() => ftlink_DecodeResponse),
+	"POST /proxyrt/install": v.lazy(() => install_InstallResponse),
+	"POST /proxyrt/install/uninstall": v.lazy(() => install_InstallResponse),
+	"POST /proxyrt/instances": v.lazy(() => api_ProxyRtInstanceResponse),
+	"POST /proxyrt/instances/{key}/apply": v.lazy(() => api_OkResponse),
+	"POST /proxyrt/instances/{key}/ensure-wg-tunnel": v.lazy(() => wdttlink_EnsureWGResponse),
+	"POST /proxyrt/instances/{key}/link": v.lazy(() => wdttlink_LinkResponse),
+	"POST /proxyrt/instances/{key}/subscription/refresh": v.lazy(() => subscription_RefreshResponse),
+	"POST /proxyrt/instances/{key}/users": v.lazy(() => wdttusers_UsersStatusResponse),
+	"POST /proxyrt/wdtt/link/decode": v.lazy(() => wdttlink_DecodeResponse),
+	"POST /proxyrt/wdtt/link/import": v.lazy(() => wdttlink_ImportResponse),
 	"POST /routing/refresh": v.lazy(() => api_RoutingRefreshResponse),
 	"POST /server/listen/change": v.lazy(() => api_ServerListenChangeResponse),
 	"POST /server/listen/confirm": v.lazy(() => api_OkResponse),
@@ -3024,7 +3539,6 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /singbox/router/bypass-set/install-deps": v.intersect([v.lazy(() => api_APIEnvelope), v.looseObject({
 	data: v.optional(v.nullable(v.lazy(() => api_BypassSetStatusData))),
 })]),
-	"POST /singbox/router/disable": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/dns/chain-preset": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/dns/globals": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/dns/rewrites/add": v.lazy(() => api_OkResponse),
@@ -3039,7 +3553,6 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /singbox/router/dns/servers/delete": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/dns/servers/move": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/dns/servers/update": v.lazy(() => api_OkResponse),
-	"POST /singbox/router/enable": v.lazy(() => api_OkResponse),
 	"POST /singbox/router/inspect": v.lazy(() => api_SingboxRouterInspectResponse),
 	"POST /singbox/router/inspect-dns": v.lazy(() => api_SingboxRouterInspectDNSResponse),
 	"POST /singbox/router/mode": v.lazy(() => api_OkResponse),
@@ -3069,8 +3582,10 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /singbox/router/staging/discard": v.lazy(() => api_OkResponse),
 	"POST /singbox/subscriptions/active-member": v.lazy(() => api_OkResponse),
 	"POST /singbox/subscriptions/create": v.lazy(() => api_SubscriptionResponse),
+	"POST /singbox/subscriptions/detect-headers": v.lazy(() => api_DetectHeadersResponse),
 	"POST /singbox/subscriptions/groups/create": v.lazy(() => api_SubscriptionGroupResponse),
 	"POST /singbox/subscriptions/groups/delete": v.lazy(() => api_APIEnvelope),
+	"POST /singbox/subscriptions/happ-keys": v.lazy(() => api_APIEnvelope),
 	"POST /singbox/subscriptions/members/add": v.lazy(() => api_SubscriptionResponse),
 	"POST /singbox/subscriptions/members/exclude": v.lazy(() => api_SubscriptionResponse),
 	"POST /singbox/subscriptions/members/remove": v.lazy(() => api_APIEnvelope),
@@ -3083,6 +3598,7 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"POST /singbox/tunnels": v.lazy(() => api_APIEnvelope),
 	"POST /singbox/tunnels/delay-check": v.lazy(() => api_APIEnvelope),
 	"POST /singbox/tunnels/share-link": v.lazy(() => api_APIEnvelope),
+	"POST /singbox/uninstall": v.lazy(() => api_SingboxStatusResponse),
 	"POST /singbox/update": v.lazy(() => api_SingboxStatusResponse),
 	"POST /static-routes/create": v.intersect([v.lazy(() => api_APIEnvelope), v.looseObject({
 	data: v.optional(v.nullable(v.lazy(() => api_StaticRouteDTO))),
@@ -3097,47 +3613,39 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 })]),
 	"POST /system-tunnels/asc": v.lazy(() => api_OkResponse),
 	"POST /system/backup/import": v.lazy(() => api_APIEnvelope),
+	"POST /system/files/chmod": v.lazy(() => api_SystemOKResponse),
+	"POST /system/files/copy": v.lazy(() => api_SystemOKResponse),
+	"POST /system/files/mkdir": v.lazy(() => api_SystemOKResponse),
+	"POST /system/files/remove": v.lazy(() => api_SystemOKResponse),
+	"POST /system/files/rename": v.lazy(() => api_SystemOKResponse),
+	"POST /system/files/script-action": v.lazy(() => api_SystemScriptActionResponse),
+	"POST /system/files/upload": v.lazy(() => api_SystemUploadResponse),
+	"POST /system/files/write": v.lazy(() => api_SystemOKResponse),
 	"POST /system/hydraroute-control": v.lazy(() => api_APIEnvelope),
+	"POST /system/opkg/install": v.lazy(() => api_SystemOutputResponse),
+	"POST /system/opkg/remove": v.lazy(() => api_SystemOutputResponse),
+	"POST /system/opkg/update": v.lazy(() => api_SystemOutputResponse),
+	"POST /system/opkg/upgrade": v.lazy(() => api_SystemOutputResponse),
+	"POST /system/ports/kill": v.lazy(() => api_SystemKillResponse),
+	"POST /system/proc/kill": v.lazy(() => api_SystemKillResponse),
 	"POST /system/restart": v.lazy(() => api_APIEnvelope),
+	"POST /system/services/action": v.lazy(() => api_SystemServiceActionResponse),
+	"POST /system/services/delete": v.lazy(() => api_SystemOKFlagResponse),
+	"POST /system/services/save": v.lazy(() => api_SystemServiceSavedResponse),
+	"POST /system/services/toggle-enable": v.lazy(() => api_SystemServiceToggleEnableResponse),
 	"POST /system/update/apply": v.lazy(() => api_UpdateApplyResponse),
 	"POST /terminal/install": v.intersect([v.lazy(() => api_APIEnvelope), v.looseObject({
 	data: v.optional(v.nullable(v.lazy(() => api_TerminalInstallData))),
 })]),
 	"POST /terminal/start": v.lazy(() => api_TerminalStartResponse),
 	"POST /terminal/stop": v.lazy(() => api_APIEnvelope),
-	"POST /tunnels/create": v.lazy(() => api_APIEnvelope),
 	"POST /tunnels/delete": v.lazy(() => api_TunnelDeleteResponse),
+	"POST /tunnels/lock": v.lazy(() => api_TunnelLockResponse),
+	"POST /tunnels/orphans/delete": v.lazy(() => api_OkResponse),
 	"POST /tunnels/pingcheck": v.lazy(() => api_APIEnvelope),
 	"POST /tunnels/pingcheck/remove": v.lazy(() => api_APIEnvelope),
 	"POST /tunnels/replace": v.lazy(() => api_APIEnvelope),
 	"POST /tunnels/update": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/client/start": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/client/stop": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/clients": v.lazy(() => api_WdttClientInstanceResponse),
-	"POST /wdtt/clients/{id}/ensure-wg-tunnel": v.lazy(() => api_WdttEnsureWGTunnelResponse),
-	"POST /wdtt/clients/{id}/import": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/clients/{id}/linked-tunnels/clear": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/clients/{id}/start": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/clients/{id}/stop": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/clients/{id}/subscription/refresh": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/install": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/link/decode": v.lazy(() => api_WdttDecodeLinkResponse),
-	"POST /wdtt/link/import": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/server/config": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/server/start": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/server/stop": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers/{id}/lan-segments": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers/{id}/link": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers/{id}/nat": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers/{id}/policy": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers/{id}/start": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers/{id}/stop": v.lazy(() => api_APIEnvelope),
-	"POST /wdtt/servers/{id}/users": v.lazy(() => api_APIEnvelope),
-	"PUT /freeturn/client/config": v.lazy(() => api_FreeTurnConfigResponse),
-	"PUT /freeturn/clients/{id}": v.lazy(() => api_APIEnvelope),
-	"PUT /freeturn/server/config": v.lazy(() => api_FreeTurnConfigResponse),
-	"PUT /freeturn/servers/{id}": v.lazy(() => api_APIEnvelope),
 	"PUT /hydraroute/config/update": v.lazy(() => api_HydraRouteConfigResponse),
 	"PUT /managed-servers/{id}": v.lazy(() => api_ServersAllResponse),
 	"PUT /managed-servers/{id}/asc": v.lazy(() => api_ASCParamsResponse),
@@ -3152,8 +3660,4 @@ export const RESPONSE_SCHEMAS: Record<string, v.GenericSchema> = {
 	"PUT /singbox/subscriptions/groups/update": v.lazy(() => api_SubscriptionGroupResponse),
 	"PUT /singbox/subscriptions/update": v.lazy(() => api_SubscriptionResponse),
 	"PUT /singbox/tunnels": v.lazy(() => api_SingboxTunnelsResponse),
-	"PUT /wdtt/client/config": v.lazy(() => api_APIEnvelope),
-	"PUT /wdtt/clients/{id}": v.lazy(() => api_APIEnvelope),
-	"PUT /wdtt/server/config": v.lazy(() => api_APIEnvelope),
-	"PUT /wdtt/servers/{id}": v.lazy(() => api_APIEnvelope),
 };

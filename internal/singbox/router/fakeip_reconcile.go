@@ -32,7 +32,7 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 	if err != nil {
 		return err
 	}
-	st := settings.FakeIP
+	st, _ := opkgTunOwned(settings, stateFakeIPTun)
 
 	if !sr.Enabled {
 		// Teardown нужен только когда что-то реально поднято. Безусловный
@@ -45,6 +45,29 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 			return nil
 		}
 		return s.Disable(ctx)
+	}
+
+	// Первотиковый свип чужого netfilter (зеркало policytun_reconcile.go и
+	// reconcileInstalled): после рестарта демона могли выжить AWGM-цепочки
+	// прежнего tproxy-режима — в fakeip они заворачивают policy-трафик в порт
+	// без слушателя, и не лечит их никто, потому что fakeip своего netfilter
+	// не ставит вовсе. Uninstall best-effort и ошибки не возвращает (F79),
+	// поэтому провал шага внутри Disable не наблюдаем — свип здесь нужен.
+	//
+	// Собственные ingress-ресурсы fakeip свип не задевает: у них свои теги
+	// (AWGM-FAKEIP-INGRESS), таблица 700 и приоритет 29000, а Uninstall
+	// снимает цепочки перехвата, теги DNS-RESCUE/NOPOLICY/INGRESS и table 100.
+	// Плюс ensureFakeIPIngress идёт в этом же тике ПОСЛЕ — реассерт.
+	if s.deps.IPTables != nil {
+		s.mu.Lock()
+		force := !s.netfilterStateKnown
+		s.mu.Unlock()
+		if force {
+			s.deps.IPTables.Uninstall(ctx)
+			s.mu.Lock()
+			s.netfilterStateKnown = true
+			s.mu.Unlock()
+		}
 	}
 
 	// LiveOpkgTunIndices probes which opkgtun ifaces actually exist on the box.
@@ -61,8 +84,7 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		live, probeErr = s.deps.OpkgTunIndices.LiveOpkgTunIndices(ctx)
 	}
 
-	reprovision := st == nil || !st.Provisioned || (probeErr == nil && !live[st.Index])
-	if reprovision {
+	if s.needsReprovision(ctx, st, live, probeErr, fakeIPTunDescription) {
 		// Not provisioned, or the iface vanished (crash / manual removal) →
 		// (re-)provision. Enable's idempotency guard short-circuits the
 		// already-provisioned+live case, so this is safe to call unconditionally.
@@ -75,8 +97,8 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 	// Best-effort: each step logs + continues so one drifted resource cannot
 	// abort the heal of the others. NEVER re-allocate an index or re-create the
 	// iface here — that is Enable's job, gated on the liveness check above.
-	iface := fakeIPIfaceName(st.Index)   // kernel name: /proc route probe, log labels
-	ndmsName := fakeIPNDMSName(st.Index) // NDMS RCI name: static-route Interface
+	iface := tunIfaceName(st.Index)   // kernel name: /proc route probe, log labels
+	ndmsName := tunNDMSName(st.Index) // NDMS RCI name: static-route Interface
 
 	// Запаркованный слот 21 — дрейф НЕЗАВИСИМО от жизни процесса (ревью #523):
 	// раньше слот чинился только при мёртвом sing-box, а при живом (крутит
@@ -102,6 +124,26 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		}
 	}
 
+	// Движок может быть жив, а его стек отцепиться от tun — это состояние не
+	// лечит никто другой, см. healDetachedTun. Слот он проверяет сам.
+	s.healDetachedTun(iface, "fakeip-reconcile", orchestrator.SlotFakeIP)
+	// Гейт probeErr == nil — см. reconcilePolicyTun.
+	if probeErr == nil {
+		s.healTunAddress(ctx, sr, iface, ndmsName, "fakeip-reconcile")
+	}
+
+	// Разовая миграция слота на форму sing-box 1.14 (см. reconcileInstalled) —
+	// для 21-fakeip.json. В устоявшемся состоянии это одно чтение файла,
+	// бюджет тика (30 с) не страдает.
+	s.heal1140SlotMigration(ctx, orchestrator.SlotFakeIP)
+
+	// Смена udpTimeout/udpNatMax через UpdateSettings — tun-in fakeip строится
+	// только на enable, поэтому без heal'а изменение не доезжало до живого
+	// режима (F114). После миграции слота — актуальный tun-in уже в форме 1.14.
+	if s.healTunSettings(ctx, orchestrator.SlotFakeIP, sr) {
+		s.completeExternalFlip(ctx, sr, iface, ndmsName, "fakeip-reconcile")
+	}
+
 	// One-shot (до первого УСПЕХА) ассерт permit-ACL: покрывает апгрейд
 	// awg-manager поверх уже включённого fakeip (ACL появился в этой версии)
 	// и удаление списка до старта демона. Идемпотентно (дубль permit NDMS
@@ -123,7 +165,7 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 	// v6-разрешение — отдельная сущность NDMS и свой флаг: успех v4 не должен
 	// гасить ретрай упавшего v6. Гейт по адресу: без v6 разрешать нечего.
 	if !s.fakeipACLv6Asserted && s.deps.OpkgTun != nil && probeErr == nil &&
-		resolveFakeIPParams(s.deps.FakeIPTun, sr).TunAddr6 != "" {
+		s.resolveFakeIPParams(sr).TunAddr6 != "" {
 		if nerr := s.deps.OpkgTun.SetPermitAllACLv6(ctx, ndmsName); nerr != nil {
 			s.appLog.Warn("fakeip-reconcile", iface, "permit acl v6: "+nerr.Error())
 		} else {
@@ -136,9 +178,13 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 	// fires only when the route is ABSENT. In steady state the route is present, so
 	// this produces ZERO route POSTs per tick. Derive net/mask from the persisted
 	// ranges exactly as Enable does (Masked first).
+	var inet4Range, inet6Range string
+	if st.FakeIP != nil {
+		inet4Range, inet6Range = st.FakeIP.Inet4Range, st.FakeIP.Inet6Range
+	}
 	if s.deps.StaticRoutes != nil {
-		if prefix, perr := netip.ParsePrefix(st.Inet4Range); perr == nil {
-			if poolNet4, poolMask4, derr := poolV4NetMask(st.Inet4Range); derr == nil {
+		if prefix, perr := netip.ParsePrefix(inet4Range); perr == nil {
+			if poolNet4, poolMask4, derr := poolV4NetMask(inet4Range); derr == nil {
 				// Probe v4 presence (same seam GetStatus uses); only re-add when absent.
 				if !fakeIPPoolRoutePresent(iface, prefix.Masked()) {
 					if e := s.deps.StaticRoutes.AddStaticRoute(ctx, StaticRouteSpec{
@@ -151,25 +197,33 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 						// а не рутинная проверка.
 						s.appLog.Info("fakeip-reconcile", iface, "pool route v4 was absent, re-added (drift-heal)")
 					}
-					// v6 re-add is gated on the SAME v4-absence signal: routes are added
-					// together at Enable, so v4-present ⇒ v6-present is a sound v1
-					// heuristic (a dedicated v6 presence probe against /proc/net/ipv6_route
-					// is a follow-up). When v4 was present we skip v6 too → zero POSTs.
-					if st.Inet6Range != "" {
-						if e := s.deps.StaticRoutes.AddStaticRoute(ctx, StaticRouteSpec{
-							V6: true, Network: st.Inet6Range, Interface: ndmsName,
-						}); e != nil {
-							s.appLog.Warn("fakeip-reconcile", iface, "re-add pool route v6: "+e.Error())
-						} else {
-							s.appLog.Info("fakeip-reconcile", iface, "pool route v6 was absent, re-added (drift-heal)")
-						}
-					}
 				}
 			} else {
 				s.appLog.Warn("fakeip-reconcile", iface, "derive pool v4 mask: "+derr.Error())
 			}
-		} else if st.Inet4Range != "" {
+		} else if inet4Range != "" {
 			s.appLog.Warn("fakeip-reconcile", iface, "parse pool v4 range: "+perr.Error())
+		}
+
+		// Пул v6 — СВОЯ проба (/proc/net/ipv6_route), как у v6-циклов CIDR ниже.
+		// Прежде re-add v6 висел на сигнале отсутствия v4: маршруты ставятся
+		// вместе на Enable, поэтому «v4 есть ⇒ v6 есть» считалось достаточной
+		// v1-эвристикой. Она давала fail-OPEN там, где у v4 fail-closed: одиноко
+		// пропавший fc00::/18 не лечился, пока стоит v4, и v6-трафик пула уходил
+		// в WAN мимо туннеля. Steady state по-прежнему ноль POST'ов — проба
+		// гейтит так же, как v4.
+		if inet6Range != "" {
+			if pfx6, perr6 := netip.ParsePrefix(inet6Range); perr6 != nil {
+				s.appLog.Warn("fakeip-reconcile", iface, "parse pool v6 range: "+perr6.Error())
+			} else if !fakeIPPoolRoute6Present(iface, pfx6.Masked()) {
+				if e := s.deps.StaticRoutes.AddStaticRoute(ctx, StaticRouteSpec{
+					V6: true, Network: inet6Range, Interface: ndmsName,
+				}); e != nil {
+					s.appLog.Warn("fakeip-reconcile", iface, "re-add pool route v6: "+e.Error())
+				} else {
+					s.appLog.Info("fakeip-reconcile", iface, "pool route v6 was absent, re-added (drift-heal)")
+				}
+			}
 		}
 	}
 
@@ -215,14 +269,26 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 			// edit-time Tier-1 diff cannot see them). Best-effort: add any remote CIDR not
 			// yet present. No removal here — Tier-1 diff-on-mutation owns removals; a remote
 			// set merely contributes additional desired routes.
+			// Потиковой сводки «remote cidrs: v4=N v6=M» здесь больше нет: она
+			// писалась на КАЖДОМ 30-секундном тике при живых наборах и держалась
+			// только на коалесценции журнала (F28). Логируем ФАКТ постановки
+			// маршрутов, а не наличие набора (F29).
+			//
+			// Строка одна на тик, а не на префикс: remote-CIDR ставит ТОЛЬКО
+			// reconcile (enable кладёт лишь desiredTunCIDRs), поэтому на первом
+			// же тике после включения отсутствуют ВСЕ префиксы набора — у
+			// декомпилированного .srs их сотни, и пер-префиксный Info выдавил
+			// бы из кольцевого журнала всю прочую диагностику. По той же причине
+			// не пишем «was absent, re-added»: для первичной установки это
+			// неправда, а отличить её от лечения дрейфа тут нечем.
 			rV4, rV6 := s.remoteTunCIDRs(ctx, cfg)
-			if len(rV4) > 0 || len(rV6) > 0 {
-				s.appLog.Info("fakeip-cidr-remote", ndmsName, fmt.Sprintf("remote cidrs: v4=%d v6=%d", len(rV4), len(rV6)))
-			}
+			added := 0
 			for _, c := range rV4 {
 				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoutePresent(iface, pfx.Masked()) {
 					if e := s.addCIDRRoute(ctx, ndmsName, c, false); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "add remote cidr "+c+": "+e.Error())
+					} else {
+						added++
 					}
 				}
 			}
@@ -233,8 +299,13 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoute6Present(iface, pfx.Masked()) {
 					if e := s.addCIDRRoute(ctx, ndmsName, c, true); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "add remote cidr v6 "+c+": "+e.Error())
+					} else {
+						added++
 					}
 				}
+			}
+			if added > 0 {
+				s.appLog.Info("fakeip-reconcile", iface, fmt.Sprintf("remote cidr routes installed: %d", added))
 			}
 		}
 	}

@@ -37,6 +37,20 @@ type WireguardServerPeerDTO struct {
 	Online        bool     `json:"online" example:"true"`
 	Enabled       bool     `json:"enabled" example:"true"`
 	ConfAvailable bool     `json:"confAvailable,omitempty" example:"true"`
+
+	// Сигнатура пира (CONTEXT.md «Сигнатура AWG»). Есть только у пиров с
+	// локальным секретом: у чужих её негде хранить.
+	I1               string `json:"i1,omitempty" example:"<b 0xc0>"`
+	I2               string `json:"i2,omitempty"`
+	I3               string `json:"i3,omitempty"`
+	I4               string `json:"i4,omitempty"`
+	I5               string `json:"i5,omitempty"`
+	SignatureProfile string `json:"signatureProfile,omitempty" example:"quic_initial"`
+
+	// DNS — резолвер пира для `.conf` (#933). Пусто = «подставить LAN-адрес
+	// роутера»; хранится в секрете, поэтому есть только у пиров с локальным
+	// секретом — как и сигнатура.
+	DNS string `json:"dns,omitempty" example:"192.168.1.1"`
 }
 
 // WireguardServerDTO mirrors frontend WireguardServer.
@@ -177,14 +191,14 @@ func (h *ServersHandler) SetCommands(commands *ndmscommand.Commands) { h.command
 // as a method on *ServersHandler because ndms/metrics.Poller calls it
 // through the ServerSnapshotPublisher interface.
 func (h *ServersHandler) PublishServerSnapshot(ctx context.Context) {
-	publishInvalidated(h.bus, ResourceServers, "metrics-tick")
+	h.bus.PublishInvalidated(events.ResourceServers, "metrics-tick")
 }
 
 // publishServerInvalidated broadcasts a resource:invalidated hint for
 // servers. Used by ManagedServerHandler after managed CRUD so its
 // subscribers refetch immediately.
 func (h *ServersHandler) publishServerInvalidated(reason string) {
-	publishInvalidated(h.bus, ResourceServers, reason)
+	h.bus.PublishInvalidated(events.ResourceServers, reason)
 }
 
 // NewServersHandler creates a new servers handler.
@@ -273,7 +287,7 @@ func (h *ServersHandler) listServers(ctx context.Context) ([]ndms.WireguardServe
 		if managedSet[s.ID] || managedServerSet[s.ID] {
 			continue
 		}
-		isBuiltIn := s.Description == "Wireguard VPN Server"
+		isBuiltIn := s.Description == ndms.BuiltInVPNServerDescription
 		isMarked := serverSet[s.ID]
 		if isBuiltIn || isMarked {
 			servers = append(servers, s)
@@ -357,7 +371,7 @@ func (h *ServersHandler) writeAll(w http.ResponseWriter, r *http.Request) {
 	managedList := []*managedServerResponse{}
 	managedStats := map[string]*managed.ManagedServerStats{}
 	if h.managed != nil {
-		managedList = h.managed.getManagedList()
+		managedList = h.managed.getManagedList(ctx)
 		managedStats = h.managed.getManagedStatsMap(ctx)
 	}
 	payload := map[string]any{
@@ -464,7 +478,7 @@ func (h *ServersHandler) Mark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	publishInvalidated(h.bus, ResourceServers, "mark-changed")
+	h.bus.PublishInvalidated(events.ResourceServers, "mark-changed")
 	h.writeAll(w, r)
 }
 
@@ -530,7 +544,7 @@ func (h *ServersHandler) SetEnabled(w http.ResponseWriter, r *http.Request) {
 	if h.queries != nil && h.queries.WGServers != nil {
 		h.queries.WGServers.Invalidate(name)
 	}
-	publishInvalidated(h.bus, ResourceServers, "server-enabled-changed")
+	h.bus.PublishInvalidated(events.ResourceServers, "server-enabled-changed")
 	h.writeAll(w, r)
 }
 
@@ -594,7 +608,7 @@ func (h *ServersHandler) Restart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		publishInvalidated(h.bus, ResourceServers, "server-restart")
+		h.bus.PublishInvalidated(events.ResourceServers, "server-restart")
 	}()
 
 	response.Success(w, map[string]any{

@@ -2,66 +2,104 @@ package router
 
 import (
 	"context"
-	"errors"
 
-	"github.com/hoaxisr/awg-manager/internal/tunnel/sysinfo"
+	"github.com/hoaxisr/awg-manager/internal/opkgtun"
+	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
-// maxFakeIPIndex — верхняя граница диапазона индексов OpkgTun, который
-// fakeip-tun сканирует под свой интерфейс (0..9 включительно).
-const maxFakeIPIndex = 9
-
-// ErrFakeIPIndexExhausted возвращается, когда в диапазоне 0..maxFakeIPIndex
-// не осталось свободного индекса OpkgTun.
-var ErrFakeIPIndexExhausted = errors.New("нет свободного OpkgTun-индекса в 0..9")
-
-// allocateFakeIPIndex возвращает низший свободный индекс OpkgTun в диапазоне
-// 0..maxFakeIPIndex, отсутствующий в live, иначе ErrFakeIPIndexExhausted.
+// reserveOpkgTun — номер для режима роутера и резервация, держащая его до
+// записи владения.
 //
-// «Наш» интерфейс определяется НЕ по номеру: эвристика sysinfo (interfaces.go:49)
-// читает 0..9 как external, а awg-manager — 100+. Поэтому caller персистит
-// собственный выбранный индекс отдельно (по персисту, не по номеру). При этом
-// ещё живущий «свой» iface корректно попадает в live и читается как занятый —
-// повторная аллокация его не выдаст.
-func allocateFakeIPIndex(live map[int]bool) (int, error) {
-	for i := 0; i <= maxFakeIPIndex; i++ {
-		if !live[i] {
-			return i, nil
-		}
+// pin ≥ 0 — номер, на который проситель имеет право претендовать (opkgTunPin);
+// отрицательный означает «любой свободный». Пин не гарантия: занятый чужой
+// ЗАЯВЛЕННЫЙ номер пул не отдаст, и тогда режим уедет на другой — о чём
+// вызывающий предупреждает пользователя, потому что permit'ы в политиках
+// закреплены за именем.
+//
+// Собственная запись владения занятости больше не мешает: у обоих режимов и у
+// поставщика один ключ владельца ("router-mode"), и пул отдаёт свой номер по
+// совпадению ключа. Прежде это делалось вычитанием своей записи из состава
+// поставщиков — приём, который ломался на handover: там номер принадлежит
+// ДРУГОМУ режиму, и вычитать было нечего.
+func (s *ServiceImpl) reserveOpkgTun(ctx context.Context, mode string, pin opkgTunPin) (int, *opkgtun.Reservation, error) {
+	self := opkgtun.RouterModeHolder(mode)
+	req := opkgtun.Want(self)
+	switch {
+	case pin.index >= 0 && pin.proven:
+		req = opkgtun.WantPinned(self, pin.index)
+	case pin.index >= 0:
+		// Владение НЕ доказано: номер когда-то был записан за нами, но след на
+		// нём мог остаться и чужой. Строгий пин не перебивает безключевого
+		// держателя — чужую запись NDMS отбирать нельзя, создание интерфейса
+		// поверх неё переписало бы чужие настройки.
+		req = opkgtun.WantPinnedStrict(self, pin.index)
 	}
-	return 0, ErrFakeIPIndexExhausted
+	res, err := s.deps.OpkgTunPool.Reserve(ctx, req)
+	if err != nil {
+		return 0, nil, err
+	}
+	idx := res.Numbers()[0]
+	if c := res.Conflicts(); len(c) > 0 {
+		s.appLog.Warn(mode, tunIfaceName(idx), "спорные номера OpkgTun: "+c.String())
+	}
+	return idx, res, nil
 }
 
-// OpkgTunIndexLister перечисляет занятые индексы OpkgTun из источника NDMS.
+// opkgTunPin — номер, на который режим вправе претендовать, и доказано ли
+// владение следом на нём.
+type opkgTunPin struct {
+	index  int  // −1 — претензии нет
+	proven bool // на номере наш интерфейс, доказано описанием
+}
+
+var noPin = opkgTunPin{index: -1}
+
+// pinFor — номер, на который режим вправе претендовать.
+//
+// Ветка одна, и она про ДОКАЗАННОЕ владение своим прежним номером: запись наша
+// и либо устройства на нём нет вовсе, либо оно наше по описанию. Молчаливый
+// переезд рвёт permit'ы: пользователь закрепил их в политике за конкретным
+// именем, а permit живёт ровно столько, сколько интерфейс, и пересозданием
+// одноимённого не воскресает (стенд 2026-08-18).
+//
+// «Устройства нет» — не то же, что «номер свободен»: запись NDMS переживает
+// удаление устройства, и она могла остаться от ЧУЖОГО интерфейса. Собственная
+// запись настроек доказывает, что номер когда-то был наш, а не что след на нём
+// наш, — поэтому такая претензия идёт СТРОГИМ пином, не перебивающим анонима.
+// Доказанное описанием владение даёт обычный пин: там след точно наш.
+//
+// Транзиентный отказ скана при живом своём устройстве читается как «не знаем» и
+// даёт −1: номер сменится. Это паритет с прежним поведением, и направление
+// безопасное — чужой интерфейс не трогаем.
+func (s *ServiceImpl) pinFor(ctx context.Context, prev *storage.OpkgTunState,
+	live map[int]bool, description string,
+) opkgTunPin {
+	if prev == nil {
+		return noPin
+	}
+	if s.ownsOpkgTun(ctx, tunNDMSName(prev.Index), description) {
+		return opkgTunPin{index: prev.Index, proven: true}
+	}
+	if !live[prev.Index] {
+		// Устройства нет, но запись NDMS его переживает, и она могла остаться
+		// от ЧУЖОГО интерфейса. Претендуем строго.
+		return opkgTunPin{index: prev.Index}
+	}
+	return noPin
+}
+
+// OpkgTunIndexLister перечисляет номера OpkgTun, устройства которых существуют
+// в ядре ПРЯМО СЕЙЧАС. Записи NDMS сюда не входят — они приходят отдельным
+// поставщиком занятости в пуле, потому что запись переживает удаление
+// устройства.
+//
+// Живая половина нужна режимам роутера отдельно от занятости: та же карта
+// отвечает ещё на два вопроса — «жив ли мой прежний интерфейс» и «доказуемо ли
+// он чужой», — и подмешивание туда чужих пинов сломало бы оба.
 //
 // Узкий интерфейс намеренно объявлен в router, а не тянет конкретные типы
 // internal/ndms: router декаплится от ndms через consumer-owned контракты (DIP),
-// как и WANInterfaceLister/IngressResolver. Реальный union (kernel /sys +
-// NDMS-имена) строит адаптер в cmd/awg-manager поверх UnionOpkgTunIndices
-// (Task 1C.2); здесь — только контракт.
+// как и WANInterfaceLister/IngressResolver; здесь — только контракт.
 type OpkgTunIndexLister interface {
 	LiveOpkgTunIndices(ctx context.Context) (map[int]bool, error)
-}
-
-// UnionOpkgTunIndices — pure-ядро union занятых индексов OpkgTun: объединяет
-// kernel-числа из /sys/class/net (sysinfo.ListSystemInterfaces) с индексами,
-// извлечёнными из NDMS system-имён интерфейсов. Вынесено отдельно от адаптера,
-// чтобы покрыть тестом без /sys и без NDMS.
-//
-// Имена из NDMS прогоняются через sysinfo.ExtractInterfaceNumber, которая
-// заякорена (^opkgtun\d+$, ^awgm\d+$, ^awg\d+$): nwg2/Wireguard0/br0 не матчатся
-// и в union не попадут. opkgtun — это именно наш диапазон; awg/awgm семантически
-// не OpkgTun, но их попадание лишь over-count'ит (займём слот зря, не баг) —
-// ложного освобождения занятого индекса не происходит.
-func UnionOpkgTunIndices(sysNums []int, ndmsNames []string) map[int]bool {
-	live := make(map[int]bool)
-	for _, n := range sysNums {
-		live[n] = true
-	}
-	for _, name := range ndmsNames {
-		if num, ok := sysinfo.ExtractInterfaceNumber(name); ok {
-			live[num] = true
-		}
-	}
-	return live
 }

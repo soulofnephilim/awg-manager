@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -167,17 +168,18 @@ func (h *ServersHandler) SetNAT(w http.ResponseWriter, r *http.Request, name str
 	}
 
 	meta, _ := h.settings.GetServerInterfaceMeta(name)
-	wan, err := h.managedSvc.ApplyNATModeToInterface(r.Context(), name, mode, meta.NATStaticWAN)
+	wans, err := h.managedSvc.ApplyNATModeToInterface(r.Context(), name, mode, meta.StaticNATList())
 	if err != nil {
 		response.Error(w, err.Error(), "NAT_FAILED")
 		return
 	}
 	if err := h.settings.UpdateServerInterfaceMeta(name, func(m *storage.ServerInterfaceMeta) error {
 		if mode == "internet-only" {
-			m.NATStaticWAN = wan
+			m.NATStaticWANs = wans
 		} else {
-			m.NATStaticWAN = ""
+			m.NATStaticWANs = nil
 		}
+		m.NATStaticWAN = "" // источник правды теперь список
 		return nil
 	}); err != nil {
 		response.Error(w, err.Error(), "SAVE_FAILED")
@@ -185,7 +187,7 @@ func (h *ServersHandler) SetNAT(w http.ResponseWriter, r *http.Request, name str
 	}
 
 	h.invalidateSystemServerCaches(name)
-	publishInvalidated(h.bus, ResourceServers, "server-nat-changed")
+	h.bus.PublishInvalidated(events.ResourceServers, "server-nat-changed")
 	h.writeAll(w, r)
 }
 
@@ -237,7 +239,7 @@ func (h *ServersHandler) SetPolicy(w http.ResponseWriter, r *http.Request, name 
 	}
 
 	h.invalidateSystemServerCaches(name)
-	publishInvalidated(h.bus, ResourceServers, "server-policy-changed")
+	h.bus.PublishInvalidated(events.ResourceServers, "server-policy-changed")
 	h.writeAll(w, r)
 }
 
@@ -289,6 +291,6 @@ func (h *ServersHandler) SetEndpoint(w http.ResponseWriter, r *http.Request, nam
 		return
 	}
 
-	publishInvalidated(h.bus, ResourceServers, "server-endpoint-changed")
+	h.bus.PublishInvalidated(events.ResourceServers, "server-endpoint-changed")
 	h.writeAll(w, r)
 }

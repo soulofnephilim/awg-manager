@@ -13,8 +13,10 @@
   import { singboxTrafficLive } from '$lib/stores/singboxEngineStats';
   import { formatBytes, formatByteRate } from '$lib/utils/format';
   import { systemInfo } from '$lib/stores/system';
+  import { OPKGTUN_UNSUPPORTED_REASON, opkgTunSupported } from '$lib/utils/opkgTunSupport';
   import { notifications } from '$lib/stores/notifications';
   import { drawerOpen, closeDrawer } from './drawerStore';
+  import { openSourceDrawer } from './sourceDrawerStore';
   import { mode } from './modeStore';
   import DepRow from './DepRow.svelte';
   import IssueRow from './IssueRow.svelte';
@@ -38,6 +40,9 @@
 
   let open = $derived($drawerOpen);
   let s = $derived($status);
+  // Эффективный путь cache.db: при незаданной настройке это может быть
+  // рукописный путь из 00-base.json, который селектор выразить не может.
+  let cacheDbNow = $derived(s?.cacheDbPath ? ` Сейчас: ${s.cacheDbPath}` : '');
   let cfg = $derived($storeSettings);
   let isExpert = $derived($mode === 'expert');
 
@@ -72,6 +77,8 @@
     activeMode ?? pickedMode ?? ($settings?.routingMode === 'policy-tun' ? 'policy-tun' : 'tproxy'),
   );
   let policyTunMode = $derived(targetMode === 'policy-tun');
+  // KeeneticOS 4.x не знает интерфейсов OpkgTun — policy-tun там не поднять.
+  let tunSupported = $derived(opkgTunSupported($systemInfo.data));
 
   // policy-tun-unbound показывает карточка режима (там же ссылка на политики) —
   // в общем списке замечаний он был бы вторым экземпляром той же строки.
@@ -86,6 +93,7 @@
 
   let wanInterfaces = $state<SingboxRouterWANInterface[]>([]);
   let saving = $state(false);
+  let restarting = $state(false);
   let lastError = $state<string | null>(null);
   let wanAutoOverride = $state<WanAutoOverride>(null);
   let wanAuto = $derived(resolveWanAuto(wanAutoOverride, cfg?.wanAutoDetect));
@@ -153,8 +161,25 @@
     }
   });
 
+  // Новичку TPROXY-настройки живут в SourceDrawer (узел «Источник» во FlowGraph);
+  // здесь — сводка и переход, чтобы под выбором режима не было пусто (#730).
+  let sourceSummary = $derived.by(() => {
+    if (cfg?.deviceMode === 'all') return 'Весь LAN-трафик роутера.';
+    const name = (cfg?.policyName ?? '').trim();
+    return name
+      ? `Только устройства политики «${name}».`
+      : 'Политика не выбрана — трафик устройств не обрабатывается.';
+  });
+  function goToSourceSettings() {
+    closeDrawer();
+    openSourceDrawer();
+  }
+
   // ── Engine control ──
   function toggleEngine(turnOn: boolean) {
+    // targetMode может быть policy-tun из сохранённых настроек: на прошивке без
+    // OpkgTun тумблер иначе позвал бы режим, который бэкенд всё равно отвергнет.
+    if (turnOn && targetMode === 'policy-tun' && !tunSupported) return;
     modeSwitch.request(turnOn ? targetMode : 'off');
   }
   function handleToggleClick(_e: MouseEvent) {
@@ -164,15 +189,21 @@
   // при включённом — сразу просим переключение (общий confirm + прогресс).
   function selectMode(m: CaptureMode) {
     if (switchBusy || m === targetMode) return;
+    if (m === 'policy-tun' && !tunSupported) return;
     pickedMode = m;
     if (activeMode !== null) modeSwitch.request(m);
   }
   async function restartEngine(_e: MouseEvent) {
+    if (restarting) return;
+    restarting = true;
     try {
       await api.singboxControl('restart');
       await singboxRouterStore.reloadStatus();
+      notifications.success('Движок перезапущен');
     } catch (e) {
-      console.error('restart failed', e);
+      notifications.error(`Не удалось перезапустить: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      restarting = false;
     }
   }
 
@@ -195,6 +226,11 @@
     wanAutoOverride = override;
     if (patch) void applyPatch(patch);
   }
+  function onCacheLocationChange(e: Event) {
+    const v = (e.currentTarget as HTMLSelectElement).value;
+    if (v === 'flash' || v === 'tmp') void applyPatch({ cacheFileLocation: v });
+  }
+
   function onWanInterfaceChange(e: Event) {
     const action = planSelectWanInterface((e.currentTarget as HTMLSelectElement).value);
     if (!action) return;
@@ -216,6 +252,14 @@
     { value: '30m0s', label: '30 минут' },
     { value: '1h0m0s', label: '1 час' },
     { value: '3h0m0s', label: '3 часа' },
+  ];
+
+  const UDP_NAT_MAX_OPTIONS = [
+    { value: '', label: 'Авто (по памяти)' },
+    { value: '2048', label: '2048' },
+    { value: '4096', label: '4096' },
+    { value: '8192', label: '8192' },
+    { value: '16384', label: '16384' },
   ];
 </script>
 
@@ -255,10 +299,15 @@
           sub="захват трафика через политику доступа Keenetic, без TPROXY-правил"
           tone="accent"
           selected={targetMode === 'policy-tun'}
+          disabled={!tunSupported}
+          title={tunSupported ? undefined : OPKGTUN_UNSUPPORTED_REASON}
           onclick={() => selectMode('policy-tun')}
         />
       </div>
       <p class="hint">Режим FakeIP включается на своей вкладке «Sing-box → FakeIP».</p>
+      {#if !tunSupported}
+        <p class="hint">{OPKGTUN_UNSUPPORTED_REASON}</p>
+      {/if}
 
       {#if showCrashInfo}
         <div class="crash-info">
@@ -328,6 +377,43 @@
       <PolicyTunCard {cfg} status={s} onPatch={(patch) => applyPatch(patch)} />
     {/if}
 
+    <!-- TPROXY у новичка: сводка источника + переход в SourceDrawer. Иначе под
+         выбором режима пусто, тогда как policy-tun показывает свою карточку. -->
+    {#if !policyTunMode && !isExpert && cfg}
+      <section class="sec">
+        <div class="sec-cap">Источник трафика</div>
+        <p class="hint">{sourceSummary}</p>
+        <Button variant="ghost" size="sm" onclick={goToSourceSettings}>Настроить источник →</Button>
+      </section>
+    {/if}
+
+    <!-- Кэш sing-box (issue #842): единственное место настройки, вне expert-гейта —
+         износ флеша касается любого режима с fakeip. -->
+    {#if cfg}
+      <section class="sec">
+        <div class="sec-cap">Кэш sing-box</div>
+        <div class="field">
+          <label class="lbl" for="ed-cache-location">Хранилище cache.db</label>
+          <select
+            id="ed-cache-location"
+            class="inp"
+            value={cfg.cacheFileLocation ?? ''}
+            onchange={onCacheLocationChange}
+          >
+            <!-- Пустое значение — «настройка не задана, путь из 00-base.json»;
+                 показываем, пока оно есть, иначе выбрать «Флеш» было бы нечем.
+                 Повторный выбор пустого отсекает onCacheLocationChange. -->
+            {#if !cfg.cacheFileLocation}
+              <option value="">Не задано — как в 00-base.json</option>
+            {/if}
+            <option value="flash">Флеш роутера (/opt)</option>
+            <option value="tmp">Оперативная память (/tmp)</option>
+          </select>
+        </div>
+        <p class="hint">В RAM записи FakeIP-карты и Clash не изнашивают флеш, но кэш не переживает перезагрузку. Выбор перезаписывает путь cache_file в 00-base.json, включая заданный вручную.{cacheDbNow}</p>
+      </section>
+    {/if}
+
     {#if isExpert && cfg}
       <!-- Источник трафика (deviceMode/policy) — только TPROXY: в policy-tun
            захват задаётся привязкой интерфейса к политике доступа NDMS. -->
@@ -386,6 +472,25 @@
           </div>
         </div>
         <p class="hint">Как долго sing-box держит UDP-сессии активными. Увеличьте если игры или другие UDP-приложения обрываются каждые несколько минут.</p>
+        <div class="field">
+          <label class="lbl" for="ed-udp-nat-max">Потолок UDP-сессий</label>
+          <div class="udp-timeout-row">
+            <select
+              id="ed-udp-nat-max"
+              class="inp"
+              value={cfg.udpNatMax ? String(cfg.udpNatMax) : ''}
+              onchange={(e) => {
+                const v = (e.currentTarget as HTMLSelectElement).value;
+                void applyPatch({ udpNatMax: v ? Number(v) : undefined });
+              }}
+            >
+              {#each UDP_NAT_MAX_OPTIONS as opt (opt.value)}
+                <option value={opt.value}>{opt.label}</option>
+              {/each}
+            </select>
+          </div>
+        </div>
+        <p class="hint">Сколько UDP-сессий движок держит одновременно; при переполнении вытесняется самая старая. Уменьшите на роутере с малой памятью, если sing-box растёт под UDP-нагрузкой.</p>
       </section>
 
       <!-- QoS-маршрутизация (DSCP): onPatch возвращает Promise — карточка
@@ -400,12 +505,12 @@
       <!-- Исключения: порт-пресеты + IP-пресеты (keendns) + ручные порты/подсети -->
       <section class="sec">
         <div class="sec-cap">Исключения</div>
-        <div class="chips">
+        <div class="bypass-presets">
           {#each BYPASS_PRESETS as p (p.id)}
             {@const active = (cfg.bypassPresets ?? []).includes(p.id)}
-            <button type="button" class="chip" class:active onclick={() => togglePreset(p.id)}>
-              <span class="chip-label">{p.label}</span>
-              <span class="chip-desc">{p.desc}</span>
+            <button type="button" class="bypass-preset" class:active onclick={() => togglePreset(p.id)}>
+              <span class="preset-label">{p.label}</span>
+              <span class="preset-desc">{p.desc}</span>
             </button>
           {/each}
         </div>
@@ -444,7 +549,7 @@
         <Button variant={captureOn ? 'danger' : 'primary'} size="sm" fullWidth disabled={switchBusy} onclick={handleToggleClick}>
           {captureOn ? 'Выключить' : 'Включить'}
         </Button>
-        <Button variant="ghost" size="sm" fullWidth onclick={restartEngine}>Перезапустить</Button>
+        <Button variant="ghost" size="sm" fullWidth loading={restarting} onclick={restartEngine}>Перезапустить</Button>
       </div>
       {#if isExpert}
         <span class="save-status" class:err={lastError}>
@@ -557,15 +662,18 @@
   .udp-timeout-row { display: flex; gap: 6px; }
   .udp-timeout-row .inp { flex: 1; }
   .hint { margin: 0; font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
-  .chips { display: flex; flex-direction: column; gap: 6px; }
-  .chip {
+  .bypass-presets { display: flex; flex-direction: column; gap: 6px; }
+  /* Не .chip: имя занято утилитой Skeleton и app.css (nowrap + центровка). */
+  .bypass-preset {
     text-align: left; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-tertiary);
     border: 1px solid var(--border); cursor: pointer; font-family: inherit; color: inherit;
     display: flex; flex-direction: column; gap: 2px;
+    transition: background var(--t-fast) ease, color var(--t-fast) ease, border-color var(--t-fast) ease;
   }
-  .chip.active { background: var(--accent-soft); border-color: var(--accent); }
-  .chip-label { font-size: 12.5px; font-weight: 600; }
-  .chip-desc { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+  .bypass-preset:hover { color: var(--color-text-primary); border-color: var(--color-border-hover); }
+  .bypass-preset.active { background: var(--accent-soft); border-color: var(--accent); }
+  .preset-label { font-size: 12.5px; font-weight: 600; }
+  .preset-desc { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
 
   .footer-actions { display: flex; flex-direction: column; gap: 6px; width: 100%; }
   .footer-btns {

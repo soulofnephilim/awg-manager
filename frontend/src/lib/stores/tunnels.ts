@@ -28,6 +28,7 @@ import type {
 	SystemTunnel,
 	DeleteResult,
 	MonitoringSnapshot,
+	ImportConfRequest,
 } from '$lib/types';
 import type { TunnelTrafficEvent } from '$lib/api/events';
 
@@ -46,10 +47,17 @@ async function fetchTunnels(): Promise<TunnelsSnapshot> {
 
 const basePolling: PollingStore<TunnelsSnapshot> = createPollingStore<TunnelsSnapshot>(
 	fetchTunnels,
-	{ staleTime: 5_000, pollInterval: 5_000 }
+	// Таймер оставлен МЕДЛЕННЫМ, а не снят: событие tunnel:traffic держит снимок
+	// свежим для NDMS-интерфейсов, но у kernel-туннелей sysfs-поллер шлёт его без
+	// lastHandshake — штамп рукопожатия обновить больше нечем. 30 с вместо 5 с.
+	{ staleTime: 5_000, pollInterval: 30_000 }
 );
 
 registerStore('tunnels', basePolling);
+// Статус ping-check (failCount/restartCount, оранжевый индикатор) живёт в этом же
+// снимке, а публикуется под СВОИМ ключом. Без второй регистрации он оживал только
+// фоновым опросом, которого у стора больше нет.
+registerStore('pingcheck', basePolling);
 
 // ─────────────────────────────────────────────
 // Operation guard (prevents double-fire of the same mutation)
@@ -119,14 +127,42 @@ function clearConnectivity(): void {
 // Returns null if no match (transient / unrelated iface).
 // ─────────────────────────────────────────────
 function updateTraffic(data: TunnelTrafficEvent): string | null {
-	const snap = get(basePolling).data;
+	// peek, а не get: get(store) подписывается и отписывается, а это на
+	// переходе subCount 0→1 запускает doFetch() по истёкшему staleTime (5 с).
+	// updateTraffic зовётся на КАЖДОЕ событие tunnel:traffic, то есть примерно
+	// раз в 5 с на туннель при любой открытой странице, — и на странице, не
+	// подписанной на этот стор, заглядывание в снимок оборачивалось полным
+	// GET /api/tunnels/all мимо всех гейтов, включая скрытую вкладку.
+	const snap = basePolling.peek().data;
 	const list = snap?.tunnels ?? [];
-	for (const t of list) {
-		if (t.id === data.id || t.ndmsName === data.id || t.interfaceName === data.id) {
-			return t.id;
-		}
+	let resolved: string | null = null;
+	let patched = false;
+
+	const tunnels = list.map((t) => {
+		if (t.id !== data.id && t.ndmsName !== data.id && t.interfaceName !== data.id) return t;
+		resolved = t.id;
+
+		// Поля события кладём В СНИМОК, а не только резолвим по нему id.
+		// Карточка показывает штамп рукопожатия и суммарные rx/tx именно
+		// отсюда, а ресурс `tunnels` публикуется только на мутациях и сменах
+		// состояния — пока туннель просто работает, снимок не обновляет никто.
+		// Событие приходит каждые 5 с и несёт ровно эти поля, так что
+		// опрашивать бэкенд ради них не нужно.
+		//
+		// Отсутствующее поле НЕ затирает прежнее значение: sysfs-поллер
+		// kernel-туннелей (internal/traffic/sysfs_poller.go) шлёт событие без
+		// lastHandshake, и обнулять штамп по нему нельзя.
+		const next = { ...t, rxBytes: data.rxBytes, txBytes: data.txBytes };
+		if (data.lastHandshake) next.lastHandshake = data.lastHandshake;
+		if (data.startedAt) next.startedAt = data.startedAt;
+		patched = true;
+		return next;
+	});
+
+	if (patched && snap) {
+		basePolling.applyMutationResponse({ ...snap, tunnels });
 	}
-	return null;
+	return resolved;
 }
 
 // ─────────────────────────────────────────────
@@ -197,12 +233,8 @@ async function restart(id: string): Promise<void> {
 	}
 }
 
-async function importConfig(
-	content: string,
-	name?: string,
-	backend?: string
-): Promise<CreateResult> {
-	const tunnel = (await api.importConfig(content, name, backend)) as CreateResult;
+async function importConfig(req: ImportConfRequest): Promise<CreateResult> {
+	const tunnel = (await api.importConfig(req)) as CreateResult;
 	basePolling.invalidate();
 	return tunnel;
 }
@@ -237,6 +269,7 @@ export interface TunnelsStore extends PollingStore<TunnelsSnapshot> {
 
 export const tunnels: TunnelsStore = {
 	subscribe: basePolling.subscribe,
+	peek: basePolling.peek,
 	refetch: basePolling.refetch,
 	invalidate: basePolling.invalidate,
 	applyMutationResponse: basePolling.applyMutationResponse,

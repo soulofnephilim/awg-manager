@@ -6,27 +6,19 @@ import (
 )
 
 // ApplyNATModeToInterface applies a NAT mode to any NDMS WireGuard interface.
-// prevWAN is the stored WAN iface for tearing down internet-only static NAT.
-func (s *Service) ApplyNATModeToInterface(ctx context.Context, ifaceName, mode, prevWAN string) (string, error) {
+// prevWANs — сохранённые выходы для teardown static-NAT режима internet-only.
+func (s *Service) ApplyNATModeToInterface(ctx context.Context, ifaceName, mode string, prevWANs []string) ([]string, error) {
 	switch mode {
 	case "full", "internet-only", "none":
 	default:
-		return "", fmt.Errorf("неизвестный NAT-режим: %q", mode)
+		return nil, fmt.Errorf("неизвестный NAT-режим: %q", mode)
 	}
-	return s.applyNATModeRaw(ctx, ifaceName, mode, prevWAN)
+	return s.applyNATModeRaw(ctx, ifaceName, mode, prevWANs)
 }
 
 // ApplyLANSegmentsToInterface sets LAN segment ACL for any WireGuard-like interface.
 func (s *Service) ApplyLANSegmentsToInterface(ctx context.Context, iface, addr, mask string, segments []string) error {
 	return s.applyLANSegmentsRaw(ctx, iface, addr, mask, segments)
-}
-
-// DefaultGatewayNDMSInterface returns the NDMS id of the current default-route WAN.
-func (s *Service) DefaultGatewayNDMSInterface(ctx context.Context) (string, error) {
-	if s.queries == nil || s.queries.Routes == nil {
-		return "", fmt.Errorf("routes not wired")
-	}
-	return s.queries.Routes.GetDefaultGatewayInterface(ctx)
 }
 
 // ApplyPolicyToInterface sets or clears the ip hotspot policy on an interface.

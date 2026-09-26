@@ -33,8 +33,11 @@ type HookWANModel interface {
 // tunnel cards without a browser refresh.
 type TunnelHookInvalidator func(ctx context.Context)
 
-// ProxyClientAutostart resumes FreeTurn/WDTT clients with Enabled==true.
-type ProxyClientAutostart func(reason string)
+// ProxyRuntimeNudge подталкивает прокси-рантайм: пока посев не состоялся,
+// повторяет боот, после — будит воркеров. Зовётся по WAN UP: холодный старт
+// роутера доходит до посева раньше, чем оживает RCI, и без повторного вызова
+// инстансы не поднялись бы вовсе.
+type ProxyRuntimeNudge func(reason string)
 
 // HookHandler handles NDM hook events.
 type HookHandler struct {
@@ -43,7 +46,8 @@ type HookHandler struct {
 	dispatcher     HookDispatcher // may be nil until SetDispatcher is called
 	wanModel       HookWANModel   // may be nil until SetWANModel is called
 	refreshTunnels TunnelHookInvalidator
-	proxyAutostart ProxyClientAutostart
+	proxyNudge     ProxyRuntimeNudge
+	endpointNudge  func()
 	log            *logging.ScopedLogger
 	wanLog         *logging.ScopedLogger
 	// selfCreateGate counts in-flight awg-manager-initiated NDMS interface
@@ -100,10 +104,19 @@ func (h *HookHandler) SetTunnelRefresher(fn TunnelHookInvalidator) {
 	h.refreshTunnels = fn
 }
 
-// SetProxyClientAutostart wires a callback to resume FreeTurn/WDTT clients
-// when WAN comes up (cold boot may have started them before DNS was ready).
-func (h *HookHandler) SetProxyClientAutostart(fn ProxyClientAutostart) {
-	h.proxyAutostart = fn
+// SetProxyRuntimeNudge wires the proxy-runtime callback fired on WAN up:
+// retry of a seed that failed against a not-yet-alive RCI, and a wake-up for
+// the workers of an already booted runtime.
+func (h *HookHandler) SetProxyRuntimeNudge(fn ProxyRuntimeNudge) {
+	h.proxyNudge = fn
+}
+
+// SetEndpointGuardNudge подключает внеочередной проход endpoint-стража.
+// Повод — ifipchanged: адрес WAN сменился, и адрес сервера за DDNS-именем
+// мог смениться заодно (у провайдера это одно событие). Ждать тика стража
+// незачем — лишний проход дёшев, адрес он меняет только на смену резолва.
+func (h *HookHandler) SetEndpointGuardNudge(fn func()) {
+	h.endpointNudge = fn
 }
 
 // HandleNDMS is the unified hook endpoint. The shared forwarder script
@@ -152,9 +165,10 @@ func (h *HookHandler) HandleNDMS(w http.ResponseWriter, r *http.Request) {
 		Layer:      r.PostForm.Get("layer"),
 		Level:      r.PostForm.Get("level"),
 		Address:    r.PostForm.Get("address"),
-		Up:         r.PostForm.Get("up") == "1" || r.PostForm.Get("up") == "true",
-		Connected:  r.PostForm.Get("connected") == "1" || r.PostForm.Get("connected") == "true",
 	}
+	// up/connected форвардер тоже присылает, и мы их НЕ разбираем: состояние
+	// линка берётся из iflayerchanged, а этим полям доверять нельзя
+	// (InterfaceStore.OnIPChanged). Лишние поля формы безвредны.
 
 	switch event.Type {
 	case events.EventIfLayerChanged, events.EventIfCreated,
@@ -168,6 +182,13 @@ func (h *HookHandler) HandleNDMS(w http.ResponseWriter, r *http.Request) {
 	// 1) Enqueue into Dispatcher for cache invalidation (async, non-blocking).
 	if h.dispatcher != nil {
 		h.dispatcher.Enqueue(event)
+	}
+
+	// 1a) Смена адреса интерфейса — повод перепроверить DDNS-имена: страж
+	// пройдётся вне очереди. Вызов неблокирующий (будит чужую горутину), так
+	// что ответ на хук он не задерживает.
+	if event.Type == events.EventIfIPChanged && h.endpointNudge != nil {
+		h.endpointNudge()
 	}
 
 	// 1b) On interface create/destroy, rebroadcast the tunnel list so
@@ -256,10 +277,11 @@ func (h *HookHandler) handleWANLayerEvent(e events.Event) {
 		}
 	}
 
-	// Автостарт FreeTurn/WDTT не зависит от оркестратора — поднимаем до
-	// его гарда, иначе в конфигурации без orch коллбэк не сработает.
-	if up && changed && h.proxyAutostart != nil {
-		go h.proxyAutostart("wan-up")
+	// Прокси-рантайм не зависит от оркестратора — будим до его гарда, иначе в
+	// конфигурации без orch коллбэк не сработает. Горутиной: ретрай боота
+	// ходит в RCI и держал бы ответ на хук.
+	if up && changed && h.proxyNudge != nil {
+		go h.proxyNudge("wan-up")
 	}
 
 	if h.orch == nil {

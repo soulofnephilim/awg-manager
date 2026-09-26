@@ -1,3 +1,18 @@
+<script module lang="ts">
+    // Стек открытых модалок в порядке открытия: последняя — верхняя.
+    // Нужен потому, что слушатель Esc висит на window вне `{#if open}`
+    // и событие приходит КАЖДОЙ смонтированной модалке разом: без стека
+    // Esc поверх пикера закрывал бы и пикер, и мастер под ним.
+    const openStack: symbol[] = [];
+
+    // Последний Esc, который уже обработала какая-то модалка. Доверенное
+    // событие Svelte флашит СИНХРОННО, прямо внутри диспатча: подтверждение,
+    // поднятое верхней модалкой, успевает смонтироваться и само стать верхним
+    // раньше, чем событие дойдёт до его window-слушателя, — и закрывает себя
+    // тем же нажатием (F426). Пометка события обрывает эту цепочку.
+    let handledEscape: Event | null = null;
+</script>
+
 <script lang="ts">
     import type { Snippet } from 'svelte';
     import ConfirmModal from './ConfirmModal.svelte';
@@ -9,7 +24,8 @@
         /** When `fill`, body does not scroll — children manage their own scroll regions. */
         bodyLayout?: 'default' | 'fill';
         onclose: () => void;
-        children: Snippet;
+        /** Omitted = no body: the section is skipped so it can't leave an empty padded strip. */
+        children?: Snippet;
         actions?: Snippet;
         /**
          * Close the modal when the user clicks the dimmed backdrop.
@@ -74,7 +90,10 @@
 
     function handleKeydown(e: KeyboardEvent) {
         if (e.key === 'Escape') {
+            if (handledEscape === e) return; // этот Esc уже обработан
+            if (openStack[openStack.length - 1] !== instanceId) return; // не верхняя
             if (confirmOpen) return; // ConfirmModal owns Esc while open
+            handledEscape = e;
             attemptClose();
         }
     }
@@ -90,6 +109,18 @@
 
     $effect(() => {
         if (!open) confirmOpen = false;
+    });
+
+    // Снятие со стека — в teardown эффекта, поэтому размонтирование открытой
+    // модалки (её вырезали из разметки) учитывается наравне с закрытием.
+    const instanceId = Symbol('modal');
+    $effect(() => {
+        if (!open) return;
+        openStack.push(instanceId);
+        return () => {
+            const i = openStack.indexOf(instanceId);
+            if (i !== -1) openStack.splice(i, 1);
+        };
     });
 
     function handleBackdropPointerDown(e: PointerEvent) {
@@ -162,13 +193,15 @@
                 </button>
             </header>
 
-            <section
-                class="modal-body"
-                class:modal-body-fill={bodyLayout === 'fill'}
-                style={bodyMinHeight ? `min-height: ${bodyMinHeight}` : undefined}
-            >
-                {@render children()}
-            </section>
+            {#if children}
+                <section
+                    class="modal-body"
+                    class:modal-body-fill={bodyLayout === 'fill'}
+                    style={bodyMinHeight ? `min-height: ${bodyMinHeight}` : undefined}
+                >
+                    {@render children()}
+                </section>
+            {/if}
 
             {#if actions}
                 <footer class="modal-footer">

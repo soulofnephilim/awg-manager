@@ -6,21 +6,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 )
 
 // StatusPublisher is the minimal SSE surface the watchdog needs. Satisfied
-// by *events.Bus — same pattern used by DelayChecker to keep the singbox
-// package independent of the events import.
+// by *events.Bus; тесты подставляют свой фейк.
 type StatusPublisher interface {
 	Publish(eventType string, data any)
 }
 
-const (
-	defaultWatchdogInterval  = 30 * time.Second
-	eventResourceInvalidated = "resource:invalidated"
-	resourceSingboxStatus    = "singbox.status"
-)
+const defaultWatchdogInterval = 30 * time.Second
 
 // Watchdog periodically verifies that sing-box is running whenever the
 // on-disk config expects at least one tunnel to be up, restarting the
@@ -131,8 +127,11 @@ func (w *Watchdog) runOrphanSweep() {
 
 // publishIfFlipped emits a resource-invalidation hint only when the running
 // state actually changes, so normal ticks don't flood the SSE channel.
-// First-ever tick (prev == -1) is treated as "initial sync" and suppressed
-// — the UI will learn the state from its regular poll of /singbox/status.
+// First-ever tick (prev == -1) is treated as "initial sync" and suppressed:
+// на старте показывать нечего — состояние ещё никто не видел. Прежнее
+// обоснование ссылалось на «регулярный опрос /singbox/status», а его больше
+// нет; подавление держится на том, что стор делает выборку при подписке, то
+// есть панель узнаёт состояние при открытии, а не от этого события.
 func (w *Watchdog) publishIfFlipped(running bool) {
 	cur := int32(0)
 	if running {
@@ -145,8 +144,21 @@ func (w *Watchdog) publishIfFlipped(running bool) {
 	if w.pub == nil {
 		return
 	}
-	w.pub.Publish(eventResourceInvalidated, map[string]any{
-		"resource": resourceSingboxStatus,
-		"reason":   "watchdog",
-	})
+	events.PublishInvalidatedTo(w.pub, events.ResourceSingboxStatus, "watchdog")
+	// Снимок туннелей несёт живое `running`, а публикуется только на НАШИХ
+	// мутациях — карточки оставались «работает» после смерти движка, пока
+	// пилюля статуса показывала «остановлен».
+	//
+	// Публикуем ИМЕННО ОТСЮДА, а не из пути выхода процесса: этот ключ слушают
+	// не только сторы фронта (awgoutbounds переписывает файл выходов,
+	// deviceproxy гоняет полный Reconcile с разбором config.d), а сторож
+	// срабатывает только на СМЕНЕ живости. В крэш-лупе это даёт одну
+	// публикацию, а не по одной на каждый перезапуск.
+	events.PublishInvalidatedTo(w.pub, events.ResourceSingboxTunnels, "watchdog")
+	// По той же причине — карточка «Активный туннель» прокси для устройств:
+	// её `alive` это живость движка, а ключ deviceproxy.runtime публиковался
+	// только на НАШИХ мутациях. Из-за этого карточке пришлось держать таймер
+	// опроса (F355); публикация отсюда его заменяет и стоит столько же, сколько
+	// соседняя строка — сторож срабатывает только на СМЕНЕ живости (F364).
+	events.PublishInvalidatedTo(w.pub, events.ResourceDeviceProxyRuntime, "watchdog")
 }

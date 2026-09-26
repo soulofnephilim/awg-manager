@@ -136,7 +136,7 @@ func TestSettingsStore_SaveAndLoad(t *testing.T) {
 	settings.PingCheck.Defaults.Interval = 60
 	settings.Server.Port = 3333
 
-	if err := store.Save(settings); err != nil {
+	if err := store.save(settings); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
@@ -176,7 +176,7 @@ func TestSettingsStore_DisableMemorySaving(t *testing.T) {
 
 	// Toggle and save
 	settings.DisableMemorySaving = true
-	if err := store.Save(settings); err != nil {
+	if err := store.save(settings); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
@@ -551,7 +551,7 @@ func TestSettingsStore_GetSingboxLogLevel_Normalized(t *testing.T) {
 	}
 
 	s.Logging.SingboxLogLevel = " WARN "
-	if err := store.Save(s); err != nil {
+	if err := store.save(s); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	if got := store.GetSingboxLogLevel(); got != "warn" {
@@ -559,7 +559,7 @@ func TestSettingsStore_GetSingboxLogLevel_Normalized(t *testing.T) {
 	}
 
 	s.Logging.SingboxLogLevel = "verbose"
-	if err := store.Save(s); err != nil {
+	if err := store.save(s); err != nil {
 		t.Fatalf("save invalid: %v", err)
 	}
 	if got := store.GetSingboxLogLevel(); got != DefaultSingboxLogLevel {
@@ -658,113 +658,73 @@ func TestSettingsStore_SetSingboxCreateNDMSProxy_PersistsAtomic(t *testing.T) {
 	}
 }
 
-// TestSetFakeIPState_PersistsAndClears verifies the single-writer setter
-// persists the fakeip-tun state across a reload from disk, that nil clears it,
-// and that it errors when settings are not loaded.
-func TestSetFakeIPState_PersistsAndClears(t *testing.T) {
-	tmpDir := t.TempDir()
-	store := NewSettingsStore(tmpDir)
+// TestSetOpkgTunState_PersistsAndClears — единая запись владения OpkgTun:
+// персист, перечитывание свежим стором, очистка nil'ом, ошибка на незагруженном.
+func TestSetOpkgTunState_PersistsAndClears(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSettingsStore(dir)
 	if _, err := store.Load(); err != nil {
-		t.Fatalf("load: %v", err)
-	}
-
-	want := &FakeIPState{Provisioned: true, Index: 5, Inet4Range: "10.128.0.0/10", Inet6Range: "3f80::/10"}
-	if err := store.SetFakeIPState(want); err != nil {
-		t.Fatalf("set: %v", err)
-	}
-
-	// Re-open from disk to confirm persistence.
-	fresh := NewSettingsStore(tmpDir)
-	s, err := fresh.Load()
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if s.FakeIP == nil {
-		t.Fatalf("FakeIP = nil after set, want %+v", want)
-	}
-	if *s.FakeIP != *want {
-		t.Errorf("persisted = %+v, want %+v", *s.FakeIP, *want)
-	}
-
-	// nil clears it, and the cleared state survives a reload.
-	if err := fresh.SetFakeIPState(nil); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
-	cleared := NewSettingsStore(tmpDir)
-	c, err := cleared.Load()
-	if err != nil {
-		t.Fatalf("reload after clear: %v", err)
-	}
-	if c.FakeIP != nil {
-		t.Errorf("FakeIP = %+v after clear, want nil", *c.FakeIP)
-	}
-
-	// Errors when settings are not loaded.
-	if err := (&SettingsStore{}).SetFakeIPState(want); err == nil {
-		t.Error("SetFakeIPState on unloaded store: want error, got nil")
-	}
-}
-
-func TestSetFakeIPState_Persists(t *testing.T) {
-	tmpDir := t.TempDir()
-	s := NewSettingsStore(tmpDir)
-	if _, err := s.Load(); err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if err := s.SetFakeIPState(&FakeIPState{Provisioned: true, Index: 2}); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := s.Load()
-	if got.FakeIP == nil || !got.FakeIP.Provisioned || got.FakeIP.Index != 2 {
-		t.Fatalf("fakeip state not persisted: %+v", got.FakeIP)
+	want := &OpkgTunState{
+		Mode: OpkgTunModePolicyTun, Provisioned: false, Index: 3,
+		PolicyTun: &OpkgTunPolicyData{NATSegments: []PolicyTunNATSegment{{Name: "Guest", PriorMode: "dynamic"}}},
+	}
+	if err := store.SetOpkgTunState(want); err != nil {
+		t.Fatal(err)
+	}
+	fresh := NewSettingsStore(dir)
+	s, err := fresh.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.OpkgTun == nil || s.OpkgTun.Mode != OpkgTunModePolicyTun || s.OpkgTun.Index != 3 ||
+		s.OpkgTun.Provisioned || s.OpkgTun.PolicyTun == nil || len(s.OpkgTun.PolicyTun.NATSegments) != 1 {
+		t.Fatalf("persisted = %+v", s.OpkgTun)
+	}
+	if err := fresh.SetOpkgTunState(nil); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := NewSettingsStore(dir).Load()
+	if c.OpkgTun != nil {
+		t.Fatalf("OpkgTun = %+v after clear, want nil", c.OpkgTun)
+	}
+	if err := (&SettingsStore{}).SetOpkgTunState(want); err == nil {
+		t.Error("unloaded store: want error")
 	}
 }
 
-// TestSetPolicyTunState_PersistsAndClears mirrors TestSetFakeIPState_PersistsAndClears
-// for the policy-tun single-writer setter.
-func TestSetPolicyTunState_PersistsAndClears(t *testing.T) {
-	tmpDir := t.TempDir()
-	store := NewSettingsStore(tmpDir)
+// TestSetOpkgTunNATSegments_PayloadOnly — payload-сеттер не трогает ownership
+// (Mode/Provisioned/Index), nil/пустой снимает payload, без записи — ошибка.
+func TestSetOpkgTunNATSegments_PayloadOnly(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSettingsStore(dir)
 	if _, err := store.Load(); err != nil {
-		t.Fatalf("load: %v", err)
+		t.Fatal(err)
 	}
-
-	want := &PolicyTunState{
-		Provisioned: true,
-		Index:       3,
-		NATSegments: []PolicyTunNATSegment{{Name: "Home", PriorMode: "dynamic"}},
+	if err := store.SetOpkgTunNATSegments([]PolicyTunNATSegment{{Name: "Guest", PriorMode: "none"}}); err == nil {
+		t.Fatal("no ownership record: want error")
 	}
-	if err := store.SetPolicyTunState(want); err != nil {
-		t.Fatalf("set: %v", err)
+	if err := store.SetOpkgTunState(&OpkgTunState{Mode: OpkgTunModePolicyTun, Provisioned: true, Index: 2}); err != nil {
+		t.Fatal(err)
 	}
-
-	fresh := NewSettingsStore(tmpDir)
-	s, err := fresh.Load()
-	if err != nil {
-		t.Fatalf("reload: %v", err)
+	if err := store.SetOpkgTunNATSegments([]PolicyTunNATSegment{{Name: "Guest", PriorMode: "none"}}); err != nil {
+		t.Fatal(err)
 	}
-	if s.PolicyTun == nil {
-		t.Fatalf("PolicyTun = nil after set, want %+v", want)
+	s, _ := NewSettingsStore(dir).Load()
+	if s.OpkgTun == nil || !s.OpkgTun.Provisioned || s.OpkgTun.Index != 2 ||
+		s.OpkgTun.Mode != OpkgTunModePolicyTun {
+		t.Fatalf("ownership clobbered: %+v", s.OpkgTun)
 	}
-	if !s.PolicyTun.Provisioned || s.PolicyTun.Index != 3 || len(s.PolicyTun.NATSegments) != 1 ||
-		s.PolicyTun.NATSegments[0] != want.NATSegments[0] {
-		t.Errorf("persisted = %+v, want %+v", *s.PolicyTun, *want)
+	if s.OpkgTun.PolicyTun == nil || len(s.OpkgTun.PolicyTun.NATSegments) != 1 {
+		t.Fatalf("payload = %+v", s.OpkgTun.PolicyTun)
 	}
-
-	if err := fresh.SetPolicyTunState(nil); err != nil {
-		t.Fatalf("clear: %v", err)
+	if err := store.SetOpkgTunNATSegments(nil); err != nil {
+		t.Fatal(err)
 	}
-	cleared := NewSettingsStore(tmpDir)
-	c, err := cleared.Load()
-	if err != nil {
-		t.Fatalf("reload after clear: %v", err)
-	}
-	if c.PolicyTun != nil {
-		t.Errorf("PolicyTun = %+v after clear, want nil", *c.PolicyTun)
-	}
-
-	if err := (&SettingsStore{}).SetPolicyTunState(want); err == nil {
-		t.Error("SetPolicyTunState on unloaded store: want error, got nil")
+	s2, _ := NewSettingsStore(dir).Load()
+	if s2.OpkgTun.PolicyTun != nil {
+		t.Fatalf("payload not cleared: %+v", s2.OpkgTun.PolicyTun)
 	}
 }
 
@@ -838,5 +798,143 @@ func TestMigrateToV27_PreservesExistingMode(t *testing.T) {
 	}
 	if s.SingboxRouter.RoutingMode != "fakeip-tun" {
 		t.Fatalf("existing routingMode must be preserved, got %q", s.SingboxRouter.RoutingMode)
+	}
+}
+
+// Аксессор, через который настройка доезжает до оператора sing-box: если он
+// начнёт врать пустой строкой, адрес bootstrap молча перестанет применяться.
+func TestSettingsStore_GetSingboxBootstrapDNS(t *testing.T) {
+	tmp := t.TempDir()
+	store := NewSettingsStore(tmp)
+	if _, err := store.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := store.GetSingboxBootstrapDNS(); got != "" {
+		t.Errorf("по умолчанию = %q, want пусто", got)
+	}
+
+	settings, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	settings.SingboxBootstrapDNS = "8.8.8.8"
+	if err := store.save(settings); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if got := store.GetSingboxBootstrapDNS(); got != "8.8.8.8" {
+		t.Errorf("GetSingboxBootstrapDNS = %q, want 8.8.8.8", got)
+	}
+}
+
+// TestSetOpkgTunState_CopyOnWrite — стор публикует КОПИЮ записи владения, а не
+// указатель вызывающего: мутация объекта после вызова не должна доезжать до
+// кэша (его параллельно маршалят читатели без нашего лока).
+func TestSetOpkgTunState_CopyOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSettingsStore(dir)
+	if _, err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	st := &OpkgTunState{Mode: OpkgTunModePolicyTun, Index: 1}
+	if err := store.SetOpkgTunState(st); err != nil {
+		t.Fatal(err)
+	}
+	st.Index = 99
+	st.Provisioned = true
+
+	got, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OpkgTun == nil || got.OpkgTun.Index != 1 || got.OpkgTun.Provisioned {
+		t.Fatalf("cache = %+v, want Index=1 Provisioned=false (мутация вызывающего доехала до кэша)", got.OpkgTun)
+	}
+}
+
+// API-ключ читается тем же полем, которым записан: разъезд Get/Set здесь —
+// это молча неработающая авторизация по ключу (запрос падает в проверку
+// сессии, будто ключа нет вовсе).
+func TestSettingsStore_ApiKeyRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSettingsStore(dir)
+	if _, err := store.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := store.SetApiKey("k-77"); err != nil {
+		t.Fatalf("SetApiKey: %v", err)
+	}
+	if got := store.GetApiKey(); got != "k-77" {
+		t.Fatalf("GetApiKey = %q, want %q", got, "k-77")
+	}
+	// Ленивый Load: свежий стор над тем же каталогом читает ключ с диска.
+	if got := NewSettingsStore(dir).GetApiKey(); got != "k-77" {
+		t.Fatalf("GetApiKey свежего стора = %q, want %q", got, "k-77")
+	}
+	// Пустой каталог — пустой ключ, а не паника на незагруженном сторе.
+	if got := NewSettingsStore(t.TempDir()).GetApiKey(); got != "" {
+		t.Fatalf("GetApiKey без настроек = %q, want пусто", got)
+	}
+}
+
+// Действующий адрес зеркала Amnezia: на свежей установке правило отдаёт
+// непустой дефолт, хотя в самих настройках поле пустое (дефолт в файле
+// перестал бы ротироваться с релизом); после записи своего адреса — свой.
+func TestEffectiveAmneziaMirrorURL(t *testing.T) {
+	store := NewSettingsStore(t.TempDir())
+	settings, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if settings.AmneziaPremiumMirrorURL != "" {
+		t.Fatalf("свежая установка несёт адрес зеркала: %q", settings.AmneziaPremiumMirrorURL)
+	}
+	if got := EffectiveAmneziaMirrorURL(settings.AmneziaPremiumMirrorURL); got != DefaultAmneziaMirrorURL {
+		t.Fatalf("действующий адрес = %q, want %q", got, DefaultAmneziaMirrorURL)
+	}
+
+	// Домен из зарезервированного .test (RFC 2606) — репозиторий публичный.
+	const custom = "https://mirror.test/cp?m-path=/ru"
+	if err := store.Update(func(cur *Settings) error {
+		cur.AmneziaPremiumMirrorURL = custom
+		return nil
+	}); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	snap, err := store.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if got := EffectiveAmneziaMirrorURL(snap.AmneziaPremiumMirrorURL); got != custom {
+		t.Fatalf("действующий адрес = %q, want %q", got, custom)
+	}
+}
+
+// Непригодное хранимое значение считается отсутствующим: действующим
+// адресом становится дефолт.
+//
+// Значение из одних пробелов — то же «пусто», записанное неаккуратно.
+// Испорченный адрес (downgrade, ручная правка) нельзя ни отдать клиенту CP,
+// ни эхо-ить в ответ настроек: страница шлёт тело ответа целиком, и мусор
+// вернулся бы PATCH-ем, получая 400 на каждое сохранение.
+func TestEffectiveAmneziaMirrorURL_UnusableStoredMeansDefault(t *testing.T) {
+	cases := []struct {
+		name   string
+		stored string
+		want   string
+	}{
+		{"одни пробелы", "   ", DefaultAmneziaMirrorURL},
+		{"не адрес вовсе", "не адрес вовсе", DefaultAmneziaMirrorURL},
+		{"не https", "http://mirror.test/cp", DefaultAmneziaMirrorURL},
+		{"с user:pass@", "https://u-test:p-test@mirror.test/cp", DefaultAmneziaMirrorURL},
+		// Годный адрес пробелы по краям не портят — их срезает то же
+		// правило, что делает «одни пробелы» пустым значением.
+		{"годный адрес в пробелах", "  https://mirror.test/cp  ", "https://mirror.test/cp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveAmneziaMirrorURL(tc.stored); got != tc.want {
+				t.Fatalf("действующий адрес = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

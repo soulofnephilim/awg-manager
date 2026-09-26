@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strconv"
 	"time"
 )
 
@@ -8,17 +9,21 @@ import (
 type EventType int
 
 const (
-	EventBoot            EventType = iota // Router boot — start all enabled
-	EventReconnect                        // Daemon restart — restore state
-	EventStart                            // User clicks Start
-	EventStop                             // User clicks Stop
-	EventRestart                          // User clicks Restart
-	EventDelete                           // User deletes tunnel
-	EventWANUp                            // WAN interface came up
-	EventWANDown                          // WAN interface went down
-	EventNDMSHook                         // NDMS iflayerchanged.d hook
-	EventPingCheckFailed                  // Connectivity loss detected
-	EventQuiesce                          // Stop running tunnels without disabling (backup/restore)
+	EventBoot      EventType = iota // Router boot — start all enabled
+	EventReconnect                  // Daemon restart — restore state
+	EventStart                      // User clicks Start
+	EventStop                       // User clicks Stop
+	EventRestart                    // User clicks Restart
+	EventDelete                     // User deletes tunnel
+	EventWANUp                      // WAN interface came up
+	EventWANDown                    // WAN interface went down
+	EventNDMSHook                   // NDMS iflayerchanged.d hook
+	EventQuiesce                    // Stop running tunnels without disabling (backup/restore)
+
+	// eventTypeCount — сентинель для теста полноты String(). Держать
+	// последним: новое событие, добавленное после него, останется
+	// безымянным в логе держателя замка и тест этого не заметит.
+	eventTypeCount
 )
 
 // Event is the input to the orchestrator.
@@ -37,4 +42,39 @@ type Event struct {
 
 	// WAN event data
 	WANIface string
+
+	// WANUp — был ли поднят WAN на момент бута. Заполняет только тот, кто
+	// шлёт EventBoot: пробу дефолтного шлюза делает бут-последовательность,
+	// и её результат обязан ехать вместе с событием, а не оставаться в
+	// отдельном вызове следом. Иначе между пробой и «отметить, что бута не
+	// было» остаётся окно, в котором WAN-фронт теряется (R2).
+	WANUp bool
+}
+
+// String names the event for logs — notably the per-tunnel lock holder
+// (issue #795), where a bare int told nobody which operation was wedged.
+func (t EventType) String() string {
+	switch t {
+	case EventBoot:
+		return "boot"
+	case EventReconnect:
+		return "reconnect"
+	case EventStart:
+		return "start"
+	case EventStop:
+		return "stop"
+	case EventRestart:
+		return "restart"
+	case EventDelete:
+		return "delete"
+	case EventWANUp:
+		return "wan-up"
+	case EventWANDown:
+		return "wan-down"
+	case EventNDMSHook:
+		return "ndms-hook"
+	case EventQuiesce:
+		return "quiesce"
+	}
+	return "event-" + strconv.Itoa(int(t))
 }

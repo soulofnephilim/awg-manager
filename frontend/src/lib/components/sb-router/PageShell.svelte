@@ -33,9 +33,8 @@
   let { subtitle, onOpenInspector, onOpenJson, onOpenConfigEditor, onOpenLogs, logsActive = false, children }: Props = $props();
   let currentMode = $derived($mode);
 
-  onMount(() => {
-    bindLiveConnectionsStore();
-  });
+  // Отпуск на размонтировании: иначе поток соединений живёт до конца сессии.
+  onMount(() => bindLiveConnectionsStore());
 
   function selectMode(next: RouterMode) {
     setMode(next);
@@ -176,7 +175,7 @@
     flex-wrap: wrap;
   }
 
-  .header-tools :global(.chip),
+  .header-tools :global(.live-chip),
   .params-btn,
   .header-actions .icon-btn,
   .header-tools :global(.segmented-control) {
@@ -267,7 +266,7 @@
       gap: 8px;
     }
     .params-btn,
-    .header-tools :global(.chip),
+    .header-tools :global(.live-chip),
     .header-tools :global(.segmented-control) {
       width: 100%;
       flex: none;
@@ -319,7 +318,7 @@
       gap: 0.5rem;
     }
 
-    .header-tools :global(.chip),
+    .header-tools :global(.live-chip),
     .params-btn,
     .header-tools :global(.segmented-control) {
       width: 100%;

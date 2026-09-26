@@ -22,8 +22,11 @@ var (
 	ErrBulkInvalidSelection = errors.New("invalid bulk selection")
 	ErrRuleSetTagConflict   = errors.New("rule set with this tag already exists")
 	ErrRuleSetNotFound      = errors.New("rule set not found")
-	ErrDatRuleSetForbidden  = errors.New("dat rule set token is invalid")
-	ErrOutboundTagConflict  = errors.New("outbound with this tag already exists")
+	// ErrRuleSetTagUnsafe — тег inline-набора не совпадает со своим именем
+	// файла артефакта (F434, #941). Ошибка ввода, API отвечает 400.
+	ErrRuleSetTagUnsafe    = errors.New("inline rule set tag must equal its artifact file name")
+	ErrDatRuleSetForbidden = errors.New("dat rule set token is invalid")
+	ErrOutboundTagConflict = errors.New("outbound with this tag already exists")
 	// ErrCompositeMemberUnknown — член selector/urltest ссылается на несуществующий выход (#567).
 	ErrCompositeMemberUnknown   = errors.New("неизвестный член композита")
 	ErrOutboundNotFound         = errors.New("outbound not found")
@@ -61,6 +64,12 @@ var (
 	// UpdateSettings outbound-existence check so the API can map them to
 	// 400 with the detailed Russian message intact.
 	ErrQoSClassesInvalid = errors.New("некорректные классы QoS")
+
+	// ErrTransitionInProgress: PUT настроек лёг в окно живого SwitchRoutingMode.
+	// Save отсюда откатил бы persistMode(target), и Enable перехода поднялся бы
+	// по чужому режиму. Не ждём (переход держит transitionMu минуты) — честно
+	// отказываем, клиент повторит после завершения перехода.
+	ErrTransitionInProgress = errors.New("смена режима роутинга выполняется — повторите после её завершения")
 
 	// ErrDNSChainTagReserved rejects a user DNS rule that claims (or references)
 	// the awgm-dns-* tag namespace owned by the DNS-preset overlay: such a rule

@@ -92,8 +92,9 @@ func newPolicyTunEnableHarness(t *testing.T, failAt string) *policyTunEnableHarn
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	all.SingboxRouter = storage.SingboxRouterSettings{RoutingMode: statePolicyTun, WANAutoDetect: true}
-	if err := store.Save(all); err != nil {
+	all.SingboxRouter = storage.SingboxRouterSettings{RoutingMode: statePolicyTun, WANAutoDetect: true,
+		FakeIPPool6: DefaultFakeIPTunParams().Inet6Range}
+	if err := store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -115,28 +116,23 @@ func newPolicyTunEnableHarness(t *testing.T, failAt string) *policyTunEnableHarn
 	svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{}}
 	svc.deps.FakeIPTun = DefaultFakeIPTunParams()
 
-	// Carrier readiness → ready; the addr flush records into the same log.
+	// Carrier readiness → ready.
 	stubTunReadyProbe(t, func(string) bool { return true })
-	old := fakeIPAddrFlush
-	fakeIPAddrFlush = func(_ context.Context, iface string) error {
-		log.add("Flush:" + iface)
-		if failAt == "Flush" {
-			return errors.New("injected: Flush")
-		}
-		return nil
-	}
-	t.Cleanup(func() { fakeIPAddrFlush = old })
-
+	// Отсев ingress-ссылок по /sys (F381) в этих тестах не проверяется —
+	// «не знаем», иначе фиктивные имена вроде nwg3 отсеивались бы машиной.
+	stubIngressLinks(t)
+	// Orphan-netdev presence read is host-only (`ip link show`); default absent.
+	stubLinkAbsent(t)
 	return &policyTunEnableHarness{svc: svc, log: log, opkg: opkg, store: store, dir: dir}
 }
 
-func (h *policyTunEnableHarness) loadPolicyTun(t *testing.T) *storage.PolicyTunState {
+func (h *policyTunEnableHarness) loadPolicyTun(t *testing.T) *storage.OpkgTunState {
 	t.Helper()
 	all, err := h.store.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	return all.PolicyTun
+	return all.OpkgTun
 }
 
 // withPolicy задаёт целевую политику режима (sr.PolicyName) и подсовывает фейк
@@ -148,7 +144,7 @@ func (h *policyTunEnableHarness) withPolicy(t *testing.T, name string) *fakeAcce
 		t.Fatalf("Load: %v", err)
 	}
 	all.SingboxRouter.PolicyName = name
-	if err := h.store.Save(all); err != nil {
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	pol := &fakeAccessPolicyProvider{}
@@ -210,9 +206,8 @@ func TestPolicyTunEnable_ProvisionOrder(t *testing.T) {
 	mustOrderCalls(t, h.log, "SetPermitACL:"+ndmsName, "SetAddress:"+ndmsName+":172.18.0.1:255.255.255.252")
 	mustOrderCalls(t, h.log, "SetAddress:"+ndmsName+":172.18.0.1:255.255.255.252", "SetMTU:"+ndmsName+":1500")
 	mustOrderCalls(t, h.log, "SetMTU:"+ndmsName+":1500", "InterfaceUp:"+ndmsName)
-	mustOrderCalls(t, h.log, "InterfaceUp:"+ndmsName, "Flush:"+iface)
 	// Default route lands only AFTER the slot write + carrier readiness.
-	mustOrderCalls(t, h.log, "Flush:"+iface, "SetDefaultRoute:"+ndmsName)
+	mustOrderCalls(t, h.log, "InterfaceUp:"+ndmsName, "SetDefaultRoute:"+ndmsName)
 	mustOrderCalls(t, h.log, "SetDefaultRoute:"+ndmsName, "SetIPv6DefaultRoute:"+ndmsName)
 
 	// Slot 20 stays the active routing slot and carries the tun inbound.
@@ -250,8 +245,8 @@ func TestPolicyTunEnable_ProvisionOrder(t *testing.T) {
 // бы их молча.
 func TestPolicyTunEnable_PrefersPersistedIndex(t *testing.T) {
 	h := newPolicyTunEnableHarness(t, "")
-	if err := h.store.SetPolicyTunState(&storage.PolicyTunState{Index: 3}); err != nil {
-		t.Fatalf("SetPolicyTunState: %v", err)
+	if err := h.store.SetOpkgTunState(&storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Index: 3}); err != nil {
+		t.Fatalf("SetOpkgTunState: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err != nil {
@@ -284,8 +279,8 @@ func TestPolicyTunEnable_ReusesHeldOwnInterface(t *testing.T) {
 	h := newPolicyTunEnableHarness(t, "")
 	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{3: true}}
 	h.svc.deps.OpkgTunScan = scanOwning("OpkgTun3")
-	if err := h.store.SetPolicyTunState(&storage.PolicyTunState{Index: 3}); err != nil {
-		t.Fatalf("SetPolicyTunState: %v", err)
+	if err := h.store.SetOpkgTunState(&storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Index: 3}); err != nil {
+		t.Fatalf("SetOpkgTunState: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err != nil {
@@ -306,8 +301,8 @@ func TestPolicyTunEnable_ReallocatesWhenPersistedIndexForeign(t *testing.T) {
 	h := newPolicyTunEnableHarness(t, "")
 	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{3: true}}
 	h.svc.deps.OpkgTunScan = scanOwning() // наших интерфейсов нет вовсе
-	if err := h.store.SetPolicyTunState(&storage.PolicyTunState{Index: 3}); err != nil {
-		t.Fatalf("SetPolicyTunState: %v", err)
+	if err := h.store.SetOpkgTunState(&storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Index: 3}); err != nil {
+		t.Fatalf("SetOpkgTunState: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err != nil {
@@ -327,8 +322,8 @@ func TestPolicyTunEnable_ReallocatesWhenScanFails(t *testing.T) {
 	h.svc.deps.OpkgTunScan = func(context.Context, string) ([]string, error) {
 		return []string{"OpkgTun3"}, errors.New("injected: scan")
 	}
-	if err := h.store.SetPolicyTunState(&storage.PolicyTunState{Index: 3}); err != nil {
-		t.Fatalf("SetPolicyTunState: %v", err)
+	if err := h.store.SetOpkgTunState(&storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Index: 3}); err != nil {
+		t.Fatalf("SetOpkgTunState: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err != nil {
@@ -346,8 +341,8 @@ func TestPolicyTunEnable_ReallocatesWhenScanUnavailable(t *testing.T) {
 	h := newPolicyTunEnableHarness(t, "")
 	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{3: true}}
 	h.svc.deps.OpkgTunScan = nil
-	if err := h.store.SetPolicyTunState(&storage.PolicyTunState{Index: 3}); err != nil {
-		t.Fatalf("SetPolicyTunState: %v", err)
+	if err := h.store.SetOpkgTunState(&storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Index: 3}); err != nil {
+		t.Fatalf("SetOpkgTunState: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err != nil {
@@ -364,8 +359,8 @@ func TestPolicyTunEnable_ReallocatesWhenScanUnavailable(t *testing.T) {
 func TestPolicyTunEnable_IdempotentWhenLive(t *testing.T) {
 	h := newPolicyTunEnableHarness(t, "")
 	h.svc.deps.OpkgTunIndices = &recIndices{live: map[int]bool{0: true}}
-	if err := h.store.SetPolicyTunState(&storage.PolicyTunState{Provisioned: true, Index: 0}); err != nil {
-		t.Fatalf("SetPolicyTunState: %v", err)
+	if err := h.store.SetOpkgTunState(&storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Provisioned: true, Index: 0}); err != nil {
+		t.Fatalf("SetOpkgTunState: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err != nil {
@@ -385,7 +380,7 @@ func TestPolicyTunEnable_IdempotentWhenLive(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPolicyTunEnable_RollbackOnFailure(t *testing.T) {
-	steps := []string{"Create", "SetIPGlobal", "SetPermitACL", "SetAddress", "SetMTU", "InterfaceUp", "Flush", "SetDefaultRoute", "SetIPv6DefaultRoute"}
+	steps := []string{"Create", "SetIPGlobal", "SetPermitACL", "SetAddress", "SetMTU", "InterfaceUp", "SetDefaultRoute", "SetIPv6DefaultRoute"}
 	for _, step := range steps {
 		t.Run(step, func(t *testing.T) {
 			h := newPolicyTunEnableHarness(t, step)
@@ -409,7 +404,10 @@ func TestPolicyTunEnable_RollbackOnFailure(t *testing.T) {
 				}
 				return
 			}
-			if !h.log.has("InterfaceDown:"+ndmsName) || !h.log.has("Delete:"+ndmsName) {
+			// Down на happy-path teardown НЕТ: любая мутация имени создаёт
+			// интерфейс заново (см. teardownOpkgTun), а откат зовут и на уже
+			// снесённом. Признак сноса — Delete.
+			if !h.log.has("Delete:" + ndmsName) {
 				t.Errorf("%s: rollback must tear the iface down: %v", step, h.log.calls)
 			}
 
@@ -455,7 +453,7 @@ func TestPolicyTunEnable_RollbackRestoresPreviousPersist(t *testing.T) {
 	}
 	all.SingboxRouter.PolicyTunSourcePreserve = true
 	all.SingboxRouter.PolicyTunNATSegments = []string{"Home"}
-	if err := h.store.Save(all); err != nil {
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -466,16 +464,12 @@ func TestPolicyTunEnable_RollbackRestoresPreviousPersist(t *testing.T) {
 
 	// Прежнее состояние: интерфейс пропал (live пуст), индекс запинен, в
 	// записях — desired-сегмент Home и уже отозванный Guest.
-	prev := &storage.PolicyTunState{
-		Provisioned: true,
-		Index:       3,
-		NATSegments: []storage.PolicyTunNATSegment{
-			{Name: "Guest", PriorMode: "dynamic"},
-			{Name: "Home", PriorMode: "none"},
-		},
-	}
-	if err := h.store.SetPolicyTunState(prev); err != nil {
-		t.Fatalf("SetPolicyTunState: %v", err)
+	prev := &storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Provisioned: true, Index: 3, PolicyTun: &storage.OpkgTunPolicyData{NATSegments: []storage.PolicyTunNATSegment{
+		{Name: "Guest", PriorMode: "dynamic"},
+		{Name: "Home", PriorMode: "none"},
+	}}}
+	if err := h.store.SetOpkgTunState(prev); err != nil {
+		t.Fatalf("SetOpkgTunState: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err == nil {
@@ -489,8 +483,8 @@ func TestPolicyTunEnable_RollbackRestoresPreviousPersist(t *testing.T) {
 	if !st.Provisioned || st.Index != 3 {
 		t.Errorf("PolicyTun persist = %+v, want provisioned index 3", st)
 	}
-	if !reflect.DeepEqual(st.NATSegments, prev.NATSegments) {
-		t.Errorf("NATSegments = %+v, want %+v (отозванный сегмент обязан уцелеть)", st.NATSegments, prev.NATSegments)
+	if !reflect.DeepEqual(natSegmentsOf(st), natSegmentsOf(prev)) {
+		t.Errorf("NATSegments = %+v, want %+v (отозванный сегмент обязан уцелеть)", natSegmentsOf(st), natSegmentsOf(prev))
 	}
 	// Сам откат при этом отработал: NAT desired-сегмента возвращён, ифейс снят.
 	if !h.log.has("RemoveStaticNAT:Home:ISP") {
@@ -525,7 +519,7 @@ func TestPolicyTunEnable_QoSInstallsDSCPOnlyChains(t *testing.T) {
 	all.SingboxRouter.QoSClasses = []storage.SingboxQoSClass{
 		{DSCP: 46, Name: "VoIP", Outbound: "direct", Enabled: true},
 	}
-	if err := h.store.Save(all); err != nil {
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	var restoreInput string
@@ -572,7 +566,7 @@ func TestPolicyTunEnable_QoSSkippedWhenTProxyUnavailable(t *testing.T) {
 	all.SingboxRouter.QoSClasses = []storage.SingboxQoSClass{
 		{DSCP: 46, Name: "VoIP", Outbound: "direct", Enabled: true},
 	}
-	if err := h.store.Save(all); err != nil {
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	installs := 0
@@ -720,7 +714,7 @@ func TestPolicyTunEnable_IngressWithoutDNAT(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	all.SingboxRouter.IngressInterfaces = []string{"iface:nwg3"}
-	if err := h.store.Save(all); err != nil {
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -751,16 +745,221 @@ func TestPolicyTunEnable_PermitACLv6FollowsAddress(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	all.SingboxRouter.FakeIPPool6 = "fdfe:dcba:9876::/48"
-	if err := h.store.Save(all); err != nil {
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
 	if err := h.svc.Enable(context.Background()); err != nil {
 		t.Fatalf("Enable: %v", err)
 	}
-	ndmsName := fakeIPNDMSName(0)
+	ndmsName := tunNDMSName(0)
 	if !h.log.has("SetPermitACLv6:" + ndmsName) {
 		t.Fatalf("v6-разрешение не поставлено: %v", h.log.calls)
 	}
 	mustOrderCalls(t, h.log, "SetIPv6Address:"+ndmsName+":fdfe:dcba:9876::1", "SetPermitACLv6:"+ndmsName)
+}
+
+// Д3: policy-tun молча наследовал пользовательский FakeIPMTU со страницы
+// fakeip. Ожидание: проводной статический MTU, настройка чужой страницы
+// игнорируется (у policy-tun ручки MTU в UI нет вовсе).
+func TestPolicyTunEnable_IgnoresFakeIPMTU(t *testing.T) {
+	h := newPolicyTunEnableHarness(t, "")
+	all, err := h.store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	all.SingboxRouter.FakeIPMTU = 9000
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable(policy-tun): %v", err)
+	}
+
+	if !h.log.has("SetMTU:OpkgTun0:1500") {
+		t.Errorf("MTU обязан быть проводным 1500, а не 9000: %v", h.log.calls)
+	}
+	data, err := os.ReadFile(filepath.Join(h.dir, "20-router.json"))
+	if err != nil {
+		t.Fatalf("read 20-router.json: %v", err)
+	}
+	var cfg RouterConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal 20-router.json: %v", err)
+	}
+	if len(cfg.Inbounds) == 0 || cfg.Inbounds[0].MTU != 1500 {
+		t.Errorf("tun-инбаунд MTU = %d, want 1500: %s", cfg.Inbounds[0].MTU, data)
+	}
+}
+
+// F13: двойной сбой RCI — упал apply source-preserve И упал restore в откате.
+// Записи сегментов, сделанные ЭТИМ enable, становятся единственным следом того,
+// каким сегмент был до нас; первый push (по LIFO — последний) клал prevRecord
+// поверх них, и «исходное = static» терялось навсегда (ГОЧА policytun_enable.go).
+func TestPolicyTunEnable_DoubleRCIFailureKeepsRecordedNAT(t *testing.T) {
+	setup := func(t *testing.T, prev *storage.OpkgTunState) *policyTunEnableHarness {
+		t.Helper()
+		h := newPolicyTunEnableHarness(t, "")
+		all, err := h.store.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		all.SingboxRouter.PolicyTunSourcePreserve = true
+		all.SingboxRouter.PolicyTunNATSegments = []string{"Home"}
+		if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		natState := &fakeNATState{nat: []query.NATEntry{{Interface: "Home"}}}
+		h.svc.deps.NATState = natState
+		// Двойная инъекция: apply падает на SetStaticNAT (маскарад уже снят),
+		// restore в откате — на возврате маскарада SetSegmentNAT.
+		h.svc.deps.SegmentNAT = &recSegmentNAT{log: h.log, state: natState, failAt: "SetStaticNAT,SetSegmentNAT"}
+		h.svc.deps.DefaultGateway = &fakeGateway{name: "ISP"}
+		if prev != nil {
+			if err := h.store.SetOpkgTunState(prev); err != nil {
+				t.Fatalf("SetOpkgTunState: %v", err)
+			}
+		}
+		return h
+	}
+
+	hasSegment := func(segs []storage.PolicyTunNATSegment, name, mode string) bool {
+		for _, s := range segs {
+			if s.Name == name && s.PriorMode == mode {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("re-provision: записи этого enable сливаются с прежними", func(t *testing.T) {
+		prev := &storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Provisioned: true, Index: 3,
+			PolicyTun: &storage.OpkgTunPolicyData{NATSegments: []storage.PolicyTunNATSegment{{Name: "Guest", PriorMode: "dynamic"}}}}
+		h := setup(t, prev)
+
+		if err := h.svc.Enable(context.Background()); err == nil {
+			t.Fatal("expected error when SetStaticNAT fails")
+		}
+
+		st := h.loadPolicyTun(t)
+		if st == nil {
+			t.Fatal("PolicyTun persist = nil, want the previous record merged with this enable's NAT records")
+		}
+		if st.Index != 3 {
+			t.Errorf("Index = %d, want 3 (пин индекса обязан уцелеть)", st.Index)
+		}
+		segs := natSegmentsOf(st)
+		if !hasSegment(segs, "Guest", "dynamic") {
+			t.Errorf("NATSegments = %+v, want запись прежнего сегмента Guest", segs)
+		}
+		if !hasSegment(segs, "Home", "dynamic") {
+			t.Errorf("NATSegments = %+v, want запись Home с исходным режимом dynamic", segs)
+		}
+	})
+
+	// Обратная сторона: когда откат NAT ОТРАБОТАЛ, беречь записи не нужно —
+	// восстанавливается ровно прежняя запись, без записей этого enable.
+	t.Run("успешный откат NAT не тащит записи в персист", func(t *testing.T) {
+		h := newPolicyTunEnableHarness(t, "SetDefaultRoute") // сбой ПОСЛЕ apply
+		all, err := h.store.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		all.SingboxRouter.PolicyTunSourcePreserve = true
+		all.SingboxRouter.PolicyTunNATSegments = []string{"Home"}
+		if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		natState := &fakeNATState{nat: []query.NATEntry{{Interface: "Home"}}}
+		h.svc.deps.NATState = natState
+		h.svc.deps.SegmentNAT = &recSegmentNAT{log: h.log, state: natState}
+		h.svc.deps.DefaultGateway = &fakeGateway{name: "ISP"}
+		prev := &storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Provisioned: true, Index: 3,
+			PolicyTun: &storage.OpkgTunPolicyData{NATSegments: []storage.PolicyTunNATSegment{{Name: "Guest", PriorMode: "dynamic"}}}}
+		if err := h.store.SetOpkgTunState(prev); err != nil {
+			t.Fatalf("SetOpkgTunState: %v", err)
+		}
+
+		if err := h.svc.Enable(context.Background()); err == nil {
+			t.Fatal("expected error when SetDefaultRoute fails")
+		}
+
+		st := h.loadPolicyTun(t)
+		if st == nil {
+			t.Fatal("PolicyTun persist = nil, want the previous record")
+		}
+		if !reflect.DeepEqual(natSegmentsOf(st), natSegmentsOf(prev)) {
+			t.Errorf("NATSegments = %+v, want %+v (откат NAT отработал — записи этого enable беречь нечего)",
+				natSegmentsOf(st), natSegmentsOf(prev))
+		}
+	})
+
+	t.Run("первый enable: запись остаётся с payload", func(t *testing.T) {
+		h := setup(t, nil)
+
+		if err := h.svc.Enable(context.Background()); err == nil {
+			t.Fatal("expected error when SetStaticNAT fails")
+		}
+
+		st := h.loadPolicyTun(t)
+		if st == nil {
+			t.Fatal("PolicyTun persist = nil, want a record carrying this enable's NAT records")
+		}
+		if st.Mode != storage.OpkgTunModePolicyTun {
+			t.Errorf("Mode = %q, want policy-tun", st.Mode)
+		}
+		if !hasSegment(natSegmentsOf(st), "Home", "dynamic") {
+			t.Errorf("NATSegments = %+v, want запись Home с исходным режимом dynamic", natSegmentsOf(st))
+		}
+	})
+}
+
+// F20: провал Install на enable-пути тоже обязан пометить снимок netfilter
+// неизвестным — иначе следующий тик reconcile сочтёт состояние известным и не
+// переустановит частично закоммиченные правила.
+//
+// Мутация для пина: убрать `s.netfilterStateKnown = false` из ветки ошибки
+// Install в enablePolicyTun — тест краснеет.
+func TestPolicyTunEnable_FailedInstallMarksNetfilterUnknown(t *testing.T) {
+	h := newPolicyTunEnableHarness(t, "")
+	all, _ := h.store.Load()
+	all.SingboxRouter.QoSClasses = []storage.SingboxQoSClass{
+		{DSCP: 46, Name: "VoIP", Outbound: "direct", Enabled: true},
+	}
+	if err := h.store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	h.svc.deps.IPTables = newStubIPTables(func(context.Context, string) error {
+		return errors.New("injected: iptables-restore")
+	})
+	h.svc.deps.WANIPCollector = &fakeWANIPCollector{ips: []string{"203.0.113.7/32"}}
+	h.svc.deps.NetfilterPreflight = func(context.Context) error { return nil }
+	h.svc.deps.XtDscpProbe = func(context.Context) bool { return true }
+	// Заранее «известное» состояние: именно оно обязано слететь на провале.
+	h.svc.netfilterStateKnown = true
+
+	if err := h.svc.Enable(context.Background()); err == nil {
+		t.Fatal("ожидался провал Install")
+	}
+	if h.svc.netfilterStateKnown {
+		t.Error("снимок netfilter остался известным после провала Install: следующий тик не переустановит")
+	}
+}
+
+// F14: policy-tun идёт тем же валидирующим путём, что и fakeip, но страховки
+// против ложного «unknown-outbound» по протухшему каталогу AWG-тегов (#567) у
+// него не было — хотя фикс #567 старше самого policy-tun. Зеркало
+// TestEnableFakeIPTun_RefreshesAWGOutbounds.
+func TestEnablePolicyTun_RefreshesAWGOutbounds(t *testing.T) {
+	h := newPolicyTunEnableHarness(t, "")
+	called := 0
+	h.svc.deps.AWGOutboundsRefresh = func(context.Context) error { called++; return nil }
+
+	if err := h.svc.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable(policy-tun): %v", err)
+	}
+	if called == 0 {
+		t.Fatal("AWGOutboundsRefresh не вызван при enable policy-tun: каталог AWG-тегов может быть протухшим на валидирующем reload")
+	}
 }

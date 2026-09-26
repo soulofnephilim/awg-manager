@@ -39,6 +39,9 @@ type SingboxRouterStatusData struct {
 	FakeIPIface            string `json:"fakeipIface,omitempty" example:"opkgtun0"`
 	FakeIPDns              string `json:"fakeipDns,omitempty" example:"172.18.0.2"`
 	FakeIPTunAddr          string `json:"fakeipTunAddr,omitempty" example:"172.18.0.1"`
+	// CacheDBPath — эффективный путь cache.db: по cacheFileLocation, при пустой
+	// настройке — из 00-base.json (рукописный путь сохраняется).
+	CacheDBPath string `json:"cacheDbPath,omitempty" example:"/opt/etc/awg-manager/singbox/cache.db"`
 	// PolicyTunIface / PolicyTunNDMSName — kernel- и NDMS-имена policy-tun
 	// интерфейса. Заполнены при Enabled+Provisioned (ДО того как режим стал
 	// active): по NDMS-имени пользователь разрешает интерфейс в политике
@@ -84,7 +87,8 @@ type SingboxRouterSettingsData struct {
 	WANInterface  string `json:"wanInterface,omitempty" example:"ppp0"`
 	// BypassPresets lists active named bypass presets.
 	// Valid values: "l2tp", "ntp", "netbios-smb" (port-based), "keendns"
-	// (managed DNS rewrite of own KeenDNS/CrazeDNS FQDN → LAN). Default includes "keendns".
+	// (имена KeenDNS/CrazeDNS резолвит сам роутер, плюс обход его адресов).
+	// Default includes "keendns".
 	BypassPresets []string `json:"bypassPresets,omitempty" example:"keendns"`
 	// BypassExtraPorts is a user-defined comma-separated list of extra
 	// port exclusions in "PORT UDP|TCP" format (e.g. "51820 UDP, 1194 TCP").
@@ -101,11 +105,16 @@ type SingboxRouterSettingsData struct {
 	// redirected through the sing-box router (e.g. "managed:Wireguard3").
 	IngressInterfaces []string `json:"ingressInterfaces,omitempty" example:"managed:Wireguard3"`
 	// --- fakeip-tun engine settings (user-editable) ---
-	// FakeIPStack selects the sing-tun stack: "gvisor" (default) or "system".
-	FakeIPStack string `json:"fakeipStack,omitempty" example:"gvisor" enums:"gvisor,system"`
+	// FakeIPStack selects the sing-tun stack for both tun modes (fakeip-tun и
+	// policy-tun). Empty (default) = собственный стек sing-tun: ключ `stack` в
+	// конфиг не пишется. "system" — legacy, удаляется в sing-box 1.17.
+	// "gvisor" и "mixed" приводятся к пустому: бинарь собран без with_gvisor.
+	FakeIPStack string `json:"fakeipStack,omitempty" example:"" enums:"system"`
 	// FakeIPPool4 is the fakeip v4 pool CIDR (default "198.18.0.0/15").
 	FakeIPPool4 string `json:"fakeipPool4,omitempty" example:"198.18.0.0/15"`
-	// FakeIPPool6 is the fakeip v6 pool CIDR (default "fc00::/18"); "" disables v6.
+	// FakeIPPool6 is the fakeip v6 pool CIDR (default "fc00::/18").
+	// Explicit "" disables v6; an OMITTED field keeps the stored value
+	// (absent != empty — the handler substitutes the current setting).
 	FakeIPPool6 string `json:"fakeipPool6,omitempty" example:"fc00::/18"`
 	// FakeIPMTU is the tun MTU (default 1500; valid range 576-9000).
 	FakeIPMTU int `json:"fakeipMtu,omitempty" example:"1500"`
@@ -119,6 +128,10 @@ type SingboxRouterSettingsData struct {
 	// (5m0s). Increase to prevent long-quiet UDP applications (games, etc.) from
 	// having their sessions silently dropped mid-game.
 	UDPTimeout string `json:"udpTimeout,omitempty" example:"10m0s"`
+	// UDPNATMax caps UDP NAT sessions on the tproxy-in / tun-in / QoS inbounds
+	// (sing-box 1.14, LRU eviction). 0 = engine default (4096-16384 by memory).
+	// Range: 0..65536.
+	UDPNATMax int `json:"udpNatMax,omitempty" example:"4096"`
 	// QoSClasses lists DSCP-based QoS traffic classes routed to dedicated
 	// outbounds. At most 8 classes; DSCP must be 0-63 and unique across
 	// classes; outbound is required; name is limited to 32 characters.
@@ -134,6 +147,11 @@ type SingboxRouterSettingsData struct {
 	// source-preserve (см. GET /singbox/router/policy-tun/nat-preview).
 	// Обнуляется бэкендом при policyTunSourcePreserve=false.
 	PolicyTunNATSegments []string `json:"policyTunNatSegments,omitempty" example:"Home"`
+	// CacheFileLocation — место хранения cache.db sing-box: "flash" —
+	// /opt/etc/awg-manager/singbox/cache.db, "tmp" — /tmp/singbox-cache.db в RAM,
+	// записи кэша перестают изнашивать флеш, но кэш не переживает перезагрузку.
+	// Пусто — не задано: путь из 00-base.json как есть (см. cacheDbPath в статусе).
+	CacheFileLocation string `json:"cacheFileLocation,omitempty" example:"flash" enums:"flash,tmp"`
 }
 
 // SingboxRouterQoSClassDTO mirrors storage.SingboxQoSClass — one DSCP-based
@@ -162,15 +180,21 @@ type SingboxRouterRuleDTO struct {
 	DomainSuffix []string `json:"domain_suffix,omitempty" example:".example.com"`
 	IPCIDR       []string `json:"ip_cidr,omitempty" example:"10.0.0.0/8"`
 	SourceIPCIDR []string `json:"source_ip_cidr,omitempty" example:"192.168.1.100/32"`
-	Port         []int    `json:"port,omitempty" example:"443"`
-	RuleSet      []string `json:"rule_set,omitempty" example:"geosite-cn"`
-	Protocol     string   `json:"protocol,omitempty" example:"tcp"`
+	// SourceMACAddress matches the LAN device MAC (sing-box 1.14, kernel neighbor table).
+	SourceMACAddress []string `json:"source_mac_address,omitempty" example:"aa:bb:cc:dd:ee:ff"`
+	Port             []int    `json:"port,omitempty" example:"443"`
+	RuleSet          []string `json:"rule_set,omitempty" example:"geosite-cn"`
+	Protocol         string   `json:"protocol,omitempty" example:"tcp"`
 	// Inbound matches sing-box listener tags the connection entered through.
 	// Managed QoS-DSCP rules use the reserved tproxy-qos-N / redirect-qos-N
 	// tag pair (N = DSCP codepoint).
 	Inbound  []string `json:"inbound,omitempty" example:"tproxy-qos-46"`
 	Action   string   `json:"action" example:"route"`
 	Outbound string   `json:"outbound,omitempty" example:"selector"`
+	// AwgmManaged marks a rule generated by awg-manager. Such a rule is
+	// rewritten on the next reconcile and the bulk endpoints refuse it, so a
+	// client must not offer it for editing or selection.
+	AwgmManaged string `json:"awgm_managed,omitempty" example:"selective-ip"`
 }
 
 // SingboxRouterRulesListResponse is the envelope for GET /singbox/router/rules/list.

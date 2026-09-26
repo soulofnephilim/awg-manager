@@ -14,6 +14,7 @@
 	import { untrack } from 'svelte';
 	import { showOutboundReferencedError } from '$lib/utils/outboundReferenced';
 	import { softCompileGoRegex } from '$lib/utils/subscriptionGroupPreview';
+	import { BindInterfacePicker } from '$lib/components/singbox';
 
 	interface Props {
 		subscription: Subscription;
@@ -41,6 +42,7 @@
 	);
 	let filterInclude = $state(untrack(() => subscription.filterInclude ?? ''));
 	let filterExclude = $state(untrack(() => subscription.filterExclude ?? ''));
+	let bindInterface = $state(untrack(() => subscription.bindInterface ?? ''));
 	let saving = $state(false);
 	let togglingEnabled = $state(false);
 	let confirmDelete = $state(false);
@@ -61,6 +63,7 @@
 			subscription.urlTest?.toleranceMs ?? DEFAULT_SUBSCRIPTION_URLTEST.toleranceMs;
 		filterInclude = subscription.filterInclude ?? '';
 		filterExclude = subscription.filterExclude ?? '';
+		bindInterface = subscription.bindInterface ?? '';
 	});
 
 	// Мягкая клиентская проверка regex — НЕ авторитетна; финальная валидация
@@ -121,8 +124,9 @@
 						: undefined,
 				filterInclude: filterInclude.trim(),
 				filterExclude: filterExclude.trim(),
+				bindInterface: bindInterface.trim(),
 			};
-			if (!subscription.isInline) {
+			if (!subscription.isInline && !subscription.isFile) {
 				patch.url = url;
 				patch.headers = parseHeadersText(headersText);
 				patch.refreshHours = refreshHours;
@@ -194,7 +198,7 @@
 						{#if enabled}
 							Подписка включена и участвует в маршрутизации
 						{:else}
-							Подписка выключена — не используется в маршрутизации
+							Подписка выключена — кроме singbox маршрутизации
 						{/if}
 					</span>
 				</div>
@@ -264,6 +268,15 @@
 			{/if}
 		</div>
 
+		<div class="bind-section">
+			<h3 class="col-title">Исходящий интерфейс</h3>
+			<BindInterfacePicker
+				label=""
+				bind:value={bindInterface}
+				hint="Весь трафик серверов этой подписки будет dial'иться через выбранный uplink. Удобно для модема, отдельного WAN или Wi‑Fi."
+			/>
+		</div>
+
 		<div class="settings-summary" aria-label="Данные подписки">
 			<div class="summary-head">
 				<h3 class="col-title">Данные подписки</h3>
@@ -277,7 +290,9 @@
 					<span class="summary-label">серверов</span>
 				</div>
 				<div class="summary-item">
-					<span class="summary-value">{subscription.isInline ? 'ручной список' : 'URL'}</span>
+					<span class="summary-value">
+						{subscription.isFile ? 'файл' : subscription.isInline ? 'ручной список' : 'URL'}
+					</span>
 					<span class="summary-label">источник</span>
 				</div>
 				<div class="summary-item">
@@ -288,15 +303,17 @@
 					<span class="summary-value">
 						{subscription.isInline
 							? 'не требуется'
-							: refreshHours > 0
-								? `${refreshHours} ч`
-								: 'вручную'}
+							: subscription.isFile
+								? 'вручную'
+								: refreshHours > 0
+									? `${refreshHours} ч`
+									: 'вручную'}
 					</span>
 					<span class="summary-label">обновление</span>
 				</div>
 				<div class="summary-item">
 					<span class="summary-value">
-						{subscription.isInline
+						{subscription.isInline || subscription.isFile
 							? '—'
 							: parseHeadersText(headersText).length > 0
 								? `${parseHeadersText(headersText).length}`
@@ -337,6 +354,11 @@
 							: `${subscription.members.length} серверов`}
 					· редактирование во вкладке «Серверы»
 				</div>
+			</div>
+		{:else if subscription.isFile}
+			<div class="inline-info">
+				<div class="inline-badge">Файл на роутере</div>
+				<div class="inline-summary mono">{subscription.path}</div>
 			</div>
 		{:else}
 			<label class="row">
@@ -393,7 +415,7 @@
 		</div>
 	</section>
 
-	
+
 </form>
 
 <Modal
@@ -513,6 +535,14 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.7rem;
+	}
+	.bind-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.7rem;
+		margin-top: 0.5rem;
+		padding-top: 0.7rem;
+		border-top: 1px solid var(--color-border);
 	}
 	.settings-summary {
 		display: flex;

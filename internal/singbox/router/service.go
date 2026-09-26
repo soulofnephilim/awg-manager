@@ -15,6 +15,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
+	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/presets"
 	"github.com/hoaxisr/awg-manager/internal/singbox/heavyop"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
@@ -23,8 +24,6 @@ import (
 )
 
 type Service interface {
-	Enable(ctx context.Context) error
-	Disable(ctx context.Context) error
 	Reconcile(ctx context.Context) error
 	// SwitchRoutingMode orchestrates a routing-mode transition (off↔tproxy↔
 	// fakeip-tun) with directional fail-closed rollback and progress events.
@@ -42,6 +41,7 @@ type Service interface {
 	// ListBindableInterfaces returns interfaces a user can bind a direct
 	// outbound to (all interfaces minus auto-managed AWG/WG ones).
 	ListBindableInterfaces(ctx context.Context) ([]WANInterfaceInfo, error)
+	ListAllBindableInterfaces(ctx context.Context) ([]WANInterfaceInfo, error)
 
 	// ListIngressEligibleInterfaces returns interfaces eligible for
 	// sing-box ingress-scope (bindable minus WAN minus LAN bridges).
@@ -101,8 +101,8 @@ type Service interface {
 	DeleteDNSRule(ctx context.Context, index int) error
 	MoveDNSRule(ctx context.Context, from, to int) error
 
-	GetDNSGlobals(ctx context.Context) (final, strategy string, err error)
-	SetDNSGlobals(ctx context.Context, final, strategy string) error
+	GetDNSGlobals(ctx context.Context) (final, strategy, timeout string, err error)
+	SetDNSGlobals(ctx context.Context, final, strategy, timeout string) error
 
 	// GetDNSChainPreset / SetDNSChainPreset — DNS-пресет цепочек sing-box 1.14
 	// (Mode "" = выключен). Состояние живёт в настройках, правила цепочки —
@@ -149,6 +149,25 @@ type SingboxController interface {
 	// crashes within the recent window, the reason of the newest one,
 	// and until when auto-restart is suppressed (zero = not suppressed).
 	CrashStats() (recentCrashes int, lastCrashReason string, restartSuppressedUntil time.Time)
+	// TunExternalConfig: want — писать ли `external_configuration` (бинарь
+	// пиннутый и знает ключ); known=false — версия бинаря пока не определена.
+	TunExternalConfig() (want, known bool)
+}
+
+// tunExternalConfig — писать ли `external_configuration` в tun-инбаунд:
+// ключ знает только пиннутый бинарь, чужой отверг бы весь конфиг. Неизвестная
+// версия даёт false — годится для включения режима (старого инстанса tun ещё
+// нет), но не для heal: см. healTunSettings.
+func (s *ServiceImpl) tunExternalWant() bool {
+	want, _ := s.tunExternalConfig()
+	return want
+}
+
+func (s *ServiceImpl) tunExternalConfig() (want, known bool) {
+	if s.deps.Singbox == nil {
+		return false, true
+	}
+	return s.deps.Singbox.TunExternalConfig()
 }
 
 // GeoTagExpander is the narrow contract used by dat→SRS rule-set export.
@@ -199,6 +218,10 @@ type WANInterfaceLister interface {
 // awgoutbounds auto-managed set). Optional dep; nil = no existence check.
 type BindableInterfaceLister interface {
 	ListBindable(ctx context.Context) ([]WANInterfaceInfo, error)
+	// ListAllBindable — то же множество, но БЕЗ вычитания интерфейсов, уже
+	// занятых direct-outbound'ом: подписки и одиночные туннели делят
+	// интерфейс с direct-выходом свободно (#709).
+	ListAllBindable(ctx context.Context) ([]WANInterfaceInfo, error)
 }
 
 // IngressResolver резолвит ref интерфейса ("managed:Wireguard3") в
@@ -245,6 +268,9 @@ type AccessPolicyProvider interface {
 	// дефолтным выходом политики (в непустой политике order=0 вставляет в
 	// начало и сдвигает прежние — это цель, а не побочный эффект).
 	PermitInterface(ctx context.Context, policyName, iface string, order int) error
+	// DenyInterface снимает интерфейс из выходов политики (policy-tun убирает
+	// WAN — обход туннеля, F440).
+	DenyInterface(ctx context.Context, policyName, iface string) error
 }
 
 // AWGTagCatalog returns the canonical AWG-direct outbound tags owned
@@ -305,6 +331,16 @@ type Deps struct {
 	// router is enabled. When nil (tests), persistConfig falls back
 	// to the legacy in-place write at routerConfigPath().
 	Orch *orchestrator.Orchestrator
+	// ApplyCacheFileLocation доводит место хранения cache.db до 00-base.json
+	// (issue #842). Optional — nil пропускается. Шов живёт здесь, а не среди
+	// SettingsHandler.SetApply* как у соседних base-настроек, потому что поле
+	// лежит в SingboxRouterSettings и применяется тем же PUT, что и overlay.
+	ApplyCacheFileLocation func(location string) error
+	// CacheDBPath — эффективный путь cache.db у оператора (Operator.CacheDBPath):
+	// один источник для overlay 21-fakeip.json и статуса, чтобы рукописный путь
+	// в 00-base.json действовал и в fakeip-tun. Optional — при nil overlay
+	// получает пустой путь, а статус его не показывает.
+	CacheDBPath func() string
 	// Bus receives resource:invalidated events for the staging/draft
 	// flow (SaveDraft, ApplyDraft, DiscardDraft). Optional — when nil,
 	// staging event emission is silently skipped.
@@ -346,6 +382,11 @@ type Deps struct {
 	// xt_connmark, xt_conntrack, xt_pkttype via
 	// EnsureRouterNetfilterModules). Tests set this to avoid real syscalls.
 	NetfilterPreflight func(context.Context) error
+
+	// FirmwareRelease is an optional override for the KeeneticOS release
+	// string (osdetect by default). Only tests set it — the tun-mode gate
+	// needs a firmware version it can steer.
+	FirmwareRelease func() string
 	// XtDscpProbe is an optional override for the xt_dscp availability
 	// check (kernel module + iptables `-m dscp` extension) that gates the
 	// QoS-DSCP dispatch rules and the status field xtDscpAvailable. When
@@ -369,6 +410,15 @@ type Deps struct {
 	// for the fakeip index allocator. Optional — nil in tests; wired in
 	// cmd/awg-manager via the union adapter. Consumed by Slice 1D Enable.
 	OpkgTunIndices OpkgTunIndexLister
+	// OpkgTunPool — общий пул номеров OpkgTun, ОДИН на процесс. Занятость он
+	// собирает сам, всеми пятью поставщиками сразу: пул делят режимы роутера,
+	// kernel-туннели, прокси и записи NDMS, и выпавший поставщик отдал бы
+	// чужой занятый номер как свободный.
+	//
+	// Своя удерживающая запись из состава НЕ вычитается: у обоих режимов один
+	// ключ владельца, и пул отдаёт свой номер по совпадению ключа. Прежнее
+	// вычитание ломалось на handover — там номер принадлежит другому режиму.
+	OpkgTunPool *opkgtun.Pool
 	// OpkgTunScan lists NDMS OpkgTun IDs carrying the given description —
 	// the reap's persist-less orphan fallback (see teardownOpkgTun for why
 	// such orphans are dangerous). Optional — nil skips the scan; wired in
@@ -436,14 +486,82 @@ type ServiceImpl struct {
 	// transitionReadinessProgress emits readiness heartbeats during
 	// waitForSingbox while SwitchRoutingMode is in flight (nil otherwise).
 	transitionReadinessProgress func(message string)
-	currentMark                 string              // last-installed iptables mark; used by Reconcile to detect change
-	currentWANIPs               []string            // last-collected WAN IPs; used by Reconcile to detect change
-	currentLANBridges           []LANBridgeDNSRedir // last-discovered LAN-bridge (name, ndnproxy port) pairs; reconcile triggers re-install when this changes (e.g. NDMS hotspot reconfigured, bridge added/removed, port reassigned)
-	currentBypassPresets        []string
-	currentBypassExtraPorts     string
-	currentBypassExtraSubnets   string
-	currentBypassGeoIPTags      []string // last-installed geoip-теги обхода; их смена = переустановка правил
-	currentIngress              []string // last-installed резолвленные ingress kernel-имена
+
+	// ─── Применённое состояние netfilter ────────────────────────────────────
+	// appliedSpec, appliedBlackhole, netfilterStateKnown и
+	// currentBypassGeoIPTags описывают то, что РЕАЛЬНО установлено в netfilter.
+	//
+	// ИНВАРИАНТ: взаимное исключение даёт transitionMu, и только он.
+	// Писатели: enableLocked, Disable, enablePolicyTun, disablePolicyTun,
+	// reconcileInstalled, reconcilePolicyTunQoS. Читатели: reconcileInstalled,
+	// reconcilePolicyTunQoS. Каждый достижим ровно двумя путями — Reconcile
+	// (берёт transitionMu через TryLock) и SwitchRoutingMode (через Lock).
+	//
+	// s.mu вокруг записей НЕ является защитой этих полей: часть чтений в
+	// reconcileInstalled (forceInitialSync, specChanged, bypassGeoTagsChanged)
+	// идёт вне s.mu, так что опираться на него нельзя — он держится ради
+	// соседних полей в тех же критических секциях.
+	//
+	// Пока путей два, гонки нет по построению. Третий путь (например новая
+	// публичная ручка, зовущая Enable/Disable мимо transitionMu) её вернёт —
+	// раньше такой путь давали ручки POST /singbox/router/{enable,disable},
+	// и они удалены именно поэтому. Новый вызывающий обязан заходить через
+	// Reconcile или SwitchRoutingMode.
+	//
+	// appliedSpec — снимок ровно того RestoreInputSpec, что уехал в
+	// IPTables.Install; nil = «ничего нашего в netfilter не установлено».
+	// Хранятся ВХОДЫ правил целиком, а не их разложенные копии: пока входы
+	// лежали двенадцатью полями, каждая новая точка сравнения забывала часть
+	// из них (так и жил дефект policy-tun, сравнивавший один вход из семи).
+	// Сравнение — equalInstalledSpec, по РЕНДЕРУ спека: поле, которого нет в
+	// правилах, изменить netfilter не может, поэтому «забыли поле» здесь
+	// невыразимо. После записи спек не мутируется.
+	// Единственный писатель непустого значения — успешный Install (nil в него
+	// пишут ещё Disable, disablePolicyTun и нулевая ветка reconcilePolicyTunQoS).
+	appliedSpec *RestoreInputSpec
+
+	// tunDownStrikes — сколько тиков реконсиляции подряд carrier на tun
+	// нулевой; по нему healDetachedTun решает, лечить ли сейчас (см.
+	// healDetachedTunAttempts). Пишется и читается только из reconcile-тика,
+	// сериализованного transitionMu.
+	tunDownStrikes int
+
+	// policyTunRouteStrikes — сколько тиков подряд рантайм NDMS не показывает
+	// дефолт через наш tun при живой записи в конфиге; по нему
+	// reassertPolicyTunDefaultRoute решает, ставить ли сейчас (см.
+	// policyTunRouteHealAttempts).
+	//
+	// Пишет только reconcile-тик (сериализован transitionMu), но ЧИТАЕТ ещё и
+	// GetStatus из HTTP-обработчика — отсюда atomic, а не голый int, как у
+	// соседнего tunDownStrikes: тот читается там же, где пишется.
+	//
+	// Ноль — «жалоб нет», и это же значение на старте процесса: до первого тика
+	// статус не должен объявлять режим сломанным.
+	policyTunRouteStrikes atomic.Int64
+
+	// ingressMissStrikes — сколько тиков подряд ingress-ссылка не резолвится в
+	// существующее устройство; по нему healIngressRefs решает, убирать ли её
+	// из настроек (см. ingressRefDropAfter). Владелец и сериализация те же,
+	// что у tunDownStrikes: только reconcile-тик под transitionMu.
+	ingressMissStrikes map[string]int
+
+	// appliedBlackhole — такой же снимок ВТОРОГО ресурса: fail-closed DROP,
+	// который reconcileInstalled поднимает, пока sing-box мёртв, а
+	// PREROUTING-джампы снесены. nil = блокировки нет. Ресурс отдельный от
+	// appliedSpec во всём: свой рендер (buildBlackholeRestoreInput), свой файл
+	// правил (persistBlackhole) и своя цепочка (BlackholeChain), — поэтому и
+	// снимок свой (сравнение — equalBlackholeSpec). Снимком, а не булевым
+	// флагом: по флагу переустановка сводилась бы к «уже стоит — не трогаем»,
+	// и смена WAN-адреса роутера посреди простоя движка не доехала бы до
+	// исключений блокировки — это закреплено
+	// TestReconcileInstalled_BlackholeFollowsWANIPChange.
+	appliedBlackhole *RestoreInputSpec
+
+	// last-installed geoip-теги обхода; в спеке от них остаётся только
+	// производный BypassGeoIPSet, то есть состав тегов из снимка
+	// невосстановим. Поэтому смена состава видна ТОЛЬКО здесь — и это триггер
+	// пересборки/сноса набора AWGM-BYPASS.
+	currentBypassGeoIPTags []string
 
 	// bypassPopulating — single-flight наполнения AWGM-BYPASS: пока идёт
 	// пересборка, повторные триггеры (Enable, reconcile, смена .dat) только
@@ -496,17 +614,6 @@ type ServiceImpl struct {
 	fakeipACLv6Asserted    bool
 	policyTunACLv6Asserted bool
 
-	// blackholeActive tracks whether the fail-closed DROP chain is currently
-	// engaged (installed by reconcileInstalled while sing-box is dead and the
-	// PREROUTING interception jumps were wiped). It is removed the moment the
-	// engine recovers. Guarded by s.mu, like the other current* install state.
-	blackholeActive bool
-
-	// currentQoSClasses is the last-installed QoS-DSCP dispatch set (DSCP +
-	// ports only — the class outbound lives in sing-box config, not in
-	// iptables). Reconcile re-Installs when it drifts from settings.
-	currentQoSClasses []QoSClassSpec
-
 	// qosApplyFailed remembers a failed sing-box apply of the QoS routes
 	// slot so the next heal re-applies even when disk state is byte-equal.
 	// См. applyQoSRoutesSlot.
@@ -525,7 +632,8 @@ type ServiceImpl struct {
 	inspectCache     *ruleSetCache
 	datRuleSetMu     sync.Mutex
 
-	// Optional keendns-preset → managed DNS rewrite (own FQDN → LAN IP).
+	// Optional keendns-preset → имена KeenDNS резолвит сам роутер, а его
+	// адреса идут мимо sing-box.
 	// Wired post-construction via SetKeenDNSPreset (dnsrewrite lives in
 	// setupListen after the router service) — под keenDNSMu, потому что
 	// startup-Reconcile читает их из своей горутины уже во время wiring.
@@ -533,9 +641,14 @@ type ServiceImpl struct {
 	// keenDNSWarnState — последнее залогированное состояние пресета, чтобы
 	// не писать один и тот же warn на каждом тике Reconcile.
 	keenDNSWarnState string
-	keenDNSDomain    KeenDNSDomainProvider
-	keenDNSLAN       LANIPv4Provider
-	keenDNSSync      KeenDNSRewriteSyncer
+	keenDNSInfoProv  KeenDNSInfoProvider
+	keenDNSSync      KeenDNSPresetSyncer
+	// Кэш данных с роутера (см. keenDNSInfoTTL) и производный от него
+	// список CIDR обхода, который уезжает в RestoreInputSpec.
+	keenDNSFQDN        string
+	keenDNSAddrs       []string
+	keenDNSInfoAt      time.Time
+	keenDNSBypassCIDRs []string
 }
 
 func NewService(d Deps) *ServiceImpl {
@@ -545,6 +658,13 @@ func NewService(d Deps) *ServiceImpl {
 	appLog := logging.NewScopedLogger(d.AppLog, logging.GroupRouting, logging.SubSingboxRouter)
 	if d.WANIPCollector == nil {
 		d.WANIPCollector = NewWANIPCollector(&routerLoggerAdapter{log: appLog})
+	}
+	if d.OpkgTunPool == nil {
+		// Не отказ: юнит-тесты собирают сервис без пула намеренно. Но в проде
+		// незаполненное поле означает, что включить режим роутера нельзя
+		// вовсе — номер взять негде. Такая пропажа уже случалась при правке
+		// проводки, поэтому она обязана быть видна в журнале, а не в ревью.
+		appLog.Warn("opkgtun-pool", "", "пул номеров OpkgTun не задан — включение режимов роутера будет отказывать")
 	}
 	// Idempotently refresh the netfilter hook script: if a previous
 	// version is on disk (older AWGM without pidof guard), this writes
@@ -562,9 +682,112 @@ func (s *ServiceImpl) routerConfigPath() string {
 	return filepath.Join(s.deps.Singbox.ConfigDir(), "20-router.json")
 }
 
+// ingressLinkNames — множество kernel-устройств, существующих ПРЯМО СЕЙЧАС.
+// Один ReadDir на резолв, а не `ip link show` на каждую ссылку (так делает
+// соседний fakeIPLinkPresent): резолв идёт каждым тиком реконсиля, и N
+// fork+exec на MIPS здесь не нужны. Seam var — ради тестов.
+var ingressLinkNames = func() (map[string]bool, error) {
+	ents, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(ents))
+	for _, e := range ents {
+		out[e.Name()] = true
+	}
+	return out, nil
+}
+
+// ingressRefDropAfter — сколько тиков подряд ссылка должна не резолвиться,
+// прежде чем её уберут из настроек. Не единица: на старте демона интерфейс
+// может ещё не существовать (порядок поднятия NativeWG/OpkgTun), и уборка «с
+// первого промаха» снесла бы живую настройку пользователя. Три тика — полторы
+// минуты, переживает загрузку с запасом.
+const ingressRefDropAfter = 3
+
+// healIngressRefs убирает из настроек ingress-ссылки вида `iface:<имя>`, под
+// которыми больше нет устройства.
+//
+// Зачем вообще: ссылка на исчезнувший интерфейс — не безобидный мусор. Заворот
+// `ip rule iif <имя>` ставится по имени, ядро помечает правило мёртвого
+// устройства `[detached]` и ПЕРЕПОДЦЕПЛЯЕТ его, как только появится тёзка, — а
+// номера OpkgTun переиспользуются. То есть чужой трафик уехал бы в нашу
+// таблицу. Плюс тик реконсиля вечно пересобирал заворот по мусорному списку
+// (F381, роутер владельца 18.09: `iif opkgtun17 [detached]`, `opkgtun18`).
+//
+// Почему в настройках, а не только в резолве: пропуск при резолве лечит
+// симптом, а список продолжает лгать — и в UI он показан отмеченным.
+//
+// `managed:`-ссылки не трогаем: их чистит pruneOrphanIngressRefs при удалении
+// сервера и при загрузке настроек, и у них своя причина не резолвиться
+// («сервер не поднят»), которая проходит сама.
+func (s *ServiceImpl) healIngressRefs(sr storage.SingboxRouterSettings) {
+	if len(sr.IngressInterfaces) == 0 {
+		return
+	}
+	links, err := ingressLinkNames()
+	if err != nil {
+		return // «не знаем» — ничего не убираем
+	}
+	if s.ingressMissStrikes == nil {
+		s.ingressMissStrikes = map[string]int{}
+	}
+	dead := map[string]bool{}
+	for _, ref := range sr.IngressInterfaces {
+		name, isIface := strings.CutPrefix(ref, "iface:")
+		if !isIface {
+			continue
+		}
+		if links[name] {
+			delete(s.ingressMissStrikes, ref)
+			continue
+		}
+		s.ingressMissStrikes[ref]++
+		if s.ingressMissStrikes[ref] == 1 {
+			s.appLog.Warn("resolve-ingress", name, fmt.Sprintf(
+				"ingress-ссылка %q указывает на несуществующее устройство — уберу из настроек, если не появится", ref))
+		}
+		if s.ingressMissStrikes[ref] >= ingressRefDropAfter {
+			dead[ref] = true
+		}
+	}
+	if len(dead) == 0 {
+		return
+	}
+	if err := s.deps.Settings.Update(func(cur *storage.Settings) error {
+		kept := make([]string, 0, len(cur.SingboxRouter.IngressInterfaces))
+		for _, ref := range cur.SingboxRouter.IngressInterfaces {
+			if !dead[ref] {
+				kept = append(kept, ref)
+			}
+		}
+		cur.SingboxRouter.IngressInterfaces = kept
+		return nil
+	}); err != nil {
+		s.appLog.Warn("resolve-ingress", "", "убрать мёртвые ingress-ссылки: "+err.Error())
+		return
+	}
+	for ref := range dead {
+		delete(s.ingressMissStrikes, ref)
+		s.appLog.Info("resolve-ingress", strings.TrimPrefix(ref, "iface:"),
+			fmt.Sprintf("ingress-ссылка %q убрана из настроек: устройства нет", ref))
+	}
+}
+
 func (s *ServiceImpl) resolveIngressInterfaces(ctx context.Context, refs []string) []string {
 	out := make([]string, 0, len(refs))
 	seen := map[string]bool{}
+	// Ссылка живёт в настройках, пока пользователь её не снял, а интерфейс под
+	// ней может исчезнуть — туннель удалён, номер OpkgTun переехал. Имя при
+	// этом остаётся валидным с виду, и заворот `ip rule iif <имя>` ставился для
+	// мёртвых устройств вечно: ядро помечает такое правило `[detached]`, а при
+	// появлении ОДНОИМЁННОГО устройства переподцепляет — то есть чужой трафик
+	// уехал бы в нашу таблицу (F381, снято с роутера репортёра 18.09:
+	// `iif opkgtun17 [detached]` и `iif opkgtun18 [detached]`).
+	//
+	// Отказ чтения — «не знаем»: ссылки остаются, иначе икота на /sys снимала
+	// бы заворот у живых интерфейсов.
+	links, linksErr := ingressLinkNames()
 	for _, ref := range refs {
 		var name string
 		switch {
@@ -577,6 +800,12 @@ func (s *ServiceImpl) resolveIngressInterfaces(ctx context.Context, refs []strin
 		}
 		if name == "" {
 			s.appLog.Warn("resolve-ingress", "", fmt.Sprintf("ingress ref %q не резолвится (сервер не поднят / кэш не готов), пропущен", ref))
+			continue
+		}
+		// МОЛЧА: резолв идёт каждым тиком, и постоянное состояние (устройства
+		// нет и не будет) залило бы журнал одной и той же строкой навсегда.
+		// Рассказывает и убирает мёртвую ссылку healIngressRefs — один раз.
+		if linksErr == nil && !links[name] {
 			continue
 		}
 		if seen[name] {
@@ -717,7 +946,7 @@ func (s *ServiceImpl) persistConfigDirect(ctx context.Context, cfg *RouterConfig
 // guard before writing. Orch must be non-nil; the caller must have arranged for
 // the slot to be enabled. Shared by persistConfigDirect and persistFakeIPConfig.
 func (s *ServiceImpl) persistSlotDirect(slot orchestrator.Slot, cfg *RouterConfig, checkCycles bool) error {
-	materialized, err := s.ruleSetMaterializer().materializeConfig(cfg)
+	materialized, err := s.ruleSetMaterializer().materializeConfig(slot, cfg)
 	if err != nil {
 		return err
 	}
@@ -759,7 +988,7 @@ func (s *ServiceImpl) orchestratorApplyNow() error {
 }
 
 func (s *ServiceImpl) persistConfig(ctx context.Context, cfg *RouterConfig) error {
-	materialized, err := s.ruleSetMaterializer().materializeConfig(cfg)
+	materialized, err := s.ruleSetMaterializer().materializeConfig(orchestrator.SlotRouter, cfg)
 	if err != nil {
 		return err
 	}

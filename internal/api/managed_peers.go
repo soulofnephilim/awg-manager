@@ -1,17 +1,21 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/hoaxisr/awg-manager/internal/managed"
 	"github.com/hoaxisr/awg-manager/internal/response"
+	"github.com/hoaxisr/awg-manager/internal/signature"
 )
 
 // AddPeerRequestDTO is the swagger-visible body for POST /managed-servers/{id}/peers.
 type AddPeerRequestDTO struct {
 	Description string `json:"description" example:"My Phone"`
-	TunnelIP    string `json:"tunnelIP" example:"10.10.0.2/32"`
-	DNS         string `json:"dns,omitempty" example:"8.8.8.8"`
+	// TunnelIP is optional: when empty, the first free host address in the
+	// server's subnet is allocated.
+	TunnelIP string `json:"tunnelIP,omitempty" example:"10.10.0.2/32"`
+	DNS      string `json:"dns,omitempty" example:"8.8.8.8"`
 }
 
 // UpdatePeerRequestDTO is the swagger-visible body for PUT /managed-servers/{id}/peers/{pubkey}.
@@ -19,6 +23,24 @@ type UpdatePeerRequestDTO struct {
 	Description string `json:"description" example:"My Phone"`
 	TunnelIP    string `json:"tunnelIP" example:"10.10.0.2/32"`
 	DNS         string `json:"dns,omitempty" example:"8.8.8.8"`
+	// Signature: nil — сигнатуру пира не трогать; объект — заменить все пять
+	// полей и профиль целиком (пустые поля объекта стирают старые байты).
+	Signature *PeerSignatureDTO `json:"signature,omitempty"`
+}
+
+// PeerSignatureDTO is the swagger-visible peer signature: five packets plus the
+// profile they were generated from ("" — набраны руками).
+type PeerSignatureDTO struct {
+	Profile string `json:"profile" example:"quic_initial"`
+	I1      string `json:"i1" example:"<b 0xc0>"`
+	I2      string `json:"i2"`
+	I3      string `json:"i3"`
+	I4      string `json:"i4"`
+	I5      string `json:"i5"`
+}
+
+func (s *PeerSignatureDTO) packets() signature.GeneratedPackets {
+	return signature.GeneratedPackets{I1: s.I1, I2: s.I2, I3: s.I3, I4: s.I4, I5: s.I5}
 }
 
 // AddPeer adds a new peer to a managed server.
@@ -43,6 +65,10 @@ func (h *ManagedServerHandler) AddPeer(w http.ResponseWriter, r *http.Request, i
 	}
 	peer, err := h.svc.AddPeer(r.Context(), id, req)
 	if err != nil {
+		if errors.Is(err, managed.ErrSignatureGenerate) {
+			response.Error(w, err.Error(), "SIGNATURE_GENERATE_FAILED")
+			return
+		}
 		response.Error(w, err.Error(), "ADD_PEER_FAILED")
 		return
 	}
@@ -56,6 +82,7 @@ func (h *ManagedServerHandler) AddPeer(w http.ResponseWriter, r *http.Request, i
 //
 //	@Summary		Update managed-server peer
 //	@Description	Updates fields (name, allowed-ips, ...) of the peer identified by pubkey on the named managed server.
+//	@Description	The signature field: absent — the peer signature is left untouched; present — it replaces all five packets and the profile.
 //	@Tags			managed-servers
 //	@Accept			json
 //	@Produce		json
@@ -74,7 +101,16 @@ func (h *ManagedServerHandler) UpdatePeer(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := h.svc.UpdatePeer(r.Context(), id, pubkey, req); err != nil {
-		response.Error(w, err.Error(), "UPDATE_PEER_FAILED")
+		switch {
+		case errors.Is(err, managed.ErrUnknownSignatureProfile):
+			response.Error(w, err.Error(), "INVALID_SIGNATURE_PROFILE")
+		case errors.Is(err, managed.ErrSignatureTooLarge):
+			response.Error(w, err.Error(), "SIGNATURE_TOO_LARGE")
+		case errors.Is(err, managed.ErrInvalidSignatureTag):
+			response.Error(w, err.Error(), "SIGNATURE_INVALID_TAG")
+		default:
+			response.Error(w, err.Error(), "UPDATE_PEER_FAILED")
+		}
 		return
 	}
 	h.svc.InvalidateCache(id)
@@ -92,6 +128,7 @@ func (h *ManagedServerHandler) UpdatePeer(w http.ResponseWriter, r *http.Request
 //	@Security		CookieAuth
 //	@Param			id		path		string	true	"Server id"
 //	@Param			pubkey	path		string	true	"Peer public key (URL-encoded)"
+//	@Param			endpoint	query		string	false	"Хост для [Peer] Endpoint вместо WAN/KeenDNS (прокси-обвязки шлют 127.0.0.1)"
 //	@Success		200		{object}	ServersAllResponse
 //	@Failure		404		{object}	APIErrorEnvelope
 //	@Failure		500		{object}	APIErrorEnvelope
@@ -159,7 +196,7 @@ func (h *ManagedServerHandler) PeerConf(w http.ResponseWriter, r *http.Request, 
 		response.MethodNotAllowed(w)
 		return
 	}
-	conf, err := h.svc.GenerateConf(r.Context(), id, pubkey)
+	conf, err := h.svc.GenerateConf(r.Context(), id, pubkey, r.URL.Query().Get("endpoint"))
 	if err != nil {
 		response.Error(w, err.Error(), "CONF_FAILED")
 		return

@@ -189,11 +189,13 @@ func (s *Store) Create(in CreateInput) (*Subscription, error) {
 		Label:            in.Label,
 		URL:              in.URL,
 		Inline:           in.Inline,
+		Path:             strings.TrimSpace(in.Path),
 		Headers:          in.Headers,
 		RefreshHours:     in.RefreshHours,
 		Enabled:          in.Enabled,
 		FilterInclude:    in.FilterInclude,
 		FilterExclude:    in.FilterExclude,
+		BindInterface:    strings.TrimSpace(in.BindInterface),
 		SelectorTag:      "sub-" + short,
 		InboundTag:       "sub-" + short + "-in",
 		ProxyIndex:       -1,
@@ -281,6 +283,16 @@ func (s *Store) Update(id string, patch UpdatePatch) (*Subscription, error) {
 		}
 		if patch.FilterExclude != nil {
 			sub.FilterExclude = *patch.FilterExclude
+		}
+		if patch.BindInterface != nil {
+			// Trim before persisting so storage state matches the
+			// validated value: subscription/service.go trims and
+			// validates before reaching the store, but a direct
+			// Store.Update call (tests, future programmatic
+			// paths) would otherwise persist a value with stray
+			// whitespace and silently fail the next kernel check
+			// (#709, PR #732 review non-blocker #11).
+			sub.BindInterface = strings.TrimSpace(*patch.BindInterface)
 		}
 		return nil
 	})
@@ -555,6 +567,10 @@ func (s *Store) MaybeRefresh(now time.Time) []Subscription {
 		// would just re-parse the same paste. Skip; user can still
 		// trigger a manual refresh from the UI if they want a re-parse.
 		if sub.IsInline() {
+			continue
+		}
+		// file source refreshes only on user action (Q5, #710)
+		if sub.IsFile() {
 			continue
 		}
 		if sub.LastFetched.IsZero() ||

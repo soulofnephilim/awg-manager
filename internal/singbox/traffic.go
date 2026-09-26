@@ -34,10 +34,15 @@ type HistoryFeeder interface {
 // When a HistoryFeeder is provided, each publish also feeds the rate-history
 // store so /api/tunnels/traffic backfill works for singbox tags.
 type TrafficAggregator struct {
-	clashAddr string
+	// clashAddr — ПОСТАВЩИК адреса, а не снимок: см. LogForwarder.clashAddr.
+	clashAddr func() string
 	publisher TrafficPublisher
 	feeder    HistoryFeeder
 	interval  time.Duration
+
+	// clients отвечает, открыта ли панель хоть у кого-нибудь. Опционально:
+	// без него агрегатор работает в прежнем темпе всегда.
+	clients ClientCounter
 
 	mu            sync.Mutex
 	tags          map[string]*TrafficSnapshot
@@ -46,7 +51,22 @@ type TrafficAggregator struct {
 	uploadTotal   int64
 }
 
-func NewTrafficAggregator(clashAddr string, pub TrafficPublisher, feeder HistoryFeeder) *TrafficAggregator {
+// SetClientCounter wires the source of "сколько панелей сейчас открыто".
+func (t *TrafficAggregator) SetClientCounter(c ClientCounter) {
+	t.mu.Lock()
+	t.clients = c
+	t.mu.Unlock()
+}
+
+// nobodyWatching — правда ли, что панель не открыта ни у кого.
+func (t *TrafficAggregator) nobodyWatching() bool {
+	t.mu.Lock()
+	c := t.clients
+	t.mu.Unlock()
+	return c != nil && c.ClientCount() == 0
+}
+
+func NewTrafficAggregator(clashAddr func() string, pub TrafficPublisher, feeder HistoryFeeder) *TrafficAggregator {
 	return &TrafficAggregator{
 		clashAddr: clashAddr,
 		publisher: pub,
@@ -74,7 +94,7 @@ func (t *TrafficAggregator) Run(ctx context.Context) {
 }
 
 func (t *TrafficAggregator) runOnce(ctx context.Context) {
-	url := fmt.Sprintf("ws://%s/connections", t.clashAddr)
+	url := fmt.Sprintf("ws://%s/connections", t.clashAddr())
 	conn, _, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
 		return
@@ -109,8 +129,29 @@ func (t *TrafficAggregator) runOnce(ctx context.Context) {
 		case <-readErr:
 			return
 		case msg := <-readCh:
+			// Разбор идёт ВСЕГДА, в том числе при закрытой панели, и это
+			// сознательно.
+			//
+			// Соблазн разрядить его тут велик: sing-box шлёт полный снимок
+			// таблицы соединений раз в секунду, и разбор — самая дорогая часть
+			// цикла. Но источник НЕМОНОТОНЕН: ingest пересобирает суммы по
+			// тегам только из ОТКРЫТЫХ соединений, а traffic.History.Feed
+			// считает вход счётчиком и при отрицательной дельте выбрасывает
+			// точку целиком (history.go:86-90). Растянув шаг до минуты, мы
+			// теряли бы и короткие соединения (открылось и закрылось внутри
+			// окна), и всю минуту разом, когда сумма по тегу за окно упала.
+			//
+			// Это и отличает агрегатор от sysfs-поллера, которому разрежение
+			// далось даром: тот кормит историю счётчиками ядра
+			// (statistics/rx_bytes), а они монотонны.
 			t.ingest(msg)
 		case <-ticker.C:
+			// Публиковать некому — три SSE-события каждые 2 с уходили бы в
+			// никуда. История при этом наполняется своим чередом.
+			if t.nobodyWatching() {
+				t.feedHistory()
+				continue
+			}
 			t.publish()
 		}
 	}
@@ -202,12 +243,22 @@ type TrafficTotalsEvent struct {
 
 // publish emits the current snapshot to SSE and (optionally) feeds the
 // history store. Download maps to rxBytes (received), Upload to txBytes (sent).
-func (t *TrafficAggregator) publish() {
+// snapshotTags — копия текущих сумм по тегам под локом. Общая для публикации и
+// для подачи в историю: два места собирали её дословно одинаково, и разойтись
+// им было бы легко — а это ровно та величина, которую видит пользователь.
+func (t *TrafficAggregator) snapshotTags() []TrafficSnapshot {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	snap := make([]TrafficSnapshot, 0, len(t.tags))
 	for _, s := range t.tags {
 		snap = append(snap, *s)
 	}
+	return snap
+}
+
+func (t *TrafficAggregator) publish() {
+	snap := t.snapshotTags()
+	t.mu.Lock()
 	mem := t.memory
 	totals := TrafficTotalsEvent{DownloadTotal: t.downloadTotal, UploadTotal: t.uploadTotal}
 	t.mu.Unlock()
@@ -220,5 +271,15 @@ func (t *TrafficAggregator) publish() {
 		for _, s := range snap {
 			t.feeder.Feed(s.Tag, s.Download, s.Upload)
 		}
+	}
+}
+
+// feedHistory кормит историю без SSE-публикации — путь простоя.
+func (t *TrafficAggregator) feedHistory() {
+	if t.feeder == nil {
+		return
+	}
+	for _, s := range t.snapshotTags() {
+		t.feeder.Feed(s.Tag, s.Download, s.Upload)
 	}
 }

@@ -41,9 +41,7 @@ func (r *Runner) collectSystem(ctx context.Context) SystemInfo {
 		TotalMemoryMB: osdetect.GetTotalMemoryMB(),
 	}
 
-	if r.deps.Backend != nil {
-		info.Backend = r.deps.Backend.Type().String()
-	}
+	info.Backend = "kernel"
 
 	// Kernel module status — delegate to Loader (single source of truth)
 	if r.deps.KmodLoader != nil {
@@ -386,6 +384,7 @@ func buildTunnelSettings(stored *storage.AWGTunnel) TunnelSettings {
 	ts := TunnelSettings{
 		MTU:               stored.Interface.MTU,
 		DNS:               stored.Interface.DNS,
+		AllowedIPs:        stored.Peer.AllowedIPs,
 		Qlen:              stored.Interface.Qlen,
 		Jc:                stored.Interface.Jc,
 		Jmin:              stored.Interface.Jmin,

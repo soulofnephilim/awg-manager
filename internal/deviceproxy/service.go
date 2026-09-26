@@ -263,8 +263,8 @@ func (s *Service) DeleteInstance(ctx context.Context, id string) (applied bool, 
 	if err := s.applyInstancesLocked(ctx); err != nil {
 		s.appLog.Warn("delete-instance", id, "apply after delete failed: "+err.Error())
 		if s.d.Bus != nil {
-			s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.config"})
-			s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.runtime"})
+			s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyConfig, "")
+			s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyRuntime, "")
 		}
 		return false, nil
 	}
@@ -327,8 +327,8 @@ func (s *Service) applyInstancesLocked(ctx context.Context) error {
 	}
 
 	if s.d.Bus != nil {
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.config"})
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.runtime"})
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyConfig, "")
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyRuntime, "")
 	}
 	return nil
 }
@@ -476,8 +476,8 @@ func (s *Service) SaveConfig(ctx context.Context, cfg Config) error {
 	if s.d.Singbox != nil {
 		// No-reload path only makes sense when the daemon is actually up —
 		// otherwise there's no live selector.now to preserve, AND the
-		// reload path includes a cold-start safety net that ApplyConfigNoReload
-		// deliberately skips. Require both conditions.
+		// reload path includes a cold-start safety net that the no-reload
+		// path deliberately skips. Require both conditions.
 		if onlySelectedOutboundChanged(oldCfg, cfg) && s.d.Singbox.IsRunning() {
 			if err := s.d.Singbox.ApplyDeviceProxyNoReload(ctx, spec); err != nil {
 				return fmt.Errorf("apply to singbox (no-reload): %w", err)
@@ -505,10 +505,10 @@ func (s *Service) SaveConfig(ctx context.Context, cfg Config) error {
 	}
 
 	if s.d.Bus != nil {
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.config"})
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyConfig, "")
 		// A default-only change also shifts what the runtime store would
 		// derive "temporarily" against, so invalidate both.
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.runtime"})
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyRuntime, "")
 	}
 	return nil
 }
@@ -560,8 +560,8 @@ func (s *Service) ForceApply(ctx context.Context) error {
 	}
 
 	if s.d.Bus != nil {
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.config"})
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.runtime"})
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyConfig, "")
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyRuntime, "")
 	}
 	return nil
 }
@@ -1087,7 +1087,7 @@ func (s *Service) SelectRuntimeOutbound(ctx context.Context, tag string) error {
 	// fast-path so the "Активный туннель" card updates sub-second,
 	// without waiting for the 5s runtime polling tick.
 	if bus != nil {
-		bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.runtime"})
+		bus.PublishInvalidated(events.ResourceDeviceProxyRuntime, "")
 	}
 	return nil
 }
@@ -1140,7 +1140,7 @@ func (s *Service) SelectInstanceRuntimeOutbound(ctx context.Context, id, tag str
 	s.appLog.Info("select-runtime", tag, fmt.Sprintf("Device proxy instance %s hot-switched outbound", id))
 
 	if bus != nil {
-		bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.runtime"})
+		bus.PublishInvalidated(events.ResourceDeviceProxyRuntime, "")
 	}
 	return nil
 }
@@ -1187,8 +1187,8 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		for _, wasTag := range missingTags {
 			s.d.Bus.Publish("deviceproxy:missing-target", map[string]string{"wasTag": wasTag})
 		}
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.config"})
-		s.d.Bus.Publish("resource:invalidated", events.ResourceInvalidatedEvent{Resource: "deviceproxy.runtime"})
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyConfig, "")
+		s.d.Bus.PublishInvalidated(events.ResourceDeviceProxyRuntime, "")
 	}
 
 	snap = s.d.Store.Snapshot()
@@ -1270,30 +1270,34 @@ func (s *Service) SubscribeBus(ctx context.Context) func() {
 	_, ch, unsub := s.d.Bus.Subscribe()
 	go func() {
 		for ev := range ch {
-			if ev.Type != "resource:invalidated" &&
+			if ev.Type != events.EventResourceInvalidated &&
 				ev.Type != "singbox:tunnels-changed" &&
 				ev.Type != "singbox-router:outbounds" {
 				continue
 			}
-			if ev.Type == "resource:invalidated" {
+			if ev.Type == events.EventResourceInvalidated {
 				// Only react to invalidations that change our child list.
 				payload, ok := ev.Data.(events.ResourceInvalidatedEvent)
 				if !ok {
 					continue
 				}
-				if payload.Resource != "tunnels" &&
-					payload.Resource != "singbox.tunnels" &&
-					payload.Resource != "singbox.subscriptions" {
+				// Ключа singbox.subscriptions здесь больше нет: его не публиковал
+				// НИКТО, ветка была мертва (F66). Прежний довод «оставить, чтобы
+				// не замаскировать будущего публикатора» обесценен закрытым
+				// набором ключей (F62): новый ключ теперь не пройдёт мимо
+				// events.AllResources и union фронта. CRUD подписок будит
+				// реконсиляцию через tunnels/singbox.tunnels, как и раньше.
+				if payload.Resource != events.ResourceTunnels &&
+					payload.Resource != events.ResourceSingboxTunnels {
 					continue
 				}
 			}
 			if err := s.Reconcile(ctx); err != nil {
-				// Reconcile failure is non-fatal at the subscriber level;
-				// the user-facing flow already has its own error path.
-				// No logger is wired on Service yet (would be added in a
-				// future task); silent swallow matches the project's other
-				// similar subscribers.
-				_ = err
+				// Отказ не фатален для подписчика — он обязан слушать
+				// дальше, — но обязан быть виден: прежде он глотался
+				// молча (F78). Своей дедупликации не нужно, журнал
+				// коалесцирует повторы сам.
+				s.appLog.Warn("reconcile", "", "bus-triggered reconcile failed: "+err.Error())
 			}
 		}
 	}()

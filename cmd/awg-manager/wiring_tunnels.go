@@ -3,20 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/auth"
 	"github.com/hoaxisr/awg-manager/internal/clientroute"
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
 	"github.com/hoaxisr/awg-manager/internal/events"
-	"github.com/hoaxisr/awg-manager/internal/freeturn"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	ndmscommand "github.com/hoaxisr/awg-manager/internal/ndms/command"
+	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
 	"github.com/hoaxisr/awg-manager/internal/presets"
-	"github.com/hoaxisr/awg-manager/internal/proxyhealth"
+	"github.com/hoaxisr/awg-manager/internal/proxyrt/exitreg"
 	"github.com/hoaxisr/awg-manager/internal/routing"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/env"
@@ -34,7 +33,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/state"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wg"
-	"github.com/hoaxisr/awg-manager/internal/wdtt"
 )
 
 // setupTunnels wires the tunnel core (wg/backend/state/firewall, NDMS
@@ -43,9 +41,9 @@ import (
 func (a *app) setupTunnels() {
 	// Create tunnel service components
 	a.wgClient = wg.New()
-	a.backendImpl = backend.New(a.bootLog)
+	a.backendImpl = backend.NewKernel()
 	a.stateMgr = state.New(a.ndmsQueries.Interfaces, a.wgClient, a.backendImpl, a.loggingService)
-	firewallMgr := firewall.New(a.backendImpl.Type() == backend.TypeKernel, osdetect.Is5(), a.loggingService)
+	firewallMgr := firewall.New(true /* mssClamp */, osdetect.Is5(), a.loggingService)
 
 	// Build NDMS CQRS Commands eagerly so the Operator can consume them.
 	// HookNotifier is wired later (ndmsCommands.SetHookNotifier(orch)) once
@@ -93,15 +91,40 @@ func (a *app) setupTunnels() {
 	// Create the main tunnel service
 	a.tunnelService = service.New(a.awgStore, a.nwgOp, a.operator, a.stateMgr, a.wanModel, a.loggingService)
 
+	// Пять владельцев пула OpkgTun собираются ЗДЕСЬ и раздаются готовыми:
+	// состав общий на всех, кто выдаёт номера (opkgTunOwners).
+	opkgIndices := &routerOpkgTunIndexAdapter{store: a.ndmsQueries.Interfaces}
+	a.opkgTunOwners = newOpkgTunOwners(ndmsSource(opkgIndices), liveSource(opkgIndices),
+		a.awgStore, a.settingsStore, a.proxyStore)
+	// Пул собирается ОДИН на процесс и тем же составом: второй экземпляр
+	// означал бы две очереди на выбор, то есть отсутствие атомарности.
+	a.opkgPool = opkgtun.NewPool(opkgtun.CeilingForHost(), a.opkgTunOwners.all()...)
+	a.tunnelService.SetOpkgTunPool(a.opkgPool, opkgTunSupported)
+
 	// Migrate legacy ISPInterface="none" to "" (auto) for tunnels from older versions.
 	a.tunnelService.MigrateISPInterfaceNone()
 	a.tunnelService.MigrateEmptyBackend()
+
+	// Реестр выходов прокси-рантайма (§5). Единственный писатель (G1) —
+	// manager.Boot (SetDeclared/MarkSeeded, ниже по этому файлу), а он идёт
+	// горутиной после старта HTTP и на холодном старте роутера ждёт RCI до
+	// ~2 минут (boot.go, Phase 1). До первого успешного Boot реестр пуст, и
+	// каталог маршрутизации использует фолбэк на зеркальную запись
+	// (routing/catalog.go, backendWdttRaw) — это страховка того же окна, а
+	// не временный мост. Имена этих двух методов здесь не пишутся намеренно:
+	// ворота плана грепают их по прод-коду подстрокой.
+	a.exitMirror = exitreg.NewStoreMirror(a.awgStore, a.eventBus)
+	a.exitRegistry = exitreg.New(
+		a.exitMirror,
+		logging.NewScopedLogger(a.loggingService, logging.GroupTunnel, logging.SubLifecycle),
+	)
 
 	// Routing catalog — unified tunnel listing for all routing subsystems
 	a.catalog = routing.NewCatalog(
 		&tunnelProviderAdapter{svc: a.tunnelService, store: a.awgStore},
 		a.ndmsQueries.Interfaces,
 		&storeAdapter{store: a.awgStore},
+		exitRegistryAdapter{reg: a.exitRegistry},
 		a.loggingService,
 	)
 
@@ -180,6 +203,13 @@ func (a *app) setupServices() {
 
 	// Create external tunnel service
 	a.externalService = external.NewService(a.awgStore, a.settingsStore, a.tunnelService, a.loggingService)
+	// Сироты пула доезжают до списка внешних туннелей: состояние у них одно —
+	// «интерфейс на роутере, которым панель не владеет», и список обязан быть
+	// один (иначе один интерфейс предлагается и принять, и удалить).
+	a.externalService.SetOrphanSource(
+		orphanIfaces(a.opkgPool, a.ndmsQueries.Interfaces),
+		ndmsDescriptionsFn(a.ndmsQueries.Interfaces),
+	)
 
 	// System WireGuard tunnels (read-only + ASC editing) — constructed later,
 	// after ndmsQueries/ndmsCommands are available.
@@ -191,48 +221,6 @@ func (a *app) setupServices() {
 	a.pingCheckService = pingcheck.NewService(a.settingsStore, a.awgStore, a.wgClient, a.loggingService)
 	a.pingCheckService.Start()
 	a.deferOnExit(a.pingCheckService.Stop)
-
-	// FreeTurn service (TURN-tunnel client/server)
-	a.freeturnService = freeturn.NewService(
-		a.dataDir,
-		filepath.Join(a.dataDir, "run"),
-		"/opt/bin/freeturn-client",
-		"/opt/bin/freeturn-server",
-	)
-	a.wdttService = wdtt.NewService(
-		a.dataDir,
-		filepath.Join(a.dataDir, "run"),
-		"/opt/bin/wdtt-client",
-		"/opt/bin/wdtt-server",
-	)
-	a.freeturnService.SetListenPortChecker(&crossListenPortChecker{
-		AWGStore:           a.awgStore,
-		WDTT:               a.wdttService,
-		IncludeWdttClients: true,
-	})
-	a.wdttService.SetListenPortChecker(&crossListenPortChecker{
-		AWGStore:               a.awgStore,
-		FreeTurn:               a.freeturnService,
-		IncludeFreeTurnClients: true,
-	})
-	relayProbe := &proxyhealth.HTTPRelayProbe{
-		CheckURL: func() string {
-			if a.settingsStore == nil {
-				return ""
-			}
-			st, err := a.settingsStore.Load()
-			if err != nil || st == nil {
-				return ""
-			}
-			return st.ConnectivityCheckURL
-		},
-	}
-	linkedTunnels := &proxyhealth.AWGLinkedTunnelResolver{Store: a.awgStore}
-	a.freeturnService.SetRelayProbe(relayProbe)
-	a.freeturnService.SetLinkedTunnelResolver(linkedTunnels)
-	a.wdttService.SetRelayProbe(relayProbe)
-	a.deferOnExit(a.freeturnService.Stop)
-	a.deferOnExit(a.wdttService.Stop)
 
 	// Unified facade: kernel → custom loop, NativeWG → NDMS native
 	a.pingCheckFacade = pingcheck.NewFacade(a.pingCheckService, a.awgStore, a.nwgOp)

@@ -72,18 +72,51 @@ func IsSingboxJSON(body []byte) bool {
 	return rootHasOutbounds(root)
 }
 
+func isXrayOutbounds(rawOutbounds any) bool {
+	obs, ok := rawOutbounds.([]any)
+	if !ok {
+		return false
+	}
+	for _, el := range obs {
+		if m, ok := el.(map[string]any); ok {
+			if _, hasProto := m["protocol"].(string); hasProto {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasSingboxTypeOutbounds(rawOutbounds any) bool {
+	obs, ok := rawOutbounds.([]any)
+	if !ok {
+		return false
+	}
+	if len(obs) == 0 {
+		return true
+	}
+	if isXrayOutbounds(rawOutbounds) {
+		return false
+	}
+	for _, el := range obs {
+		if m, ok := el.(map[string]any); ok {
+			if _, hasType := m["type"].(string); hasType {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // rootHasOutbounds checks the parsed JSON root for any of the three
 // recognised sing-box shapes. Used by IsSingboxJSON.
 func rootHasOutbounds(root any) bool {
 	switch r := root.(type) {
 	case map[string]any:
-		// Shape 1: single config object with outbounds key.
-		if _, ok := r["outbounds"].([]any); ok {
+		// Shape 1: single config object with outbounds key containing sing-box "type" fields.
+		if raw, ok := r["outbounds"]; ok && hasSingboxTypeOutbounds(raw) {
 			return true
 		}
-		// A single bare outbound object (type + tag) without a config
-		// envelope is not a recognised subscription shape — sing-box
-		// JSON exports always use one of the three documented shapes.
 		return false
 	case []any:
 		if len(r) == 0 {
@@ -94,8 +127,8 @@ func rootHasOutbounds(root any) bool {
 			if !ok {
 				continue
 			}
-			// Shape 2: array element is a config with outbounds.
-			if _, ok := obj["outbounds"].([]any); ok {
+			// Shape 2: array element is a config with outbounds containing sing-box "type" fields.
+			if raw, ok := obj["outbounds"]; ok && hasSingboxTypeOutbounds(raw) {
 				return true
 			}
 			// Shape 3: array element looks like a bare outbound
@@ -135,6 +168,7 @@ func ParseSingboxBody(body []byte) BatchResult {
 			LineIdx: 0,
 			Scheme:  "sing-box-json",
 			Message: fmt.Sprintf("json parse: %s", err.Error()),
+			Node:    true,
 		})
 		return out
 	}
@@ -150,6 +184,7 @@ func ParseSingboxBody(body []byte) BatchResult {
 				LineIdx: i,
 				Scheme:  "sing-box-json",
 				Message: "outbound has no type",
+				Node:    true,
 			})
 			continue
 		}
@@ -166,6 +201,7 @@ func ParseSingboxBody(body []byte) BatchResult {
 				LineIdx: i,
 				Scheme:  "sing-box:" + t,
 				Message: fmt.Sprintf("unsupported sing-box outbound type %q", t),
+				Node:    true,
 			})
 			continue
 		}
@@ -175,6 +211,7 @@ func ParseSingboxBody(body []byte) BatchResult {
 				LineIdx: i,
 				Scheme:  "sing-box:" + t,
 				Message: err.Error(),
+				Node:    true,
 			})
 			continue
 		}
@@ -260,9 +297,10 @@ func buildSingboxOutbound(ob map[string]any, typ string) (*ParsedOutbound, error
 //   - per-type auth: vless→uuid, trojan→password, shadowsocks→method+password,
 //     hysteria2→password, mieru→transport+username+password+port(s)
 //
-// Anything beyond this (transport/tls/multiplex shape) is left to sing-box
-// itself — if it can't load the outbound at Reload time, the user sees the
-// load error in subscription state.Err.
+// Сверх этого проверяется только то, что бьёт НЕ ПО ОДНОЙ записи (см.
+// checkSingboxFatal). Остальная форма (transport/tls/multiplex) по-прежнему
+// остаётся на усмотрение sing-box: не загрузится — пользователь увидит ошибку
+// в состоянии подписки.
 func validateSingboxOutbound(ob map[string]any, typ string) error {
 	server := asString(ob["server"])
 	if server == "" {
@@ -310,15 +348,79 @@ func validateSingboxOutbound(ob map[string]any, typ string) error {
 		if !hasServerPort && (!hasServerPorts || len(ports) == 0) {
 			return fmt.Errorf("missing server_port or server_ports")
 		}
-	case "trusttunnel":
-		if asString(ob["username"]) == "" {
-			return fmt.Errorf("missing trusttunnel username")
+	}
+	return checkSingboxFatal(ob, typ)
+}
+
+// checkSingboxFatal отсекает у готового sing-box-аутбаунда ровно то, что
+// роняет БОЛЬШЕ, чем саму запись: неизвестный плагин и чужой flow валят
+// создание аутбаунда, то есть `sing-box check` и применение ВСЕЙ
+// конфигурации, а нулевой sc-диапазон xhttp — весь процесс уже в рантайме
+// (#908). Подписка в формате sing-box JSON — такой же чужой вход, как ссылка
+// или Clash, и одна её запись не должна стоить остальным работоспособности.
+//
+// Всё прочее здесь намеренно не проверяется: вход уже в семантике sing-box,
+// повторять его валидацию целиком мы не можем и не будем.
+func checkSingboxFatal(ob map[string]any, typ string) error {
+	transport, _ := ob["transport"].(map[string]any)
+	transportType := strings.ToLower(asString(transport["type"]))
+
+	if transport != nil && transportType != "" && !singboxTransportTypes[transportType] {
+		return fmt.Errorf("unsupported transport type %q", transportType)
+	}
+
+	switch typ {
+	case "vless":
+		if flow := asString(ob["flow"]); flow != "" {
+			// Те же правила, что у ссылок и Clash: собираем из готового
+			// аутбаунда минимальный StreamBuilder, чтобы решение принималось
+			// одним кодом, а не вторым его списком.
+			stream := &StreamBuilder{Network: "tcp"}
+			if transportType != "" {
+				stream.Network = transportType
+			}
+			if outboundTLSEnabled(ob) {
+				stream.TLS = &outboundTLS{Enabled: true}
+			}
+			if err := checkVlessFlow(flow, stream); err != nil {
+				return err
+			}
 		}
-		if asString(ob["password"]) == "" {
-			return fmt.Errorf("missing trusttunnel password")
+	case "shadowsocks":
+		// Имя здесь уже должно быть sing-box'овым, поэтому не переименовываем
+		// (в отличие от ss://-ссылки, где ходят оба написания) — только судим.
+		if plugin := asString(ob["plugin"]); plugin != "" {
+			if err := checkSSPlugin(plugin); err != nil {
+				return err
+			}
+		}
+	}
+
+	if transportType == "xhttp" {
+		// sc_max_each_post_bytes == 0 — паника в рантайме (#908),
+		// x_padding_bytes == 0 — «cannot be disabled», конфигурация не грузится.
+		for _, key := range []string{"sc_max_each_post_bytes", "x_padding_bytes"} {
+			v, present := transport[key]
+			if !present {
+				continue
+			}
+			if lo, _, ok := rangeBounds(v); !ok || lo <= 0 {
+				return fmt.Errorf("%s %v is not usable: the value must start above zero", key, v)
+			}
 		}
 	}
 	return nil
+}
+
+// singboxTransportTypes — транспорты, которые знает наш форк
+// (option/v2ray_transport.go). Незнакомый тип валит загрузку конфигурации.
+var singboxTransportTypes = map[string]bool{
+	"http":        true,
+	"ws":          true,
+	"quic":        true,
+	"grpc":        true,
+	"httpupgrade": true,
+	"xhttp":       true,
 }
 
 // LooksLikeJSON reports whether body parses as a JSON object or array,

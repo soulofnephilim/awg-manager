@@ -22,7 +22,7 @@ func TestConfig_AddTunnel_RoundTrip(t *testing.T) {
 	c := NewConfig()
 
 	ob := json.RawMessage(`{"type":"vless","tag":"Germany","server":"de.tld","server_port":443,"uuid":"u"}`)
-	if err := c.AddTunnel("Germany", "vless", "de.tld", 443, ob); err != nil {
+	if err := c.AddTunnelWithListenPort("Germany", "vless", "de.tld", 443, 0, ob); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Save(path); err != nil {
@@ -44,13 +44,55 @@ func TestConfig_AddTunnel_RoundTrip(t *testing.T) {
 	}
 }
 
+// mixed-inbound туннеля слушает ТОЛЬКО loopback: это локальный прокси для
+// ProxyN роутера, а не сервис для LAN. Мутант "0.0.0.0" проходил все
+// конфиг-тесты — форма inbound'а литералом не пиновалась.
+func TestConfig_AddTunnel_InboundListensOnLoopbackOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	c := NewConfig()
+	ob := json.RawMessage(`{"type":"vless","tag":"Germany","server":"de.tld","server_port":443,"uuid":"u"}`)
+	if err := c.AddTunnelWithListenPort("Germany", "vless", "de.tld", 443, 0, ob); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Inbounds []map[string]any `json:"inbounds"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, ib := range doc.Inbounds {
+		if ib["tag"] != "Germany-in" {
+			continue
+		}
+		found = true
+		if ib["type"] != "mixed" {
+			t.Errorf("type = %v, ждали mixed", ib["type"])
+		}
+		if ib["listen"] != "127.0.0.1" {
+			t.Errorf("listen = %v, ждали 127.0.0.1 — прокси туннеля открыт наружу", ib["listen"])
+		}
+	}
+	if !found {
+		t.Fatalf("inbound Germany-in не найден: %s", raw)
+	}
+}
+
 func TestConfig_AddTunnel_TagConflict(t *testing.T) {
 	c := NewConfig()
 	ob := json.RawMessage(`{"type":"vless","tag":"X"}`)
-	if err := c.AddTunnel("X", "vless", "h", 1, ob); err != nil {
+	if err := c.AddTunnelWithListenPort("X", "vless", "h", 1, 0, ob); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddTunnel("X", "vless", "h", 1, ob); err == nil {
+	if err := c.AddTunnelWithListenPort("X", "vless", "h", 1, 0, ob); err == nil {
 		t.Error("expected tag conflict")
 	}
 }
@@ -58,7 +100,7 @@ func TestConfig_AddTunnel_TagConflict(t *testing.T) {
 func TestConfig_AddTunnel_EnsuresNaiveUDPOverTCP(t *testing.T) {
 	c := NewConfig()
 	ob := json.RawMessage(`{"type":"naive","tag":"N","server":"h","server_port":443,"username":"u","password":"p"}`)
-	if err := c.AddTunnel("N", "naive", "h", 443, ob); err != nil {
+	if err := c.AddTunnelWithListenPort("N", "naive", "h", 443, 0, ob); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := c.GetOutbound("N")
@@ -125,7 +167,7 @@ func TestEnsureHysteria2ChromeParrot_RespectsExplicitValue(t *testing.T) {
 func TestConfig_AddTunnel_EnsuresHysteria2ChromeParrot(t *testing.T) {
 	c := NewConfig()
 	ob := json.RawMessage(`{"type":"hysteria2","tag":"H","server":"h","server_port":443,"password":"p","tls":{"enabled":true,"disable_sni":true}}`)
-	if err := c.AddTunnel("H", "hysteria2", "h", 443, ob); err != nil {
+	if err := c.AddTunnelWithListenPort("H", "hysteria2", "h", 443, 0, ob); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := c.GetOutbound("H")
@@ -143,8 +185,8 @@ func TestConfig_AddTunnel_EnsuresHysteria2ChromeParrot(t *testing.T) {
 
 func TestConfig_RemoveTunnel(t *testing.T) {
 	c := NewConfig()
-	c.AddTunnel("A", "vless", "h", 1, json.RawMessage(`{"type":"vless","tag":"A"}`))
-	c.AddTunnel("B", "vless", "h", 2, json.RawMessage(`{"type":"vless","tag":"B"}`))
+	c.AddTunnelWithListenPort("A", "vless", "h", 1, 0, json.RawMessage(`{"type":"vless","tag":"A"}`))
+	c.AddTunnelWithListenPort("B", "vless", "h", 2, 0, json.RawMessage(`{"type":"vless","tag":"B"}`))
 	if err := c.RemoveTunnel("A"); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +195,7 @@ func TestConfig_RemoveTunnel(t *testing.T) {
 		t.Errorf("after remove: %+v", list)
 	}
 	// Port 1080 should now be free; next add reuses it
-	c.AddTunnel("C", "vless", "h", 3, json.RawMessage(`{"type":"vless","tag":"C"}`))
+	c.AddTunnelWithListenPort("C", "vless", "h", 3, 0, json.RawMessage(`{"type":"vless","tag":"C"}`))
 	list = c.Tunnels()
 	var gotC TunnelInfo
 	for _, ti := range list {
@@ -168,7 +210,7 @@ func TestConfig_RemoveTunnel(t *testing.T) {
 
 func TestConfig_RenameTunnel_RewritesLocalReferences(t *testing.T) {
 	c := NewConfig()
-	if err := c.AddTunnel("old", "vless", "h", 443, json.RawMessage(`{"type":"vless","tag":"old","server":"h","server_port":443}`)); err != nil {
+	if err := c.AddTunnelWithListenPort("old", "vless", "h", 443, 0, json.RawMessage(`{"type":"vless","tag":"old","server":"h","server_port":443}`)); err != nil {
 		t.Fatal(err)
 	}
 	c.setRouteRules(append(c.routeRules(), map[string]any{
@@ -202,10 +244,10 @@ func TestConfig_RenameTunnel_RewritesLocalReferences(t *testing.T) {
 
 func TestConfig_RenameTunnel_Errors(t *testing.T) {
 	c := NewConfig()
-	if err := c.AddTunnel("A", "vless", "h", 1, json.RawMessage(`{"type":"vless","tag":"A"}`)); err != nil {
+	if err := c.AddTunnelWithListenPort("A", "vless", "h", 1, 0, json.RawMessage(`{"type":"vless","tag":"A"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddTunnel("B", "vless", "h", 2, json.RawMessage(`{"type":"vless","tag":"B"}`)); err != nil {
+	if err := c.AddTunnelWithListenPort("B", "vless", "h", 2, 0, json.RawMessage(`{"type":"vless","tag":"B"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.RenameTunnel("missing", "C"); err == nil {
@@ -221,9 +263,9 @@ func TestConfig_RenameTunnel_Errors(t *testing.T) {
 
 func TestConfig_ProxyInterface_StableAcrossRemove(t *testing.T) {
 	c := NewConfig()
-	c.AddTunnel("A", "vless", "h", 1, json.RawMessage(`{"type":"vless","tag":"A"}`))
-	c.AddTunnel("B", "vless", "h", 2, json.RawMessage(`{"type":"vless","tag":"B"}`))
-	c.AddTunnel("C", "vless", "h", 3, json.RawMessage(`{"type":"vless","tag":"C"}`))
+	c.AddTunnelWithListenPort("A", "vless", "h", 1, 0, json.RawMessage(`{"type":"vless","tag":"A"}`))
+	c.AddTunnelWithListenPort("B", "vless", "h", 2, 0, json.RawMessage(`{"type":"vless","tag":"B"}`))
+	c.AddTunnelWithListenPort("C", "vless", "h", 3, 0, json.RawMessage(`{"type":"vless","tag":"C"}`))
 
 	// Before: A=Proxy0, B=Proxy1, C=Proxy2
 	var cBefore TunnelInfo
@@ -251,7 +293,7 @@ func TestConfig_ProxyInterface_StableAcrossRemove(t *testing.T) {
 	}
 
 	// Add D — reuses port 1081 = Proxy1
-	c.AddTunnel("D", "vless", "h", 4, json.RawMessage(`{"type":"vless","tag":"D"}`))
+	c.AddTunnelWithListenPort("D", "vless", "h", 4, 0, json.RawMessage(`{"type":"vless","tag":"D"}`))
 	var d TunnelInfo
 	for _, ti := range c.Tunnels() {
 		if ti.Tag == "D" {
@@ -287,7 +329,7 @@ func TestConfig_AtomicSave(t *testing.T) {
 	// Pre-populate with garbage
 	os.WriteFile(path, []byte("existing"), 0644)
 	c := NewConfig()
-	c.AddTunnel("X", "vless", "h", 1, json.RawMessage(`{"type":"vless","tag":"X"}`))
+	c.AddTunnelWithListenPort("X", "vless", "h", 1, 0, json.RawMessage(`{"type":"vless","tag":"X"}`))
 	if err := c.Save(path); err != nil {
 		t.Fatal(err)
 	}
@@ -299,8 +341,8 @@ func TestConfig_AtomicSave(t *testing.T) {
 
 func TestConfig_Tunnels_KernelInterface(t *testing.T) {
 	c := NewConfig()
-	c.AddTunnel("A", "vless", "h", 1, json.RawMessage(`{"type":"vless","tag":"A"}`))
-	c.AddTunnel("B", "vless", "h", 2, json.RawMessage(`{"type":"vless","tag":"B"}`))
+	c.AddTunnelWithListenPort("A", "vless", "h", 1, 0, json.RawMessage(`{"type":"vless","tag":"A"}`))
+	c.AddTunnelWithListenPort("B", "vless", "h", 2, 0, json.RawMessage(`{"type":"vless","tag":"B"}`))
 
 	got := map[string]string{}
 	for _, ti := range c.Tunnels() {
@@ -319,7 +361,7 @@ func TestConfig_EnsureDeviceProxy_Full(t *testing.T) {
 
 	// Seed a sing-box user outbound so EnsureDeviceProxy has an sb tag to include.
 	ob := json.RawMessage(`{"type":"vless","server":"x","server_port":443}`)
-	if err := c.AddTunnel("VLESS-RU", "vless", "x", 443, ob); err != nil {
+	if err := c.AddTunnelWithListenPort("VLESS-RU", "vless", "x", 443, 0, ob); err != nil {
 		t.Fatalf("seed AddTunnel: %v", err)
 	}
 

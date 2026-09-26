@@ -14,10 +14,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
@@ -27,76 +30,39 @@ import (
 var errSyntheticValidator = errors.New("synthetic validator")
 
 func TestParseSingboxVersionOutput(t *testing.T) {
-	t.Run("typical 1.13.x output", func(t *testing.T) {
-		out := "sing-box version 1.13.8\n" +
-			"\n" +
-			"Environment: go1.25.9 linux/arm64\n" +
-			"Tags: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_naive_outbound,badlinkname,tfogo_checklinkname0,with_musl\n" +
-			"Revision: d5adb54bc6c6b2c21ab6f748276c4ec62d9bb650\n" +
-			"CGO: enabled\n"
-		version, features := parseSingboxVersionOutput(out)
-		if version != "1.13.8" {
-			t.Errorf("version = %q, want 1.13.8", version)
+	cases := map[string]string{
+		"sing-box version 1.13.8\nEnvironment: go1.25.9 linux/arm64\nTags: with_gvisor,with_quic\n": "1.13.8",
+		"sing-box version 1.2.3\n":                   "1.2.3",
+		"SingBox Version 1.13.11\nTaGs: with_quic\n": "1.13.11",
+		"":                                    "",
+		"Environment: go1.25.9 linux/arm64\n": "",
+	}
+	for in, want := range cases {
+		if got := parseSingboxVersionOutput(in); got != want {
+			t.Errorf("parse(%q) = %q, want %q", in, got, want)
 		}
-		wantFeatures := []string{
-			"with_gvisor", "with_quic", "with_dhcp", "with_wireguard",
-			"with_utls", "with_acme", "with_clash_api", "with_tailscale",
-			"with_ccm", "with_ocm", "with_naive_outbound", "badlinkname",
-			"tfogo_checklinkname0", "with_musl",
-		}
-		if !reflect.DeepEqual(features, wantFeatures) {
-			t.Errorf("features mismatch:\n  got  %v\n  want %v", features, wantFeatures)
-		}
-	})
+	}
+}
 
-	t.Run("missing Tags line — version only", func(t *testing.T) {
-		out := "sing-box version 1.10.0\nEnvironment: go1.22 linux/amd64\n"
-		version, features := parseSingboxVersionOutput(out)
-		if version != "1.10.0" {
-			t.Errorf("version = %q", version)
-		}
-		if len(features) != 0 {
-			t.Errorf("features = %v, want empty", features)
-		}
-	})
-
-	t.Run("tags with spaces around commas", func(t *testing.T) {
-		out := "sing-box version 1.0\nTags: with_a , with_b ,with_c\n"
-		_, features := parseSingboxVersionOutput(out)
-		want := []string{"with_a", "with_b", "with_c"}
-		if !reflect.DeepEqual(features, want) {
-			t.Errorf("features = %v, want %v", features, want)
-		}
-	})
-
-	t.Run("empty output", func(t *testing.T) {
-		v, f := parseSingboxVersionOutput("")
-		if v != "" || f != nil {
-			t.Errorf("want empty, got version=%q features=%v", v, f)
-		}
-	})
-
-	t.Run("version line alone", func(t *testing.T) {
-		v, f := parseSingboxVersionOutput("sing-box version 1.2.3\n")
-		if v != "1.2.3" {
-			t.Errorf("version = %q", v)
-		}
-		if len(f) != 0 {
-			t.Errorf("features = %v, want empty", f)
-		}
-	})
-
-	t.Run("accepts singbox alias and mixed case", func(t *testing.T) {
-		out := "SingBox Version 1.13.11\nTaGs: with_quic, with_naive_outbound\n"
-		v, f := parseSingboxVersionOutput(out)
-		if v != "1.13.11" {
-			t.Errorf("version = %q, want 1.13.11", v)
-		}
-		want := []string{"with_quic", "with_naive_outbound"}
-		if !reflect.DeepEqual(f, want) {
-			t.Errorf("features = %v, want %v", f, want)
-		}
-	})
+// Теги не пробуются у бинаря: у pinned-версии они известны из embedded.go,
+// у любой другой — «неизвестно», и гейты outbound-типов молчат.
+func TestFeaturesForVersion(t *testing.T) {
+	op := newOperatorForTest(t)
+	if got := op.featuresForVersion(installer.RequiredVersion); !reflect.DeepEqual(got, installer.RequiredTags) {
+		t.Fatalf("pinned: got %v, want RequiredTags", got)
+	}
+	if got := op.featuresForVersion("0.0.1"); got != nil {
+		t.Fatalf("other version: got %v, want nil", got)
+	}
+	if got := op.featuresForVersion(""); got != nil {
+		t.Fatalf("unknown version: got %v, want nil", got)
+	}
+	// С установщиком pinned — это spec.Version, а не константа.
+	binary := fakeBinary(t, t.TempDir())
+	op.SetInstaller(installer.New(binary, "test-arch", installer.BinarySpec{Version: "9.9.9", SHA256: strings.Repeat("a", 64)}, nil))
+	if got := op.featuresForVersion("9.9.9"); !reflect.DeepEqual(got, installer.RequiredTags) {
+		t.Fatalf("spec pinned: got %v, want RequiredTags", got)
+	}
 }
 
 func TestOperator_ConfigPaths(t *testing.T) {
@@ -110,6 +76,182 @@ func TestOperator_ConfigPaths(t *testing.T) {
 	}
 	if op.tunnelsFile() != filepath.Join(dir, "config.d", "10-tunnels.json") {
 		t.Errorf("tunnelsFile: %s", op.tunnelsFile())
+	}
+}
+
+// Байты совпали с pinned — версия известна без субпроцесса. Скрипт печатает
+// ЧУЖУЮ версию: если бы проба запустилась, тест бы это увидел.
+func TestDetectVersion_PinnedSHA_NoSubprocess(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	body := []byte("#!/bin/sh\necho 'sing-box version 9.9.9'\n")
+	sum := sha256.Sum256(body)
+	if err := os.WriteFile(binary, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	op.SetInstaller(installer.New(binary, "test-arch", installer.BinarySpec{Version: "1.2.3", SHA256: hex.EncodeToString(sum[:])}, nil))
+
+	v, f := op.detectVersionAndFeaturesCached(context.Background())
+	if v != "1.2.3" {
+		t.Fatalf("version = %q, want 1.2.3 (from pinned SHA, not from the script)", v)
+	}
+	if !reflect.DeepEqual(f, installer.RequiredTags) {
+		t.Fatalf("features = %v, want RequiredTags", f)
+	}
+	meta, ok := readFreshSidecar(binary)
+	if !ok || meta.Version != "1.2.3" {
+		t.Fatalf("sidecar = %+v ok=%v, want version 1.2.3 persisted", meta, ok)
+	}
+}
+
+// Процесс запущен, SHA чужой (UPX-копия) — версия из Clash API, субпроцесс
+// не нужен (скрипт завершается ошибкой, проба дала бы пустоту).
+func TestDetectVersion_FromClashWhenRunning(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	op.SetInstaller(installer.New(binary, "test-arch", installer.BinarySpec{Version: "1.2.3", SHA256: strings.Repeat("f", 64)}, nil))
+	if err := os.WriteFile(op.pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op.proc.matchBinaryFn = func(int) bool { return true }
+	op.exeMatches = func(int, string) bool { return true } // /proc/self/exe теста ≠ скрипт
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"sing-box 1.2.3"}`))
+	}))
+	defer ts.Close()
+	op.clash.SetAddress(strings.TrimPrefix(ts.URL, "http://"))
+
+	v, f := op.detectVersionAndFeaturesCached(context.Background())
+	if v != "1.2.3" {
+		t.Fatalf("version = %q, want 1.2.3 from Clash API", v)
+	}
+	if !reflect.DeepEqual(f, installer.RequiredTags) {
+		t.Fatalf("features = %v, want RequiredTags (version is pinned)", f)
+	}
+
+	// Clash погас, новый Operator без in-memory кэша — версия из sidecar.
+	ts.Close()
+	op2 := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	if v2, _ := op2.detectVersionAndFeaturesCached(context.Background()); v2 != "1.2.3" {
+		t.Fatalf("after restart version = %q, want 1.2.3 from sidecar", v2)
+	}
+}
+
+// Процесс не запущен, sidecar нет, SHA чужой — единственный оставшийся
+// источник: субпроцесс. Версия не pinned ⇒ теги неизвестны.
+// Чужой Clash на нашем порту при отсутствии pid-файла НЕ опрашивается.
+func TestDetectVersion_SubprocessFallback(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho 'sing-box version 0.0.7'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"sing-box 1.2.3"}`))
+	}))
+	defer foreign.Close()
+	op.clash.SetAddress(strings.TrimPrefix(foreign.URL, "http://"))
+
+	v, f := op.detectVersionAndFeaturesCached(context.Background())
+	if v != "0.0.7" || f != nil {
+		t.Fatalf("got %q/%v, want 0.0.7/nil (subprocess, not the foreign Clash)", v, f)
+	}
+}
+
+// Процесс запущен, но Clash API недоступен (порт закрыт) — цепочка идёт
+// дальше к субпроцессу, а не возвращает пустую версию.
+func TestDetectVersion_RunningButClashDown_FallsBack(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho 'sing-box version 0.0.7'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	if err := os.WriteFile(op.pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op.proc.matchBinaryFn = func(int) bool { return true }
+	op.exeMatches = func(int, string) bool { return true }
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	addr := strings.TrimPrefix(dead.URL, "http://")
+	dead.Close() // адрес остаётся, слушателя нет
+	op.clash.SetAddress(addr)
+
+	if v, _ := op.detectVersionAndFeaturesCached(context.Background()); v != "0.0.7" {
+		t.Fatalf("version = %q, want 0.0.7 from subprocess", v)
+	}
+}
+
+// Подмена бинаря при живом процессе: pid наш, но /proc/<pid>/exe — другой
+// файл. Clash молчит (иначе версия СТАРОГО процесса осела бы в sidecar
+// НОВОГО файла), версия — из субпроцесса по новому файлу.
+func TestDetectVersion_ExeMismatch_SkipsClash(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho 'sing-box version 0.0.7'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	if err := os.WriteFile(op.pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op.proc.matchBinaryFn = func(int) bool { return true }
+	op.exeMatches = func(int, string) bool { return false }
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"sing-box 1.2.3"}`))
+	}))
+	defer old.Close()
+	op.clash.SetAddress(strings.TrimPrefix(old.URL, "http://"))
+
+	if v, _ := op.detectVersionAndFeaturesCached(context.Background()); v != "0.0.7" {
+		t.Fatalf("version = %q, want 0.0.7 from the new file, not 1.2.3 from the old process", v)
+	}
+}
+
+// processExeIs сравнивает inode /proc/<pid>/exe и файла.
+func TestProcessExeIs(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc only")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	if !processExeIs(os.Getpid(), self) {
+		t.Fatal("own exe must match")
+	}
+	if processExeIs(os.Getpid(), fakeBinary(t, t.TempDir())) {
+		t.Fatal("other file must not match")
+	}
+}
+
+func TestOperator_GetStatus_NoUpdateForUPXPackedSameVersion(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	body := []byte("#!/bin/sh\n# UPX! marker as in a packed ELF\necho 'sing-box version 1.2.3'\n")
+	if err := os.WriteFile(binary, body, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	op.SetInstaller(installer.New(binary, "test-arch", installer.BinarySpec{
+		Version: "1.2.3",
+		SHA256:  strings.Repeat("f", 64),
+		Size:    100 << 20,
+	}, nil))
+
+	status := op.GetStatus(context.Background())
+	if status.UpdateAvailable {
+		t.Fatal("UpdateAvailable = true, want false for UPX-packed binary of the pinned version")
+	}
+	if status.InstallState != string(installer.InstallStateInstalled) {
+		t.Fatalf("InstallState = %q, want %q", status.InstallState, installer.InstallStateInstalled)
 	}
 }
 
@@ -170,7 +312,7 @@ func TestOperator_GetStatus_PopulatesInstallStateAndBytes(t *testing.T) {
 func TestEnsureBaseConfig_FullSkeleton(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config.d")
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 
 	raw, err := os.ReadFile(filepath.Join(configDir, "00-base.json"))
 	if err != nil {
@@ -197,16 +339,18 @@ func TestEnsureBaseConfig_FullSkeleton(t *testing.T) {
 	if _, has := route["final"]; has {
 		t.Errorf("route.final should be absent (owned by 20-router.json), got %v", route["final"])
 	}
-	if route["default_domain_resolver"] != "dns-bootstrap" {
-		t.Errorf("default_domain_resolver: want dns-bootstrap, got %v", route["default_domain_resolver"])
+	// Дефолты обоих условных скаляров живут в 99-defaults.json, а не здесь:
+	// в базе они были бы в выигрывающей позиции merge и затеняли бы слот.
+	if _, has := route["default_domain_resolver"]; has {
+		t.Errorf("default_domain_resolver обязан быть в 99-defaults, а не в базе: %v", route)
 	}
 
 	dns, ok := base["dns"].(map[string]any)
 	if !ok {
 		t.Fatalf("dns block missing: %#v", base["dns"])
 	}
-	if dns["strategy"] != "prefer_ipv4" {
-		t.Errorf("dns.strategy: want prefer_ipv4, got %v", dns["strategy"])
+	if _, has := dns["strategy"]; has {
+		t.Errorf("dns.strategy обязан быть в 99-defaults, а не в базе: %v", dns)
 	}
 	servers, _ := dns["servers"].([]any)
 	if len(servers) != 1 {
@@ -232,9 +376,9 @@ func TestEnsureBaseConfig_Idempotent(t *testing.T) {
 	}
 	// First call applies surgical heals (e.g. route.default_domain_resolver
 	// for sing-box 1.13+). Second call must be a no-op — same bytes.
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	first, _ := os.ReadFile(basePath)
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	second, _ := os.ReadFile(basePath)
 	if string(first) != string(second) {
 		t.Errorf("ensureBaseConfig not idempotent: first=%s second=%s", first, second)
@@ -256,7 +400,7 @@ func TestEnsureBaseConfig_PatchesStaleClashPort(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -280,11 +424,14 @@ func TestEnsureBaseConfig_PatchesStaleClashPort(t *testing.T) {
 	}
 }
 
-func TestEnsureBaseConfig_NoClashApiBlockUntouched(t *testing.T) {
+func TestEnsureBaseConfig_MissingClashApiBlockRestored(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config.d")
 	_ = os.MkdirAll(configDir, 0755)
-	// User explicitly removed clash_api — respect that, don't re-add.
+	// Блок clash_api отсутствует — восстанавливаем: им владеем мы, а не
+	// пользователь (ADR 0001). Без блока молча слепнут LogForwarder,
+	// DelayChecker, /connections и селекторы подписок, причём sing-box
+	// стартует нормально и в журнале не будет ни строчки.
 	// log.level is "debug" so the log-level heal also leaves it alone.
 	// route.default_domain_resolver IS materialised because sing-box 1.13+
 	// FATALs without it; that injection is unrelated to clash_api.
@@ -293,24 +440,32 @@ func TestEnsureBaseConfig_NoClashApiBlockUntouched(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if _, has := m["experimental"]; has {
-		t.Errorf("experimental block must NOT be re-added, got %s", raw)
+	exp, ok := m["experimental"].(map[string]any)
+	if !ok {
+		t.Fatalf("experimental block must be restored, got %s", raw)
+	}
+	clash, ok := exp["clash_api"].(map[string]any)
+	if !ok {
+		t.Fatalf("clash_api block must be restored, got %s", raw)
+	}
+	if got := clash["external_controller"]; got != ClashAddr(0) {
+		t.Errorf("external_controller want %q, got %v", ClashAddr(0), got)
 	}
 	if m["log"].(map[string]any)["level"] != "info" {
 		t.Errorf("log.level want info, got %v", m["log"])
 	}
-	route, ok := m["route"].(map[string]any)
-	if !ok {
-		t.Fatalf("route block must be materialised for sing-box 1.13+, got %s", raw)
-	}
-	if route["default_domain_resolver"] != "dns-bootstrap" {
-		t.Errorf("default_domain_resolver want dns-bootstrap, got %v", route["default_domain_resolver"])
+	// Блок route в БАЗЕ больше не обязателен: sing-box получает его из
+	// 99-defaults.json, а ensureBaseConfig существующую базу им не досыпает.
+	if route, ok := m["route"].(map[string]any); ok {
+		if _, has := route["default_domain_resolver"]; has {
+			t.Errorf("резолвер не должен появляться в базе: %v", route)
+		}
 	}
 }
 
@@ -323,7 +478,7 @@ func TestEnsureBaseConfig_PatchesStaleLogLevel(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -346,7 +501,7 @@ func TestEnsureBaseConfig_DefaultDesiredLevelOverridesDebug(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
@@ -358,7 +513,7 @@ func TestEnsureBaseConfig_DefaultDesiredLevelOverridesDebug(t *testing.T) {
 func TestEnsureBaseConfigWithLogLevel_UsesDesiredLevel(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config.d")
-	ensureBaseConfigWithLogLevel(configDir, "warn")
+	ensureBaseConfig(configDir, "warn", "", 0, "")
 
 	raw, err := os.ReadFile(filepath.Join(configDir, "00-base.json"))
 	if err != nil {
@@ -405,8 +560,7 @@ func TestPatchBaseLogLevel_AppliesDesiredLevel(t *testing.T) {
 }
 
 func TestOperatorApplyLogLevel_UpdatesBaseConfig(t *testing.T) {
-	dir := t.TempDir()
-	op := NewOperator(OperatorDeps{Dir: dir})
+	op, _ := newOrchedOperator(t)
 	basePath := filepath.Join(op.ConfigDir(), "00-base.json")
 	if err := op.ApplyLogLevel("warn"); err != nil {
 		t.Fatalf("ApplyLogLevel: %v", err)
@@ -426,8 +580,7 @@ func TestOperatorApplyLogLevel_UpdatesBaseConfig(t *testing.T) {
 }
 
 func TestOperatorApplyLogLevel_BrokenBaseJSONReturnsError(t *testing.T) {
-	dir := t.TempDir()
-	op := NewOperator(OperatorDeps{Dir: dir})
+	op, _ := newOrchedOperator(t)
 	basePath := filepath.Join(op.ConfigDir(), "00-base.json")
 	if err := os.WriteFile(basePath, []byte("{broken"), 0o644); err != nil {
 		t.Fatal(err)
@@ -448,7 +601,8 @@ func TestOperatorApplyLogLevel_BrokenBaseJSONReturnsError(t *testing.T) {
 func TestOperatorApplyLogLevel_UsesOrchestratorSlotBase(t *testing.T) {
 	dir := t.TempDir()
 	op := NewOperator(OperatorDeps{Dir: dir})
-	orch := singboxorch.New(op.ConfigDir(), op.Process())
+	orch := singboxorch.NewWithAppliedPath(op.ConfigDir(), op.Process(), filepath.Join(t.TempDir(), "singbox-applied.json"))
+	t.Cleanup(orch.Close)
 	for _, meta := range singboxorch.KnownSlots() {
 		if meta.Slot == singboxorch.SlotBase {
 			if err := orch.Register(meta); err != nil {
@@ -465,23 +619,21 @@ func TestOperatorApplyLogLevel_UsesOrchestratorSlotBase(t *testing.T) {
 		t.Fatalf("ApplyLogLevel via orch: %v", err)
 	}
 
+	// Поллинга здесь быть не должно: Orchestrator.Mutate пишет файл СИНХРОННО,
+	// асинхронен только reload. Прежний вариант ждал до 2 с и давал лишний
+	// повод для флейка (F38).
 	basePath := filepath.Join(op.ConfigDir(), "00-base.json")
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		raw, err := os.ReadFile(basePath)
-		if err == nil {
-			var m map[string]any
-			if json.Unmarshal(raw, &m) == nil {
-				logBlock, _ := m["log"].(map[string]any)
-				if got, _ := logBlock["level"].(string); got == "error" {
-					return
-				}
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("00-base.json was not updated to error via orchestrator in time")
-		}
-		time.Sleep(50 * time.Millisecond)
+	raw, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatalf("read 00-base.json: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("parse 00-base.json: %v", err)
+	}
+	logBlock, _ := m["log"].(map[string]any)
+	if got, _ := logBlock["level"].(string); got != "error" {
+		t.Fatalf("log.level = %q, want error (запись через оркестратор синхронна)", got)
 	}
 }
 
@@ -496,7 +648,7 @@ func TestEnsureBaseConfig_PatchesMissingDomainResolver(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -506,8 +658,9 @@ func TestEnsureBaseConfig_PatchesMissingDomainResolver(t *testing.T) {
 	if !ok {
 		t.Fatalf("route block lost: %v", m["route"])
 	}
-	if route["default_domain_resolver"] != "dns-bootstrap" {
-		t.Errorf("default_domain_resolver want dns-bootstrap, got %v", route["default_domain_resolver"])
+	// Резолвер в базу не досыпается: его дефолт живёт в 99-defaults.json.
+	if _, has := route["default_domain_resolver"]; has {
+		t.Errorf("резолвер не должен появляться в базе: %v", route)
 	}
 	// ensureBaseConfig preserves existing route.final — removal is done
 	// separately by removeFinalFromBase, called after ensureBaseConfig in
@@ -528,7 +681,7 @@ func TestEnsureBaseConfig_RespectsExistingDomainResolver(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
@@ -549,22 +702,23 @@ func TestEnsureBaseConfig_MaterialisesMissingRouteBlock(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	route, ok := m["route"].(map[string]any)
-	if !ok {
-		t.Fatalf("route block must be materialised, got %s", raw)
+	// Блок route в базе больше не материализуется — он приходит из
+	// 99-defaults.json вместе с дефолтным резолвером.
+	if route, ok := m["route"].(map[string]any); ok {
+		if _, has := route["default_domain_resolver"]; has {
+			t.Errorf("резолвер не должен появляться в базе: %v", route)
+		}
 	}
-	if route["default_domain_resolver"] != "dns-bootstrap" {
-		t.Errorf("default_domain_resolver want dns-bootstrap, got %v", route["default_domain_resolver"])
-	}
-	// dns block preserved, but legacy ipv4_only strategy migrated to prefer_ipv4.
-	if m["dns"].(map[string]any)["strategy"] != "prefer_ipv4" {
-		t.Errorf("dns.strategy must be migrated ipv4_only→prefer_ipv4: %v", m["dns"])
+	// Легаси-strategy ensureBaseConfig не мигрирует: её выносит из базы
+	// reconcileDerivedDefaults (см. TestReconcileDerivedDefaults_*).
+	if m["dns"].(map[string]any)["strategy"] != "ipv4_only" {
+		t.Errorf("ensureBaseConfig не должен трогать strategy: %v", m["dns"])
 	}
 	if m["log"].(map[string]any)["level"] != "info" {
 		t.Errorf("log.level lost: %v", m["log"])
@@ -582,14 +736,17 @@ func TestEnsureBaseConfig_MigratesIpv4OnlyStrategy(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := m["dns"].(map[string]any)["strategy"]; got != "prefer_ipv4" {
-		t.Errorf("strategy: want prefer_ipv4 (migrated), got %v", got)
+	// ensureBaseConfig легаси-strategy больше не переписывает: её (как и наш
+	// prefer_ipv4) выносит из базы reconcileDerivedDefaults — см.
+	// TestReconcileDerivedDefaults_MigratesOurValuesOutOfBase.
+	if got := m["dns"].(map[string]any)["strategy"]; got != "ipv4_only" {
+		t.Errorf("ensureBaseConfig не должен трогать strategy, got %v", got)
 	}
 }
 
@@ -602,7 +759,7 @@ func TestEnsureBaseConfig_KeepsNonLegacyStrategy(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
@@ -706,7 +863,7 @@ func TestClassifyProcessLine(t *testing.T) {
 }
 
 func TestFreshBaseConfig_CacheFilePathIsAbsolute(t *testing.T) {
-	cfg := freshBaseConfig()
+	cfg := freshBaseConfig("info", "", 0, defaultCacheDBPath)
 	exp := cfg["experimental"].(map[string]any)
 	cf := exp["cache_file"].(map[string]any)
 	if cf["enabled"] != true {
@@ -716,128 +873,6 @@ func TestFreshBaseConfig_CacheFilePathIsAbsolute(t *testing.T) {
 	want := defaultCacheDBPath
 	if got != want {
 		t.Errorf("cache_file.path=%q want %q", got, want)
-	}
-}
-
-func TestEnsureBaseConfig_PatchesRelativeCachePath(t *testing.T) {
-	dir := t.TempDir()
-	configDir := filepath.Join(dir, "config.d")
-	_ = os.MkdirAll(configDir, 0755)
-	stale := `{"log":{"level":"debug"},"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"},"cache_file":{"enabled":true,"path":"cache.db"}}}`
-	basePath := filepath.Join(configDir, "00-base.json")
-	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
-		t.Fatal(err)
-	}
-	ensureBaseConfig(configDir)
-	raw, _ := os.ReadFile(basePath)
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	exp := m["experimental"].(map[string]any)
-	cf := exp["cache_file"].(map[string]any)
-	if cf["path"] != defaultCacheDBPath {
-		t.Errorf("expected %s, got %v", defaultCacheDBPath, cf["path"])
-	}
-	if m["log"].(map[string]any)["level"] != "info" {
-		t.Errorf("log.level want info, got %v", m["log"])
-	}
-}
-
-func TestEnsureBaseConfig_LeavesAbsoluteCachePathUntouched(t *testing.T) {
-	dir := t.TempDir()
-	configDir := filepath.Join(dir, "config.d")
-	_ = os.MkdirAll(configDir, 0755)
-	custom := `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"},"cache_file":{"enabled":true,"path":"/custom/path/cache.db"}}}`
-	basePath := filepath.Join(configDir, "00-base.json")
-	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
-		t.Fatal(err)
-	}
-	ensureBaseConfig(configDir)
-	raw, _ := os.ReadFile(basePath)
-	var m map[string]any
-	json.Unmarshal(raw, &m)
-	exp := m["experimental"].(map[string]any)
-	cf := exp["cache_file"].(map[string]any)
-	if cf["path"] != "/custom/path/cache.db" {
-		t.Errorf("user-customized path overwritten: %v", cf["path"])
-	}
-}
-
-func TestPatchBaseCacheFilePath_AddsMissingBlock(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "00-base.json")
-	// experimental exists but no cache_file
-	stale := `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`
-	if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
-		t.Fatal(err)
-	}
-	patchBaseCacheFilePath(p)
-	raw, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	exp := m["experimental"].(map[string]any)
-	cf, ok := exp["cache_file"].(map[string]any)
-	if !ok {
-		t.Fatal("cache_file block not added")
-	}
-	if cf["enabled"] != true {
-		t.Errorf("enabled=%v want true", cf["enabled"])
-	}
-	if got := cf["path"]; got != defaultCacheDBPath {
-		t.Errorf("path=%q want %q", got, defaultCacheDBPath)
-	}
-}
-
-func TestPatchBaseCacheFilePath_MigratesLegacyAbsolute(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "00-base.json")
-	stale := `{"experimental":{"cache_file":{"enabled":true,"path":"/opt/etc/sing-box/cache.db"}}}`
-	if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
-		t.Fatal(err)
-	}
-	patchBaseCacheFilePath(p)
-	raw, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	exp := m["experimental"].(map[string]any)
-	cf := exp["cache_file"].(map[string]any)
-	if got := cf["path"]; got != defaultCacheDBPath {
-		t.Errorf("path=%q want %q (legacy should be replaced)", got, defaultCacheDBPath)
-	}
-}
-
-func TestPatchBaseCacheFilePath_PreservesUserCustomPath(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "00-base.json")
-	custom := "/srv/sing-box/my-cache.db"
-	stale := `{"experimental":{"cache_file":{"enabled":true,"path":"` + custom + `"}}}`
-	if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
-		t.Fatal(err)
-	}
-	patchBaseCacheFilePath(p)
-	raw, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	exp := m["experimental"].(map[string]any)
-	cf := exp["cache_file"].(map[string]any)
-	if got := cf["path"]; got != custom {
-		t.Errorf("path=%q want %q (custom path should be preserved)", got, custom)
 	}
 }
 
@@ -973,7 +1008,7 @@ func TestPatchTunnelsSlotEnsureNaiveUDPOverTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	patchTunnelsSlotEnsureNaiveUDPOverTCP(p)
+	patchSlotOutboundCompat(p)
 
 	raw, err := os.ReadFile(p)
 	if err != nil {
@@ -992,6 +1027,45 @@ func TestPatchTunnelsSlotEnsureNaiveUDPOverTCP(t *testing.T) {
 	vless := outbounds[1].(map[string]any)
 	if _, ok := vless["udp_over_tcp"]; ok {
 		t.Fatalf("vless must not get udp_over_tcp: %v", vless)
+	}
+}
+
+// TestPatchSlotOutboundCompat_Hysteria2ChromeParrot — вторая половина слитого
+// шага: несовместимый по TLS hysteria2 получает disable_chrome_parrot,
+// совместимый остаётся нетронутым.
+func TestPatchSlotOutboundCompat_Hysteria2ChromeParrot(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "10-tunnels.json")
+	slot := `{
+		"outbounds": [
+			{"type":"hysteria2","tag":"BAD","server":"h","server_port":443,"password":"p",
+			 "tls":{"enabled":true,"server_name":"h","disable_sni":true,"insecure":false}},
+			{"type":"hysteria2","tag":"OK","server":"h","server_port":443,"password":"p",
+			 "tls":{"enabled":true,"server_name":"h"}}
+		]
+	}`
+	if err := os.WriteFile(p, []byte(slot), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	patchSlotOutboundCompat(p)
+
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	outbounds := m["outbounds"].([]any)
+	bad := outbounds[0].(map[string]any)
+	if bad["disable_chrome_parrot"] != true {
+		t.Fatalf("incompatible hysteria2 must get disable_chrome_parrot, got: %v", bad)
+	}
+	ok := outbounds[1].(map[string]any)
+	if _, has := ok["disable_chrome_parrot"]; has {
+		t.Fatalf("compatible hysteria2 must stay untouched: %v", ok)
 	}
 }
 
@@ -1091,8 +1165,13 @@ func TestPatchTunnelsSlotStripBaseOwnedBlocks_StripsDanglingFinalReference(t *te
 
 // TestPatchTunnelsSlotStripBaseOwnedBlocks_PreservesUserDNSRules keeps the dns
 // block alive when servers got filtered to zero but the user has rules
-// pointing at base-owned tags (dns rules reference, but don't own,
-// server tags — sing-box merges across slots).
+// pointing at one of our owned tags. Nobody currently declares "dns-doh"
+// (legacy phantom, see F43) — the surviving rule below is a dangling
+// reference, but our cross-slot validator never inspects dns.rules[].server
+// (only dns.final and route.default_domain_resolver.server), and sing-box
+// resolves dns.rules servers per-query at runtime, logging and skipping a
+// missing transport rather than failing config load. So the orphaned rule
+// is harmless, not "merged across slots" by some owner.
 func TestPatchTunnelsSlotStripBaseOwnedBlocks_PreservesUserDNSRules(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "10-tunnels.json")
@@ -1147,7 +1226,7 @@ func TestEnsureBaseConfig_PatchesMissingDirectOutbound(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -1174,7 +1253,7 @@ func TestEnsureBaseConfig_PreservesExistingDirectOutbound(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, _ := os.ReadFile(basePath)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
@@ -1199,7 +1278,7 @@ func TestEnsureBaseConfig_PrependsDirectWhenMissing(t *testing.T) {
 	if err := os.WriteFile(basePath, []byte(custom), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 	raw, err := os.ReadFile(basePath)
 	if err != nil {
 		t.Fatal(err)
@@ -1241,7 +1320,7 @@ func TestEnsureBaseConfig_MovesExistingDirectToFirstOutbound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ensureBaseConfig(configDir)
+	ensureBaseConfig(configDir, "info", "", 0, "")
 
 	raw, err := os.ReadFile(basePath)
 	if err != nil {
@@ -1406,7 +1485,7 @@ func TestPreflightConfigDir_SurfacesCollisionWithBothFilenames(t *testing.T) {
 		configPath: configDir,
 		validator: &Validator{
 			binary: "/nonexistent",
-			exec:   func(string, ...string) ([]byte, error) { return nil, nil },
+			exec:   func(context.Context, string, ...string) ([]byte, error) { return nil, nil },
 		},
 	}
 
@@ -1437,7 +1516,7 @@ func TestPreflightConfigDir_FallsThroughToValidator(t *testing.T) {
 		configPath: configDir,
 		validator: &Validator{
 			binary: "/nonexistent",
-			exec: func(string, ...string) ([]byte, error) {
+			exec: func(context.Context, string, ...string) ([]byte, error) {
 				validatorCalls++
 				return []byte("synthetic schema failure"), errSyntheticValidator
 			},
@@ -1557,6 +1636,7 @@ func TestListTunnels_Running_NDMSDisabled_UsesClash(t *testing.T) {
 			op.configPath = configDir
 			op.pidPath = pidPath
 			op.proc = NewProcess(op.binary, configDir, pidPath)
+			t.Cleanup(op.proc.Close)
 			// The pid file holds the test process's own PID to fake "running";
 			// bypass the /proc cmdline identity check which would reject it.
 			op.proc.matchBinaryFn = func(int) bool { return true }
@@ -1666,13 +1746,14 @@ func newOperatorForTest(t *testing.T, opts ...operatorOpt) *Operator {
 	for _, o := range opts {
 		o(&d)
 	}
-	return NewOperator(d)
+	op := NewOperator(d)
+	t.Cleanup(op.Process().Close)
+	return op
 }
 
 // TestNextFreeListenPortSlot covers the NDMS-free slot allocator used by
-// AddTunnels when the NDMS Proxy toggle is off. Full AddTunnels integration
-// requires a live sing-box binary (preflight + startAndWait fork/exec) — out
-// of scope for a unit test; manual scenarios (Task 23, S2) cover that path.
+// AddTunnels when the NDMS Proxy toggle is off. Сам AddTunnels пинуется юнитом —
+// см. TestAddTunnels_RejectsDuplicateOfExistingTunnel.
 func TestNextFreeListenPortSlot(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1886,7 +1967,7 @@ func TestRemoveFinalFromBase_MalformedJSON_NoOp(t *testing.T) {
 // --- freshBaseConfig DNS (#445) ---
 
 func TestFreshBaseConfig_OmitsDNSFinal_KeepsStrategy(t *testing.T) {
-	cfg := freshBaseConfig()
+	cfg := freshBaseConfig("info", "", 0, defaultCacheDBPath)
 	dns, ok := cfg["dns"].(map[string]any)
 	if !ok {
 		t.Fatalf("dns block missing/wrong type: %v", cfg["dns"])
@@ -1894,8 +1975,10 @@ func TestFreshBaseConfig_OmitsDNSFinal_KeepsStrategy(t *testing.T) {
 	if _, has := dns["final"]; has {
 		t.Errorf("dns.final must be omitted (owned by 20-router.json), got %v", dns["final"])
 	}
-	if dns["strategy"] != "prefer_ipv4" {
-		t.Errorf("dns.strategy must stay prefer_ipv4 (router-disabled default), got %v", dns["strategy"])
+	// strategy ушла в 99-defaults вместе с резолвером — см.
+	// TestFreshBaseConfig_OmitsDerivedScalars.
+	if _, has := dns["strategy"]; has {
+		t.Errorf("dns.strategy must live in 99-defaults, got %v", dns["strategy"])
 	}
 	servers, _ := dns["servers"].([]any)
 	if len(servers) != 1 {
@@ -1939,66 +2022,6 @@ func TestRemoveDNSFinalFromBase_DropsFinal_KeepsStrategyWhenRouterAbsent(t *test
 	// Other dns keys intact.
 	if _, has := dns["servers"]; !has {
 		t.Errorf("dns.servers unexpectedly removed")
-	}
-}
-
-func TestRemoveDNSFinalFromBase_StripsStrategyWhenRouterOwnsIt(t *testing.T) {
-	dir := t.TempDir()
-	basePath := filepath.Join(dir, "00-base.json")
-	if err := os.WriteFile(basePath,
-		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4","servers":[{"tag":"dns-bootstrap","type":"udp","server":"1.1.1.1"}]}}`),
-		0644); err != nil {
-		t.Fatal(err)
-	}
-	// Router slot sets a non-empty strategy → base strategy strip is enabled.
-	if err := os.WriteFile(filepath.Join(dir, "20-router.json"),
-		[]byte(`{"dns":{"final":"dns-direct","strategy":"ipv4_only","servers":[{"tag":"dns-direct","type":"udp","server":"8.8.8.8"}]}}`),
-		0644); err != nil {
-		t.Fatal(err)
-	}
-
-	removeDNSFinalFromBase(basePath)
-
-	raw, _ := os.ReadFile(basePath)
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	dns, _ := m["dns"].(map[string]any)
-	if _, has := dns["final"]; has {
-		t.Errorf("dns.final should be stripped")
-	}
-	if _, has := dns["strategy"]; has {
-		t.Errorf("dns.strategy should be stripped when router owns it, got %v", dns["strategy"])
-	}
-}
-
-func TestRemoveDNSFinalFromBase_RouterStrategyEmpty_KeepsBaseStrategy(t *testing.T) {
-	dir := t.TempDir()
-	basePath := filepath.Join(dir, "00-base.json")
-	if err := os.WriteFile(basePath,
-		[]byte(`{"dns":{"final":"dns-bootstrap","strategy":"prefer_ipv4"}}`),
-		0644); err != nil {
-		t.Fatal(err)
-	}
-	// Router slot exists but strategy is empty → base keeps its strategy.
-	if err := os.WriteFile(filepath.Join(dir, "20-router.json"),
-		[]byte(`{"dns":{"final":"dns-direct","strategy":"","servers":[{"tag":"dns-direct","type":"udp","server":"8.8.8.8"}]}}`),
-		0644); err != nil {
-		t.Fatal(err)
-	}
-
-	removeDNSFinalFromBase(basePath)
-
-	raw, _ := os.ReadFile(basePath)
-	var m map[string]any
-	_ = json.Unmarshal(raw, &m)
-	dns, _ := m["dns"].(map[string]any)
-	if _, has := dns["final"]; has {
-		t.Errorf("dns.final should still be stripped")
-	}
-	if dns["strategy"] != "prefer_ipv4" {
-		t.Errorf("dns.strategy must survive when router strategy empty, got %v", dns["strategy"])
 	}
 }
 
@@ -2094,7 +2117,7 @@ func TestOperator_Install_NoSpace_ReturnsNil(t *testing.T) {
 	if err := op.Install(context.Background()); err != nil {
 		t.Fatalf("Install returned error, expected nil: %v", err)
 	}
-	if got := inst.EvaluateInstallState(); got != installer.InstallStateMissingNoSpace {
+	if got := inst.EvaluateInstallState(""); got != installer.InstallStateMissingNoSpace {
 		t.Fatalf("EvaluateInstallState=%q, want %q", got, installer.InstallStateMissingNoSpace)
 	}
 }
@@ -2115,13 +2138,34 @@ func TestOperator_Update_NoSpace_ReturnsNil(t *testing.T) {
 	if err := op.Update(context.Background()); err != nil {
 		t.Fatalf("Update returned error, expected nil: %v", err)
 	}
-	if got := inst.EvaluateInstallState(); got != installer.InstallStateOutdatedNoSpace {
+	if got := inst.EvaluateInstallState(""); got != installer.InstallStateOutdatedNoSpace {
 		t.Fatalf("EvaluateInstallState=%q, want %q", got, installer.InstallStateOutdatedNoSpace)
 	}
 }
 
-// same-version+same-sha → MatchesRequired==true → Update должен быть no-op
-// без обращения к gate (gate стоит ПОСЛЕ MatchesRequired early-return).
+// same-version+same-sha → MatchesPinnedBytes==true → Update должен быть no-op
+// без обращения к gate (gate стоит ПОСЛЕ этого early-return).
+// UPX-копия pinned-версии: Update — no-op, скачивания нет. Downloader не
+// сконфигурирован, поэтому попытка скачать вернула бы ошибку.
+func TestOperator_Update_UPXPinned_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	body := []byte("#!/bin/sh\n# UPX! marker as in a packed ELF\necho 'sing-box version 1.2.3'\n")
+	if err := os.WriteFile(binary, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+	inst := installer.New(binary, "test-arch", installer.BinarySpec{
+		Version: "1.2.3", URL: "u", SHA256: strings.Repeat("f", 64), Size: 100 << 20,
+	}, nil)
+	inst.SetFreeDiskFn(func(string) (int64, bool) { return 200 << 20, true })
+	op.SetInstaller(inst)
+
+	if err := op.Update(context.Background()); err != nil {
+		t.Fatalf("Update = %v, want nil no-op for UPX copy of pinned version", err)
+	}
+}
+
 func TestOperator_Update_SameVersionSameSHA_NoOp(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "sing-box")
@@ -2143,7 +2187,7 @@ func TestOperator_Update_SameVersionSameSHA_NoOp(t *testing.T) {
 	if err := op.Update(context.Background()); err != nil {
 		t.Fatalf("Update returned error, expected no-op nil: %v", err)
 	}
-	// Бинарь не тронут — Update вернулся через MatchesRequired до gate'а.
+	// Бинарь не тронут — Update вернулся через MatchesPinnedBytes до gate'а.
 	if _, err := os.Stat(binary); err != nil {
 		t.Fatalf("binary disappeared: %v", err)
 	}
@@ -2173,7 +2217,7 @@ func TestParseTunnelLinksInput(t *testing.T) {
 		],
 		"activeProfile": "default"
 	}`
-	res := parseTunnelLinksInput(mieruJSON)
+	res := ParseTunnelLinksInput(mieruJSON)
 	if len(res.Errors) != 0 {
 		t.Fatalf("errors: %+v", res.Errors)
 	}
@@ -2187,11 +2231,23 @@ func TestParseTunnelLinksInput(t *testing.T) {
 	}
 
 	// Обычные share-link'и — прежний построчный путь.
-	res = parseTunnelLinksInput("vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=h#A\ntrojan://p@h.example:444?security=tls&sni=h#B")
+	res = ParseTunnelLinksInput("vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=h#A\ntrojan://p@h.example:444?security=tls&sni=h#B")
 	if len(res.Errors) != 0 {
 		t.Fatalf("errors: %+v", res.Errors)
 	}
 	if len(res.Outbounds) != 2 {
 		t.Fatalf("outbounds=%d want 2", len(res.Outbounds))
+	}
+}
+
+func TestNewOperator_WiresEventBus(t *testing.T) {
+	// Проверяем, что конструктор корректно присваивает Bus из OperatorDeps.
+	bus := events.NewBus()
+	op := NewOperator(OperatorDeps{
+		Dir: t.TempDir(),
+		Bus: bus,
+	})
+	if op.bus != bus {
+		t.Fatalf("bus mismatch: got %p, want %p", op.bus, bus)
 	}
 }

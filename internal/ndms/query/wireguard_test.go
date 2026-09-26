@@ -671,3 +671,75 @@ func TestIPMaskToPrefix(t *testing.T) {
 		})
 	}
 }
+
+// Состав системных туннелей спрашивает поллер метрик на КАЖДОМ тике, а выборка
+// — это `/show/interface/` целиком. Без кэша при открытой панели мы запрашивали
+// всё дерево интерфейсов четыре раза в минуту, только чтобы решить, что
+// опрашивать (F364).
+func TestWGServerStore_ListSystemTunnels_CachedBetweenCalls(t *testing.T) {
+	fg := newFakeGetter()
+	primeWGFakeGetter(fg)
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+
+	if _, err := s.ListSystemTunnels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Меряем ПРИРОСТ после первого вызова: первый тянет ещё и InterfaceStore,
+	// который резолвит kernel-имена, и его обращения к делу не относятся.
+	base := fg.Calls("/show/interface/")
+	for i := 0; i < 5; i++ {
+		if _, err := s.ListSystemTunnels(context.Background()); err != nil {
+			t.Fatalf("вызов %d: %v", i, err)
+		}
+	}
+	if got := fg.Calls("/show/interface/") - base; got != 0 {
+		t.Errorf("пять повторов дали %d новых обращений к /show/interface/, ожидали 0", got)
+	}
+}
+
+// ...но кэш обязан сбрасываться по хуку NDMS, иначе поднявшийся туннель не
+// попадёт в опрос до истечения TTL.
+func TestWGServerStore_ListSystemTunnels_InvalidateRefetches(t *testing.T) {
+	fg := newFakeGetter()
+	primeWGFakeGetter(fg)
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+
+	if _, err := s.ListSystemTunnels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	base := fg.Calls("/show/interface/")
+	s.InvalidateAll()
+	if _, err := s.ListSystemTunnels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fg.Calls("/show/interface/") - base; got != 1 {
+		t.Errorf("после сброса новых обращений %d, ожидали 1 — кэш не сбросился", got)
+	}
+}
+
+// 5.02.A.11 отдаёт rc ASC числами ("jc": 4), а не строками: разбор в
+// map[string]string падал целиком, и редактор ASC системного туннеля не
+// читался. ASC3Fields возвращает только ключи 3.x.
+func TestWGServerStore_GetASCParams_NumericForm(t *testing.T) {
+	fg := newFakeGetter()
+	fg.SetJSON("/show/rc/interface/Wireguard1/wireguard/asc", `{
+		"jc": 4, "jmin": 40, "jmax": 70, "s1": 87, "s2": 118,
+		"h1": "100000-100100", "h2": "2", "h3": "3", "h4": "4",
+		"s3": 36, "s4": 12, "i1": "<r 32>", "i2": "", "i3": "", "i4": "", "i5": "",
+		"header-protection-key": "K", "random-trailers": 1
+	}`)
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+	raw, err := s.GetASCParams(context.Background(), "Wireguard1", true)
+	if err != nil {
+		t.Fatalf("GetASCParams: %v", err)
+	}
+	var got map[string]any
+	json.Unmarshal(raw, &got)
+	if got["jc"] != 4.0 || got["s3"] != 36.0 || got["h1"] != "100000-100100" || got["i1"] != "<r 32>" {
+		t.Fatalf("разбор: %s", raw)
+	}
+	asc3, err := s.ASC3Fields(context.Background(), "Wireguard1")
+	if err != nil || len(asc3) != 2 || string(asc3["random-trailers"]) != "1" {
+		t.Fatalf("ASC3Fields: %v %v", asc3, err)
+	}
+}

@@ -164,7 +164,7 @@ func setTestBypassTags(t *testing.T, store *storage.SettingsStore, tags []string
 		t.Fatalf("settingsStore.Load: %v", err)
 	}
 	all.SingboxRouter.BypassGeoIPTags = tags
-	if err := store.Save(all); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = *all; return nil }); err != nil {
 		t.Fatalf("settingsStore.Save: %v", err)
 	}
 }
@@ -348,8 +348,8 @@ func TestTriggerBypassSetPopulate_RerunsAfterTriggerDuringRun(t *testing.T) {
 		return bypassset.PopulateResult{CountOK: true}, nil
 	}
 	svc.TriggerBypassSetPopulate()
-	<-entered                       // первый прогон вошёл
-	svc.TriggerBypassSetPopulate()  // занято → взводит повтор
+	<-entered                      // первый прогон вошёл
+	svc.TriggerBypassSetPopulate() // занято → взводит повтор
 	close(release)
 
 	select {
@@ -369,6 +369,7 @@ func TestTriggerBypassSetPopulate_RerunsAfterTriggerDuringRun(t *testing.T) {
 // Смена состава тегов — это и переустановка правил (появляется/исчезает
 // `--match-set`), и пересборка набора.
 func TestReconcileInstalled_BypassGeoTagsChanged_ReinstallsAndPopulates(t *testing.T) {
+	stubNoLANBridges(t)
 	sr := storage.SingboxRouterSettings{
 		Enabled: true, PolicyName: "Policy0", WANAutoDetect: true,
 		BypassGeoIPTags: []string{"ru"},
@@ -388,8 +389,7 @@ func TestReconcileInstalled_BypassGeoTagsChanged_ReinstallsAndPopulates(t *testi
 			NetfilterPreflight: func(context.Context) error { return nil },
 			XtDscpProbe:        func(context.Context) bool { return true },
 		},
-		currentMark:         "0xffffaaa",
-		currentWANIPs:       []string{"203.0.113.207/32"},
+		appliedSpec:         &RestoreInputSpec{PolicyMark: "0xffffaaa", WANIPs: []string{"203.0.113.207/32"}},
 		netfilterStateKnown: true,
 	}
 	populated := make(chan []string, 1)
@@ -419,6 +419,7 @@ func TestReconcileInstalled_BypassGeoTagsChanged_ReinstallsAndPopulates(t *testi
 
 // Снятие последнего тега убирает правило набора из перехвата.
 func TestReconcileInstalled_BypassGeoTagsCleared_DropsSetRule(t *testing.T) {
+	stubNoLANBridges(t)
 	sr := storage.SingboxRouterSettings{Enabled: true, PolicyName: "Policy0", WANAutoDetect: true}
 	var lastRestore string
 	ipt := newStubIPTables(func(_ context.Context, input string) error {
@@ -435,8 +436,7 @@ func TestReconcileInstalled_BypassGeoTagsCleared_DropsSetRule(t *testing.T) {
 			NetfilterPreflight: func(context.Context) error { return nil },
 			XtDscpProbe:        func(context.Context) bool { return true },
 		},
-		currentMark:            "0xffffaaa",
-		currentWANIPs:          []string{"203.0.113.207/32"},
+		appliedSpec:            &RestoreInputSpec{PolicyMark: "0xffffaaa", WANIPs: []string{"203.0.113.207/32"}},
 		currentBypassGeoIPTags: []string{"ru"},
 		netfilterStateKnown:    true,
 	}
@@ -535,5 +535,42 @@ func TestCleanupLegacySelective_RunsOnce(t *testing.T) {
 	}
 	if len(got.Route.Rules) != 1 {
 		t.Fatalf("зачистка отработала повторно: %+v", got.Route.Rules)
+	}
+}
+
+// RT9: Disable сносит набор БЕЗУСЛОВНО, а не по снимку тегов в памяти.
+//
+// После перезапуска демона поле currentBypassGeoIPTags пустое, а набор в ядре
+// и его дамп на диске — нет: хук netfilter восстанавливал бы их на каждой
+// перезагрузке firewall уже после выключения движка. Довод записан прямо в
+// коде, но не был пинован ничем — гейт `if s.currentBypassGeoIPTags != nil`
+// вокруг вызова проходил зелёным.
+func TestDisable_TearsDownBypassSetWithoutTagSnapshot(t *testing.T) {
+	torn := make(chan struct{})
+	svc := newTestService(t, Deps{
+		Settings: newTestSettingsStore(t, storage.SingboxRouterSettings{
+			Enabled: true, PolicyName: "Policy0",
+		}),
+		Policies: &fakeAccessPolicyProvider{mark: "0xffffaaa"},
+		IPTables: &IPTables{
+			runIPTables:    func(context.Context, ...string) error { return nil },
+			runIPTablesOut: func(context.Context, ...string) (string, error) { return "", nil },
+			runIP:          func(context.Context, ...string) error { return nil },
+			runIPOut:       func(context.Context, ...string) (string, error) { return "", nil },
+		},
+		Singbox: newTestSingbox(t),
+	})
+	// Ровно состояние после перезапуска демона: набор в ядре есть, снимок
+	// тегов в памяти — нет.
+	svc.currentBypassGeoIPTags = nil
+	svc.teardownBypassSetFn = func(context.Context) { close(torn) }
+
+	if err := svc.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	select {
+	case <-torn:
+	default:
+		t.Fatal("набор не снесён: хук воскресит его на первой же перезагрузке netfilter")
 	}
 }

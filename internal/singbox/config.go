@@ -184,17 +184,10 @@ func (c *Config) Tunnels() []TunnelInfo {
 	return out
 }
 
-// AddTunnel inserts inbound + outbound + route rule for a new tunnel.
-// Returns error if tag already exists. Picks listen_port internally via
-// allocPort — use AddTunnelWithListenPort when the caller needs the
-// listen_port to align with an externally-chosen ProxyN slot.
-func (c *Config) AddTunnel(tag, protocol, server string, port int, outbound json.RawMessage) error {
-	return c.AddTunnelWithListenPort(tag, protocol, server, port, 0, outbound)
-}
-
-// AddTunnelWithListenPort is like AddTunnel but lets the caller pin the
-// listen_port. Pass 0 to fall back to allocPort (equivalent to AddTunnel).
-// A non-zero listenPort is rejected if already taken in this config.
+// AddTunnelWithListenPort inserts inbound + outbound + route rule for a new
+// tunnel and lets the caller pin the listen_port. Returns error if the tag
+// already exists. Pass 0 to pick the listen_port internally via allocPort;
+// a non-zero listenPort is rejected if already taken in this config.
 func (c *Config) AddTunnelWithListenPort(tag, protocol, server string, port, listenPort int, outbound json.RawMessage) error {
 	for _, ob := range c.userOutbounds() {
 		if t, _ := ob["tag"].(string); t == tag {
@@ -476,6 +469,18 @@ func ensureHysteria2ChromeParrot(ob map[string]any) bool {
 	return true
 }
 
+// EnsureOutboundCompat применяет к одному outbound'у компат-фиксы, обязательные
+// для КАЖДОГО продюсера слотов: naive → udp_over_tcp (без него UDP через naive
+// мёртв), hysteria2 → disable_chrome_parrot при несовместимых TLS-опциях
+// (sing-box 1.14.0-beta.7 включил парротинг по умолчанию). Экспортирован для
+// подписочного адаптера; Config.Save применяет те же фиксы через свои
+// методы-обёртки.
+func EnsureOutboundCompat(ob map[string]any) bool {
+	naive := ensureNaiveUDPOverTCP(ob)
+	hy2 := ensureHysteria2ChromeParrot(ob)
+	return naive || hy2
+}
+
 func (c *Config) ensureHysteria2ChromeParrotOutbounds() bool {
 	changed := false
 	for _, raw := range c.outbounds() {
@@ -601,7 +606,7 @@ func detectTransport(ob map[string]any) string {
 	switch strOr(ob["type"], "") {
 	case "hysteria2":
 		return "quic"
-	case "naive":
+	case "naive", "trusttunnel":
 		return "https"
 	case "mieru":
 		return strings.ToLower(strOr(ob["transport"], "tcp"))
@@ -645,8 +650,11 @@ func detectFingerprint(ob map[string]any) string {
 // рабочие mieru-подключения. Здесь только теги, подтверждённые файлом
 // include/<type>_outbound.go в исходниках sing-box.
 func outboundRequiresFeature(obType string) string {
-	if obType == "naive" {
+	switch obType {
+	case "naive":
 		return "with_naive_outbound"
+	case "trusttunnel":
+		return "with_trusttunnel"
 	}
 	return ""
 }

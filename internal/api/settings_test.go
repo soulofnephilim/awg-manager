@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	sysports "github.com/hoaxisr/awg-manager/internal/sys/ports"
 )
 
 type testDownloadOutboundsProvider struct {
@@ -89,7 +92,7 @@ func TestUpdate_SingboxLogLevelPartialPreservesOtherLoggingFields(t *testing.T) 
 	seed.Logging.AppMaxEntries = 6000
 	seed.Logging.SingboxMaxEntries = 7000
 	seed.Logging.SingboxLogLevel = "trace"
-	if err := store.Save(&seed); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = seed; return nil }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -132,7 +135,7 @@ func TestUpdate_SingboxLogLevelUnchanged_ApplyCallbackNotCalled(t *testing.T) {
 	h, store := newSettingsHandlerForTest(t)
 	current, _ := store.Get()
 	current.Logging.SingboxLogLevel = "trace"
-	if err := store.Save(current); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = *current; return nil }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -223,7 +226,7 @@ func TestUpdateUsageLevelEmptyPreserves(t *testing.T) {
 	current, _ := store.Get()
 	seed := *current
 	seed.UsageLevel = storage.UsageLevelExpert
-	if err := store.Save(&seed); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = seed; return nil }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -269,7 +272,7 @@ func TestUpdate_PartialPayload_PreservesOmittedFields(t *testing.T) {
 	seed.ApiKey = "seeded-key"
 	seed.Server.Port = 3333
 	seed.UsageLevel = storage.UsageLevelExpert
-	if err := store.Save(&seed); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = seed; return nil }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -313,7 +316,7 @@ func TestUpdate_AuthEnabledFalse_NotReverted(t *testing.T) {
 	current, _ := store.Get()
 	seed := *current
 	seed.AuthEnabled = true
-	if err := store.Save(&seed); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = seed; return nil }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -374,7 +377,7 @@ func TestUpdate_ApiKeyExplicitEmpty_Preserved(t *testing.T) {
 	current, _ := store.Get()
 	seed := *current
 	seed.ApiKey = "preexisting-key"
-	if err := store.Save(&seed); err != nil {
+	if err := store.Update(func(cur *storage.Settings) error { *cur = seed; return nil }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -512,5 +515,143 @@ func TestUpdate_ConnectivityCheckURLValidEmptyInvalid(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "INVALID_CONNECTIVITY_CHECK_URL") {
 		t.Fatalf("missing INVALID_CONNECTIVITY_CHECK_URL, body=%s", rec.Body.String())
+	}
+}
+
+// «Включить проверку на всех туннелях» не должно заводить измерение на
+// зеркальных записях прокси-выходов: пользователь их туннелями не заводил, и
+// своя настройка у них есть на карточке. Симметрично для выключения.
+func TestPingCheckOnAllTunnels_SkipsWdttRawMirrors(t *testing.T) {
+	h, store := newSettingsHandlerForTest(t)
+	dir := t.TempDir()
+	tunnels := storage.NewAWGTunnelStoreWithLockDir(dir, filepath.Join(dir, "locks"))
+	h.SetTunnelStore(tunnels)
+
+	own := &storage.AWGTunnel{ID: "awg10", Name: "Свой", Backend: "kernel",
+		DefaultRouteSet: true,
+		Interface:       storage.AWGInterface{Address: "10.0.0.1/32", MTU: 1420}}
+	mirror := &storage.AWGTunnel{ID: "wdttraw-de", Name: "Зеркало", Backend: "wdtt-raw",
+		DefaultRouteSet: true,
+		Interface:       storage.AWGInterface{Address: "10.70.0.2/32", MTU: 1420}}
+	for _, tun := range []*storage.AWGTunnel{own, mirror} {
+		if err := tunnels.Create(tun); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	settings, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.enablePingCheckOnAllTunnels(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	gotOwn, err := tunnels.Get("awg10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOwn.PingCheck == nil || !gotOwn.PingCheck.Enabled {
+		t.Fatal("на своём туннеле проверка обязана включиться")
+	}
+	gotMirror, err := tunnels.Get("wdttraw-de")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMirror.PingCheck != nil && gotMirror.PingCheck.Enabled {
+		t.Fatal("на зеркальной записи проверка включена глобальным тумблером: пользователь её не выбирал")
+	}
+}
+
+// F10: отказ деривации ВНУТРИ мутатора store.Update должен отдаваться кодом
+// поля, а не глухим SETTINGS_SAVE_ERROR. Узкие мутаторы валидируемых полей не
+// пишут, поэтому отказ провоцируется конкурентной записью из фейка
+// порт-инспектора — он исполняется между черновой валидацией и записью.
+type corruptingInspector struct {
+	store *storage.SettingsStore
+}
+
+func (c corruptingInspector) InspectPort(int, string) ([]sysports.Binding, error) {
+	_ = c.store.Update(func(s *storage.Settings) error {
+		s.UsageLevel = "garbage" // мимо API такой не пройдёт — имитация будущего писателя
+		return nil
+	})
+	return nil, nil
+}
+
+func TestUpdate_MutatorDerivationFailureReportsFieldCode(t *testing.T) {
+	h, store := newSettingsHandlerForTest(t)
+	h.SetClashPortInspector(corruptingInspector{store: store})
+
+	body := []byte(`{"singboxClashPort":9500}`)
+	req := httptest.NewRequest(http.MethodPost, "/settings/update", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.Update(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "INVALID_USAGE_LEVEL") {
+		t.Fatalf("ожидался код поля INVALID_USAGE_LEVEL, body=%s", rec.Body.String())
+	}
+}
+
+func TestSettingsHandler_UpdatePublishesInvalidation(t *testing.T) {
+	h, _ := newSettingsHandlerForTest(t)
+	p := newBusProbe(t)
+	h.SetEventBus(p.bus())
+	rr := perform(h.Update, http.MethodPost, "/settings", `{"usageLevel":"expert"}`)
+	if rr.Code != 200 {
+		t.Fatalf("code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got, want := p.invalidated(), []string{"settings/updated"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("публикации = %v, want %v", got, want)
+	}
+	// Отказ разбора — публикаций нет.
+	p2 := newBusProbe(t)
+	h2, _ := newSettingsHandlerForTest(t)
+	h2.SetEventBus(p2.bus())
+	if rr := perform(h2.Update, http.MethodPost, "/settings", `{`); rr.Code == 200 {
+		t.Fatal("битый JSON обязан отвергаться")
+	}
+	if got := p2.invalidated(); len(got) != 0 {
+		t.Fatalf("на отказе публикаций быть не должно: %v", got)
+	}
+}
+
+// Ротация: ключ в теле ответа = ключ в сторе ≠ прежнему; UUID v4; публикация api-key-rotated.
+func TestSettingsHandler_RegenerateApiKey_RotatesAndPersists(t *testing.T) {
+	h, store := newSettingsHandlerForTest(t)
+	if err := store.SetApiKey("old-key-0000"); err != nil {
+		t.Fatal(err)
+	}
+	p := newBusProbe(t)
+	h.SetEventBus(p.bus())
+
+	rr := perform(h.RegenerateApiKey, http.MethodPost, "/settings/regenerate-api-key", "")
+	if rr.Code != 200 {
+		t.Fatalf("code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	data, _ := decodeJSONBody(t, rr)["data"].(map[string]any)
+	got, _ := data["apiKey"].(string)
+	snap, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == "" || got == "old-key-0000" || got != snap.ApiKey {
+		t.Fatalf("ключ: тело=%q стор=%q (старый old-key-0000)", got, snap.ApiKey)
+	}
+	if len(got) != 36 || got[14] != '4' {
+		t.Fatalf("ожидался UUID v4, got %q", got)
+	}
+	if got, want := p.invalidated(), []string{"settings/api-key-rotated"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("публикации = %v, want %v", got, want)
+	}
+	rr = perform(h.RegenerateApiKey, http.MethodGet, "/settings/regenerate-api-key", "")
+	if rr.Code != 405 {
+		t.Fatalf("GET → 405, got %d", rr.Code)
+	}
+	if got := p.invalidated(); len(got) != 0 {
+		t.Fatalf("на 405 публикаций быть не должно: %v", got)
 	}
 }

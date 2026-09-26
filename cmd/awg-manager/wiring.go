@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 
 	"github.com/hoaxisr/awg-manager/internal/accesspolicy"
 	"github.com/hoaxisr/awg-manager/internal/api"
@@ -10,8 +11,8 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/clientroute"
 	"github.com/hoaxisr/awg-manager/internal/deviceproxy"
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
+	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/events"
-	"github.com/hoaxisr/awg-manager/internal/freeturn"
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
@@ -21,9 +22,13 @@ import (
 	ndmsmetrics "github.com/hoaxisr/awg-manager/internal/ndms/metrics"
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	ndmstransport "github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
 	"github.com/hoaxisr/awg-manager/internal/presets"
+	"github.com/hoaxisr/awg-manager/internal/proxyrt/exitreg"
+	"github.com/hoaxisr/awg-manager/internal/proxyrt/instancestore"
+	"github.com/hoaxisr/awg-manager/internal/proxyrt/manager"
 	"github.com/hoaxisr/awg-manager/internal/routing"
 	"github.com/hoaxisr/awg-manager/internal/server"
 	"github.com/hoaxisr/awg-manager/internal/singbox"
@@ -48,7 +53,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wg"
 	"github.com/hoaxisr/awg-manager/internal/updater"
-	"github.com/hoaxisr/awg-manager/internal/wdtt"
 )
 
 // app is the composition root of the daemon: every subsystem constructed by
@@ -66,8 +70,11 @@ type app struct {
 	dataDir     string
 	forceBoot   bool
 	pprofListen string
-	pprofOnMain bool
 	slowReqMS   int
+
+	// prunedRestoreDirs — сколько остатков восстановлений удалено до
+	// setupCore (пишется в журнал, когда он появится).
+	prunedRestoreDirs int
 
 	// process state
 	uptime   float64
@@ -78,9 +85,14 @@ type app struct {
 
 	// storage / settings / logging
 	settingsStore *storage.SettingsStore
+	mcpKeys       *storage.McpKeyStore
 	settings      *storage.Settings
 	awgStore      *storage.AWGTunnelStore
 
+	// singboxDir — каталог sing-box для setupSingboxRuntime. В проде пустой
+	// (оператор берёт дефолт рядом с бинарём); существует ради подмены
+	// каталога во временный в пинах конструктора.
+	singboxDir     string
 	loggingService *logging.Service
 	bootLog        *logging.ScopedLogger
 
@@ -95,15 +107,27 @@ type app struct {
 	// tunnel core
 	kmodLoader    *kmod.Loader
 	wgClient      *wg.ClientImpl
-	backendImpl   backend.Backend
+	backendImpl   *backend.KernelBackend
 	stateMgr      *state.ManagerImpl
 	eventBus      *events.Bus
 	operator      ops.Operator
 	nwgOp         *nwg.OperatorNativeWG
 	wanModel      *wan.Model
 	tunnelService *service.ServiceImpl
-	catalog       *routing.CatalogImpl
-	orch          *orchestrator.Orchestrator
+	// opkgTunOwners — пять поставщиков занятости пула OpkgTun. Состав общий на
+	// всех, кто выдаёт номера, и потому собирается один раз (opkgTunOwners).
+	opkgTunOwners opkgTunOwners
+	// opkgPool — общий пул номеров OpkgTun, ОДИН на процесс: второй экземпляр
+	// означал бы две очереди на выбор, то есть отсутствие атомарности.
+	opkgPool     *opkgtun.Pool
+	catalog      *routing.CatalogImpl
+	exitRegistry *exitreg.Registry
+	// exitMirror — зеркальные записи tunnel-store реестра выходов. Держится
+	// полем, а не локальной: одноразовые шаги посева (обнуление протухших
+	// адресов) ходят в ту же ведомость, а второй экземпляр значил бы двух
+	// владельцев одного файла.
+	exitMirror *exitreg.StoreMirror
+	orch       *orchestrator.Orchestrator
 
 	// routing / aux services
 	hydraService        *hydraroute.Service
@@ -121,8 +145,6 @@ type app struct {
 	testService         *testing.Service
 	pingCheckService    *pingcheck.Service
 	pingCheckFacade     *pingcheck.Facade
-	freeturnService     *freeturn.Service
-	wdttService         *wdtt.Service
 	monitoringService   *monitoring.Service
 	keeneticClient      *auth.KeeneticClient
 	sessionStore        *auth.SessionStore
@@ -151,6 +173,21 @@ type app struct {
 	routerScheduler     *router.Scheduler
 	awg3Store           *awg3endpoint.Store
 	awg3Svc             *awg3endpoint.Service
+	downloadSvc         *downloader.Service
+
+	// прокси-рантайм
+	//
+	// proxyStore — ОДИН экземпляр владельца proxy-instances.json на процесс:
+	// читают его и потребители вне рантайма (подбор listen-порта старого
+	// мира, импорт связанного туннеля), а второй экземпляр развёл бы
+	// сериализацию записи по разным замкам.
+	proxyStore *instancestore.Store
+	proxyMgr   *manager.Manager
+
+	// binariesRetryOnce — цикл повтора бута после ErrBinariesPending (F98)
+	// заводится один раз на процесс: нуджей много (проводка, фазы бута,
+	// WAN-хук), а ждущий загрузки цикл нужен один.
+	binariesRetryOnce sync.Once
 
 	// HTTP
 	srv *server.Server

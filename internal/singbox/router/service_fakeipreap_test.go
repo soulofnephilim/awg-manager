@@ -54,25 +54,20 @@ func newReapSettingsStore(t *testing.T, mode string, index int, provisioned bool
 		WANAutoDetect: true,
 	})
 	if provisioned {
-		if err := store.SetFakeIPState(&storage.FakeIPState{
-			Provisioned: true,
-			Index:       index,
-			Inet4Range:  "198.18.0.0/15",
-			Inet6Range:  "fc00::/18",
-		}); err != nil {
-			t.Fatalf("SetFakeIPState: %v", err)
+		if err := store.SetOpkgTunState(&storage.OpkgTunState{Mode: storage.OpkgTunModeFakeIP, Provisioned: true, Index: index, FakeIP: &storage.OpkgTunFakeIPData{Inet4Range: "198.18.0.0/15", Inet6Range: "fc00::/18"}}); err != nil {
+			t.Fatalf("SetOpkgTunState: %v", err)
 		}
 	}
 	return store
 }
 
-func loadFakeIP(t *testing.T, store *storage.SettingsStore) *storage.FakeIPState {
+func loadFakeIP(t *testing.T, store *storage.SettingsStore) *storage.OpkgTunState {
 	t.Helper()
 	all, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	return all.FakeIP
+	return all.OpkgTun
 }
 
 func TestReapOrphaned_RemovesAndClears(t *testing.T) {
@@ -348,5 +343,81 @@ func TestSchedulerTick_ReapsOrphanWhenEngineDisabled(t *testing.T) {
 
 	if len(opkg.deleted) != 1 || opkg.deleted[0] != "OpkgTun5" {
 		t.Errorf("deleted = %v, want [OpkgTun5] (reap must run with engine disabled)", opkg.deleted)
+	}
+}
+
+// newReapStoreWithPools — реап при КАСТОМНЫХ пулах: настроенный и записанный в
+// персист нарочно различаются, чтобы тесты фиксировали ИСТОЧНИК, а не совпадение.
+func newReapStoreWithPools(t *testing.T, mode, cfgPool4, persistPool4 string) *storage.SettingsStore {
+	t.Helper()
+	store := newTestSettingsStore(t, storage.SingboxRouterSettings{
+		RoutingMode:   mode,
+		WANAutoDetect: true,
+		FakeIPPool4:   cfgPool4,
+	})
+	if persistPool4 != "" {
+		if err := store.SetOpkgTunState(&storage.OpkgTunState{
+			Mode: storage.OpkgTunModeFakeIP, Provisioned: true, Index: 3,
+			FakeIP: &storage.OpkgTunFakeIPData{Inet4Range: persistPool4, Inet6Range: "fc00::/18"},
+		}); err != nil {
+			t.Fatalf("SetOpkgTunState: %v", err)
+		}
+	}
+	return store
+}
+
+// F11: свип протухшего drain-маршрута адресует ЗАПИСАННЫЙ пул (тот, с которым
+// drain и ставился), а не проводной дефолт 198.18.0.0/15.
+func TestReapOrphaned_SweepsStaleRejectRouteUsesPersistedPool(t *testing.T) {
+	store := newReapStoreWithPools(t, "tproxy", "10.80.0.0/16", "10.90.0.0/16")
+	log := &callLog{}
+	svc := newTestService(t, Deps{
+		Settings:     store,
+		OpkgTun:      &recordingOpkgTunProvisioner{},
+		StaticRoutes: &recStaticRoutes{log: log},
+		FakeIPTun:    DefaultFakeIPTunParams(),
+	})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if !log.has("RemoveRoute:10.90.0.0:OpkgTun3") {
+		t.Errorf("свип адресует не записанный пул, got %v", log.calls)
+	}
+}
+
+// F11: pre-delete скана бесперсистных сирот снимает пуловый маршрут по
+// ДЕЙСТВУЮЩИМ настройкам — своего пула у сироты без персиста нет.
+func TestReapOrphaned_ScanRemovesPoolRouteWithConfiguredPool(t *testing.T) {
+	store := newReapStoreWithPools(t, "tproxy", "10.70.0.0/16", "")
+	log := &callLog{}
+	svc := newTestService(t, Deps{
+		Settings:     store,
+		OpkgTun:      &recordingOpkgTunProvisioner{},
+		OpkgTunScan:  scanReturning([]string{"OpkgTun1"}, nil),
+		StaticRoutes: &recStaticRoutes{log: log},
+		FakeIPTun:    DefaultFakeIPTunParams(),
+	})
+
+	if err := svc.ReapOrphanedFakeIPTun(context.Background()); err != nil {
+		t.Fatalf("ReapOrphanedFakeIPTun: %v", err)
+	}
+	if !log.has("RemoveRoute:10.70.0.0:OpkgTun1") {
+		t.Errorf("маршрут сироты снят не по настроенному пулу, got %v", log.calls)
+	}
+}
+
+// F11: статусная DNS-проверка сверяется с ЗАПИСАННЫМ пулом — иначе «активен»
+// считается по чужому префиксу.
+func TestFakeIPReadyInputs_UsesPersistedPool(t *testing.T) {
+	store := newReapStoreWithPools(t, stateFakeIPTun, "10.80.0.0/16", "10.90.0.0/16")
+	svc := newTestService(t, Deps{Settings: store, FakeIPTun: DefaultFakeIPTunParams()})
+
+	_, _, fakeipNet, ok := svc.fakeIPReadyInputs()
+	if !ok {
+		t.Fatal("fakeIPReadyInputs: !ok")
+	}
+	if fakeipNet.String() != "10.90.0.0/16" {
+		t.Errorf("fakeipNet = %s, want 10.90.0.0/16 (пул из персиста)", fakeipNet)
 	}
 }

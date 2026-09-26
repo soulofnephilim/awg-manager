@@ -3,15 +3,16 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
 	"github.com/hoaxisr/awg-manager/internal/response"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/config"
-	"github.com/hoaxisr/awg-manager/internal/wdtt"
 )
 
 // stateToStatus converts a tunnel State to the status string sent to the frontend.
@@ -121,9 +122,9 @@ func (h *TunnelsHandler) publishTunnelList(ctx context.Context) {
 	if h.bus == nil {
 		return
 	}
-	publishInvalidated(h.bus, ResourceTunnels, "list-changed")
+	h.bus.PublishInvalidated(events.ResourceTunnels, "list-changed")
 	if h.catalog != nil {
-		publishInvalidated(h.bus, ResourceRoutingTunnels, "list-changed")
+		h.bus.PublishInvalidated(events.ResourceRoutingTunnels, "list-changed")
 	}
 
 	// Also refresh pingcheck (new/deleted tunnels appear/disappear on monitoring page)
@@ -161,17 +162,34 @@ func BuildTunnelResponse(r *http.Request, svc TunnelService, store *storage.AWGT
 		"ispInterface":  ispIface,
 		"interfaceName": t.InterfaceName,
 		"ndmsName":      t.NDMSName,
-		"configPreview": t.ConfigPreview,
 		"state":         displayStatus(t.StateInfo, quiescentUntil, time.Now()),
 		"stateInfo":     t.StateInfo,
 	}
 
 	if stored != nil {
-		resp["interface"] = stored.Interface
-		resp["peer"] = stored.Peer
+		// Ключевой материал наружу не отдаём НИ В КАКОМ виде: GET читают три
+		// модалки, и каждая шлёт весь объект обратно в update. Сохранность
+		// обоих ключей держится не на эхе, а на merge-семантике — пустое
+		// значение в теле значит «оставить прежний» (mergedInterface для
+		// PrivateKey, mergedPeer для PresharedKey, F56+F70).
+		iface := stored.Interface
+		iface.PrivateKey = ""
+		resp["interface"] = iface
+		peer := stored.Peer
+		peer.PresharedKey = ""
+		resp["peer"] = peer
+		if stored.Obfuscator != nil {
+			// Целиком, включая key: это XOR-ключ релея, а не приватный ключ
+			// WG — без него вкладка «Обфускатор» не может показать и править
+			// его (mergedObfuscator пустой ключ не затирает).
+			resp["obfuscator"] = stored.Obfuscator
+		}
 		resp["pingCheck"] = stored.PingCheck
 		resp["connectivityCheck"] = stored.ConnectivityCheck
 		resp["ispInterfaceLabel"] = stored.ISPInterfaceLabel
+		// Страна подписки: карточка показывает, из какой страны Amnezia
+		// Premium получена текущая конфигурация.
+		resp["amneziaCountry"] = stored.AmneziaCountry
 		backend := stored.Backend
 		if backend == "" {
 			backend = "kernel"
@@ -209,6 +227,43 @@ type tunnelItem struct {
 	StartedAt                 string                           `json:"startedAt,omitempty"`
 	PingCheck                 pingcheck.TunnelPingInfo         `json:"pingCheck"`
 	ConnectivityCheck         *storage.ConnectivityCheckConfig `json:"connectivityCheck,omitempty"`
+	// WdttClientID links the tunnel to the WDTT client instance it was
+	// created from; empty for tunnels unrelated to WDTT.
+	WdttClientID string `json:"wdttClientId,omitempty"`
+	// FreeTurnClientID — то же для FreeTurn-клиента. Пара к WdttClientID:
+	// список помечает туннели, принадлежащие прокси-выходу, и без второго
+	// поля метки не было бы ровно у половины из них.
+	FreeTurnClientID string `json:"freeTurnClientId,omitempty"`
+	// AmneziaCountry — страна подписки Amnezia Premium, из которой получена
+	// конфигурация туннеля; пусто у прочих. Мастер читает ИМЕННО список
+	// (главная страница), поэтому поле обязано быть и здесь, а не только в
+	// детальном ответе: иначе метка «этой стране уже соответствует туннель»
+	// не появится никогда.
+	AmneziaCountry string `json:"amneziaCountry,omitempty"`
+	// Locked — при true туннель защищён от изменений (#818).
+	Locked bool `json:"locked,omitempty"`
+	// StatusDetails — человекочитаемая причина состояния (StateInfo.Details),
+	// напр. «обфускатор не запущен».
+	StatusDetails string          `json:"statusDetails,omitempty"`
+	Obfuscator    *obfuscatorItem `json:"obfuscator,omitempty"`
+}
+
+// obfuscatorItem — что показывает список о релее; Key наружу не отдаём.
+type obfuscatorItem struct {
+	Flavor    string `json:"flavor"`
+	Target    string `json:"target"`
+	LocalPort int    `json:"localPort"`
+}
+
+func obfItem(stored *storage.AWGTunnel) *obfuscatorItem {
+	if stored == nil || stored.Obfuscator == nil {
+		return nil
+	}
+	return &obfuscatorItem{
+		Flavor:    stored.Obfuscator.Flavor,
+		Target:    stored.Obfuscator.Target,
+		LocalPort: stored.Obfuscator.LocalPort,
+	}
 }
 
 // listItems builds the tunnel list items for API response and SSE snapshots.
@@ -232,23 +287,33 @@ func (h *TunnelsHandler) listItems(ctx context.Context) ([]tunnelItem, error) {
 	for _, t := range tunnels {
 		// Get stored tunnel for additional fields
 		stored, _ := h.store.Get(t.ID)
-		// WDTT Raw rows are appended below with live iface/status from wdtt.
-		if stored != nil && stored.Backend == wdtt.BackendWdttRaw {
-			continue
-		}
 
 		awgVersion := "wg"
-		var endpoint, address string
+		var endpoint, address, wdttClientID, freeTurnClientID, amneziaCountry string
 		var ispInterface, ispInterfaceLabel string
 		var resolvedISPInterface, resolvedISPInterfaceLabel string
 		var mtu int
 		if stored != nil {
 			endpoint = stored.Peer.Endpoint
+			if stored.Obfuscator != nil {
+				// У обфусцированного туннеля Peer.Endpoint — loopback релея;
+				// пользователю показываем реальный сервер (Q7).
+				endpoint = stored.Obfuscator.Target
+			}
 			address = stored.Interface.Address
 			mtu = stored.Interface.MTU
 			awgVersion = config.ClassifyAWGVersion(&stored.Interface)
+			if stored.Backend == backendWdttRaw {
+				// У зеркала прокси-выхода нет конфига интерфейса, по
+				// которому считается версия: классификатор вернул бы
+				// "wg" и карточка получила бы бейдж «WireGuard».
+				awgVersion = "raw"
+			}
 			ispInterface = stored.ISPInterface
 			ispInterfaceLabel = stored.ISPInterfaceLabel
+			wdttClientID = strings.TrimSpace(stored.WdttClientID)
+			freeTurnClientID = strings.TrimSpace(stored.FreeTurnClientID)
+			amneziaCountry = stored.AmneziaCountry
 
 			// NativeWG stores NDMS IDs (e.g. "ISP"), but frontend uses kernel names (e.g. "eth3").
 			// Convert back so the dropdown can match the stored value.
@@ -299,8 +364,13 @@ func (h *TunnelsHandler) listItems(ctx context.Context) ([]tunnelItem, error) {
 		}
 
 		backend := "kernel"
-		if stored != nil && stored.Backend == "nativewg" {
-			backend = "nativewg"
+		if stored != nil {
+			switch stored.Backend {
+			case "nativewg":
+				backend = "nativewg"
+			case backendWdttRaw:
+				backend = backendWdttRaw
+			}
 		}
 
 		var startedAt string
@@ -343,14 +413,25 @@ func (h *TunnelsHandler) listItems(ctx context.Context) ([]tunnelItem, error) {
 			MTU:                       mtu,
 			StartedAt:                 startedAt,
 			PingCheck:                 pcInfo,
+			WdttClientID:              wdttClientID,
+			FreeTurnClientID:          freeTurnClientID,
+			AmneziaCountry:            amneziaCountry,
+			Obfuscator:                obfItem(stored),
+		}
+		if item.Obfuscator != nil {
+			// Только у обфусцированных: причины оттуда пишет nwg/obfuscated.go
+			// по-русски и для пользователя, а у остальных бэкендов Details —
+			// внутренняя английская строка классификатора состояния.
+			item.StatusDetails = t.StateInfo.Details
 		}
 		if stored != nil && stored.ConnectivityCheck != nil {
 			item.ConnectivityCheck = stored.ConnectivityCheck
 		}
+		if stored != nil && stored.Locked {
+			item.Locked = true
+		}
 		items = append(items, item)
 	}
-
-	items = h.appendWdttRawListItems(ctx, items)
 
 	return items, nil
 }
