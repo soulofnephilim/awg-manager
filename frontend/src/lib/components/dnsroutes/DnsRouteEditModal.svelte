@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { DnsRoute, DnsRouteTarget, DnsRouteSubscription, RoutingTunnel } from '$lib/types';
-	import { Modal, Button, Dropdown } from '$lib/components/ui';
+	import type { DnsRoute, DnsRouteTarget, DnsRouteSubscription, RoutingTunnel, DedupeItem } from '$lib/types';
+	import { Modal, Button, Dropdown, FormToggle } from '$lib/components/ui';
 	import { formatRelativeTime } from '$lib/utils/format';
 	import DnsRouteDomainEditor from './DnsRouteDomainEditor.svelte';
 	import ServiceIcon from './ServiceIcon.svelte';
@@ -13,6 +13,7 @@
 	import DownloadRouteNote from '$lib/components/downloads/DownloadRouteNote.svelte';
 	import { humanizeDownloadError } from '$lib/utils/downloadError';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
+	import { m } from '$lib/i18n';
 
 	interface Props {
 		open: boolean;
@@ -21,39 +22,23 @@
 		saving: boolean;
 		onsave: (data: Partial<DnsRoute>) => void;
 		onclose: () => void;
-		isOS5?: boolean;
-		hydrarouteInstalled?: boolean;
 	}
 
-	let { open, route, tunnels: rawTunnels, saving, onsave, onclose, isOS5 = false, hydrarouteInstalled = false }: Props = $props();
+	let { open, route, tunnels: rawTunnels, saving, onsave, onclose }: Props = $props();
 	let tunnels = $derived((rawTunnels ?? []).filter(t => t.available || t.type === 'wan'));
 
 	// Form state
 	let name = $state('');
 	let iconUrl = $state<string | undefined>(undefined);
+	let skipIPv6 = $state(false);
 	let iconPickerOpen = $state(false);
 	let manualDomains = $state<string[]>([]);
 	let manualText = $state('');
 	let subscriptions = $state<DnsRouteSubscription[]>([]);
 	let routes = $state<DnsRouteTarget[]>([]);
 	let newSubUrl = $state('');
-	let backend = $state<'ndms' | 'hydraroute'>('ndms');
-
-	// New state variables
-	let hrRouteMode = $state<'interface' | 'policy'>('interface');
-	let hrPolicyName = $state('');
 	let excludesText = $state('');
 	let excludesTextareaEl = $state<HTMLTextAreaElement | null>(null);
-	let hrInterfaceId = $state('');
-
-	let showBackendSelector = $derived(isOS5 && hydrarouteInstalled);
-	let isHydraRouteBackend = $derived(backend === 'hydraroute');
-
-	// New derived
-	let isHR = $derived(backend === 'hydraroute');
-	let isNDMS = $derived(backend !== 'hydraroute');
-	let isPolicyMode = $derived(isHR && hrRouteMode === 'policy');
-	let isInterfaceMode = $derived(isHR && hrRouteMode === 'interface');
 
 	let isInitialized = $state(false);
 	let attempted = $state(false);
@@ -64,12 +49,9 @@
 	let initialManualText = $state('');
 	let initialSubscriptions = $state<DnsRouteSubscription[]>([]);
 	let initialRoutes = $state<DnsRouteTarget[]>([]);
-	let initialBackend = $state<'ndms' | 'hydraroute'>('ndms');
-	let initialHrRouteMode = $state<'interface' | 'policy'>('interface');
-	let initialHrPolicyName = $state('');
 	let initialExcludesText = $state('');
-	let initialHrInterfaceId = $state('');
 	let initialIconUrl = $state<string | undefined>(undefined);
+	let initialSkipIPv6 = $state(false);
 
 	let nameError = $derived(attempted && name.trim() === '');
 	let routeError = $derived(attempted && routes.length === 0);
@@ -85,48 +67,36 @@
 					manualText = route.manualText ?? manualDomains.join('\n');
 					subscriptions = (route.subscriptions ?? []).map((s) => ({ ...s }));
 					routes = (route.routes ?? []).map((r) => ({ ...r }));
-					backend = route.backend || (isOS5 ? 'ndms' : hydrarouteInstalled ? 'hydraroute' : 'ndms');
-					hrRouteMode = route.hrRouteMode || 'interface';
-					hrPolicyName = route.hrPolicyName || '';
 					excludesText = route.excludesText ?? [...(route.excludes ?? []), ...(route.excludeSubnets ?? [])].join('\n');
-					hrInterfaceId = (isHR && route.routes?.[0]?.tunnelId) || tunnels[0]?.id || '';
 					iconUrl = route.iconUrl;
+					skipIPv6 = route.skipIPv6 ?? false;
 					// Capture snapshot for isDirty
 					initialName = route.name;
 					initialManualDomains = [...(route.manualDomains ?? [])];
 					initialManualText = manualText;
 					initialSubscriptions = (route.subscriptions ?? []).map((s) => ({ ...s }));
 					initialRoutes = (route.routes ?? []).map((r) => ({ ...r }));
-					initialBackend = backend;
-					initialHrRouteMode = hrRouteMode;
-					initialHrPolicyName = hrPolicyName;
 					initialExcludesText = excludesText;
-					initialHrInterfaceId = hrInterfaceId;
 					initialIconUrl = iconUrl;
+					initialSkipIPv6 = skipIPv6;
 				} else {
 					name = '';
 					manualDomains = [];
 					manualText = '';
 					subscriptions = [];
 					routes = [];
-					backend = isOS5 ? 'ndms' : (hydrarouteInstalled ? 'hydraroute' : 'ndms');
-					hrRouteMode = 'interface';
-					hrPolicyName = '';
 					excludesText = '';
-					hrInterfaceId = tunnels[0]?.id || '';
 					iconUrl = undefined;
+					skipIPv6 = false;
 					// Capture snapshot for isDirty (create mode defaults)
 					initialName = '';
 					initialManualDomains = [];
 					initialManualText = '';
 					initialSubscriptions = [];
 					initialRoutes = [];
-					initialBackend = backend;
-					initialHrRouteMode = 'interface';
-					initialHrPolicyName = '';
 					initialExcludesText = '';
-					initialHrInterfaceId = hrInterfaceId;
 					initialIconUrl = undefined;
+					initialSkipIPv6 = false;
 				}
 				newSubUrl = '';
 				newRouteTunnelId = '';
@@ -142,7 +112,25 @@
 	let hasDedups = $derived(dedupReport && dedupReport.totalRemoved > 0);
 
 	let isEdit = $derived(route !== null);
-	let title = $derived(isEdit ? `Редактирование: ${route?.name ?? ''}` : 'Новый DNS-маршрут');
+	let title = $derived(isEdit ? m.routing_ip_edit_title({ name: route?.name ?? '' }) : m.dns_routes_edit_new_title());
+
+	function dedupReason(item: DedupeItem): string {
+		const list = item.listName || item.listId;
+		const coveredBy = item.coveredBy;
+		if (item.reason === 'exact') {
+			if (item.listName) return m.dns_routes_edit_dedup_exact_in_name({ list });
+			if (item.listId) return m.dns_routes_edit_dedup_exact_in_id({ list });
+			return m.dns_routes_edit_dedup_exact();
+		}
+		if (item.reason === 'wildcard') {
+			if (item.listName) return m.dns_routes_edit_dedup_wildcard_in_name({ coveredBy, list });
+			if (item.listId) return m.dns_routes_edit_dedup_wildcard_in_id({ coveredBy, list });
+			return m.dns_routes_edit_dedup_wildcard({ coveredBy });
+		}
+		if (item.listName) return m.dns_routes_edit_dedup_subnet_in_name({ coveredBy, list });
+		if (item.listId) return m.dns_routes_edit_dedup_subnet_in_id({ coveredBy, list });
+		return m.dns_routes_edit_dedup_subnet({ coveredBy });
+	}
 
 	let totalDomains = $derived.by(() => {
 		const manualCount = manualDomains.length;
@@ -152,7 +140,7 @@
 
 	let groupCount = $derived(Math.ceil(totalDomains / 300) || 0);
 
-	let canSave = $derived(name.trim() !== '' && (isInterfaceMode ? !!hrInterfaceId : routes.length > 0));
+	let canSave = $derived(name.trim() !== '' && routes.length > 0);
 
 	// isDirty: deep comparison with snapshot (edit mode) or with defaults (create mode)
 	let isDirty = $derived.by(() => {
@@ -177,12 +165,9 @@
 			compareDomains(manualDomains, initialManualDomains) ||
 			compareSubscriptions(subscriptions, initialSubscriptions) ||
 			compareRoutes(routes, initialRoutes) ||
-			backend !== initialBackend ||
-			hrRouteMode !== initialHrRouteMode ||
-			hrPolicyName !== initialHrPolicyName ||
 			excludesText !== initialExcludesText ||
-			hrInterfaceId !== initialHrInterfaceId ||
-			iconUrl !== initialIconUrl
+			iconUrl !== initialIconUrl ||
+			skipIPv6 !== initialSkipIPv6
 		);
 	});
 
@@ -252,13 +237,6 @@
 		return findRoutingTunnelLabel(tunnels, tunnelId);
 	}
 
-	const hrInterfaceTunnelOpts = $derived(
-		buildRoutingTunnelDropdownOptions(tunnels, {
-			filter: (t) =>
-				(t.type === 'managed' && t.available) || t.type === 'system' || t.type === 'wan',
-		}),
-	);
-
 	const addRouteTunnelOpts = $derived(
 		buildRoutingTunnelDropdownOptions(availableTunnels),
 	);
@@ -292,23 +270,17 @@
 
 		const parsedExcludes = parseExcludesForPayload(excludesText);
 
-		// Build routes based on mode
-		let saveRoutes = routes;
-		if (isInterfaceMode) {
-			saveRoutes = hrInterfaceId ? [{ tunnelId: hrInterfaceId, interface: hrInterfaceId, fallback: '' as const }] : [];
-		}
-
 		const data: Partial<DnsRoute> = {
 			name: name.trim(),
 			manualDomains,
 			manualText,
 			subscriptions,
-			routes: saveRoutes,
-			backend,
-			excludes: isNDMS ? parsedExcludes : undefined,
-			excludesText: isNDMS ? excludesText : undefined,
-			hrRouteMode: isHR ? hrRouteMode : undefined,
-			hrPolicyName: isPolicyMode ? (hrPolicyName || `AWG_${name.trim().replace(/\s+/g, '_')}`) : undefined,
+			routes,
+			// Правила HR Neo правит HrNeoEditModal — здесь только NDMS (F689).
+			backend: 'ndms',
+			excludes: parsedExcludes,
+			excludesText,
+			skipIPv6,
 			iconUrl: iconUrl || undefined,
 		};
 		onsave(data);
@@ -414,73 +386,54 @@
 	<!-- Name -->
 	<div class="form-group" class:field-error={nameError}>
 		<!-- svelte-ignore a11y_label_has_associated_control -->
-		<label class="field-label">Название</label>
+		<label class="field-label">{m.routing_ip_name()}</label>
 		<input
 			class="field-input"
 			type="text"
-			placeholder="Заблокированные сайты"
+			placeholder={m.dns_routes_edit_name_placeholder()}
 			value={name}
 			oninput={(e) => { name = (e.target as HTMLInputElement).value; }}
 		/>
-		<div class="error-text" class:visible={nameError}>Введите название</div>
+		<div class="error-text" class:visible={nameError}>{m.routing_ip_name_required()}</div>
 	</div>
 
 	<!-- Icon -->
 	<div class="form-group">
 		<!-- svelte-ignore a11y_label_has_associated_control -->
-		<label class="field-label">Иконка</label>
+		<label class="field-label">{m.routing_ip_icon()}</label>
 		<div class="icon-row">
 			<ServiceIcon {iconUrl} name={name || 'rule'} size={36} />
 			<div class="icon-meta">
 				{#if iconUrl}
-					<div class="icon-src">Кастомная иконка</div>
+					<div class="icon-src">{m.routing_ip_icon_custom()}</div>
 					<div class="icon-hint" title={iconUrl}>{formatIconUrlHint(iconUrl)}</div>
 				{:else}
-					<div class="icon-src">Авто-определение по имени</div>
+					<div class="icon-src">{m.routing_ip_icon_auto()}</div>
 					<div class="icon-hint">
-						{name ? `Подбирается по «${name}»` : 'Введите имя — иконка подберётся автоматически'}
+						{name ? m.routing_ip_icon_auto_for({ name }) : m.routing_ip_icon_auto_empty()}
 					</div>
 				{/if}
 			</div>
 			<Button variant="ghost" size="sm" onclick={() => (iconPickerOpen = true)}>
-				{iconUrl ? 'Сменить иконку' : 'Выбрать иконку'}
+				{iconUrl ? m.routing_ip_card_change_icon() : m.routing_ip_icon_choose()}
 			</Button>
 		</div>
 	</div>
 
-	<!-- Backend selector -->
-	{#if showBackendSelector}
-		<div class="form-group">
-			<Dropdown
-				label="Движок маршрутизации"
-				bind:value={backend}
-				options={[
-					{ value: 'ndms' as const, label: 'ПО роутера (NDMS)' },
-					{ value: 'hydraroute' as const, label: 'HydraRoute Neo' },
-				]}
-				fullWidth
-			/>
-		</div>
-	{/if}
-
 	<!-- Manual domains -->
 	<div class="form-section">
-		<div class="section-title">Домены (вручную)</div>
-		{#if isHydraRouteBackend}
-			<span class="field-hint geo-hint">Поддерживается geosite:TAG, например geosite:GOOGLE</span>
-		{/if}
+		<div class="section-title">{m.dns_routes_edit_manual_domains()}</div>
 		<DnsRouteDomainEditor
 			domains={manualDomains}
 			textValue={manualText}
 			onchange={handleDomainsChange}
-			allowGeoTags={isHydraRouteBackend}
 		/>
 	</div>
 
 	<!-- Subscriptions -->
 	<div class="form-section">
-		<div class="section-title">Подписки</div>
-		<DownloadRouteNote text="URL-листы будут проверены и обновлены через" />
+		<div class="section-title">{m.dns_routes_edit_subscriptions()}</div>
+		<DownloadRouteNote text={m.dns_routes_edit_url_lists_note()} />
 		{#if subscriptions.length > 0}
 			<div class="sub-list">
 				{#each subscriptions as sub, i (sub.url)}
@@ -493,14 +446,14 @@
 										{humanizeDownloadError(sub.lastError).title}
 									</span>
 								{:else if sub.lastCount !== undefined && sub.lastCount > 0}
-									<span class="sub-ok">{sub.lastCount} доменов</span>
+									<span class="sub-ok">{m.routing_search_domains({ count: sub.lastCount })}</span>
 									{#if sub.lastFetched}
 										<span class="sub-time"> &middot; {formatRelativeTime(sub.lastFetched)}</span>
 									{/if}
 								{/if}
 							</span>
 						</div>
-						<button class="btn-remove" onclick={() => removeSubscription(i)} title="Удалить подписку">
+						<button class="btn-remove" onclick={() => removeSubscription(i)} title={m.dns_routes_edit_remove_subscription()}>
 							&times;
 						</button>
 					</div>
@@ -517,154 +470,113 @@
 				onkeydown={handleSubKeydown}
 			/>
 			<Button variant="secondary" size="sm" onclick={addSubscription} disabled={!newSubUrl.trim()}>
-				Добавить
+				{m.common_add()}
 			</Button>
 		</div>
 	</div>
 
-	<!-- HR Mode Tabs (only for hydraroute) -->
-	{#if isHR}
-		<div class="section-title">Маршрут</div>
-		<div class="mode-tabs">
-			<button class="mode-tab" class:active={hrRouteMode === 'interface'} onclick={() => hrRouteMode = 'interface'}>Интерфейс</button>
-			<button class="mode-tab" class:active={hrRouteMode === 'policy'} onclick={() => hrRouteMode = 'policy'}>Политика</button>
-		</div>
-	{/if}
-
-	<!-- HR Interface mode: single selector -->
-	{#if isInterfaceMode}
-		<div class="form-group">
-			<Dropdown
-				label="Целевой интерфейс"
-				bind:value={hrInterfaceId}
-				options={hrInterfaceTunnelOpts}
-				hint="Трафик направляется напрямую на интерфейс (DirectRoute)"
-				fullWidth
-			/>
-		</div>
-	{/if}
-
-	<!-- Route chain (for NDMS and HR Policy mode) -->
-	{#if isNDMS || isPolicyMode}
-		<div class="form-section">
-			{#if isNDMS}
-				<div class="section-title">Маршрут (порядок = приоритет)</div>
-			{/if}
-			{#if routes.length === 0}
-				<p class="route-hint" class:route-hint-error={routeError}>Добавьте хотя бы один туннель для маршрутизации</p>
-			{/if}
-			{#if routes.length > 0}
-				<div class="route-list">
-					{#each routes as target, i (i)}
-						<div class="route-item">
-							<span class="route-index">{i + 1}.</span>
-							<span class="route-name">{tunnelName(target.tunnelId)}</span>
-							<span class="route-id" title={target.tunnelId}>{target.tunnelId}</span>
-							<div class="route-actions">
-								<button class="btn-move" onclick={() => moveRoute(i, -1)} disabled={i === 0} title="Вверх">&uarr;</button>
-								<button class="btn-move" onclick={() => moveRoute(i, 1)} disabled={i === routes.length - 1} title="Вниз">&darr;</button>
-								<button class="btn-remove" onclick={() => removeRoute(i)} title="Удалить">&times;</button>
-							</div>
+	<!-- Route chain -->
+	<div class="form-section">
+		<div class="section-title">{m.dns_routes_edit_route_order()}</div>
+		{#if routes.length === 0}
+			<p class="route-hint" class:route-hint-error={routeError}>{m.dns_routes_edit_route_required()}</p>
+		{/if}
+		{#if routes.length > 0}
+			<div class="route-list">
+				{#each routes as target, i (i)}
+					<div class="route-item">
+						<span class="route-index">{i + 1}.</span>
+						<span class="route-name">{tunnelName(target.tunnelId)}</span>
+						<span class="route-id" title={target.tunnelId}>{target.tunnelId}</span>
+						<div class="route-actions">
+							<button class="btn-move" onclick={() => moveRoute(i, -1)} disabled={i === 0} title={m.dns_routes_edit_move_up()}>&uarr;</button>
+							<button class="btn-move" onclick={() => moveRoute(i, 1)} disabled={i === routes.length - 1} title={m.dns_routes_edit_move_down()}>&darr;</button>
+							<button class="btn-remove" onclick={() => removeRoute(i)} title={m.common_delete()}>&times;</button>
 						</div>
-					{/each}
+					</div>
+				{/each}
+			</div>
+		{/if}
+		{#if availableTunnels.length > 0}
+			<div class="route-add">
+				<div class="route-add-select">
+					<Dropdown
+						value={newRouteTunnelId || availableTunnels[0]?.id || ''}
+						options={addRouteTunnelOpts}
+						onchange={(v) => (newRouteTunnelId = v)}
+						fullWidth
+					/>
 				</div>
-			{/if}
-			{#if availableTunnels.length > 0}
-				<div class="route-add">
-					<div class="route-add-select">
-						<Dropdown
-							value={newRouteTunnelId || availableTunnels[0]?.id || ''}
-							options={addRouteTunnelOpts}
-							onchange={(v) => (newRouteTunnelId = v)}
-							fullWidth
+				<Button variant="primary" size="sm" onclick={addRoute} iconBefore={createIcon}>
+					{m.common_add()}
+				</Button>
+			</div>
+		{/if}
+
+		{#if routes.length > 0}
+			<div class="fallback-group">
+				<!-- svelte-ignore a11y_label_has_associated_control -->
+				<label class="field-label">{m.dns_routes_edit_fallback_label()}</label>
+				<div class="fallback-options">
+					<label class="fallback-option">
+						<input
+							type="radio"
+							name="fallback"
+							value="auto"
+							checked={currentFallback === 'auto'}
+							onchange={() => handleFallbackChange('auto')}
 						/>
-					</div>
-					<Button variant="primary" size="sm" onclick={addRoute} iconBefore={createIcon}>
-						Добавить
-					</Button>
+						<span>{m.dns_routes_edit_fallback_provider()}</span>
+					</label>
+					<label class="fallback-option">
+						<input
+							type="radio"
+							name="fallback"
+							value="reject"
+							checked={currentFallback === 'reject'}
+							onchange={() => handleFallbackChange('reject')}
+						/>
+						<span>{m.dns_routes_edit_fallback_exclusive()}</span>
+					</label>
 				</div>
-			{/if}
+			</div>
+		{/if}
+	</div>
 
-			{#if isNDMS && routes.length > 0}
-				<div class="fallback-group">
-					<!-- svelte-ignore a11y_label_has_associated_control -->
-					<label class="field-label">Если все недоступны:</label>
-					<div class="fallback-options">
-						<label class="fallback-option">
-							<input
-								type="radio"
-								name="fallback"
-								value="auto"
-								checked={currentFallback === 'auto'}
-								onchange={() => handleFallbackChange('auto')}
-							/>
-							<span>провайдер</span>
-						</label>
-						<label class="fallback-option">
-							<input
-								type="radio"
-								name="fallback"
-								value="reject"
-								checked={currentFallback === 'reject'}
-								onchange={() => handleFallbackChange('reject')}
-							/>
-							<span>эксклюзивный</span>
-						</label>
-					</div>
-				</div>
-			{/if}
-
-			{#if isPolicyMode}
-				<div class="policy-name-row">
-					<span class="policy-label">Имя политики:</span>
-					<input class="policy-input" value={hrPolicyName} oninput={(e) => hrPolicyName = (e.target as HTMLInputElement).value} placeholder="HydraRoute">
-				</div>
-				<span class="field-hint">Порядок = приоритет. Политика создаётся автоматически на роутере.</span>
-			{/if}
-		</div>
-	{/if}
-
-	<!-- Excludes (NDMS only) -->
-	{#if isNDMS}
-		<div class="form-section">
-			<div class="section-title">Исключения</div>
-			<textarea
-				bind:this={excludesTextareaEl}
-				class="field-textarea excludes-textarea"
-				rows="3"
-				placeholder={"# Домены, которые НЕ маршрутизировать\nexample.com\n.local\n\n# Подсети, которые НЕ маршрутизировать\n10.0.0.0/8\n2001:db8::/32"}
-				value={excludesText}
-				oninput={(e) => excludesText = (e.target as HTMLTextAreaElement).value}
-				onkeydown={handleExcludesKeydown}
-			></textarea>
-			<span class="field-hint excludes-hint">Эти домены будут исключены из маршрутизации через туннель.
-Комментарии начинаются с #
-Ctrl+/ или Cmd+/ комментирует выбранные строки.</span>
-		</div>
-	{/if}
+	<!-- Excludes -->
+	<div class="form-section">
+		<div class="section-title">{m.dns_routes_edit_excludes()}</div>
+		<textarea
+			bind:this={excludesTextareaEl}
+			class="field-textarea excludes-textarea"
+			rows="3"
+			placeholder={m.dns_routes_edit_excludes_placeholder()}
+			value={excludesText}
+			oninput={(e) => excludesText = (e.target as HTMLTextAreaElement).value}
+			onkeydown={handleExcludesKeydown}
+		></textarea>
+		<span class="field-hint excludes-hint">{m.dns_routes_edit_excludes_hint()}</span>
+	</div>
+	<div class="form-section">
+		<FormToggle
+			bind:checked={skipIPv6}
+			size="sm"
+			label={m.dns_routes_edit_skip_ipv6()}
+			hint={m.dns_routes_edit_skip_ipv6_hint()}
+		/>
+	</div>
 
 	{#if hasDedups && dedupReport}
 		<details class="dedup-details">
 			<summary class="dedup-summary">
-				Убрано {dedupReport.totalRemoved} дублей ({dedupReport.exactDupes} точных, {dedupReport.wildcardDupes} wildcard)
+				{m.dns_routes_edit_dedup_summary({ total: dedupReport.totalRemoved, exact: dedupReport.exactDupes, wildcard: dedupReport.wildcardDupes })}
 			</summary>
 			<div class="dedup-list">
 				{#each dedupReport.items ?? [] as item}
 					<div class="dedup-item">
 						<code>{item.domain}</code>
 						<span class="dedup-reason">
-							{#if item.reason === 'exact'}
-								дубль
-							{:else if item.reason === 'wildcard'}
-								покрыт {item.coveredBy}
-							{:else}
-								покрыт подсетью {item.coveredBy}
-							{/if}
-							{#if item.listName}
-								в «{item.listName}»
-							{:else if item.listId}
-								в {item.listId}
-							{/if}
+							{dedupReason(item)}
 						</span>
 					</div>
 				{/each}
@@ -675,15 +587,19 @@ Ctrl+/ или Cmd+/ комментирует выбранные строки.</s
 	<!-- Summary -->
 	{#if totalDomains > 0}
 		<div class="summary">
-			Итого: {totalDomains} доменов{#if groupCount > 1} &rarr; {groupCount} групп по 300{/if}
+			{#if groupCount > 1}
+				{m.dns_routes_edit_total_groups({ domains: totalDomains, groups: groupCount })}
+			{:else}
+				{m.dns_routes_edit_total_domains({ count: totalDomains })}
+			{/if}
 		</div>
 	{/if}
 
 	{#snippet actions()}
-		<Button variant="secondary" onclick={onclose}>Отмена</Button>
+		<Button variant="secondary" onclick={onclose}>{m.common_cancel()}</Button>
 		<!-- TODO Phase 1: shake animation on save when invalid (was class:shake={shaking}) -->
 		<Button variant="primary" onclick={handleSave} loading={saving}>
-			Сохранить
+			{m.common_save()}
 		</Button>
 	{/snippet}
 </Modal>
@@ -1004,75 +920,4 @@ Ctrl+/ или Cmd+/ комментирует выбранные строки.</s
 		font-size: 0.6875rem;
 		margin-bottom: 0.375rem;
 	}
-
-	.geo-hint {
-		color: var(--color-accent);
-		font-style: italic;
-	}
-
-	/* Mode tabs */
-	.mode-tabs {
-		display: flex;
-		gap: 0;
-		margin-bottom: 0.75rem;
-		background: var(--color-bg-primary);
-		border-radius: 6px;
-		padding: 3px;
-	}
-
-	.mode-tab {
-		flex: 1;
-		padding: 0.375rem 0.75rem;
-		text-align: center;
-		font-size: 0.75rem;
-		font-weight: 500;
-		border-radius: 4px;
-		cursor: pointer;
-		border: none;
-		background: transparent;
-		color: var(--color-text-muted);
-		font-family: inherit;
-		transition: all 0.15s;
-	}
-
-	.mode-tab.active {
-		background: var(--color-bg-hover);
-		color: var(--color-text-primary);
-		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-	}
-
-	/* Policy name row */
-	.policy-name-row {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		margin-top: 0.75rem;
-		padding: 0.5rem 0.625rem;
-		background: var(--color-bg-primary);
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-	}
-
-	.policy-label {
-		font-size: 0.75rem;
-		color: var(--color-text-muted);
-		white-space: nowrap;
-	}
-
-	.policy-input {
-		flex: 1;
-		padding: 0.25rem 0.5rem;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background: var(--color-bg-secondary);
-		color: var(--color-text-primary);
-		font-size: 0.8125rem;
-		font-family: inherit;
-	}
-
-	.policy-input:focus {
-		outline: none;
-		border-color: var(--color-accent);
-	}
-
 </style>

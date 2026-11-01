@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -20,7 +21,15 @@ type Store struct {
 	path string
 	mu   sync.RWMutex
 	data map[string]*Subscription
+	// onChange зовётся после каждой успешной записи на диск: одна точка на
+	// REST, MCP и фоновое обновление — подсказка инвалидации фронту (MC9).
+	// Ставится до начала работы (SetOnChange) и дальше не меняется.
+	onChange func()
 }
+
+// SetOnChange подключает уведомление об изменении. Вызывается под замком
+// стора — обязано быть неблокирующим (events.Bus.Publish таков).
+func (s *Store) SetOnChange(fn func()) { s.onChange = fn }
 
 func NewStore(path string) (*Store, error) {
 	s := &Store{path: path, data: make(map[string]*Subscription)}
@@ -69,6 +78,13 @@ func sanitizeLegacySubscriptionLastError(sub *Subscription) bool {
 		sub.LastError = ""
 		return true
 	}
+	// Text saved before MaskURL reduced every address kept the token of a
+	// redirect hop or the uuid of a share link, and REST served it until
+	// the next successful fetch — for a disabled subscription, forever.
+	if scrubbed := MaskURL(sub.LastError, sub.URL); scrubbed != sub.LastError {
+		sub.LastError = scrubbed
+		return true
+	}
 	return false
 }
 
@@ -81,7 +97,13 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return storage.AtomicWrite(s.path, b)
+	if err := storage.AtomicWrite(s.path, b); err != nil {
+		return err
+	}
+	if s.onChange != nil {
+		s.onChange()
+	}
+	return nil
 }
 
 // cloneSlice копирует срез с сохранением nil-ности: nil остаётся nil (важно
@@ -166,7 +188,7 @@ func (s *Store) Create(in CreateInput) (*Subscription, error) {
 		mode = ModeSelector
 	}
 	var urlTest *URLTestConfig
-	if mode == ModeURLTest {
+	if mode.AutoSelect() {
 		cfg := DefaultURLTestConfig()
 		if in.URLTest != nil {
 			if in.URLTest.URL != "" {
@@ -269,7 +291,7 @@ func (s *Store) Update(id string, patch UpdatePatch) (*Subscription, error) {
 		}
 		if patch.Mode != nil {
 			sub.Mode = *patch.Mode
-			if sub.Mode == ModeURLTest && sub.URLTest == nil {
+			if sub.Mode.AutoSelect() && sub.URLTest == nil {
 				cfg := DefaultURLTestConfig()
 				sub.URLTest = &cfg
 			}
@@ -545,12 +567,18 @@ func (s *Store) SetListenPort(id string, port uint16) error {
 }
 
 // MaskURL replaces the subscription URL in an error message with a placeholder
-// so logs and API responses never leak provider tokens / paths.
+// so logs and API responses never leak provider tokens / paths. Any other
+// address left in the message — a redirect hop, a share link quoted by the
+// parser — is reduced to its scheme and host (logging.RedactURLs): an
+// exact-match replacement cannot know those.
 func MaskURL(msg, url string) string {
-	if url == "" || msg == "" {
+	if msg == "" {
 		return msg
 	}
-	return strings.ReplaceAll(msg, url, "<subscription-url>")
+	if url != "" {
+		msg = strings.ReplaceAll(msg, url, "<subscription-url>")
+	}
+	return logging.RedactURLs(msg)
 }
 
 // MaybeRefresh returns subscriptions whose RefreshHours interval has

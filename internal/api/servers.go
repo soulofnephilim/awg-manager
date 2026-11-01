@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/events"
@@ -51,6 +52,14 @@ type WireguardServerPeerDTO struct {
 	// роутера»; хранится в секрете, поэтому есть только у пиров с локальным
 	// секретом — как и сигнатура.
 	DNS string `json:"dns,omitempty" example:"192.168.1.1"`
+
+	// ClientAllowedIPs / RemoteSubnets — сети клиента (#713); есть только у
+	// пиров с локальным секретом. TunnelIP — адрес из секрета: у пира с
+	// сетями за клиентом в allowedIPs больше одного кандидата, и фронт не
+	// должен угадывать; у чужих пиров пусто — фронт применяет эвристику.
+	ClientAllowedIPs string   `json:"clientAllowedIPs,omitempty" example:"10.0.1.0/24, 192.168.1.0/24"`
+	RemoteSubnets    []string `json:"remoteSubnets,omitempty" example:"192.168.77.0/24"`
+	TunnelIP         string   `json:"tunnelIP,omitempty" example:"10.0.1.2/32"`
 }
 
 // WireguardServerDTO mirrors frontend WireguardServer.
@@ -103,10 +112,12 @@ type ManagedServerStatsDTO struct {
 }
 
 // ServersAllData is the composite payload for GET /servers/all.
+// Поля — ровно те, что пишет writeAll (F164): managed-серверы и их
+// статистика по имени интерфейса.
 type ServersAllData struct {
-	Servers      []WireguardServerDTO   `json:"servers"`
-	ManagedStats *ManagedServerStatsDTO `json:"managedStats"`
-	WANIP        string                 `json:"wanIP" example:"203.0.113.42"`
+	Servers      []WireguardServerDTO             `json:"servers"`
+	Managed      []ManagedServerDTO               `json:"managed"`
+	ManagedStats map[string]ManagedServerStatsDTO `json:"managedStats"`
 }
 
 // ServersAllResponse is the envelope for GET /servers/all.
@@ -225,6 +236,29 @@ func (h *ServersHandler) validateName(w http.ResponseWriter, name string) bool {
 		return false
 	}
 	return true
+}
+
+// confirmServerIface — интерфейс сервера по свежему полному списку (F546):
+// `interface X …` по отсутствующему X создаёт X, а список серверов — снимок
+// кэша. ok=false — список не прочитан, отказ уже записан (решение 4: без
+// команды); present=false — интерфейса нет, решает вызывающий (снос — не отказ).
+func (h *ServersHandler) confirmServerIface(ctx context.Context, w http.ResponseWriter, name string) (iface query.Confirmed, present, ok bool) {
+	iface, _, present, err := h.queries.Interfaces.Confirm(ctx, name)
+	if err != nil {
+		response.Error(w, err.Error(), "GET_FAILED")
+		return query.Confirmed{}, false, false
+	}
+	return iface, present, true
+}
+
+// requireServerIface — confirmServerIface для настройки: интерфейса нет —
+// 404 IFACE_GONE.
+func (h *ServersHandler) requireServerIface(ctx context.Context, w http.ResponseWriter, name string) (query.Confirmed, bool) {
+	iface, present, ok := h.confirmServerIface(ctx, w, name)
+	if ok && !present {
+		response.ErrorWithStatus(w, http.StatusNotFound, "интерфейса нет в NDMS", "IFACE_GONE")
+	}
+	return iface, ok && present
 }
 
 func (h *ServersHandler) getListedServer(ctx context.Context, name string) (*ndms.WireguardServer, error) {
@@ -364,11 +398,12 @@ func (h *ServersHandler) writeAll(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, err.Error(), "LIST_FAILED")
 		return
 	}
+	h.overlayLivePeers(ctx, list)
 	enriched := make([]WireguardServerDTO, len(list))
 	for i, srv := range list {
 		enriched[i] = h.enrichServerDTO(ctx, srv)
 	}
-	managedList := []*managedServerResponse{}
+	managedList := []*ManagedServerDTO{}
 	managedStats := map[string]*managed.ManagedServerStats{}
 	if h.managed != nil {
 		managedList = h.managed.getManagedList(ctx)
@@ -382,12 +417,35 @@ func (h *ServersHandler) writeAll(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, payload)
 }
 
-// GetAll returns the composite servers snapshot (list + managed + stats + wanIP).
+// overlayLivePeers — живые поля пиров поверх кэша списка серверов (F476).
+// Пиров держит PeerStore (TTL 8 с), при открытой панели его греет поллер
+// метрик, так что обычно это ноль запросов к роутеру; при холодном кэше
+// чтения идут параллельно, и батчер склеивает их в один POST. Сбой чтения
+// оставляет данные списка и не логируется: поллер пишет ту же ошибку по
+// этому интерфейсу на каждом тике.
+func (h *ServersHandler) overlayLivePeers(ctx context.Context, list []ndms.WireguardServer) {
+	if h.queries == nil || h.queries.Peers == nil {
+		return
+	}
+	var wg sync.WaitGroup
+	for i := range list {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if live, err := h.queries.Peers.GetPeers(ctx, list[i].ID); err == nil {
+				list[i] = query.WithLivePeers(list[i], live)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// GetAll returns the composite servers snapshot (list + managed + stats).
 // Replaces the snapshot:servers SSE event — the frontend polls this.
 // GET /api/servers/all
 //
 //	@Summary		Get all servers snapshot
-//	@Description	Returns the composite servers snapshot: WireGuard servers list, managed server, stats and WAN IP.
+//	@Description	Returns the composite servers snapshot: WireGuard servers list, managed servers and their stats.
 //	@Tags			servers
 //	@Produce		json
 //	@Security		CookieAuth
@@ -529,13 +587,21 @@ func (h *ServersHandler) SetEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Enabled {
-		if err := h.commands.Interfaces.InterfaceUp(r.Context(), name); err != nil {
+	iface, present, ok := h.confirmServerIface(r.Context(), w, name)
+	if !ok {
+		return
+	}
+	switch {
+	case req.Enabled && !present:
+		response.ErrorWithStatus(w, http.StatusNotFound, "интерфейса нет в NDMS", "IFACE_GONE")
+		return
+	case req.Enabled:
+		if err := h.commands.Interfaces.InterfaceUp(r.Context(), iface); err != nil {
 			response.Error(w, err.Error(), "INTERFACE_UP_FAILED")
 			return
 		}
-	} else {
-		if err := h.commands.Interfaces.InterfaceDown(r.Context(), name); err != nil {
+	case present: // нет — опускать нечего
+		if err := h.commands.Interfaces.InterfaceDown(r.Context(), iface); err != nil {
 			response.Error(w, err.Error(), "INTERFACE_DOWN_FAILED")
 			return
 		}
@@ -587,6 +653,12 @@ func (h *ServersHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Подтверждение — до ответа «принято»: фон шлёт down/up по нему же.
+	iface, ok := h.requireServerIface(r.Context(), w, name)
+	if !ok {
+		return
+	}
+
 	wasUp := h.serverIsUp(r.Context(), server)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
 
@@ -598,13 +670,13 @@ func (h *ServersHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 
 		if wasUp {
-			if err := h.commands.Interfaces.InterfaceDown(ctx, name); err != nil {
+			if err := h.commands.Interfaces.InterfaceDown(ctx, iface); err != nil {
 				return
 			}
 			time.Sleep(1200 * time.Millisecond)
 		}
 
-		if err := h.commands.Interfaces.InterfaceUp(ctx, name); err != nil {
+		if err := h.commands.Interfaces.InterfaceUp(ctx, iface); err != nil {
 			return
 		}
 

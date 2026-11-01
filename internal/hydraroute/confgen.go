@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -27,58 +26,8 @@ func SetPaths(domain, ipList string) (restore func()) {
 	}
 }
 
-// GenerateDomainConf produces the full domain.conf content. We own the
-// whole file — no markers, no preserved user blocks. Format per entry:
-//
-//	## Name
-//	domain1,domain2,geosite:TAG/Target
-func GenerateDomainConf(lists []ManagedEntry) string {
-	var sb strings.Builder
-	for _, e := range lists {
-		if len(e.Domains) == 0 {
-			continue
-		}
-		fmt.Fprintf(&sb, "## %s\n", e.ListName)
-		line := fmt.Sprintf("%s/%s", strings.Join(e.Domains, ","), e.Iface)
-		if e.Disabled {
-			line = "#" + line
-		}
-		fmt.Fprintf(&sb, "%s\n", line)
-	}
-	return sb.String()
-}
-
-// GenerateIPList produces the full ip.list content. Format per entry:
-//
-//	## Name
-//	/Target
-//	cidr1
-//	cidr2
-//	<empty line>
-func GenerateIPList(lists []ManagedEntry) string {
-	var sb strings.Builder
-	for _, e := range lists {
-		if len(e.Subnets) == 0 {
-			continue
-		}
-		fmt.Fprintf(&sb, "## %s\n", e.ListName)
-		target := fmt.Sprintf("/%s", e.Iface)
-		if e.Disabled {
-			target = "#" + target
-		}
-		fmt.Fprintf(&sb, "%s\n", target)
-		for _, s := range e.Subnets {
-			if e.Disabled {
-				fmt.Fprintf(&sb, "#%s\n", s)
-			} else {
-				sb.WriteString(s)
-				sb.WriteByte('\n')
-			}
-		}
-		sb.WriteByte('\n') // HR Neo block terminator
-	}
-	return sb.String()
-}
+// PathsForTest returns the current HR config file paths (set by SetPaths).
+func PathsForTest() (domain, ipList string) { return domainConfPath, ipListPath }
 
 // WriteWholeFile atomically writes content as the entire file body.
 // We own the file — anything outside our format is discarded on next write.

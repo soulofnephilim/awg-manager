@@ -7,8 +7,12 @@
   Семантика: работает в режимах TProxy и «Политики + tun» (DSCP-перехват —
   единственный netfilter policy-tun), но не в fakeip-tun; трафик с меткой
   DSCP N уходит в outbound класса, минуя остальные правила маршрутизации.
+  Outbound «мимо sing-box» (только TProxy) — трафик класса в движок не
+  заходит и идёт по маршруту политики устройства или роутера.
 -->
 <script lang="ts">
+  import { outboundGroupLabel } from '$lib/components/routing/singboxRouter/outboundOptions';
+  import { m } from '$lib/i18n';
   import { Plus, Trash2, TriangleAlert } from 'lucide-svelte';
   import { Toggle, Button, Dropdown, IconButton, type DropdownOption } from '$lib/components/ui';
   import { notifications } from '$lib/stores/notifications';
@@ -29,6 +33,7 @@
     removeQosClass,
     resolveOutboundOptions,
     createSaveQueue,
+    QOS_BYPASS_OUTBOUND,
   } from './qosClasses';
 
   interface Props {
@@ -61,9 +66,16 @@
   // singboxRouter.options (buildOutboundOptions) → плоский DropdownOption[].
   const outboundDropdownOptions = $derived<DropdownOption[]>(
     outboundOptions.flatMap((g) =>
-      g.items.map((i) => ({ value: i.value, label: i.label, group: g.group })),
+      g.items.map((i) => ({ value: i.value, label: i.label, group: outboundGroupLabel(g.id) })),
     ),
   );
+  // Пункт «Мимо sing-box» добавляется к строке поверх resolveOutboundOptions,
+  // а не в общий список: иначе список никогда не пуст, и пока опции грузятся,
+  // живой outbound класса показывался бы «не найденным».
+  const bypassOption = $derived<DropdownOption>({ value: QOS_BYPASS_OUTBOUND, label: m.sb_router_qos_bypass_option() });
+  // «Мимо sing-box» — RETURN в цепочках TProxy; в policy-tun default политики
+  // и есть tun движка, обходить нечем.
+  const bypassInert = $derived(cfg.routingMode === 'policy-tun');
   // Новый класс по умолчанию направляем в первый туннель (не direct):
   // класс с outbound=direct не имеет смысла для «направить в туннель».
   const defaultOutbound = $derived(
@@ -102,7 +114,7 @@
     const input = e.currentTarget as HTMLInputElement;
     const parsed = clampDscp(Number(input.value));
     if (isDscpTaken(classes, idx, parsed)) {
-      notifications.error(`DSCP ${parsed} уже используется другим классом`);
+      notifications.error(m.sb_router_qos_dscp_taken({ dscp: parsed }));
       input.value = String(classes[idx].dscp);
       return;
     }
@@ -138,30 +150,32 @@
 </script>
 
 <section class="sec">
-  <div class="sec-cap">QoS-маршрутизация (DSCP)</div>
+  <div class="sec-cap">{m.sb_router_qos_title()}</div>
 
   <p class="hint">
-    Трафик с меткой DSCP направляется в выбранный туннель. Метку на трафик программ
-    ставит клиентское устройство (например, политика QoS в Windows).
+    {m.sb_router_qos_intro()}
   </p>
 
   {#if locked}
-    <p class="hint locked-hint">Недоступно в режиме FakeIP.</p>
+    <p class="hint locked-hint">{m.sb_router_qos_locked_fakeip()}</p>
   {:else}
     {#if xtDscpMissing}
-      <IssueRow tone="warning" text="Модуль ядра xt_dscp недоступен — правила DSCP не будут применены" />
+      <IssueRow tone="warning" text={m.sb_router_qos_xt_dscp_missing()} />
     {/if}
 
     {#if classes.length > 0}
       <div class="qos-list">
         <div class="qos-grid qos-head">
           <span>DSCP</span>
-          <span>Название</span>
-          <span class="col-center">Вкл</span>
+          <span>{m.sb_router_qos_col_name()}</span>
+          <span class="col-center">{m.sb_router_qos_col_on()}</span>
           <span></span>
         </div>
         {#each classes as cls, idx (cls.dscp)}
-          {@const outboundView = resolveOutboundOptions(outboundDropdownOptions, cls.outbound)}
+          {@const outboundView = resolveOutboundOptions(
+            outboundDropdownOptions,
+            cls.outbound === QOS_BYPASS_OUTBOUND ? '' : cls.outbound,
+          )}
           <div class="qos-row" class:row-off={!cls.enabled}>
             <div class="qos-grid">
               <input
@@ -171,7 +185,7 @@
                 max={QOS_DSCP_MAX}
                 step="1"
                 value={cls.dscp}
-                aria-label="DSCP класса {idx + 1}"
+                aria-label={m.sb_router_qos_dscp_aria({ n: idx + 1 })}
                 onblur={(e) => handleDscpCommit(e, idx)}
                 onkeydown={blurOnEnter}
               />
@@ -179,9 +193,9 @@
                 class="inp"
                 type="text"
                 maxlength={QOS_NAME_MAX}
-                placeholder="Название"
+                placeholder={m.sb_router_qos_col_name()}
                 value={cls.name}
-                aria-label="Название класса {idx + 1}"
+                aria-label={m.sb_router_qos_name_aria({ n: idx + 1 })}
                 onblur={(e) => handleNameCommit(e, idx)}
                 onkeydown={blurOnEnter}
               />
@@ -189,15 +203,15 @@
                 <Toggle
                   size="sm"
                   checked={cls.enabled}
-                  ariaLabel="Включить класс DSCP {cls.dscp}"
+                  ariaLabel={m.sb_router_qos_toggle_aria({ dscp: cls.dscp })}
                   onchange={(v) => handleToggle(idx, v)}
                 />
               </span>
               <IconButton
                 variant="danger"
                 size="sm"
-                ariaLabel="Удалить класс {cls.name || cls.dscp}"
-                title="Удалить класс"
+                ariaLabel={m.sb_router_qos_remove_aria({ name: cls.name || cls.dscp })}
+                title={m.sb_router_qos_remove_title()}
                 onclick={() => handleRemove(idx)}
               >
                 <Trash2 size={14} />
@@ -205,15 +219,21 @@
             </div>
             <Dropdown
               value={cls.outbound}
-              options={outboundView.options}
-              placeholder="— outbound —"
+              options={[bypassOption, ...outboundView.options]}
+              placeholder={m.sb_router_qos_outbound_placeholder()}
               fullWidth
               onchange={(v) => handleOutboundChange(idx, String(v))}
             />
             {#if outboundView.missing}
               <p class="qos-warn">
                 <TriangleAlert size={12} aria-hidden="true" />
-                outbound не найден — выберите другой
+                {m.sb_router_qos_outbound_missing()}
+              </p>
+            {/if}
+            {#if bypassInert && cls.outbound === QOS_BYPASS_OUTBOUND}
+              <p class="qos-warn">
+                <TriangleAlert size={12} aria-hidden="true" />
+                {m.sb_router_qos_bypass_tproxy_only()}
               </p>
             {/if}
           </div>
@@ -221,8 +241,7 @@
       </div>
     {:else}
       <p class="hint">
-        Классы не настроены. Добавьте класс, чтобы направлять помеченный трафик
-        в отдельный туннель.
+        {m.sb_router_qos_empty()}
       </p>
     {/if}
 
@@ -230,19 +249,18 @@
       {#snippet iconBefore()}
         <Plus size={14} aria-hidden="true" />
       {/snippet}
-      Добавить класс
+      {m.sb_router_qos_add()}
     </Button>
     {#if atCap}
-      <p class="hint">Достигнут максимум — {QOS_MAX_CLASSES} классов.</p>
+      <p class="hint">{m.sb_router_qos_max_reached({ count: QOS_MAX_CLASSES })}</p>
     {/if}
 
     <p class="hint">
-      DSCP: 0–63. Типичные метки: 46 (EF — голос/игры), 32 (CS4 — видео),
-      8 (CS1 — фоновая закачка).
+      {m.sb_router_qos_dscp_hint()}
     </p>
 
     <button type="button" class="link-btn" onclick={() => (helpOpen = true)}>
-      Как пометить трафик на ПК →
+      {m.sb_router_qos_help_link()}
     </button>
   {/if}
 </section>

@@ -30,9 +30,6 @@ func (s *SettingsStore) migrateToV2(settings *Settings) error {
 	if settings.PingCheck.Defaults.Interval == 0 {
 		settings.PingCheck.Defaults.Interval = 45
 	}
-	if settings.PingCheck.Defaults.DeadInterval == 0 {
-		settings.PingCheck.Defaults.DeadInterval = 120
-	}
 	if settings.PingCheck.Defaults.FailThreshold == 0 {
 		settings.PingCheck.Defaults.FailThreshold = 3
 	}
@@ -284,7 +281,8 @@ func (s *SettingsStore) migrateToV28(settings *Settings) {
 // migrateToV29 introduces SessionTtlHours (issue #441), defaulting to the
 // historical fixed 24h session lifetime, and EntwareAuthEnabled, whose zero
 // value (false — keep NDMS-only login) is the intended default so no
-// explicit action is needed beyond the version stamp.
+// explicit action is needed beyond the version stamp. EntwareAuthEnabled
+// removed 26.09.2026 (способ входа выбирается на форме логина).
 func (s *SettingsStore) migrateToV29(settings *Settings) {
 	if settings.SessionTtlHours == 0 {
 		settings.SessionTtlHours = DefaultSessionTTLHours
@@ -502,5 +500,29 @@ func (s *SettingsStore) migrateToV39(settings *Settings) {
 	switch settings.SingboxRouter.FakeIPStack {
 	case "gvisor", "mixed":
 		settings.SingboxRouter.FakeIPStack = ""
+	}
+}
+
+// migrateToV40 включает анонимную статистику установок (Updates.StatsEnabled)
+// существующим установкам: поле новое, нулевое значение — «выключено», а
+// дефолт — «включено»; выключить можно тумблером в настройках.
+func (s *SettingsStore) migrateToV40(settings *Settings) {
+	settings.Updates.StatsEnabled = true
+}
+
+// migrateToV41 — поддержка Amnezia Premium снята. Поля ключа подписки,
+// зеркала и страны подключения структура больше не знает, разбор их уже
+// выбросил; подъём версии заставляет переписать файл, а secretsDropped — и
+// .bak с шифротекстом ключа. Здесь же стирается секрет устройства, которым
+// ключ был зашифрован, вместе с его временными и карантинными копиями: без
+// него шифротекст, переживший где-то ещё (settings.json.corrupt), не
+// расшифровывается.
+func (s *SettingsStore) migrateToV41() {
+	dir := s.DataDir()
+	leftovers, _ := filepath.Glob(filepath.Join(dir, DeviceKeyFile+".*"))
+	for _, p := range append(leftovers, filepath.Join(dir, DeviceKeyFile)) {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			recordNotice("device-key-remove", p, "не удалось удалить секрет устройства: "+err.Error())
+		}
 	}
 }

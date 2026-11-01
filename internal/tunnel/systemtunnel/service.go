@@ -5,6 +5,7 @@ package systemtunnel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	ndms "github.com/hoaxisr/awg-manager/internal/ndms"
@@ -16,7 +17,10 @@ import (
 
 // Service defines operations on system WireGuard tunnels.
 type Service interface {
+	// List — из кэша: состав верен, живые поля (rx/tx, рукопожатие, uptime)
+	// могут отставать до TTL. Для показа — ListFresh.
 	List(ctx context.Context) ([]ndms.SystemWireguardTunnel, error)
+	ListFresh(ctx context.Context) ([]ndms.SystemWireguardTunnel, error)
 	Get(ctx context.Context, name string) (*ndms.SystemWireguardTunnel, error)
 	GetASCParams(ctx context.Context, name string) (json.RawMessage, error)
 	SetASCParams(ctx context.Context, name string, params json.RawMessage) error
@@ -59,6 +63,10 @@ func (s *ServiceImpl) List(ctx context.Context) ([]ndms.SystemWireguardTunnel, e
 	return s.queries.WGServers.ListSystemTunnels(ctx)
 }
 
+func (s *ServiceImpl) ListFresh(ctx context.Context) ([]ndms.SystemWireguardTunnel, error) {
+	return s.queries.WGServers.ListSystemTunnelsFresh(ctx)
+}
+
 func (s *ServiceImpl) Get(ctx context.Context, name string) (*ndms.SystemWireguardTunnel, error) {
 	return s.queries.WGServers.GetSystemTunnel(ctx, name)
 }
@@ -68,6 +76,15 @@ func (s *ServiceImpl) GetASCParams(ctx context.Context, name string) (json.RawMe
 }
 
 func (s *ServiceImpl) SetASCParams(ctx context.Context, name string, params json.RawMessage) error {
+	// `interface X wireguard asc …` по отсутствующему X создаёт X (F546):
+	// подтверждаем свежим списком до любых чтений по имени.
+	iface, _, ok, err := s.queries.Interfaces.Confirm(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("интерфейса %s нет в NDMS", name)
+	}
 	// У интерфейса-сервера сигнатура — свойство каждого его пира, а не
 	// интерфейса: форма ASC её не задаёт, и до NDMS ключи не доходят.
 	if s.isServerInterface(ctx, name) {
@@ -85,5 +102,5 @@ func (s *ServiceImpl) SetASCParams(ctx context.Context, name string, params json
 	if params, err = ndms.KeepASC3(params, current); err != nil {
 		return err
 	}
-	return s.commands.Wireguard.SetASCParams(ctx, name, params)
+	return s.commands.Wireguard.SetASCParams(ctx, iface, params)
 }

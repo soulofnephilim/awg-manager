@@ -1,5 +1,6 @@
 <!-- frontend/src/lib/components/routing/singboxRouter/ConnectionsBreakdownPanel.svelte -->
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { ConnectionBucket } from '$lib/types/singboxConnections';
 	import { formatBytes } from '$lib/utils/format';
 
@@ -78,7 +79,7 @@
 			<div class="pie-lbl">conn</div>
 		</div>
 
-		<div class="legend">
+		<div class="breakdown-legend">
 			{#each donutSlices as s}
 				<div class="legend-row">
 					<span class="legend-dot" style="background:{s.color}"></span>
@@ -109,7 +110,7 @@
 			</button>
 		{/each}
 		{#if buckets.length === 0}
-			<div class="empty">Нет данных</div>
+			<div class="empty">{m.routing_singbox_no_data()}</div>
 		{/if}
 	</div>
 </div>
@@ -161,7 +162,7 @@
 		font-size: 9px; color: var(--color-text-muted);
 		text-transform: uppercase; letter-spacing: 0.05em;
 	}
-	.legend {
+	.breakdown-legend {
 		display: flex; flex-direction: column;
 		gap: 4px; font-size: 11px; flex: 1; min-width: 0;
 	}

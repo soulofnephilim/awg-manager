@@ -26,6 +26,7 @@ import (
 type fakeObfRunner struct {
 	mu      sync.Mutex
 	started map[string]*storage.Obfuscator
+	ips     map[string]string // адрес сервера, отданный релею на Start
 	alive   map[string]bool
 	starts  map[string]int
 	// failStart — настоящий Runner отказывает на занятом loopback-порту и на
@@ -34,10 +35,10 @@ type fakeObfRunner struct {
 }
 
 func newFakeObfRunner() *fakeObfRunner {
-	return &fakeObfRunner{started: map[string]*storage.Obfuscator{}, alive: map[string]bool{}}
+	return &fakeObfRunner{started: map[string]*storage.Obfuscator{}, ips: map[string]string{}, alive: map[string]bool{}}
 }
 
-func (f *fakeObfRunner) Start(_ context.Context, id string, o *storage.Obfuscator) error {
+func (f *fakeObfRunner) Start(_ context.Context, id string, o *storage.Obfuscator, ip string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failStart != nil {
@@ -47,11 +48,15 @@ func (f *fakeObfRunner) Start(_ context.Context, id string, o *storage.Obfuscato
 	// же конфигом он не трогает (runner.go). Фейк обязан это повторять —
 	// иначе тест не отличит перезапуск релея от бесплодного повторного Start.
 	if f.alive[id] && f.started[id] != nil &&
-		obfuscator.RenderConf(f.started[id]) == obfuscator.RenderConf(o) {
+		obfuscator.RenderConf(f.started[id], f.ips[id]) == obfuscator.RenderConf(o, ip) {
 		return nil
 	}
 	cp := *o
 	f.started[id] = &cp
+	if f.ips == nil {
+		f.ips = map[string]string{}
+	}
+	f.ips[id] = ip
 	f.alive[id] = true
 	if f.starts == nil {
 		f.starts = map[string]int{}
@@ -88,21 +93,30 @@ func (f *fakeObfRunner) Alive(id string) bool {
 	return f.alive[id]
 }
 
+func (f *fakeObfRunner) Backend(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.alive[id] {
+		return "process"
+	}
+	return ""
+}
+
 // captureNDMS: GET /show/ip/route → default via ISP0; POST — копит тела и отвечает
 // пустым объектом (batch — массивом той же длины). Ходит через transport.Client,
 // который реализует и query.Getter, и command.Poster — поэтому и RCI-батч, и
 // RouteCommands приходят на этот же сервер.
 //
-// Запрос состояния интерфейса (POST {"show":{"interface":…}}) в posts не
-// попадает — там только команды; ответ задаётся ifaceResp, по умолчанию
-// «интерфейса нет».
+// Запрос состояния интерфейса (POST {"show":…}) в posts не попадает — там
+// только команды. Запись Wireguard3 в списке задаёт ifaceResp (состояние
+// читается из снимка списка, F546), по умолчанию — голая запись.
 type captureNDMS struct {
 	srv       *httptest.Server
 	mu        sync.Mutex
 	posts     []string
 	failBatch bool   // RCI-батч (массив команд) отвечает 500
 	failRoute bool   // команды маршрута отвечают отказом во вложенном status
-	ifaceResp string // тело ответа на show interface
+	ifaceResp string // запись Wireguard3 в списке /show/interface/
 	// confLines — строки running-config: по ним снятие host-route находит
 	// СВОИ записи (по метке !awgm-) и снимает их парной формой.
 	confLines []string
@@ -119,19 +133,26 @@ func newCaptureNDMS(t *testing.T) *captureNDMS {
 			_ = json.NewEncoder(w).Encode(map[string]any{"message": lines})
 			return
 		}
+		// Список интерфейсов: туннель и WAN'ы, через которые тесты ставят
+		// host-route, — команды по ним идут только после подтверждения (F546).
+		if r.Method == http.MethodGet && r.URL.Path == "/show/interface/" {
+			c.mu.Lock()
+			wg3 := c.ifaceResp
+			c.mu.Unlock()
+			if wg3 == "" {
+				wg3 = `{"id":"Wireguard3","type":"Wireguard"}`
+			}
+			_, _ = w.Write([]byte(`{"Wireguard3":` + wg3 + `,
+				"ISP0":{"id":"ISP0"},"ISP1":{"id":"ISP1"},"PPPoE0":{"id":"PPPoE0"}}`))
+			return
+		}
 		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/show/ip/route") {
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"destination": "0.0.0.0/0", "interface": "ISP0"}})
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(b), `"show"`) {
-			c.mu.Lock()
-			resp := c.ifaceResp
-			c.mu.Unlock()
-			if resp == "" {
-				resp = `{"show":{"interface":{}}}`
-			}
-			_, _ = w.Write([]byte(resp))
+			_, _ = w.Write([]byte(`{"show":{"interface":{}}}`))
 			return
 		}
 		c.mu.Lock()
@@ -178,13 +199,13 @@ func (c *captureNDMS) firstPostWith(sub string) int {
 	return -1
 }
 
-// obfIfaceOnRelay — ответ RCI для интерфейса на нашем релее: conf=running, peer
+// obfIfaceOnRelay — запись интерфейса на нашем релее: conf=running, peer
 // смотрит в 127.0.0.1:39000 (LocalPort из obfStored), online — по аргументу.
 func obfIfaceOnRelay(online bool) string {
-	return `{"show":{"interface":{"id":"Wireguard3","link":"up",
+	return `{"id":"Wireguard3","type":"Wireguard","link":"up",
 		"summary":{"layer":{"conf":"running"}},
 		"wireguard":{"status":"up","peer":[{"online":` + strconv.FormatBool(online) + `,"via":"ISP1",
-			"remote-endpoint-address":"127.0.0.1","remote-port":39000}]}}}}`
+			"remote-endpoint-address":"127.0.0.1","remote-port":39000}]}}`
 }
 
 func newObfOperator(t *testing.T, n *captureNDMS, fr *fakeObfRunner) *OperatorNativeWG {
@@ -193,6 +214,7 @@ func newObfOperator(t *testing.T, n *captureNDMS, fr *fakeObfRunner) *OperatorNa
 	q := query.NewQueries(query.Deps{Getter: tr, Logger: query.NopLogger(), IsOS5: func() bool { return true }})
 	// Save обязателен: mutation.go зовёт save.Request() без nil-гарда.
 	sc := command.NewSaveCoordinator(tr, startNopPublisher{}, 500*time.Millisecond, 5*time.Second, 0, nil)
+	sc.SetSaveTimings(command.SaveEventCap, 0, command.SaveAfterRemoval) // без шины событий
 	cmds := command.NewCommands(command.Deps{Poster: tr, Save: sc, Queries: q, IsOS5: func() bool { return true }})
 	op := &OperatorNativeWG{
 		queries:      q,
@@ -256,6 +278,118 @@ func TestStartObfuscated_RunnerRouteEndpointUp(t *testing.T) {
 	}
 }
 
+// F482: релей и host-route обязаны смотреть на один и тот же IP — второй
+// независимый резолв на round-robin/DDNS давал разные адреса и петлю.
+func TestStartObfuscated_SameIPForRelayAndRoute(t *testing.T) {
+	withObfDirs(t)
+	n := newCaptureNDMS(t)
+	fr := newFakeObfRunner()
+	op := newObfOperator(t, n, fr)
+	op.resolveFn = sequenceResolver("198.51.100.1", "198.51.100.2")
+	if err := op.startObfuscated(context.Background(), obfStored(), ifaceOf(obfStored())); err != nil {
+		t.Fatal(err)
+	}
+	route := n.lastRouteHost()
+	if got := fr.ips["awg20"]; got == "" || got != route {
+		t.Fatalf("релей на %q, host-route на %q", got, route)
+	}
+}
+
+// Отказ релея после резолва не должен сдвигать трекер на новый адрес: иначе
+// на следующем старте prevIP == новому, и host-route под прежним адресом
+// остаётся на роутере сиротой навсегда.
+func TestStartObfuscated_RelayFailureKeepsPrevRouteIP(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start func(op *OperatorNativeWG, st *storage.AWGTunnel) error
+	}{
+		{"Start", func(op *OperatorNativeWG, st *storage.AWGTunnel) error {
+			return op.startObfuscated(context.Background(), st, ifaceOf(st))
+		}},
+		{"SyncObfuscator", func(op *OperatorNativeWG, st *storage.AWGTunnel) error {
+			_, err := op.SyncObfuscator(context.Background(), st)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withObfDirs(t)
+			n := newCaptureNDMS(t)
+			fr := newFakeObfRunner()
+			op := newObfOperator(t, n, fr)
+			op.resolveFn = sequenceResolver("198.51.100.1", "198.51.100.2")
+			if err := tc.start(op, obfStored()); err != nil {
+				t.Fatal(err)
+			}
+			fr.setFailStart(errors.New("порт занят"))
+			if err := tc.start(op, obfStored()); err == nil {
+				t.Fatal("ждали отказ релея")
+			}
+			fr.setFailStart(nil)
+			if err := tc.start(op, obfStored()); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(n.joined(), `"host":"198.51.100.1","interface":"ISP0","no":true`) {
+				t.Fatalf("host-route под прежним адресом не снят:\n%s", n.joined())
+			}
+		})
+	}
+}
+
+// F486: то же для отказа RCI-батча — резолв уже сдвинул трекер на новый адрес,
+// а маршрут остался под прежним.
+func TestStartObfuscated_BatchFailureKeepsPrevRouteIP(t *testing.T) {
+	withObfDirs(t)
+	n := newCaptureNDMS(t)
+	fr := newFakeObfRunner()
+	op := newObfOperator(t, n, fr)
+	op.resolveFn = sequenceResolver("198.51.100.1", "198.51.100.2")
+	if err := op.startObfuscated(context.Background(), obfStored(), ifaceOf(obfStored())); err != nil {
+		t.Fatal(err)
+	}
+	n.failBatch = true
+	if err := op.startObfuscated(context.Background(), obfStored(), ifaceOf(obfStored())); err == nil {
+		t.Fatal("ждали отказ батча")
+	}
+	n.failBatch = false
+	if err := op.startObfuscated(context.Background(), obfStored(), ifaceOf(obfStored())); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(n.joined(), `"host":"198.51.100.1","interface":"ISP0","no":true`) {
+		t.Fatalf("host-route под прежним адресом не снят:\n%s", n.joined())
+	}
+}
+
+// sequenceResolver — каждый вызов отдаёт следующий адрес (последний — дальше
+// повторяется): так ведёт себя round-robin/DDNS между двумя резолвами.
+func sequenceResolver(ips ...string) func(string) (string, int, error) {
+	var mu sync.Mutex
+	i := 0
+	return func(string) (string, int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		ip := ips[min(i, len(ips)-1)]
+		i++
+		return ip, 51824, nil
+	}
+}
+
+// lastRouteHost — host последней постановки нашего host-route ("" — не было).
+func (c *captureNDMS) lastRouteHost() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.posts) - 1; i >= 0; i-- {
+		p := c.posts[i]
+		if !strings.Contains(p, `"comment":"awgm-obfuscator`) {
+			continue
+		}
+		if _, rest, ok := strings.Cut(p, `"host":"`); ok {
+			host, _, _ := strings.Cut(rest, `"`)
+			return host
+		}
+	}
+	return ""
+}
+
 // Start прилетает на каждый WAN-up и на рестарт демона: если интерфейс уже
 // поднят на наш релей, батч по нему — churn. Маршрут ставится всё равно.
 func TestStartObfuscated_AlreadyUpOnRelay_SkipsBatch(t *testing.T) {
@@ -304,8 +438,8 @@ func TestStartObfuscated_HostRouteViaFreshPeerVia(t *testing.T) {
 	withObfDirs(t)
 	n := newCaptureNDMS(t)
 	// conf не running → батч уходит, а peer.via читается для маршрута.
-	n.ifaceResp = `{"show":{"interface":{"id":"Wireguard3","link":"up",
-		"wireguard":{"status":"up","peer":[{"online":true,"via":"PPPoE0"}]}}}}`
+	n.ifaceResp = `{"id":"Wireguard3","type":"Wireguard","link":"up",
+		"wireguard":{"status":"up","peer":[{"online":true,"via":"PPPoE0"}]}}`
 	fr := newFakeObfRunner()
 	op := newObfOperator(t, n, fr)
 	st := obfStored()
@@ -517,6 +651,28 @@ func TestStartObfuscated_ResolveFailure_LeavesNDMSUntouched(t *testing.T) {
 	}
 }
 
+// RestartObfuscatorRelay — смена выключателя «ядро/процесс»: перезапуск идёт
+// под тем же per-tunnel замком, что и действия оркестратора.
+func TestRestartObfuscatorRelay_RestartsUnderLock(t *testing.T) {
+	withObfDirs(t)
+	n := newCaptureNDMS(t)
+	fr := newFakeObfRunner()
+	op := newObfOperator(t, n, fr)
+	stored := obfStored()
+	op.tunnelLookup = func(id string) (*storage.AWGTunnel, error) { return stored, nil }
+	var owners []string
+	op.tunnelLock = func(ctx context.Context, id, owner string, work func() error) error {
+		owners = append(owners, owner)
+		return work()
+	}
+	if err := op.RestartObfuscatorRelay(context.Background(), stored.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(owners) != 1 || owners[0] != "obfuscator-backend" || fr.starts[stored.ID] != 1 {
+		t.Fatalf("owners=%v starts=%v", owners, fr.starts)
+	}
+}
+
 func TestSyncKmodSlot_NoopForObfuscated(t *testing.T) {
 	op := &OperatorNativeWG{appLog: logging.NewScopedLogger(nil, logging.GroupTunnel, logging.SubOps)}
 	t.Cleanup(op.Close)
@@ -599,7 +755,7 @@ func TestDeleteObfuscated_RemovesConf(t *testing.T) {
 	fr := newFakeObfRunner()
 	op := newObfOperator(t, n, fr)
 	st := obfStored()
-	if err := obfuscator.WriteConf(st.ID, st.Obfuscator); err != nil {
+	if err := obfuscator.WriteConf(st.ID, st.Obfuscator, "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	if err := op.Delete(context.Background(), st); err != nil {
@@ -638,7 +794,7 @@ func TestObfSlotPredicate_LiveRelayCountsAsSlot(t *testing.T) {
 	if pred(39000) {
 		t.Fatal("релея нет — слота нет")
 	}
-	_ = fr.Start(context.Background(), st.ID, st.Obfuscator)
+	_ = fr.Start(context.Background(), st.ID, st.Obfuscator, "203.0.113.5")
 	if !pred(39000) {
 		t.Fatal("живой релей на своём порту = слот")
 	}
@@ -737,8 +893,7 @@ func TestStartObfuscated_UnroutableStoredIPIsNotRemoved(t *testing.T) {
 }
 
 func TestStartPlainWG_WithoutObfuscator_StillRejected(t *testing.T) {
-	op := &OperatorNativeWG{appLog: logging.NewScopedLogger(nil, logging.GroupTunnel, logging.SubOps)}
-	t.Cleanup(op.Close)
+	op := newObfOperator(t, newCaptureNDMS(t), newFakeObfRunner())
 	st := obfStored()
 	st.Obfuscator = nil
 	if err := op.Start(context.Background(), st); err != tunnel.ErrNotObfuscated {

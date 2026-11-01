@@ -1,8 +1,9 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
-	import { PageContainer } from '$lib/components/layout';
+	import { PageContainer, LoadingSpinner } from '$lib/components/layout';
 	import { Button } from '$lib/components/ui';
 	import { TerminalInstall, TerminalView, TerminalCredentialsBar } from '$lib/components/terminal';
 	import type { TerminalStatus } from '$lib/types';
@@ -17,7 +18,8 @@
 
 	let pageState: PageState = $state('loading');
 	let installing = $state(false);
-	let installError: string | null = $state(null);
+	// Текст ошибки установки; пустое message подменяется при отрисовке (язык может смениться).
+	let installError = $state<{ message: string } | null>(null);
 	let autoLogin = $state<Pick<TerminalAutoLogin, 'login' | 'password'> | null>(null);
 
 	onMount(async () => {
@@ -51,10 +53,10 @@
 		installError = null;
 		try {
 			await api.terminalInstall();
-			notifications.success('ttyd установлен');
+			notifications.success(m.terminal_ttyd_installed());
 			await startTerminal();
 		} catch (e) {
-			installError = errorMessage(e, 'Неизвестная ошибка');
+			installError = { message: errorMessage(e, '') };
 		} finally {
 			installing = false;
 		}
@@ -66,7 +68,7 @@
 			await api.terminalStart();
 			pageState = 'active';
 		} catch (e) {
-			notifications.error('Не удалось запустить терминал: ' + (errorMessage(e, '')));
+			notifications.error(m.terminal_start_failed({ error: errorMessage(e, '') }));
 			pageState = 'error';
 		}
 	}
@@ -86,25 +88,28 @@
 </script>
 
 <svelte:head>
-	<title>Терминал — AWG Manager</title>
+	<title>{m.terminal_page_title()}</title>
 </svelte:head>
 
 {#if pageState === 'loading' || pageState === 'starting'}
 	<PageContainer>
 		<div class="terminal-loading">
-			<div class="spinner"></div>
-			<p>{pageState === 'loading' ? 'Проверка...' : 'Запуск терминала...'}</p>
+			<LoadingSpinner size="md" message={pageState === 'loading' ? m.terminal_page_checking() : m.terminal_page_starting()} />
 		</div>
 	</PageContainer>
 {:else if pageState === 'not-installed'}
 	<PageContainer>
-		<TerminalInstall {installing} error={installError} oninstall={handleInstall} />
+		<TerminalInstall
+				{installing}
+				error={installError ? installError.message || m.terminal_unknown_error() : null}
+				oninstall={handleInstall}
+			/>
 	</PageContainer>
 {:else if pageState === 'session-busy'}
 	<PageContainer>
 		<div class="terminal-loading">
-			<p>Терминал уже открыт в другой вкладке</p>
-			<Button variant="primary" size="md" onclick={checkStatus}>Повторить</Button>
+			<p>{m.terminal_page_busy()}</p>
+			<Button variant="primary" size="md" onclick={checkStatus}>{m.common_retry()}</Button>
 		</div>
 	</PageContainer>
 {:else if pageState === 'active'}
@@ -125,8 +130,8 @@
 {:else}
 	<PageContainer>
 		<div class="terminal-loading">
-			<p>Ошибка подключения к терминалу</p>
-			<Button variant="primary" size="md" onclick={checkStatus}>Повторить</Button>
+			<p>{m.terminal_page_error()}</p>
+			<Button variant="primary" size="md" onclick={checkStatus}>{m.common_retry()}</Button>
 		</div>
 	</PageContainer>
 {/if}
@@ -150,22 +155,8 @@
 	}
 	.terminal-loading {
 		display: flex;
-		flex-direction: column;
 		align-items: center;
 		justify-content: center;
 		height: 60vh;
-		gap: 1rem;
-		color: var(--text-secondary);
-	}
-	.spinner {
-		width: 32px;
-		height: 32px;
-		border: 3px solid var(--border-primary);
-		border-top-color: var(--accent-primary);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
-	@keyframes spin {
-		to { transform: rotate(360deg); }
 	}
 </style>

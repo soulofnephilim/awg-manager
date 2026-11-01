@@ -86,7 +86,7 @@ func TestBuildLink_Defaults(t *testing.T) {
 
 	want := LinkPayload{
 		V: 1, Provider: "vk", Peer: "203.0.113.7:56000", Transport: "tcp", Mode: "udp",
-		N: 10, StreamsPerCred: 10, MTU: 1280,
+		N: 12, StreamsPerCred: 12, MTU: 1280,
 	}
 	if !reflect.DeepEqual(p, want) {
 		t.Fatalf("дефолты:\n got %+v\nwant %+v", p, want)
@@ -217,6 +217,8 @@ func TestBuildLink_Rejections(t *testing.T) {
 func TestBuildLink_PortAppendedForIPv6(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"[2001:db8::1]", "[2001:db8::1]:56123"},
+		{"2001:db8::1", "[2001:db8::1]:56123"},
+		{"2001:db8::1:56000", "2001:db8::1:56000"},
 		{"[2001:db8::1]:56000", "[2001:db8::1]:56000"},
 		{"vpn.example.org", "vpn.example.org:56123"},
 		{"vpn.example.org:1", "vpn.example.org:1"},

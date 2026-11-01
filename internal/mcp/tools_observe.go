@@ -69,9 +69,7 @@ func registerObservabilityTools(s *mcp.Server, d Deps) {
 			in.Limit = MaxConnectionsInOutput
 		}
 		list, total, err := d.ListConnections(ctx, ConnectionsQuery{TunnelID: in.TunnelID, ClientIP: clientIP, Limit: in.Limit})
-		if list == nil {
-			list = []Connection{}
-		}
+		list = orEmpty(list)
 		return nil, connectionsOut{Connections: list, Total: total}, err
 	})
 
@@ -93,35 +91,69 @@ func registerObservabilityTools(s *mcp.Server, d Deps) {
 			in.Limit = MaxPingCheckLogEntries
 		}
 		entries, err := d.PingCheckLogs(ctx, in.TunnelID, in.Limit)
-		if entries == nil {
-			entries = []PingCheckLogEntry{}
-		}
+		entries = orEmpty(entries)
 		return nil, pingLogsOut{Entries: entries}, err
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "run_diagnostics",
 		Description: "Start a full diagnostic sweep of the router in the background: interfaces, routes, firewall, kernel module, per-tunnel checks. " +
-			"It takes tens of seconds; call get_diagnostics afterwards for the outcome. Changes nothing.",
+			"It takes tens of seconds; call get_diagnostics afterwards for the outcome. Changes nothing: the restart test, which stops and starts tunnels, is run_diagnostics_with_restart.",
 		Annotations: readOnly("Run diagnostics"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, DiagnosticsRun, error) {
-		out, err := d.RunDiagnostics(ctx)
+		out, err := d.RunDiagnostics(ctx, false)
+		return nil, out, err
+	})
+
+	// The restart test is a tool of its own, not an argument: a host decides
+	// from the annotations alone whether to ask the user, and readOnlyHint
+	// cannot depend on an argument. As a write, it is closed to a read-only
+	// key by the scope middleware, like every other write.
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "run_diagnostics_with_restart",
+		Description: "The full diagnostic sweep of run_diagnostics plus the restart test: every running kernel tunnel is stopped and started to time the cycle, which drops its connections for a few seconds. " +
+			"Ask the user first. Runs in the background; call get_diagnostics afterwards for the outcome.",
+		Annotations: safeWrite("Run diagnostics with the restart test", false),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, DiagnosticsRun, error) {
+		out, err := d.RunDiagnostics(ctx, true)
 		return nil, out, err
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name: "run_tunnel_diagnostics",
+		Description: "Check one tunnel or sing-box proxy now and wait for the result. A tunnel gets the per-tunnel checks of a full sweep: name resolution and reachability of the endpoint, its route, handshake, connectivity, firewall rules, config, interface state, MTU, proxy health, ping-check, rp_filter; a sing-box proxy gets the connectivity check only. " +
+			"The DNS leak and route leak checks compare tunnels with each other and run in the full sweep only (run_diagnostics); so do the system-wide checks, and the restart test never runs here. " +
+			"Takes up to a few tens of seconds. Changes nothing; refused while a full sweep runs.",
+		Annotations: readOnly("Run tunnel diagnostics"),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in tunnelDiagnosticsIn) (*mcp.CallToolResult, tunnelDiagnosticsOut, error) {
+		id := strings.TrimSpace(in.TunnelID)
+		if tag, ok := strings.CutPrefix(id, "singbox:"); ok {
+			t, err := requireSingboxTag(tag, "list_singbox_tunnels")
+			if err != nil {
+				return nil, tunnelDiagnosticsOut{}, err
+			}
+			id = "singbox:" + t
+		} else if err := requireTunnelID(id); err != nil {
+			return nil, tunnelDiagnosticsOut{}, err
+		}
+		checks, err := d.RunTunnelDiagnostics(ctx, id)
+		if err != nil {
+			return nil, tunnelDiagnosticsOut{}, err
+		}
+		return nil, tunnelDiagnosticsOut{TunnelID: id, Checks: orEmpty(checks)}, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name: "get_diagnostics",
-		Description: "Outcome of the last diagnostic sweep: how many checks passed, and every check that did NOT — failures first, each with the detail explaining it. " +
-			"The full report is far larger than a tool result and stays in the web interface; this is the part that says what is wrong.",
+		Description: "Outcome of the last diagnostic sweep: how many checks passed, and every check that did NOT — failures first, each with the detail explaining it. includePassed lists every check as well. " +
+			"The raw report (merged configuration, journal excerpts) is far larger than a tool result and stays in the web interface.",
 		Annotations: readOnly("Diagnostics result"),
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, DiagnosticsResult, error) {
-		out, err := d.DiagnosticsResult(ctx)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in getDiagnosticsIn) (*mcp.CallToolResult, DiagnosticsResult, error) {
+		out, err := d.DiagnosticsResult(ctx, in.IncludePassed)
 		if err != nil {
 			return nil, DiagnosticsResult{}, err
 		}
-		if out.Problems == nil {
-			out.Problems = []DiagnosticsProblem{}
-		}
+		out.Problems = orEmpty(out.Problems)
 		if out.Status == "running" {
 			// Said in text as well: a zero-count result with status
 			// "running" is easy to read as a clean sweep.
@@ -131,6 +163,19 @@ func registerObservabilityTools(s *mcp.Server, d Deps) {
 		}
 		return nil, out, nil
 	})
+}
+
+type getDiagnosticsIn struct {
+	IncludePassed bool `json:"includePassed,omitempty" jsonschema:"also list every check, passed and skipped ones included, in report order"`
+}
+
+type tunnelDiagnosticsIn struct {
+	TunnelID string `json:"tunnelId" jsonschema:"tunnel id from list_tunnels, or singbox:<tag> for a proxy from list_singbox_tunnels"`
+}
+
+type tunnelDiagnosticsOut struct {
+	TunnelID string             `json:"tunnelId"`
+	Checks   []DiagnosticsCheck `json:"checks"`
 }
 
 // ErrNoDiagnostics is what DiagnosticsResult reports when nothing has run

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { ManagedPeer, ManagedPeerStats } from '$lib/types';
 	import { ConfirmModal } from '$lib/components/ui';
 	import { notifications } from '$lib/stores/notifications';
@@ -60,13 +61,13 @@
 
 	async function copyCellValue(value: string, label: string): Promise<void> {
 		if (!value || value === '—' || value === '-') {
-			notifications.warning(`${label} отсутствует`, { duration: 2000 });
+			notifications.warning(m.servers_peer_table_missing({ label }), { duration: 2000 });
 			return;
 		}
 		if (await copyToClipboard(value)) {
-			notifications.success(`${label} скопирован: ${value}`, { duration: 2000 });
+			notifications.success(m.servers_peer_table_copied({ label, value }), { duration: 2000 });
 		} else {
-			notifications.error(`Не удалось скопировать ${label.toLowerCase()}`);
+			notifications.error(m.servers_peer_table_copy_failed({ label: label.toLowerCase() }));
 		}
 	}
 
@@ -75,14 +76,14 @@
 
 <div class="peer-views">
 <div class="desktop-peer-table">
-	<div class="table-wrap">
+	<div class="peers-table-wrap">
 		<table class="managed-peer-table">
 			<thead>
 				<tr>
 					<th class="col-name" aria-sort={peerAriaSort($peerSort, 'name')}>
-						<PeerTableSortHeader label="Имя" sortKey="name" />
+						<PeerTableSortHeader label={m.servers_peer_table_name()} sortKey="name" />
 					</th>
-					<th class="col-status">Статус</th>
+					<th class="col-status">{m.tunnels_awg_col_status()}</th>
 					<th class="col-ip" aria-sort={peerAriaSort($peerSort, 'ip')}>
 						<PeerTableSortHeader label="IP" sortKey="ip" />
 					</th>
@@ -97,7 +98,7 @@
 						<PeerTableSortHeader label="Handshake" sortKey="handshake" />
 					</th>
 					{#if showActionsCol}
-						<th class="col-actions">Действия</th>
+						<th class="col-actions">{m.tunnels_awg_col_actions()}</th>
 					{/if}
 				</tr>
 			</thead>
@@ -144,10 +145,10 @@
 {#if deletePeerTarget}
 	<ConfirmModal
 		open={true}
-		title="Удаление клиента"
-		message={`Удалить клиента «${deletePeerTarget.description || deletePeerTarget.publicKey.slice(0, 8) + '...'}»?`}
-		secondary={`Туннельный IP: ${deletePeerTarget.tunnelIP}. Конфигурация и ключи будут удалены без возможности восстановления.`}
-		confirmLabel="Удалить"
+		title={m.servers_peer_table_delete_title()}
+		message={m.servers_peer_table_delete_message({ name: deletePeerTarget.description || deletePeerTarget.publicKey.slice(0, 8) + '...' })}
+		secondary={m.servers_peer_table_delete_secondary({ ip: deletePeerTarget.tunnelIP })}
+		confirmLabel={m.common_delete()}
 		busy={deletingPeer}
 		onConfirm={confirmDeletePeer}
 		onClose={() => { if (!deletingPeer) deletePeerTarget = null; }}
@@ -155,7 +156,7 @@
 {/if}
 
 <style>
-	.table-wrap { overflow-x: auto; }
+	.peers-table-wrap { overflow-x: auto; }
 	.managed-peer-table { width: 100%; border-collapse: collapse; }
 	.managed-peer-table th {
 		text-align: left;

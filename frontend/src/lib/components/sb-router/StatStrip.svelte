@@ -3,6 +3,7 @@
 -->
 
 <script lang="ts" module>
+  import { m } from '$lib/i18n';
   export interface StatCellData {
     label: string;
     value: string;
@@ -105,12 +106,12 @@
     {@const tipId = `stat-tip-${i}`}
     <div class="cell-shell" class:last={i === cells.length - 1}>
       <div class="cell">
-        <div class="label">{cell.label}</div>
+        <div class="strip-label">{cell.label}</div>
         <div class="value" class:value-compact={cell.compact} style:color={colorFor(cell.tone)}>{cell.value}</div>
 
         {#if cell.onClick}
           <button type="button" class="cell-action" onclick={cell.onClick}>
-            {cell.actionLabel ?? 'подробнее'}
+            {cell.actionLabel ?? m.sb_router_stat_more()}
           </button>
         {/if}
 
@@ -118,7 +119,7 @@
           <button
             type="button"
             class="help-btn"
-            aria-label={`Подсказка: ${cell.label}`}
+            aria-label={m.sb_router_stat_help_aria({ label: cell.label })}
             aria-describedby={activeIndex === i ? tipId : undefined}
             onmouseenter={(event) => showTooltip(i, event)}
             onmouseleave={() => hideTooltip(i)}
@@ -188,7 +189,7 @@
     position: relative;
     box-sizing: border-box;
   }
-  .label {
+  .strip-label {
     min-width: 0;
     font-size: 10px;
     line-height: 1.2;
@@ -338,7 +339,7 @@
       justify-content: space-between;
       gap: 0.25rem 0.75rem;
     }
-    .cell-shell:first-child .label {
+    .cell-shell:first-child .strip-label {
       font-size: 10px;
     }
     .cell-shell:first-child .value {
@@ -386,7 +387,7 @@
     .cell-shell:not(:first-child) .cell {
       min-height: 3.75rem;
     }
-    .cell-shell:not(:first-child) .label {
+    .cell-shell:not(:first-child) .strip-label {
       font-size: 9px;
       letter-spacing: 0.04em;
     }

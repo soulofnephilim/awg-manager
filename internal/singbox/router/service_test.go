@@ -16,6 +16,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
+	"github.com/hoaxisr/awg-manager/internal/netdev"
 	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -101,6 +102,8 @@ func newStubIPTables(restoreRecorder func(context.Context, string) error) *IPTab
 		persistBlackhole:        func(string) error { return nil },
 		cleanupBlackhole:        func() {},
 		runCtClean:              func(context.Context) {},
+
+		v6: nopV6{},
 	}
 }
 
@@ -332,7 +335,7 @@ func TestEnable_RefusesWhenTProxyTargetUnavailable(t *testing.T) {
 		PolicyName: "Policy0", WANAutoDetect: true,
 	})
 
-	err := svc.Enable(context.Background())
+	err := svc.enable(context.Background())
 	if err == nil {
 		t.Fatal("недоступная цель TPROXY обязана валить Enable")
 	}
@@ -409,7 +412,7 @@ func TestEnable_NoPolicy_Refused(t *testing.T) {
 		Policies: policies,
 		IPTables: newTestIPTables(fe),
 	})
-	err := svc.Enable(context.Background())
+	err := svc.enable(context.Background())
 	if !errors.Is(err, ErrPolicyNotConfigured) {
 		t.Errorf("want ErrPolicyNotConfigured, got %v", err)
 	}
@@ -424,7 +427,7 @@ func TestEnable_PolicyMissing_Refused(t *testing.T) {
 		Policies: policies,
 		IPTables: newTestIPTables(fe),
 	})
-	err := svc.Enable(context.Background())
+	err := svc.enable(context.Background())
 	if !errors.Is(err, ErrPolicyMissing) {
 		t.Errorf("want ErrPolicyMissing, got %v", err)
 	}
@@ -439,7 +442,7 @@ func TestEnable_PolicyMissing_MessageContainsPolicyName(t *testing.T) {
 		Policies: policies,
 		IPTables: newTestIPTables(fe),
 	})
-	err := svc.Enable(context.Background())
+	err := svc.enable(context.Background())
 	if !errors.Is(err, ErrPolicyMissing) {
 		t.Fatalf("expected ErrPolicyMissing, got %v", err)
 	}
@@ -470,7 +473,7 @@ func TestEnable_AllDevicesMode_DoesNotRequirePolicyMark(t *testing.T) {
 		WANIPCollector:     &fakeWANIPCollector{},
 		NetfilterPreflight: func(context.Context) error { return nil },
 	})
-	if err := svc.Enable(context.Background()); err != nil {
+	if err := svc.enable(context.Background()); err != nil {
 		t.Fatalf("Enable all-devices mode: %v", err)
 	}
 	if policies.markCalls != 0 {
@@ -881,6 +884,7 @@ func TestReconcile_JumpsMissing_Reinstalls(t *testing.T) {
 	stubNoLANBridges(t)
 	restoreCalls := 0
 	ipt := &IPTables{
+		v6:             nopV6{},
 		restoreNoflush: func(_ context.Context, _ string) error { restoreCalls++; return nil },
 		runIPTables:    func(_ context.Context, _ ...string) error { return nil },
 		// Chains declared but PREROUTING has no `-j AWGM-*` jump → jumps wiped.
@@ -932,6 +936,7 @@ func TestReconcile_ProbeError_NoReinstall(t *testing.T) {
 	stubNoLANBridges(t)
 	restoreCalls := 0
 	ipt := &IPTables{
+		v6:             nopV6{},
 		restoreNoflush: func(_ context.Context, _ string) error { restoreCalls++; return nil },
 		runIPTables:    func(_ context.Context, _ ...string) error { return nil },
 		runIPTablesOut: func(_ context.Context, _ ...string) (string, error) {
@@ -1052,6 +1057,7 @@ func TestReconcile_DisabledPartialInstall_CleansUp(t *testing.T) {
 	// (остатки есть) при installed=false (целостности нет).
 	uninstallCalled := false
 	ipt := &IPTables{
+		v6:          nopV6{},
 		runIPTables: func(_ context.Context, _ ...string) error { return nil },
 		runIPTablesOut: func(_ context.Context, args ...string) (string, error) {
 			if len(args) >= 2 && args[0] == "-t" && args[1] == "mangle" {
@@ -1240,6 +1246,7 @@ func newOrchedTestService(t *testing.T) (*ServiceImpl, string) {
 			Singbox:  &fakeSingbox{dir: dir},
 			Orch:     orch,
 			Bus:      bus,
+			SwapGate: &netdev.SwapGate{},
 		},
 	}
 	if svc.deps.OpkgTunPool == nil {
@@ -1795,7 +1802,7 @@ func TestUpdateRuleSet_InlineRenameRewritesVisibleAndMaterializedRefs(t *testing
 	if len(cfg.Route.RuleSet) != 1 || cfg.Route.RuleSet[0].Tag != "new-inline-srs" {
 		t.Fatalf("materialized rule_set = %+v", cfg.Route.RuleSet)
 	}
-	if len(cfg.Route.Rules) != 1 || cfg.Route.Rules[0].RuleSet[0] != "new-inline-srs" {
+	if rules := withoutMDNSDrop(cfg.Route.Rules); len(rules) != 1 || rules[0].RuleSet[0] != "new-inline-srs" {
 		t.Fatalf("materialized route refs = %+v", cfg.Route.Rules)
 	}
 	if len(cfg.DNS.Rules) != 1 || cfg.DNS.Rules[0].RuleSet[0] != "new-inline-srs" {
@@ -2105,24 +2112,6 @@ func TestReconcile_BypassPresetsSame_NoOp(t *testing.T) {
 type fakeWAN struct{ list []WANInterfaceInfo }
 
 func (f fakeWAN) ListWAN(_ context.Context) ([]WANInterfaceInfo, error) { return f.list, nil }
-
-func TestListIngressEligibleInterfaces_ExcludesWAN(t *testing.T) {
-	s := &ServiceImpl{deps: Deps{
-		BindableInterfaces: fakeBindable{list: []WANInterfaceInfo{
-			{Name: "nwg3", Type: "Wireguard", Up: true},
-			{Name: "br0", Type: "Bridge", Up: true},
-			{Name: "ppp0", Type: "PPP", Up: true},
-		}},
-		WANInterfaces: fakeWAN{list: []WANInterfaceInfo{{Name: "ppp0"}}},
-	}}
-	got, err := s.ListIngressEligibleInterfaces(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Name != "nwg3" {
-		t.Fatalf("got %+v", got)
-	}
-}
 
 type fakeIngressResolver struct{ m map[string]string }
 

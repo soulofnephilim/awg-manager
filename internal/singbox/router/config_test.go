@@ -216,7 +216,7 @@ func TestStripAutoManagedDirect(t *testing.T) {
 		{Type: "direct", Tag: "nwg", BindInterface: "nwg0"},             // NativeWG — strip
 		{Type: "direct", Tag: "ipsec-vpn", BindInterface: "ipsec0"},     // user VPN — keep
 	}
-	got := stripAutoManagedDirect(in)
+	got := stripAutoManagedDirect(in, nil)
 	tags := map[string]bool{}
 	for _, o := range got {
 		tags[o.Tag] = true
@@ -238,9 +238,25 @@ func TestUserDirectOutboundSurvivesStrip(t *testing.T) {
 		{Type: "direct", Tag: "ipsec-vpn", BindInterface: "ipsec0"},
 		{Type: "direct", Tag: "awg-auto", BindInterface: "opkgtun0"},
 	}}
-	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds)
+	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds, nil)
 	if len(cfg.Outbounds) != 1 || cfg.Outbounds[0].Tag != "ipsec-vpn" {
 		t.Fatalf("user direct should survive, AWG stripped: %+v", cfg.Outbounds)
+	}
+}
+
+func TestStripAutoManagedDirect_ForeignKept(t *testing.T) {
+	in := []Outbound{
+		{Type: "direct", Tag: "csqtt", BindInterface: "opkgtun7"},
+		{Type: "direct", Tag: "awg", BindInterface: "opkgtun9"},
+		{Type: "direct", Tag: "kern", BindInterface: "wg5"},
+	}
+	got := stripAutoManagedDirect(in, []string{"opkgtun7", "wg5"})
+	tags := map[string]bool{}
+	for _, o := range got {
+		tags[o.Tag] = true
+	}
+	if !tags["csqtt"] || !tags["kern"] || tags["awg"] {
+		t.Fatalf("после strip = %v", tags)
 	}
 }
 
@@ -255,7 +271,7 @@ func TestIsStrippedDirectBind(t *testing.T) {
 		"":       false, // пусто
 	}
 	for iface, want := range cases {
-		if got := IsStrippedDirectBind(iface); got != want {
+		if got := IsStrippedDirectBind(iface, nil); got != want {
 			t.Errorf("IsStrippedDirectBind(%q) = %v, want %v", iface, got, want)
 		}
 	}
@@ -569,5 +585,44 @@ func TestRouterConfig_CacheFileEnabledAlwaysEmitted(t *testing.T) {
 	b, _ := json.Marshal(c)
 	if !strings.Contains(string(b), `"enabled":false`) {
 		t.Errorf("expected enabled:false to be emitted: %s", b)
+	}
+}
+
+// F731: sing-box 1.15 отвергает группу с повтором члена и не стартует.
+func TestAddCompositeOutbound_RejectsDuplicateMember(t *testing.T) {
+	for _, typ := range []string{"selector", "urltest", "fallback"} {
+		t.Run(typ, func(t *testing.T) {
+			cfg := &RouterConfig{Outbounds: []Outbound{}}
+			err := cfg.AddCompositeOutbound(Outbound{Type: typ, Tag: "grp", Outbounds: []string{"awg-a", "awg-b", "awg-a"}})
+			if !errors.Is(err, ErrOutboundInvalid) || !strings.Contains(err.Error(), "more than once") {
+				t.Fatalf("повтор члена должен отвергаться как ErrOutboundInvalid, got %v", err)
+			}
+			if len(cfg.Outbounds) != 0 {
+				t.Errorf("отвергнутая группа не должна сохраняться, got %d", len(cfg.Outbounds))
+			}
+		})
+	}
+}
+
+func TestUpdateCompositeOutbound_RejectsDuplicateMember(t *testing.T) {
+	cfg := &RouterConfig{Outbounds: []Outbound{{Type: "selector", Tag: "grp", Outbounds: []string{"awg-a", "awg-b"}}}}
+	err := cfg.UpdateCompositeOutbound("grp", Outbound{Type: "selector", Tag: "grp", Outbounds: []string{"awg-b", "awg-b"}})
+	if !errors.Is(err, ErrOutboundInvalid) {
+		t.Fatalf("повтор члена должен отвергаться, got %v", err)
+	}
+	if got := cfg.Outbounds[0].Outbounds; len(got) != 2 || got[0] != "awg-a" {
+		t.Errorf("отказ не должен менять группу, got %v", got)
+	}
+}
+
+// Переименование в тег, уже стоящий в группе, не должно давать повтор члена.
+func TestRenameOutboundReferences_CollapsesDuplicateMember(t *testing.T) {
+	cfg := NewEmptyConfig()
+	cfg.Outbounds = []Outbound{{Type: "fallback", Tag: "grp", Outbounds: []string{"old", "x", "new"}}}
+
+	cfg.renameOutboundReferences("old", "new")
+
+	if got := cfg.Outbounds[0].Outbounds; strings.Join(got, ",") != "new,x" {
+		t.Fatalf("members = %v, want [new x] (первое вхождение, порядок сохранён)", got)
 	}
 }

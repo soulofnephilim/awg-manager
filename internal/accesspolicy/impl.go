@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -58,6 +59,12 @@ type ManagedTunnelResolver interface {
 	ManagedTunnelByNDMSName(ctx context.Context, ndmsName string) (id string, ok bool)
 }
 
+// PolicyHoldSource — интерфейсы, снятые мониторингом с политик:
+// имя политики → имена NDMS (F752).
+type PolicyHoldSource interface {
+	HeldInterfaces() (map[string][]string, error)
+}
+
 // ServiceImpl implements Service on top of the NDMS CQRS layer
 // (command.PolicyCommands for writes, query.Queries for reads).
 // InterfaceCommands is plumbed in so SetInterfaceUp can reuse the
@@ -78,7 +85,13 @@ type ServiceImpl struct {
 	// SetTunnelLifecycle after construction.
 	lifecycle      TunnelLifecycle
 	tunnelResolver ManagedTunnelResolver
+
+	// holds — пометка туннелей, снятых мониторингом (F752). Опционально.
+	holds PolicyHoldSource
 }
+
+// SetPolicyHolds подключает удержания мониторинга к списку политик.
+func (s *ServiceImpl) SetPolicyHolds(src PolicyHoldSource) { s.holds = src }
 
 // SetTunnelLifecycle wires managed-tunnel lifecycle routing for
 // SetInterfaceUp. Call once after construction. Pass nil resolver or
@@ -159,6 +172,8 @@ func (s *ServiceImpl) List(ctx context.Context) ([]Policy, error) {
 		}
 	}
 
+	s.markHeld(policies)
+
 	// Stable sort: PolicyN by number first, then custom policies alphabetically
 	sort.Slice(policies, func(i, j int) bool {
 		pi, pj := query.PolicyIndex(policies[i].Name), query.PolicyIndex(policies[j].Name)
@@ -169,6 +184,26 @@ func (s *ServiceImpl) List(ctx context.Context) ([]Policy, error) {
 	})
 
 	return policies, nil
+}
+
+// markHeld заполняет Held. Интерфейс, уже стоящий в политике (deny монитора
+// не прошёл, permit вернули руками), не дублируется.
+func (s *ServiceImpl) markHeld(policies []Policy) {
+	if s.holds == nil {
+		return
+	}
+	held, err := s.holds.HeldInterfaces()
+	if err != nil {
+		s.appLog.Warn("policy-holds", "", err.Error())
+		return
+	}
+	for i := range policies {
+		for _, iface := range held[policies[i].Name] {
+			if !slices.ContainsFunc(policies[i].Interfaces, func(pi PermittedIface) bool { return pi.Name == iface }) {
+				policies[i].Held = append(policies[i].Held, iface)
+			}
+		}
+	}
 }
 
 // validateDescription checks that the description conforms to NDMS requirements:
@@ -321,7 +356,16 @@ func (s *ServiceImpl) PermitInterface(ctx context.Context, name, iface string, o
 		return fmt.Errorf("invalid policy name: %s", name)
 	}
 
-	if err := s.policies.PermitInterface(ctx, name, iface, order); err != nil {
+	// Ссылка на отсутствующий интерфейс пишет E в журнал ndm — подтверждаем
+	// свежим списком (F546); нет — отказ.
+	c, _, ok, err := s.queries.Interfaces.Confirm(ctx, iface)
+	if err == nil && !ok {
+		err = fmt.Errorf("интерфейса %s нет в NDMS", iface)
+	}
+	if err == nil {
+		err = s.policies.PermitInterface(ctx, name, c, order)
+	}
+	if err != nil {
 		s.appLog.Warn("permit", name, fmt.Sprintf("Failed to permit %s: %v", iface, err))
 		return err
 	}
@@ -332,16 +376,38 @@ func (s *ServiceImpl) PermitInterface(ctx context.Context, name, iface string, o
 
 // DenyInterface removes an interface from a policy's permitted list.
 func (s *ServiceImpl) DenyInterface(ctx context.Context, name, iface string) error {
+	return s.deny(ctx, name, iface, s.policies.DenyInterface, "denied")
+}
+
+// HoldInterface — DenyInterface без сохранения во флеш: временное снятие
+// мониторингом до возврата связи (F753).
+func (s *ServiceImpl) HoldInterface(ctx context.Context, name, iface string) error {
+	return s.deny(ctx, name, iface, s.policies.DenyInterfaceUnsaved, "held by monitoring (unsaved)")
+}
+
+// done — исход в журнале: удержание мониторингом отличимо от снятия
+// пользователем, иначе не понять, вернёт ли permit перезагрузка.
+func (s *ServiceImpl) deny(ctx context.Context, name, iface string,
+	post func(context.Context, string, query.Confirmed) error, done string) error {
 	if !isValidPolicyName(name) {
 		return fmt.Errorf("invalid policy name: %s", name)
 	}
 
-	if err := s.policies.DenyInterface(ctx, name, iface); err != nil {
+	// Интерфейса нет в NDMS — permit ушёл вместе с ним, снимать нечего (F546).
+	c, _, ok, err := s.queries.Interfaces.Confirm(ctx, iface)
+	if err == nil && !ok {
+		s.appLog.Info("deny", name, fmt.Sprintf("Policy %s: interface %s нет в NDMS — снимать нечего", name, iface))
+		return nil
+	}
+	if err == nil {
+		err = post(ctx, name, c)
+	}
+	if err != nil {
 		s.appLog.Warn("deny", name, fmt.Sprintf("Failed to deny %s: %v", iface, err))
 		return err
 	}
 
-	s.appLog.Info("deny", name, fmt.Sprintf("Policy %s: interface %s denied", name, iface))
+	s.appLog.Info("deny", name, fmt.Sprintf("Policy %s: interface %s %s", name, iface, done))
 	return nil
 }
 
@@ -496,11 +562,20 @@ func (s *ServiceImpl) SetInterfaceUp(ctx context.Context, ndmsName string, up bo
 		}
 	}
 
-	var err error
-	if up {
-		err = s.interfaces.InterfaceUp(ctx, ndmsName)
-	} else {
-		err = s.interfaces.InterfaceDown(ctx, ndmsName)
+	// `interface X up/down` по отсутствующему X создаёт X (F546): подтверждаем
+	// свежим списком. Нет — поднимать нечего (отказ), опускать нечего (nil).
+	c, _, ok, err := s.queries.Interfaces.Confirm(ctx, ndmsName)
+	switch {
+	case err != nil:
+	case !ok && up:
+		err = fmt.Errorf("интерфейса %s нет в NDMS", ndmsName)
+	case !ok:
+		s.appLog.Info("set-interface", ndmsName, "интерфейса нет в NDMS — опускать нечего")
+		return nil
+	case up:
+		err = s.interfaces.InterfaceUp(ctx, c)
+	default:
+		err = s.interfaces.InterfaceDown(ctx, c)
 	}
 	if err != nil {
 		s.appLog.Warn("set-interface", ndmsName, fmt.Sprintf("Failed to set %s: %v", action, err))

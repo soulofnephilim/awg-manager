@@ -69,7 +69,7 @@ func obf() *storage.Obfuscator {
 
 func TestRunner_StartStop(t *testing.T) {
 	r, spy := newTestRunner(t)
-	if err := r.Start(context.Background(), "awg20", obf()); err != nil {
+	if err := r.Start(context.Background(), "awg20", obf(), "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	if !r.Alive("awg20") {
@@ -102,18 +102,18 @@ func TestRunner_StartStop(t *testing.T) {
 func TestRunner_StartIsIdempotentAndRestartsOnConfChange(t *testing.T) {
 	r, _ := newTestRunner(t)
 	o := obf()
-	if err := r.Start(context.Background(), "awg20", o); err != nil {
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	pid1 := r.pid("awg20")
-	if err := r.Start(context.Background(), "awg20", o); err != nil {
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	if r.pid("awg20") != pid1 {
 		t.Fatal("same conf must not respawn")
 	}
 	o.Key = "changed"
-	if err := r.Start(context.Background(), "awg20", o); err != nil {
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	if r.pid("awg20") == pid1 {
@@ -121,14 +121,57 @@ func TestRunner_StartIsIdempotentAndRestartsOnConfChange(t *testing.T) {
 	}
 }
 
+// Перезапуск с прежним конфигом не переписывает файл: /opt — флеш (F119 4.5).
+func TestRunner_StartSkipsRewriteOfSameConf(t *testing.T) {
+	r, _ := newTestRunner(t)
+	o := obf()
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Stop("awg20"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(ConfPath("awg20"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Alive("awg20") {
+		t.Fatal("релей не поднялся")
+	}
+	st, err := os.Stat(ConfPath("awg20"))
+	if err != nil || !st.ModTime().Equal(old) {
+		t.Fatalf("конфиг переписан при том же тексте: mtime %v, ждали %v (%v)", st.ModTime(), old, err)
+	}
+}
+
+// Тот же конфиг, другой IP сервера — перезапуск: на этом держится доставка
+// нового DDNS-адреса процессному релею.
+func TestRunner_StartRestartsOnIPChange(t *testing.T) {
+	r, _ := newTestRunner(t)
+	o := obf()
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err != nil {
+		t.Fatal(err)
+	}
+	pid1 := r.pid("awg20")
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.6"); err != nil {
+		t.Fatal(err)
+	}
+	if r.pid("awg20") == pid1 {
+		t.Fatal("changed ip must respawn")
+	}
+}
+
 func TestRunner_AdoptAll(t *testing.T) {
 	r, _ := newTestRunner(t)
-	if err := r.Start(context.Background(), "awg20", obf()); err != nil {
+	if err := r.Start(context.Background(), "awg20", obf(), "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	o2 := obf()
 	o2.LocalPort = 39051
-	if err := r.Start(context.Background(), "awg21", o2); err != nil {
+	if err := r.Start(context.Background(), "awg21", o2, "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Stop("awg21") })
@@ -143,6 +186,13 @@ func TestRunner_AdoptAll(t *testing.T) {
 	}
 	if !r2.Alive("awg20") || r2.Alive("awg21") {
 		t.Fatalf("alive: awg20=%v awg21=%v", r2.Alive("awg20"), r2.Alive("awg21"))
+	}
+	// Конфиг с ключом погашенной сироты убран, живого туннеля — на месте (F119 1.9).
+	if _, err := os.Stat(ConfPath("awg21")); !os.IsNotExist(err) {
+		t.Fatal("конфиг сироты с ключом остался на флеше")
+	}
+	if _, err := os.Stat(ConfPath("awg20")); err != nil {
+		t.Fatalf("конфиг усыновлённого туннеля пропал: %v", err)
 	}
 	// Мёртвый pidfile — убирается.
 	_ = os.WriteFile(filepath.Join(RunDir, "awg22.pid"), []byte("999999"), 0o644)
@@ -177,7 +227,7 @@ func TestRunner_StartRefusesBusyPort(t *testing.T) {
 		t.Skip("cannot bind loopback in this sandbox")
 	}
 	defer c.Close()
-	err = r.Start(context.Background(), "awg20", o)
+	err = r.Start(context.Background(), "awg20", o, "203.0.113.5")
 	if err == nil || !strings.Contains(err.Error(), "занят") {
 		t.Fatalf("err = %v", err)
 	}
@@ -190,7 +240,7 @@ func TestRunner_StartRefusesBusyPort(t *testing.T) {
 // процесса остаётся навсегда на живом раннере.
 func TestRunner_AdoptAllDropsTailOfDeadProcess(t *testing.T) {
 	r, _ := newTestRunner(t)
-	if err := r.Start(context.Background(), "awg20", obf()); err != nil {
+	if err := r.Start(context.Background(), "awg20", obf(), "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	pid := r.pid("awg20")
@@ -209,7 +259,7 @@ func TestRunner_AdoptAllDropsTailOfDeadProcess(t *testing.T) {
 
 func TestRunner_AliveRequiresOurBinary(t *testing.T) {
 	r, _ := newTestRunner(t)
-	if err := r.Start(context.Background(), "awg20", obf()); err != nil {
+	if err := r.Start(context.Background(), "awg20", obf(), "203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
 	// Вернуть шов до Cleanup раннера (LIFO): иначе Stop не погасит sh-скрипт.
@@ -217,5 +267,24 @@ func TestRunner_AliveRequiresOurBinary(t *testing.T) {
 	r.matchFn = func(int) bool { return false } // pid переиспользован чужим процессом
 	if r.Alive("awg20") {
 		t.Fatal("foreign pid must not count as alive")
+	}
+}
+
+// Бинаря для нового конфига нет — старый релей не гасится: иначе туннель
+// остался бы без релея вовсе (F119 1.8).
+func TestRunner_StartKeepsOldRelayWhenBinaryMissing(t *testing.T) {
+	r, _ := newTestRunner(t)
+	o := obf()
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err != nil {
+		t.Fatal(err)
+	}
+	pid := r.pid("awg20")
+	r.deps.BinaryFor = func(context.Context, string) (string, error) { return "", os.ErrNotExist }
+	o.Key = "changed"
+	if err := r.Start(context.Background(), "awg20", o, "203.0.113.5"); err == nil {
+		t.Fatal("Start без бинаря обязан вернуть ошибку")
+	}
+	if !r.Alive("awg20") || r.pid("awg20") != pid {
+		t.Fatal("старый релей погашен, хотя новый запустить нечем")
 	}
 }

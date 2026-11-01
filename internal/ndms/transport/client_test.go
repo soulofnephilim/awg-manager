@@ -129,6 +129,35 @@ func TestClient_Get_NonOKStatus(t *testing.T) {
 	}
 }
 
+// #1080: без X-Detail тысячи 403 в журнале неразличимы — код отказа NDMS
+// обязан дойти и до ошибки, и до журнала.
+func TestClient_NonOKStatus_CarriesXDetail(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Detail", "0x2312, not identified")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	rec := &recordingLogger{}
+	c.SetAppLogger(rec)
+
+	var dst map[string]any
+	getErr := c.Get(context.Background(), "/show/version", &dst)
+	_, postErr := c.Post(context.Background(), map[string]any{})
+	for _, err := range []error{getErr, postErr} {
+		var herr *HTTPError
+		if !errors.As(err, &herr) || herr.Detail != "0x2312, not identified" {
+			t.Errorf("err = %v, want HTTPError with X-Detail", err)
+		}
+	}
+	if len(rec.entries) != 2 {
+		t.Fatalf("expected 2 log entries, got %d", len(rec.entries))
+	}
+	for _, e := range rec.entries {
+		if e.message != "status 403 (0x2312, not identified)" {
+			t.Errorf("log message = %q", e.message)
+		}
+	}
+}
+
 func TestClient_Get_DecodeError(t *testing.T) {
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `not-json`)
@@ -165,6 +194,31 @@ func TestClient_Post_RoundTrip(t *testing.T) {
 	}
 	if string(resp) != `{"status":"ok"}` {
 		t.Errorf("resp body: %s", resp)
+	}
+}
+
+// F532: NDMS отвечает на POST show.interface по отсутствующей записи
+// HTTP 200 с конвертом статус-ошибки, ВЛОЖЕННЫМ в show.interface, а не
+// верхнеуровневым {"status":"error",...}, который проверяет ExtractError
+// (стенд KN-1810, 5.02.A.11 — дословное тело). postJSON обязан пропустить
+// его как обычный успех: разбор "unable to find" — забота
+// internal/ndms/query.fetchOne; «доучи» ExtractError смотреть и во
+// вложенные объекты — и первый же старт туннеля (записи ещё нет) поймает
+// поддельный NDMSAppError.
+func TestClient_Post_NestedStatusError_IsNotNDMSAppError(t *testing.T) {
+	const body = `{"show":{"interface":{"status":[{"status":"error","code":"6553619","ident":"Network::Interface::Base","message":"unable to find \"OpkgTun99\"."}]}}}`
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+
+	resp, err := c.Post(context.Background(), map[string]any{
+		"show": map[string]any{"interface": map[string]any{"name": "OpkgTun99"}},
+	})
+	if err != nil {
+		t.Fatalf("Post: want nil error (вложенный статус — не верхнеуровневый конверт), got %v", err)
+	}
+	if string(resp) != body {
+		t.Errorf("resp body: got %s, want %s", resp, body)
 	}
 }
 

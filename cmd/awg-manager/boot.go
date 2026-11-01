@@ -18,6 +18,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/proxyrt"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/sys/iproute2"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 )
@@ -104,6 +105,9 @@ func (a *app) startBootSequence() {
 	}
 	a.bootLog.Info("startup", "",
 		fmt.Sprintf("awg-manager %s started (uptime %ds, tunnels in config: %d)", version, int(a.uptime), tunnelCount))
+	if err := iproute2.Check(context.Background()); err != nil {
+		a.bootLog.Error("startup", "", err.Error())
+	}
 	const bootDetectionMax = 300 // 5 minutes
 	isBoot := (a.uptime > 0 && a.uptime < bootDetectionMax) || a.forceBoot
 	if isBoot {
@@ -266,6 +270,7 @@ func (a *app) startBootSequence() {
 			// терялся, а отложенный бут потом ждал второго фронта.
 			a.orch.HandleEvent(a.shutdownCtx, bootEvent(err))
 			a.restorePingMonitors()
+			go a.reconcileSystemClientRoutes() // F497: system:-выходы после ребута
 
 			// Маркер надо снять и здесь: холодный старт и так поднимается из
 			// восстановленного конфига, а невынутый маркер на всех последующих
@@ -321,6 +326,7 @@ func (a *app) startBootSequence() {
 				WANUp: true,
 			})
 			a.restorePingMonitors()
+			go a.reconcileSystemClientRoutes() // F497: system:-выходы после ребута
 			go a.proxyRuntimeNudge("post-restore", proxyrt.EventBoot)
 			return
 		}
@@ -331,6 +337,7 @@ func (a *app) startBootSequence() {
 		a.orch.LoadState(context.Background())
 		a.orch.HandleEvent(context.Background(), orchestrator.Event{Type: orchestrator.EventReconnect})
 		a.restorePingMonitors()
+		go a.reconcileSystemClientRoutes() // F497: system:-выходы после ребута
 		// Как на cold-boot: посев мог не состояться, если RCI ещё не отвечал
 		// сразу после opkg upgrade.
 		go a.proxyRuntimeNudge("daemon-restart", proxyrt.EventBoot)
@@ -350,7 +357,7 @@ func (a *app) serve() {
 	go func() {
 		<-sigCh
 		os.Remove(pidFile)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), serveShutdownTimeout)
 		defer cancel()
 		a.srv.Shutdown(ctx)
 	}()

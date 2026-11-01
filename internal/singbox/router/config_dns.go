@@ -62,16 +62,9 @@ var validRejectMethods = map[string]bool{
 	"": true, "default": true, "drop": true,
 }
 
-const managedDNSDirectTag = "dns-direct"
-
-// scrubDNSServerDetourStored normalizes only values that must never be kept in
-// the editable router config (explicit direct → empty). Legacy detour on
-// dns-direct is preserved so the UI can warn until the user saves.
-func scrubDNSServerDetourStored(s *DNSServer) {
-	if strings.TrimSpace(s.Detour) == "direct" {
-		s.Detour = ""
-	}
-}
+// ManagedDNSDirectTag — управляемый сервер прямого DNS: ходит только
+// напрямую, detour у него не пишется.
+const ManagedDNSDirectTag = "dns-direct"
 
 // scrubDNSServerDetourForSingbox clears detour values that must not reach
 // sing-box: empty, explicit "direct", and any detour on dns-direct. A named
@@ -79,7 +72,7 @@ func scrubDNSServerDetourStored(s *DNSServer) {
 // domain resolver instead of retaining a misleading configuration.
 func scrubDNSServerDetourForSingbox(s *DNSServer) {
 	d := strings.TrimSpace(s.Detour)
-	if d == "" || d == "direct" || s.Tag == managedDNSDirectTag {
+	if d == "" || d == "direct" || s.Tag == ManagedDNSDirectTag {
 		s.Detour = ""
 	} else {
 		s.Detour = d
@@ -87,8 +80,10 @@ func scrubDNSServerDetourForSingbox(s *DNSServer) {
 	}
 }
 
-// SanitizeDNSConfigForSingbox prepares DNS servers for 20-router.json / sing-box.
-func SanitizeDNSConfigForSingbox(cfg *RouterConfig) {
+// SanitizeDNSConfig снимает detour, которого sing-box видеть не должен. Слот
+// 20-router.json — сам конфиг sing-box, отдельной «хранимой» формы нет:
+// чистка одна и та же при загрузке и при записи (materializeConfig) (F333).
+func SanitizeDNSConfig(cfg *RouterConfig) {
 	if cfg == nil {
 		return
 	}
@@ -97,22 +92,24 @@ func SanitizeDNSConfigForSingbox(cfg *RouterConfig) {
 	}
 }
 
-// SanitizeDNSConfig normalizes stored router config after load (direct only).
-func SanitizeDNSConfig(cfg *RouterConfig) {
-	if cfg == nil {
-		return
+// validateDNSServer оборачивает отказ checkDNSServer в ErrDNSServerInvalid:
+// API отдаёт его как ошибку ввода (400), а не сбой (F671).
+func validateDNSServer(s DNSServer) error {
+	if err := checkDNSServer(s); err != nil {
+		return fmt.Errorf("%w: %w", ErrDNSServerInvalid, err)
 	}
-	for i := range cfg.DNS.Servers {
-		scrubDNSServerDetourStored(&cfg.DNS.Servers[i])
-	}
+	return nil
 }
 
-func validateDNSServer(s DNSServer) error {
+func checkDNSServer(s DNSServer) error {
 	if strings.TrimSpace(s.Tag) == "" {
 		return fmt.Errorf("dns server tag is required")
 	}
 	if !validDNSTypes[s.Type] {
 		return fmt.Errorf("dns server %q: unknown type %q", s.Tag, s.Type)
+	}
+	if err := validateDNSBindAddress(s); err != nil {
+		return err
 	}
 	if s.Type == "fakeip" {
 		if strings.TrimSpace(s.Inet4Range) == "" && strings.TrimSpace(s.Inet6Range) == "" {
@@ -168,6 +165,27 @@ func validateDNSServer(s DNSServer) error {
 		if s.TLS.MinVersion != "" && s.TLS.MaxVersion != "" && validTLSVersions[s.TLS.MinVersion] > validTLSVersions[s.TLS.MaxVersion] {
 			return fmt.Errorf("dns server %q: tls min_version must not exceed max_version", s.Tag)
 		}
+	}
+	return nil
+}
+
+// validateDNSBindAddress проверяет форму inet4_bind_address. Что адрес
+// назначен роутеру, проверяет сервисный слой: для этого нужен список адресов.
+func validateDNSBindAddress(s DNSServer) error {
+	a := s.Inet4BindAddress
+	if a == "" {
+		return nil
+	}
+	if ip, err := netip.ParseAddr(a); err != nil || !ip.Is4() || ip.IsUnspecified() {
+		return fmt.Errorf("%w: %q у %q — не IPv4-адрес", ErrDNSBindAddress, a, s.Tag)
+	}
+	switch {
+	case s.Type == "local" || s.Type == "fakeip":
+		return fmt.Errorf("%w: тип %q у %q не подключается к серверу", ErrDNSBindAddress, s.Type, s.Tag)
+	case s.Tag == ManagedDNSDirectTag:
+		return fmt.Errorf("%w: %q управляется приложением", ErrDNSBindAddress, s.Tag)
+	case s.Detour != "":
+		return fmt.Errorf("%w: у %q задан detour, с ним sing-box адрес отправителя игнорирует", ErrDNSBindAddress, s.Tag)
 	}
 	return nil
 }

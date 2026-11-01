@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import { m } from '$lib/i18n';
   import { Plus } from 'lucide-svelte';
 
   interface Props {
@@ -27,9 +28,14 @@
   const active = $derived(items.find((i) => i.id === activeId) ?? items[0]);
 </script>
 
-<aside class="rail" aria-label="Список серверов">
+<!-- Интерфейс и порт: обрезается только имя, порт виден всегда. -->
+{#snippet ifaceLabel(item: RailItem)}
+  <span class="iface"><span class="iface-name">{item.iface}</span>{#if item.listenPort}<span class="port">:{item.listenPort}</span>{/if}</span>
+{/snippet}
+
+<aside class="rail" aria-label={m.servers_rail_aria()}>
   <header class="rail-header">
-    <span class="label">Серверы ({items.length})</span>
+    <span class="rail-label">{m.servers_rail_label({ count: items.length })}</span>
   </header>
 
   {#each items as item (item.id)}
@@ -46,10 +52,10 @@
         <span class="item-name">{item.name}</span>
       </span>
       <span class="item-meta">
-        <span class="iface">{item.iface}{item.listenPort ? `:${item.listenPort}` : ''}</span>
+        {@render ifaceLabel(item)}
         {#if item.peerCount !== undefined && item.peerCount > 0}
           <span class="dot">·</span>
-          <span>{item.peerActive ?? 0}/{item.peerCount} peers</span>
+          <span class="peers">{m.servers_rail_peers({ active: item.peerActive ?? 0, total: item.peerCount })}</span>
         {/if}
       </span>
     </button>
@@ -58,7 +64,7 @@
   {#if onCreate}
     <button type="button" class="create-btn" onclick={onCreate}>
       <Plus size={12} strokeWidth={2} aria-hidden="true" />
-      Новый сервер
+      {m.servers_rail_new()}
     </button>
   {/if}
 </aside>
@@ -86,14 +92,14 @@
             <span class="item-name">{item.name}</span>
           </span>
           <span class="item-meta">
-            <span class="iface">{item.iface}{item.listenPort ? `:${item.listenPort}` : ''}</span>
+            {@render ifaceLabel(item)}
           </span>
         </button>
       {/each}
       {#if onCreate}
         <button type="button" class="create-btn" onclick={() => { onCreate?.(); mobileOpen = false; }}>
           <Plus size={12} strokeWidth={2} aria-hidden="true" />
-          Новый сервер
+          {m.servers_rail_new()}
         </button>
       {/if}
     </div>
@@ -123,7 +129,7 @@
     padding: 6px 8px 8px;
   }
 
-  .label {
+  .rail-label {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -177,9 +183,21 @@
     font-family: var(--font-mono);
   }
 
+  /* Обрезается имя интерфейса, а порт и число пиров видны всегда. */
   .iface {
+    display: flex;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .iface-name {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .port,
+  .peers {
+    flex-shrink: 0;
     white-space: nowrap;
   }
 

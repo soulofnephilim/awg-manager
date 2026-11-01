@@ -3,6 +3,10 @@ package router
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
+	"slices"
+	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -16,16 +20,166 @@ func (s *ServiceImpl) ListDNSServers(ctx context.Context) ([]DNSServer, error) {
 }
 
 func (s *ServiceImpl) AddDNSServer(ctx context.Context, srv DNSServer) error {
+	srv = s.withLocalDNSBind(srv)
+	if err := s.dnsBindAddressLocal(srv); err != nil {
+		return err
+	}
 	return s.withConfig(ctx, "dns-servers", func(c *RouterConfig) error { return c.AddDNSServer(srv) })
 }
 
 func (s *ServiceImpl) UpdateDNSServer(ctx context.Context, tag string, srv DNSServer) error {
+	srv = s.dropDerivedDNSBind(tag, srv)
+	srv = s.withLocalDNSBind(srv)
+	bindErr := s.dnsBindAddressLocal(srv)
 	return s.withConfig(ctx, "dns-servers", func(c *RouterConfig) error {
+		if bindErr != nil && !keepsDNSBindAddress(c, tag, srv) {
+			return bindErr
+		}
 		if err := c.UpdateDNSServer(tag, srv); err != nil {
 			return err
 		}
 		return s.captureDNSChainServerRename(tag, srv.Tag)
 	})
+}
+
+// SetDNSServerDetour меняет у сервера tag только detour — «Detour (outbound)»
+// формы без пересылки всей записи (MCP). Запись читается и пишется в одном
+// withConfig, поэтому правка прочих полей между чтением и записью не
+// теряется. Пустой detour и "direct" его снимают, как и форма.
+//
+// С detour sing-box игнорирует поля подключения, поэтому адрес отправителя и
+// bootstrap-резолвер уходят — форма их тогда тоже не отправляет. При снятии
+// detour адрес отправителя подставляется заново, как при сохранении формы
+// (withLocalDNSBind). Тег detour обязан быть известным выходом: форма даёт
+// выбрать только из списка, а здесь его пишет агент.
+func (s *ServiceImpl) SetDNSServerDetour(ctx context.Context, tag, detour string) error {
+	detour = strings.TrimSpace(detour)
+	if detour == "direct" {
+		detour = ""
+	}
+	return s.withConfig(ctx, "dns-servers", func(c *RouterConfig) error {
+		i := slices.IndexFunc(c.DNS.Servers, func(e DNSServer) bool { return e.Tag == tag })
+		if i < 0 {
+			return fmt.Errorf("%w: %q", ErrDNSServerNotFound, tag)
+		}
+		srv := c.DNS.Servers[i]
+		if detour != "" {
+			switch {
+			case srv.Tag == ManagedDNSDirectTag:
+				return fmt.Errorf("%w: %q управляется приложением и ходит напрямую", ErrDNSServerDetour, tag)
+			case srv.Type == "local" || srv.Type == "fakeip":
+				return fmt.Errorf("%w: тип %q у %q не подключается к серверу", ErrDNSServerDetour, srv.Type, tag)
+			case !s.isKnownOutboundTag(ctx, detour, c):
+				return fmt.Errorf("%w: неизвестный outbound %q", ErrDNSServerDetour, detour)
+			}
+			// Резолвер снимет scrubDNSServerDetourForSingbox в UpdateDNSServer;
+			// адрес — здесь: с detour validateDNSBindAddress его отвергает.
+			srv.Inet4BindAddress = ""
+		}
+		srv.Detour = detour
+		if detour == "" {
+			srv = s.withLocalDNSBind(srv)
+		}
+		return c.UpdateDNSServer(tag, srv)
+	})
+}
+
+// dnsBindAddressLocal — inet4_bind_address назначен интерфейсу роутера.
+// Считается ДО мутатора: список адресов читается из ядра. Неразборчивый адрес
+// и не-IPv4 пропускаются — их отвергнет validateDNSServer с точной причиной.
+func (s *ServiceImpl) dnsBindAddressLocal(srv DNSServer) error {
+	want, err := netip.ParseAddr(srv.Inet4BindAddress)
+	if err != nil || !want.Is4() {
+		return nil
+	}
+	addrs, err := s.deps.LocalAddrs()
+	if err != nil {
+		return fmt.Errorf("адреса интерфейсов роутера: %w", err)
+	}
+	if AddrIsLocal(addrs, want) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s не назначен ни одному интерфейсу роутера", ErrDNSBindAddress, want)
+}
+
+// AddrIsLocal — want назначен одному из интерфейсов (addrs из net.InterfaceAddrs).
+func AddrIsLocal(addrs []net.Addr, want netip.Addr) bool {
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			if ip, ok := netip.AddrFromSlice(n.IP); ok && ip.Unmap() == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// localDNSSelfBind — адрес отправителя для DNS-сервера на собственном адресе
+// роутера (F702): под auto_detect_interface/default_interface sing-box биндит
+// сокет к интерфейсу-владельцу адреса, и на ядре Keenetic запрос к своему
+// адресу висит — DNS через sing-box мёртв целиком (стенд 21.10). Любой адрес
+// отправителя снимает автопривязку; собственный — единственный, что пропустит
+// dnsBindAddressLocal. Только пустое поле и без detour (с ним поля
+// подключения игнорируются): явный выбор пользователя не трогаем.
+func localDNSSelfBind(srv DNSServer, addrs []net.Addr) (string, bool) {
+	if srv.Inet4BindAddress != "" || srv.Detour != "" || srv.Type == "local" || srv.Type == "fakeip" || srv.Tag == ManagedDNSDirectTag {
+		return "", false
+	}
+	ip, err := netip.ParseAddr(srv.Server)
+	if err != nil || !ip.Is4() || !AddrIsLocal(addrs, ip) {
+		return "", false
+	}
+	return ip.String(), true
+}
+
+// dropDerivedDNSBind снимает выведенный адрес отправителя (равный адресу
+// сервера, см. localDNSSelfBind), когда адрес сервера меняется, а адрес
+// отправителя пришёл прежним: окно правки шлёт сохранённое обратно, и
+// подстановка прилипла бы — запросы к новому серверу шли бы с LAN-адреса мимо
+// выбора WAN. withLocalDNSBind затем вычислит его заново. Явный адрес
+// (отличный от адреса сервера) — выбор пользователя, его не трогаем.
+func (s *ServiceImpl) dropDerivedDNSBind(tag string, srv DNSServer) DNSServer {
+	cfg, err := s.loadRouterConfig()
+	if err != nil {
+		return srv
+	}
+	for _, old := range cfg.DNS.Servers {
+		if old.Tag == tag && old.Inet4BindAddress != "" && old.Inet4BindAddress == old.Server &&
+			srv.Inet4BindAddress == old.Inet4BindAddress && srv.Server != old.Server {
+			srv.Inet4BindAddress = ""
+		}
+	}
+	return srv
+}
+
+// withLocalDNSBind — localDNSSelfBind при сохранении сервера. Сбой чтения
+// адресов роутера сохранение не роняет: подстановка лишь не случится.
+func (s *ServiceImpl) withLocalDNSBind(srv DNSServer) DNSServer {
+	if ip, err := netip.ParseAddr(srv.Server); err != nil || !ip.Is4() || s.deps.LocalAddrs == nil {
+		return srv
+	}
+	addrs, err := s.deps.LocalAddrs()
+	if err != nil {
+		s.appLog.Warn("dns-servers", srv.Tag, "адреса интерфейсов роутера: "+err.Error()+" — адрес отправителя не подставлен")
+		return srv
+	}
+	if bind, ok := localDNSSelfBind(srv, addrs); ok {
+		srv.Inet4BindAddress = bind
+	}
+	return srv
+}
+
+// keepsDNSBindAddress — у записи tag в c тот же inet4_bind_address. Однажды
+// принятый адрес Update не перепроверяет: адрес мог пропасть вместе с
+// интерфейсом, и правка остальных полей от этого ломаться не должна — как
+// keepsBind у direct-выходов (#961).
+func keepsDNSBindAddress(c *RouterConfig, tag string, srv DNSServer) bool {
+	for _, e := range c.DNS.Servers {
+		if e.Tag == tag {
+			return e.Inet4BindAddress == srv.Inet4BindAddress
+		}
+	}
+	return false
 }
 
 func (s *ServiceImpl) DeleteDNSServer(ctx context.Context, tag string, force bool) error {

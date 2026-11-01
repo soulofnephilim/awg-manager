@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -23,6 +24,7 @@ import (
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/presets"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/zapret"
 )
 
 // routeReg — одна регистрация маршрута в server_routes.go: путь-литерал и
@@ -141,7 +143,6 @@ var noAuthRoutes = map[string]string{
 	"/api/auth/logout":                     "выход по куке, гард не нужен",
 	"/api/auth/status":                     "фронт спрашивает, включена ли авторизация, до входа",
 	"/api/health":                          "liveness для внешних проверок",
-	"/api/hook/ndms":                       "форма из shell-хуков роутера — сессии быть не может",
 	"/api/server/listen/confirm":           "одноразовый токен подтверждения смены адреса (server_listen.go)",
 	"/api/boot-status":                     "экран загрузки до входа",
 	"/api/dns-check/probe":                 "статический {ok:true} с CORS *, зовётся с origin awgm-dnscheck.test — кука не поедет",
@@ -154,7 +155,18 @@ var expertPrefixes = []string{
 	"/api/system/proc/", "/api/system/services/",
 }
 
+// expertRoutes — ручки вне «Системы», закрытые expert: управление внешним
+// демоном Zapret и запись его конфига и списков.
+var expertRoutes = map[string]bool{
+	"/api/zapret/control":            true,
+	"/api/zapret/strategies/reorder": true,
+	"/api/zapret/hostlist/save":      true,
+}
+
 func isExpertPath(p string) bool {
+	if expertRoutes[p] {
+		return true
+	}
 	for _, pre := range expertPrefixes {
 		if strings.HasPrefix(p, pre) {
 			return true
@@ -164,8 +176,9 @@ func isExpertPath(p string) bool {
 }
 
 // Каждая регистрация /api/* обёрнута в гард на месте регистрации: auth —
-// везде, кроме allow-списка; expert — ровно на разделе «Система». Читается из
-// исходника, поэтому новая ручка без h.guarded(...) роняет тест сама.
+// везде, кроме allow-списка; expert — ровно на разделе «Система» и
+// expertRoutes. Читается из исходника, поэтому новая ручка без
+// h.guarded(...) роняет тест сама.
 func TestAPIRoutes_EveryRegistrationGuarded(t *testing.T) {
 	for _, r := range routeRegistrations(t) {
 		if !strings.HasPrefix(r.path, "/api/") {
@@ -178,9 +191,9 @@ func TestAPIRoutes_EveryRegistrationGuarded(t *testing.T) {
 		case !allowed && r.guard == "none":
 			t.Errorf("%s зарегистрирован БЕЗ гарда", r.path)
 		case isExpertPath(r.path) && r.guard != "expert":
-			t.Errorf("%s — раздел «Система», ждали expertGuarded, получили %q", r.path, r.guard)
+			t.Errorf("%s — expert-ручка («Система» или expertRoutes), ждали expertGuarded, получили %q", r.path, r.guard)
 		case !isExpertPath(r.path) && r.guard == "expert":
-			t.Errorf("%s обёрнут в expertGuarded вне раздела «Система»", r.path)
+			t.Errorf("%s обёрнут в expertGuarded вне раздела «Система» и expertRoutes", r.path)
 		}
 	}
 }
@@ -191,6 +204,17 @@ func (testAuthChecker) IsAuthEnabled() bool { return true }
 func (testAuthChecker) GetApiKey() string   { return "" }
 
 func stub(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }
+
+// stubForeignIfaces — нулевая реализация api.ForeignIfaceMarker: снимает
+// nil-гейт секции /api/interfaces/foreign/* в фикстуре, гард сам хендлер не
+// вызывает.
+type stubForeignIfaces struct{}
+
+func (stubForeignIfaces) Mark(_ context.Context, n string) (string, error) { return n, nil }
+func (stubForeignIfaces) Unmark(context.Context, string) error             { return nil }
+func (stubForeignIfaces) Candidates(context.Context) ([]api.ForeignIfaceCandidate, error) {
+	return nil, nil
+}
 
 // newGuardServer — минимальный Server, на котором registerRoutes регистрирует
 // ВСЕ маршруты. Гард срабатывает до вызова хендлера, поэтому хендлерам
@@ -237,10 +261,12 @@ func newGuardServer(t *testing.T) (*Server, *auth.SessionStore) {
 		// маршрутов. Без них пути не регистрируются вовсе, и гард на них
 		// проверить нечем.
 		hydraService:       &hydraroute.Service{},
+		zapretService:      &zapret.Service{},
 		dnsCheckService:    &dnscheck.Service{},
 		managedServiceImpl: &managed.Service{},
 		presetCatalog:      &presets.Catalog{},
 		ndmsQueries:        &ndmsquery.Queries{DNSProxyStatus: &ndmsquery.DNSProxyStatusStore{}},
+		foreignIfaces:      stubForeignIfaces{},
 		proxyRt: ProxyRtSurface{
 			Instances: stub, ListenMoves: stub, WdttLinkDecode: stub, WdttLinkImport: stub,
 			FreeTurnLinkDecode: stub, CaptchaStatus: stub, InstallStatus: stub, Install: stub, Uninstall: stub,

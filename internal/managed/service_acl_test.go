@@ -8,9 +8,9 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 )
 
-// Running-config недоступен → сегменты всё равно применяются (4 прежние
-// команды + auto-delete), и никакого Warn: ради ACL мы в running-config
-// больше не ходим — чужой `_WEBADMIN_` не снимается (#879).
+// Running-config недоступен → сегменты всё равно применяются (снятие
+// вслепую + permit, bind, auto-delete), и никакого Warn: ради ACL в
+// running-config обязательно не ходим (#879).
 func TestApplyLANSegments_RunningConfigUnavailable_ProceedsSilently(t *testing.T) {
 	svc, store, poster := newLANSegmentsTestService(t) // stateAwareGetter: running-config = ошибка
 	spy := &recAppLog{}
@@ -25,6 +25,13 @@ func TestApplyLANSegments_RunningConfigUnavailable_ProceedsSilently(t *testing.T
 	}
 	if len(spy.entries) != 1 || spy.entries[0] != "info|lan-segments|Wireguard0|LAN segments changed: Home" {
 		t.Fatalf("журнал = %v", spy.entries)
+	}
+	resetPosts(poster)
+	if err := svc.SetLANSegments(context.Background(), "Wireguard0", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := parseStrings(poster); !slices.Equal(got, []string{"no interface Wireguard0 ip access-group AWGM_Wireguard0 in", "no access-list AWGM_Wireguard0"}) {
+		t.Fatalf("teardown: %v", got)
 	}
 }
 
@@ -48,8 +55,6 @@ func TestForeignAccessGroups_ExcludesOurs(t *testing.T) {
 // после каждой перезагрузки роутера.
 func TestApplyLANSegments_NeverTouchesForeignPermitAll(t *testing.T) {
 	want := []string{
-		"no interface Wireguard0 ip access-group AWGM_Wireguard0 in",
-		"no access-list AWGM_Wireguard0",
 		"access-list AWGM_Wireguard0 permit ip 10.66.66.0 255.255.255.0 10.10.10.0 255.255.255.0",
 		"interface Wireguard0 ip access-group AWGM_Wireguard0 in",
 		"access-list AWGM_Wireguard0 auto-delete",

@@ -68,6 +68,13 @@ func NewDNSRewritesHandler(svc DNSRewritesService, appLogger logging.AppLogger) 
 	}
 }
 
+// Service returns the concrete instance shared with MCP, preserving its
+// write lock. A test-only alternative service is not exposed to MCP.
+func (h *DNSRewritesHandler) Service() *dnsrewrite.Service {
+	svc, _ := h.svc.(*dnsrewrite.Service)
+	return svc
+}
+
 // List returns all DNS rewrites in priority order.
 //
 //	@Summary		List singbox-router DNS rewrites

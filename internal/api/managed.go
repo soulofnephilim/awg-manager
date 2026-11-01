@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,7 +18,8 @@ import (
 
 // ── Response DTOs ────────────────────────────────────────────────
 
-// ManagedPeerDTO mirrors frontend ManagedPeer.
+// ManagedPeerDTO — пир managed-сервера с ключами: ответ добавления пира и
+// бэкап (storage.ManagedPeer). Без ключей — ManagedPeerPublicDTO.
 type ManagedPeerDTO struct {
 	PublicKey    string `json:"publicKey" example:"HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH="`
 	PrivateKey   string `json:"privateKey" example:"IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII="`
@@ -34,26 +36,10 @@ type ManagedPeerDTO struct {
 	I4               string `json:"i4,omitempty"`
 	I5               string `json:"i5,omitempty"`
 	SignatureProfile string `json:"signatureProfile,omitempty" example:"quic_initial"`
-}
-
-// ManagedServerDTO mirrors frontend ManagedServer.
-type ManagedServerDTO struct {
-	InterfaceName string   `json:"interfaceName" example:"Wireguard1"`
-	Address       string   `json:"address" example:"10.10.0.1"`
-	Mask          string   `json:"mask" example:"255.255.255.0"`
-	ListenPort    int      `json:"listenPort" example:"51821"`
-	Endpoint      string   `json:"endpoint,omitempty" example:"203.0.113.42:51821"`
-	DNS           string   `json:"dns,omitempty" example:"8.8.8.8"`
-	MTU           int      `json:"mtu,omitempty" example:"1420"`
-	NatEnabled    bool     `json:"natEnabled,omitempty" example:"true"`
-	NATMode       string   `json:"natMode,omitempty" example:"internet-only"`
-	LANSegments   []string `json:"lanSegments,omitempty" example:"Home"`
-	// ForeignACLs — чужие списки `ip access-group … in` на интерфейсе сервера
-	// (кроме нашего AWGM_<iface>), в порядке привязки. Список, привязанный
-	// раньше нашего и разрешающий шире, срабатывает до выбора сегментов.
-	ForeignACLs []string         `json:"foreignAcls,omitempty" example:"GUEST_ACL"`
-	Policy      string           `json:"policy" example:"default"`
-	Peers       []ManagedPeerDTO `json:"peers"`
+	// ClientAllowedIPs — строка AllowedIPs в .conf клиента (CIDR через запятую,
+	// пусто — весь трафик). RemoteSubnets — сети за клиентом, IPv4 CIDR (#713).
+	ClientAllowedIPs string   `json:"clientAllowedIPs,omitempty" example:"10.10.0.0/24, 192.168.1.0/24"`
+	RemoteSubnets    []string `json:"remoteSubnets,omitempty" example:"192.168.77.0/24"`
 }
 
 // ManagedServerResponse is the envelope for GET /managed-server.
@@ -171,6 +157,7 @@ type CreateServerRequestDTO struct {
 	DNS         string `json:"dns,omitempty" example:"8.8.8.8"`
 	MTU         int    `json:"mtu,omitempty" example:"1420"`
 	GenerateASC *bool  `json:"generateAsc,omitempty" example:"true"`
+	Mode        string `json:"mode,omitempty" enums:"3.1" example:"3.1"` // пусто — AWG 2.0; "3.1" — AWG 3.1 (5.02.A.11+)
 }
 
 // UpdateServerRequestDTO is the swagger-visible body for PUT /managed-servers/{id}.
@@ -193,8 +180,10 @@ func isValidWGKey(key string) bool {
 	return err == nil && len(decoded) == 32
 }
 
-// managedServerResponse is a safe DTO that strips private keys from peers.
-type managedServerResponse struct {
+// ManagedServerDTO — ответ о managed-сервере: безопасный DTO без приватных
+// ключей пиров. Он же — схема swagger: зеркала рядом нет, поле ответа не
+// разойдётся с документацией (F291).
+type ManagedServerDTO struct {
 	InterfaceName string   `json:"interfaceName"`
 	Description   string   `json:"description,omitempty"`
 	Address       string   `json:"address"`
@@ -209,13 +198,13 @@ type managedServerResponse struct {
 	// ForeignACLs — чужие списки `ip access-group … in` на интерфейсе сервера
 	// (кроме нашего AWGM_<iface>), в порядке привязки. Список, привязанный
 	// раньше нашего и разрешающий шире, срабатывает до выбора сегментов.
-	ForeignACLs []string            `json:"foreignAcls,omitempty"`
-	Policy      string              `json:"policy"`
-	Peers       []managedPeerPublic `json:"peers"`
+	ForeignACLs []string               `json:"foreignAcls,omitempty"`
+	Policy      string                 `json:"policy"`
+	Peers       []ManagedPeerPublicDTO `json:"peers"`
 }
 
-// managedPeerPublic is a peer DTO without private/preshared keys.
-type managedPeerPublic struct {
+// ManagedPeerPublicDTO is a peer DTO without private/preshared keys.
+type ManagedPeerPublicDTO struct {
 	PublicKey   string `json:"publicKey"`
 	Description string `json:"description"`
 	TunnelIP    string `json:"tunnelIP"`
@@ -229,13 +218,17 @@ type managedPeerPublic struct {
 	I4               string `json:"i4,omitempty"`
 	I5               string `json:"i5,omitempty"`
 	SignatureProfile string `json:"signatureProfile,omitempty"`
+	// ClientAllowedIPs — строка AllowedIPs в .conf клиента (CIDR через запятую,
+	// пусто — весь трафик). RemoteSubnets — сети за клиентом, IPv4 CIDR (#713).
+	ClientAllowedIPs string   `json:"clientAllowedIPs,omitempty"`
+	RemoteSubnets    []string `json:"remoteSubnets,omitempty"`
 }
 
 // toManagedServerResponse converts storage model to a safe response DTO.
-func toManagedServerResponse(s *storage.ManagedServer, foreign []string) *managedServerResponse {
-	peers := make([]managedPeerPublic, len(s.Peers))
+func toManagedServerResponse(s *storage.ManagedServer, foreign []string) *ManagedServerDTO {
+	peers := make([]ManagedPeerPublicDTO, len(s.Peers))
 	for i, p := range s.Peers {
-		peers[i] = managedPeerPublic{
+		peers[i] = ManagedPeerPublicDTO{
 			PublicKey:        p.PublicKey,
 			Description:      p.Description,
 			TunnelIP:         p.TunnelIP,
@@ -247,9 +240,11 @@ func toManagedServerResponse(s *storage.ManagedServer, foreign []string) *manage
 			I4:               p.I4,
 			I5:               p.I5,
 			SignatureProfile: p.SignatureProfile,
+			ClientAllowedIPs: p.ClientAllowedIPs,
+			RemoteSubnets:    p.RemoteSubnets,
 		}
 	}
-	return &managedServerResponse{
+	return &ManagedServerDTO{
 		InterfaceName: s.InterfaceName,
 		Description:   s.Description,
 		Address:       s.Address,
@@ -322,9 +317,9 @@ func (h *ManagedServerHandler) foreignACLsFor(ctx context.Context, iface string)
 // getManagedList builds the list of managed server DTOs for the composite
 // servers snapshot. Always returns a non-nil slice so callers can json-marshal
 // it as `[]` rather than `null`.
-func (h *ManagedServerHandler) getManagedList(ctx context.Context) []*managedServerResponse {
+func (h *ManagedServerHandler) getManagedList(ctx context.Context) []*ManagedServerDTO {
 	servers := h.svc.List()
-	out := make([]*managedServerResponse, 0, len(servers))
+	out := make([]*ManagedServerDTO, 0, len(servers))
 	for i := range servers {
 		out = append(out, toManagedServerResponse(&servers[i], h.foreignACLsFor(ctx, servers[i].InterfaceName)))
 	}
@@ -517,6 +512,10 @@ func (h *ManagedServerHandler) Subtree(w http.ResponseWriter, r *http.Request) {
 			response.Error(w, "unknown path", "UNKNOWN_PATH")
 			return
 		}
+		if parts[2] == "presets" {
+			h.PeerPresets(w, r, id)
+			return
+		}
 		pubkey := parts[2]
 		if !h.validatePubkey(w, pubkey) {
 			return
@@ -672,7 +671,15 @@ func (h *ManagedServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	server, err := h.svc.Create(r.Context(), req)
 	if err != nil {
-		response.Error(w, err.Error(), "CREATE_FAILED")
+		if server == nil || !errors.Is(err, managed.ErrASCUnverified) {
+			response.Error(w, err.Error(), "CREATE_FAILED")
+			return
+		}
+		// Сервер создан и сохранён, не сверен только ASC: состояние изменилось —
+		// публикуем, но успехом не отвечаем (R44, как правка ASC).
+		h.svc.InvalidateCache(server.InterfaceName)
+		h.publishServerUpdated()
+		response.Error(w, err.Error(), "ASC_UNVERIFIED")
 		return
 	}
 	h.svc.InvalidateCache(server.InterfaceName)
@@ -847,7 +854,7 @@ func (h *ManagedServerHandler) NAT(w http.ResponseWriter, r *http.Request, id st
 // POST /api/managed-servers/{id}/enabled
 //
 //	@Summary		Toggle managed-server enabled
-//	@Description	Brings the named managed server interface up or down (and persists the desired state).
+//	@Description	Brings the named managed server interface up or down in NDMS. awg-manager stores nothing for this toggle.
 //	@Tags			managed-servers
 //	@Accept			json
 //	@Produce		json
@@ -963,10 +970,26 @@ func (h *ManagedServerHandler) ASC(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		if err := h.svc.SetASCParams(r.Context(), id, params); err != nil {
-			response.Error(w, err.Error(), "SET_ASC_FAILED")
+			if errors.Is(err, managed.ErrASCNotApplied) {
+				// Запись принята, сверка не сошлась: часть могла примениться —
+				// фронту есть что перечитать (F601).
+				h.svc.InvalidateCache(id)
+				h.publishServerUpdated()
+			}
+			if !errors.Is(err, managed.ErrASCUnverified) {
+				response.Error(w, err.Error(), "SET_ASC_FAILED")
+				return
+			}
+			// Роутер запись принял, сверка не прочиталась: состояние изменилось —
+			// публикуем, но успехом не отвечаем (R44).
+			h.svc.InvalidateCache(id)
+			h.publishServerUpdated()
+			response.Error(w, err.Error(), "ASC_UNVERIFIED")
 			return
 		}
-		h.svc.InvalidateCache(id)
+		// Без InvalidateCache (F600): кэш сбросила сама запись (rciAfter), а
+		// сверка положила в него дерево rc, прочитанное ПОСЛЕ записи. Сброс
+		// здесь выкинул бы его, и снимок ответа читал бы третье дерево.
 		h.publishServerUpdated()
 		h.writeServersSnapshot(w, r)
 	default:

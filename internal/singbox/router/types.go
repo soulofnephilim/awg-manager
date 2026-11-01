@@ -44,6 +44,10 @@ type Status struct {
 	// FakeIPTunAddr is the fakeip-tun gateway address (the tun /30 host, e.g.
 	// "172.18.0.1"); "" when not in fakeip-tun mode. Read-only, for display.
 	FakeIPTunAddr string `json:"fakeipTunAddr,omitempty"`
+	// TunAddrLocked — смена settings.fakeipTunAddr4 сейчас отвергается
+	// (ErrTunAddrLocked): OpkgTun какого-либо tun-режима поднят. Тот же
+	// признак, что у гарда UpdateSettings (tunAddrLocked).
+	TunAddrLocked bool `json:"tunAddrLocked,omitempty"`
 	// CacheDBPath — эффективный путь cache.db (issue #842): по настройке, а при
 	// пустой — из 00-base.json. Показывает рукописный путь, который селектор
 	// «flash | tmp» выразить не может. "" без шва Deps.CacheDBPath.
@@ -111,6 +115,10 @@ type Rule struct {
 	// it to bind a per-class inbound pair (tproxy-qos-N / redirect-qos-N) to
 	// the class outbound; user rules may use it too.
 	Inbound []string `json:"inbound,omitempty"`
+	// AuthUser — имя пользователя, с которым соединение вошло в inbound
+	// (sing-box auth_user). Им служебный вход загрузки наборов выбирает
+	// detour (ruleset_fetch.go).
+	AuthUser []string `json:"auth_user,omitempty"`
 	// IPIsPrivate, when set, matches packets whose destination is an
 	// RFC1918/loopback/link-local/multicast/unspecified address — the
 	// negation of sing's N.IsPublicAddr. CGNAT (100.64/10) is NOT among
@@ -248,18 +256,27 @@ type RuleSet struct {
 	// MaterializedSRS is set by ListRuleSets when a compiled .srs sibling
 	// exists for an inline ruleset. Not persisted in router JSON.
 	MaterializedSRS bool `json:"materialized_srs,omitempty"`
+	// fetchVia — прокси служебного входа, через который наша копия набора
+	// качается его detour'ом (withRuleSetFetchVia). Только в памяти.
+	fetchVia string
+	// restoreFailed — источник управляемого локального набора не прочитан
+	// (restoreRuleSet): Rules пуст не потому, что набор пуст. Снос маршрутов
+	// tun по такому конфигу снял бы рабочие (F756). Только в памяти.
+	restoreFailed bool
 }
 
 type Outbound struct {
-	Type          string   `json:"type"`
-	Tag           string   `json:"tag"`
-	BindInterface string   `json:"bind_interface,omitempty"`
-	Outbounds     []string `json:"outbounds,omitempty"`
-	URL           string   `json:"url,omitempty"`
-	Interval      string   `json:"interval,omitempty"`
-	Tolerance     int      `json:"tolerance,omitempty"`
-	Default       string   `json:"default,omitempty"`
-	Strategy      string   `json:"strategy,omitempty"`
+	Type                      string   `json:"type"`
+	Tag                       string   `json:"tag"`
+	BindInterface             string   `json:"bind_interface,omitempty"`
+	Outbounds                 []string `json:"outbounds,omitempty"`
+	URL                       string   `json:"url,omitempty"`
+	Interval                  string   `json:"interval,omitempty"`
+	Tolerance                 int      `json:"tolerance,omitempty"`
+	Default                   string   `json:"default,omitempty"`
+	Strategy                  string   `json:"strategy,omitempty"`
+	InterruptExistConnections bool     `json:"interrupt_exist_connections,omitempty"`
+	IdleTimeout               string   `json:"idle_timeout,omitempty"`
 	// Server and DomainResolver support fakeip-tun's domain_resolver guard:
 	// a hostname-bearing proxy outbound resolves its Server via the named
 	// resolver instead of the fakeip server. Both omitempty so v1 IP-bound
@@ -272,7 +289,7 @@ type Outbound struct {
 // outbound — the canonical Outbound plus a Source tag identifying which
 // orchestrator slot owns it. "router" entries come from 20-router.json
 // (mutable via this service); "subscription" entries come from
-// 40-subscriptions.json (managed by the subscription service — the UI
+// 13-subscriptions.json (managed by the subscription service — the UI
 // renders them read-only).
 type CompositeOutboundView struct {
 	Outbound
@@ -285,7 +302,10 @@ type Inbound struct {
 	Listen     string `json:"listen,omitempty"`
 	ListenPort int    `json:"listen_port,omitempty"`
 	Network    string `json:"network,omitempty"`
-	UDPTimeout string `json:"udp_timeout,omitempty"`
+	// BindInterface привязывает слушающий сокет (и сокеты ответов tproxy) к
+	// интерфейсу. Нужен v6-инбаундам tproxy6-in-<мост> — см. iptables6.go.
+	BindInterface string `json:"bind_interface,omitempty"`
+	UDPTimeout    string `json:"udp_timeout,omitempty"`
 	// UDPNATMax — потолок UDP-NAT-сессий inbound'а (sing-box 1.14, LRU). 0 =
 	// авто (4096-16384 по памяти) и ключ не пишется.
 	UDPNATMax   int  `json:"udp_nat_max,omitempty"`
@@ -300,9 +320,19 @@ type Inbound struct {
 	AutoRedirect  *bool    `json:"auto_redirect,omitempty"`
 	StrictRoute   *bool    `json:"strict_route,omitempty"`
 	Stack         string   `json:"stack,omitempty"`
+	// DNSMode — tunDNSMode (см. там), иначе sing-box ≥1.15.0-alpha.12 без
+	// auto_route выключает перехват DNS на адрес tun.
+	DNSMode string `json:"dns_mode,omitempty"`
 	// ExternalConfiguration (форк sing-box): адрес tun'а ставит и держит
 	// NDMS, sing-tun его не добавляет и не снимает при Close/SIGHUP.
 	ExternalConfiguration bool `json:"external_configuration,omitempty"`
+	// Users — пользователи mixed-inbound (служебный вход загрузки наборов).
+	Users []InboundUser `json:"users,omitempty"`
+}
+
+type InboundUser struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type Route struct {
@@ -362,6 +392,12 @@ type DNSServer struct {
 	TLS            *DNSClientTLSOptions `json:"tls,omitempty"`
 	Inet4Range     string               `json:"inet4_range,omitempty"`
 	Inet6Range     string               `json:"inet6_range,omitempty"`
+	// Inet4BindAddress — адрес отправителя запросов. В sing-box он снимает
+	// привязку к route.default_interface/auto_detect_interface, и запрос идёт
+	// по таблице маршрутов ядра: так он попадает в IPsec site-to-site без
+	// своего интерфейса. С detour несовместим — там поля подключения
+	// игнорируются.
+	Inet4BindAddress string `json:"inet4_bind_address,omitempty"`
 }
 
 // DNSMatchResponse — union sing-box `match_response`: true | "<tag>"

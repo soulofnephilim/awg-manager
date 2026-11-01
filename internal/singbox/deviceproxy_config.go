@@ -9,7 +9,7 @@ import (
 // BuildDeviceProxyConfig produces a standalone JSON document containing
 // ONLY the device-proxy inbound + selector outbound + route rule for
 // the given spec. The result is suitable for a direct write to the
-// orchestrator slot 30-deviceproxy.json.
+// orchestrator slot 12-deviceproxy.json.
 //
 // AWG-direct outbounds referenced by the spec (spec.AWGTags) are NOT
 // included — they live in 15-awg.json owned by the awgoutbounds
@@ -20,8 +20,10 @@ import (
 // remove the slot's effect should also call orchestrator.SetEnabled
 // with false to move the file under disabled/.
 //
-// The result intentionally omits log/dns/experimental keys: those are
-// owned by 00-base.json and must not collide across config.d slots.
+// The result intentionally omits log/experimental keys and dns scalars:
+// those are owned by 00-base.json and must not collide across config.d
+// slots. dns.servers is the exception — it concatenates across slots and
+// carries the instance's local LAN resolver (F702).
 func BuildDeviceProxyConfig(spec DeviceProxySpec) ([]byte, error) {
 	return BuildDeviceProxyInstancesConfig([]DeviceProxyInstanceSpec{
 		{

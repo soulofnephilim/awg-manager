@@ -12,12 +12,14 @@
 	import { decodeVpnLink, isVpnLink, vpnLinkUnsupportedPortalReason } from '$lib/utils/vpnlink';
 	import { nativewgUnavailableHint } from '$lib/utils/backendAvailability';
 	import { api } from '$lib/api/client';
+	import { tunnelNameError } from '$lib/utils/tunnelName';
+	import { m } from '$lib/i18n';
 	import type { SystemInfo } from '$lib/types';
 
 	function normalizeTunnelImportTab(raw: string | null): TunnelImportTab {
 		if (raw === 'file' || raw === 'paste' || raw === 'vpn') return raw;
 		if (raw === 'phobos' || raw === 'clusterm') return raw;
-		if (raw === 'link' || raw === 'premium') return 'vpn';
+		if (raw === 'link') return 'vpn';
 		return 'file';
 	}
 
@@ -41,6 +43,7 @@
 	});
 
 	let isObf = $derived(activeTab === 'phobos' || activeTab === 'clusterm');
+	let nameError = $derived(tunnelNameError(importName));
 
 	let nativewgHint = $derived(
 		systemInfo !== null && !systemInfo.backendAvailability?.nativewg
@@ -82,11 +85,12 @@
 	/** Импорт из сырого текста (.conf или vpn:// с клиентским конфигом). Обновляет importContent после успешного декода vpn:// */
 	async function executeImport(rawContent: string) {
 		let content = rawContent.trim();
+		if (nameError) return;
 		if (!content && !(activeTab === 'phobos' && obfInstallUrl.trim())) {
 			notifications.error(
 				isObf
-					? 'Вставьте конфиг, ссылку phobos:// или ссылку установки'
-					: 'Вставьте содержимое конфигурации, загрузите файл или вставьте vpn:// ссылку'
+					? m.tunnel_edit_new_paste_obf()
+					: m.tunnel_edit_new_paste_any()
 			);
 			return;
 		}
@@ -95,7 +99,7 @@
 		// получился бы туннель без релея, падающий на старте с чужой ошибкой.
 		// Install-ссылку проверяет бэкенд — её содержимого мы здесь не видим.
 		if (activeTab === 'phobos' && content && !content.toLowerCase().startsWith('phobos://') && !/^\s*\[instance\]/im.test(content)) {
-			notifications.error('Нужен конфиг Phobos с секцией [instance] или ссылка phobos://');
+			notifications.error(m.tunnel_edit_new_phobos_needs_instance());
 			return;
 		}
 
@@ -112,7 +116,7 @@
 					importName = result.name;
 				}
 			} catch (e) {
-				notifications.error(e instanceof Error ? e.message : 'Ошибка декодирования vpn:// ссылки');
+				notifications.error(e instanceof Error ? e.message : m.tunnel_edit_new_vpn_decode_error());
 				return;
 			}
 		}
@@ -131,10 +135,10 @@
 			if (tunnel.warnings?.length) {
 				tunnel.warnings.forEach(w => notifications.warning(w));
 			}
-			notifications.success('Туннель успешно импортирован');
+			notifications.success(m.tunnel_edit_imported());
 			goto(`/tunnels/${tunnel.id}`);
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка импорта');
+			notifications.error(e instanceof Error ? e.message : m.tunnel_edit_import_error());
 		} finally {
 			loading = false;
 		}
@@ -147,30 +151,31 @@
 </script>
 
 <svelte:head>
-	<title>Новый туннель - AWG Manager</title>
+	<title>{m.tunnel_edit_new_page_title()}</title>
 </svelte:head>
 
 <PageContainer>
 <div class="page-header">
 	<BackLink href="/" />
-	<h2 class="page-title">Новый туннель</h2>
+	<h2 class="page-title">{m.tunnel_edit_new_heading()}</h2>
 </div>
 
 <div class="import-container">
-	<label class="field-label" for="import-name">Название туннеля</label>
+	<label class="field-label" for="import-name">{m.tunnel_edit_name_label()}</label>
 	<div class="top-row">
-		<input type="text" id="import-name" class="name-input" bind:value={importName} placeholder="Мой VPN">
+		<input type="text" id="import-name" class="name-input" bind:value={importName} placeholder={m.tunnel_edit_name_placeholder()}>
 		<div class="btn-import-wrap">
-			<Button variant="primary" size="md" onclick={handleImport} disabled={!importContent.trim() && !(activeTab === 'phobos' && obfInstallUrl.trim())} loading={loading}>
-				Импортировать
+			<Button variant="primary" size="md" onclick={handleImport} disabled={!!nameError || (!importContent.trim() && !(activeTab === 'phobos' && obfInstallUrl.trim()))} loading={loading}>
+				{m.tunnel_edit_import_button()}
 			</Button>
 		</div>
 	</div>
+	<p class="error-text" class:visible={!!nameError}>{nameError}</p>
 
 	{#if !isObf || nativewgHint}
 	<div class="backend-selector">
 		{#if !isObf}
-		<span class="field-label">Режим работы</span>
+		<span class="field-label">{m.tunnel_edit_backend_mode()}</span>
 		<div class="backend-options">
 			<button
 				type="button"
@@ -182,7 +187,7 @@
 				onclick={() => selectedBackend = 'nativewg'}
 			>
 				<span class="backend-name">NativeWG</span>
-				<span class="backend-desc">DNS/IP маршрутизация, failover, виден в UI роутера</span>
+				<span class="backend-desc">{m.tunnel_edit_backend_nativewg_desc()}</span>
 			</button>
 			<button
 				type="button"
@@ -190,11 +195,11 @@
 				class:selected={selectedBackend === 'kernel'}
 				class:disabled={systemInfo !== null && !systemInfo.backendAvailability?.kernel}
 				disabled={systemInfo !== null && !systemInfo.backendAvailability?.kernel}
-				title={systemInfo !== null && !systemInfo.backendAvailability?.kernel ? 'Модуль ядра не загружен' : ''}
+				title={systemInfo !== null && !systemInfo.backendAvailability?.kernel ? m.tunnel_edit_backend_kernel_unloaded() : ''}
 				onclick={() => selectedBackend = 'kernel'}
 			>
 				<span class="backend-name">Kernel</span>
-				<span class="backend-desc">Через OpkgTun и модуль ядра, с поддержкой до AWG 3.1</span>
+				<span class="backend-desc">{m.tunnel_edit_backend_kernel_desc()}</span>
 			</button>
 		</div>
 		{/if}
@@ -221,7 +226,7 @@
 
 	{#if !isObf}
 		<p class="form-hint">
-			Поддерживаются WireGuard и AmneziaWG конфигурации с параметрами Jc, Jmin, Jmax, S1-S4, H1-H4, I1-I5; вкладка vpn:// распознаёт клиентский конфиг в ссылке; ключ Amnezia Premium обслуживает отдельный мастер подписки.
+			{m.tunnel_edit_new_supported_hint()}
 		</p>
 	{/if}
 </div>
@@ -355,6 +360,8 @@
 		}
 
 		.name-input {
+			/* В колонке flex: 1 (база 0) отменяет height — поле сжималось. */
+			flex: none;
 			width: 100%;
 			max-width: none;
 		}

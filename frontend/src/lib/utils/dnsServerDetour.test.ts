@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
 	DNS_DIRECT_SERVER_TAG,
-	getDnsDirectLegacyDetour,
 	normalizeDnsServerDetour,
 	isDnsServerEmptyDetour,
 	shouldOmitDnsServerDetour,
@@ -83,13 +82,18 @@ describe('sanitizeDnsServerForApi', () => {
 			detour: 'wg-nl',
 		});
 	});
-});
 
-describe('getDnsDirectLegacyDetour', () => {
-	it('returns stored detour only for dns-direct', () => {
-		expect(getDnsDirectLegacyDetour({ tag: 'dns-direct', detour: 'wg-nl' })).toBe('wg-nl');
-		expect(getDnsDirectLegacyDetour({ tag: 'dns-tunnel', detour: 'wg-nl' })).toBeNull();
-		expect(getDnsDirectLegacyDetour({ tag: 'dns-direct', detour: '' })).toBeNull();
+	it('keeps inet4_bind_address only on a direct non-managed server', () => {
+		const base = { type: 'udp' as const, server: '10.0.10.53', inet4_bind_address: ' 10.0.20.1 ' };
+		expect(sanitizeDnsServerForApi({ ...base, tag: 's2s' })).toEqual({
+			tag: 's2s',
+			type: 'udp',
+			server: '10.0.10.53',
+			inet4_bind_address: '10.0.20.1',
+		});
+		expect(sanitizeDnsServerForApi({ ...base, tag: 's2s', detour: 'wg-nl' }).inet4_bind_address).toBeUndefined();
+		expect(sanitizeDnsServerForApi({ ...base, tag: DNS_DIRECT_SERVER_TAG }).inet4_bind_address).toBeUndefined();
+		expect(sanitizeDnsServerForApi({ ...base, tag: 's2s', inet4_bind_address: '  ' }).inet4_bind_address).toBeUndefined();
 	});
 });
 

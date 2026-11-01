@@ -3,6 +3,7 @@ package dnsroute
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms"
@@ -87,7 +88,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:  []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.groups) != 1 {
 			t.Fatalf("expected 1 group, got %d", len(ts.groups))
 		}
@@ -109,7 +110,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:  []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.routes) != 1 || ts.routes[0].disabled {
 			t.Errorf("expected 1 enabled route, got %+v", ts.routes)
 		}
@@ -119,7 +120,7 @@ func TestBuildTargetState(t *testing.T) {
 		data := &StoreData{Lists: []DomainList{
 			{ID: "list_1", Enabled: true, Domains: nil, Subnets: nil},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.groups) != 0 {
 			t.Errorf("expected 0 groups, got %d", len(ts.groups))
 		}
@@ -142,7 +143,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:  []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1", Fallback: "reject"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.routes) != 2 {
 			t.Fatalf("expected 2 routes, got %d", len(ts.routes))
 		}
@@ -151,6 +152,32 @@ func TestBuildTargetState(t *testing.T) {
 		}
 		if ts.routes[1].fallback != "reject" {
 			t.Errorf("fallback reject must be preserved, got %q", ts.routes[1].fallback)
+		}
+	})
+
+	// F691: NDMS держит одну строку на (группа, интерфейс) — повтор в
+	// маршрутах схлопывается до первого вхождения, fallback исходного
+	// последнего маршрута наследует последний из схлопнутых.
+	t.Run("repeated interface collapses to first occurrence", func(t *testing.T) {
+		data := &StoreData{Lists: []DomainList{
+			{
+				ID: "list_1", Name: "foo", Enabled: true,
+				Domains: []string{"a.com"},
+				Routes: []RouteTarget{
+					{Interface: "A", TunnelID: "a"},
+					{Interface: "B", TunnelID: "b"},
+					{Interface: "A", TunnelID: "a", Fallback: "reject"},
+				},
+			},
+		}}
+		ts := buildTargetState(data, nil, nil)
+		got := fmt.Sprint(ts.routes)
+		want := fmt.Sprint([]targetRoute{
+			{group: "foo_p1", iface: "A"},
+			{group: "foo_p1", iface: "B", fallback: "reject"},
+		})
+		if got != want {
+			t.Errorf("routes = %s, want %s", got, want)
 		}
 	})
 
@@ -164,7 +191,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:  []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.groups) != 1 {
 			t.Fatalf("expected 1 group, got %d", len(ts.groups))
 		}
@@ -194,7 +221,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:   []RouteTarget{{Interface: "OpkgTun0"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.groups) != 2 {
 			t.Fatalf("expected 2 groups, got %d", len(ts.groups))
 		}
@@ -220,7 +247,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:  []RouteTarget{{Interface: "OpkgTun0"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.groups) != 1 {
 			t.Fatalf("expected 1 group, got %d", len(ts.groups))
 		}
@@ -246,7 +273,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:  []RouteTarget{{Interface: "OpkgTun0"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		if len(ts.groups) != 4 {
 			t.Fatalf("expected 4 groups (1200/300), got %d", len(ts.groups))
 		}
@@ -288,7 +315,7 @@ func TestBuildTargetState(t *testing.T) {
 				Routes:   []RouteTarget{{Interface: "OpkgTun0"}},
 			},
 		}}
-		ts := buildTargetState(data, nil)
+		ts := buildTargetState(data, nil, nil)
 		// 600 items, every chunk budget = 300 - 10 excludes = 290 -> 290 + 290 + 20.
 		if len(ts.groups) != 3 {
 			t.Fatalf("expected 3 groups, got %d: sizes=%d,%d,%d",
@@ -329,7 +356,7 @@ func TestBuildTargetState_SkipsFailedTunnel(t *testing.T) {
 	}
 
 	failed := map[string]struct{}{"tun0": {}}
-	ts := buildTargetState(data, failed)
+	ts := buildTargetState(data, failed, nil)
 
 	if len(ts.routes) != 1 {
 		t.Fatalf("expected 1 route, got %d: %+v", len(ts.routes), ts.routes)
@@ -355,7 +382,7 @@ func TestBuildTargetState_AllTunnelsFailed(t *testing.T) {
 	}
 
 	failed := map[string]struct{}{"tun0": {}, "tun1": {}}
-	ts := buildTargetState(data, failed)
+	ts := buildTargetState(data, failed, nil)
 
 	if len(ts.routes) != 0 {
 		t.Errorf("expected 0 routes, got %d: %+v", len(ts.routes), ts.routes)
@@ -377,7 +404,7 @@ func TestBuildTargetState_NoFailedTunnels(t *testing.T) {
 		}},
 	}
 
-	ts := buildTargetState(data, nil)
+	ts := buildTargetState(data, nil, nil)
 
 	if len(ts.routes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(ts.routes))
@@ -398,7 +425,7 @@ func TestBuildTargetState_FallbackReassignedToLastActive(t *testing.T) {
 	}
 
 	failed := map[string]struct{}{"tun1": {}}
-	ts := buildTargetState(data, failed)
+	ts := buildTargetState(data, failed, nil)
 
 	if len(ts.routes) != 2 {
 		t.Fatalf("expected 2 routes, got %d: %+v", len(ts.routes), ts.routes)
@@ -828,7 +855,7 @@ func TestBuildTargetState_SameTunnelInMultipleLists(t *testing.T) {
 	}
 
 	failed := map[string]struct{}{"tun-shared": {}}
-	ts := buildTargetState(data, failed)
+	ts := buildTargetState(data, failed, nil)
 
 	if len(ts.routes) != 2 {
 		t.Fatalf("expected 2 routes, got %d: %+v", len(ts.routes), ts.routes)
@@ -846,5 +873,61 @@ func TestBuildTargetState_SameTunnelInMultipleLists(t *testing.T) {
 	}
 	if !ifaces["Wireguard2"] {
 		t.Error("expected Wireguard2 in target state")
+	}
+}
+
+// TestBuildTargetStateSkipIPv6 — #1011: каждая IPv6-запись занимает слот
+// include в object-group наравне с доменом, а на роутере без IPv6 только
+// съедает лимит. С флагом они не уходят на роутер, но остаются в списке:
+// выключенный флаг возвращает их без повторной загрузки подписок.
+func TestBuildTargetStateSkipIPv6(t *testing.T) {
+	skip := true
+	list := func(flag *bool) DomainList {
+		return DomainList{
+			ID: "list_1", Name: "foo", Enabled: true,
+			Domains:  []string{"a.com", "2001:db8::1"},
+			Subnets:  []string{"10.0.0.0/8", "2001:db8::/32"},
+			Excludes: []string{"b.a.com", "2001:db8::2"},
+			Routes:   []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1"}},
+			SkipIPv6: flag,
+		}
+	}
+
+	data := &StoreData{Lists: []DomainList{list(&skip)}}
+	ts := buildTargetState(data, nil, nil)
+	if len(ts.groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(ts.groups))
+	}
+	g := ts.groups[0]
+	if strings.Join(g.includes, ",") != "a.com,10.0.0.0/8" {
+		t.Fatalf("includes = %v, want the IPv6 address and network dropped", g.includes)
+	}
+	if strings.Join(g.excludes, ",") != "b.a.com" {
+		t.Fatalf("excludes = %v, want the IPv6 exclude dropped", g.excludes)
+	}
+	if len(data.Lists[0].Domains) != 2 || len(data.Lists[0].Subnets) != 2 || len(data.Lists[0].Excludes) != 2 {
+		t.Fatalf("the stored list must keep its IPv6 entries: %+v", data.Lists[0])
+	}
+
+	off := false
+	for name, flag := range map[string]*bool{"not set": nil, "off": &off} {
+		ts := buildTargetState(&StoreData{Lists: []DomainList{list(flag)}}, nil, nil)
+		if len(ts.groups) != 1 || len(ts.groups[0].includes) != 4 || len(ts.groups[0].excludes) != 2 {
+			t.Fatalf("%s: every entry must reach the router: %+v", name, ts.groups)
+		}
+	}
+
+	// A list of nothing but IPv6 has nothing left to route.
+	only := DomainList{ID: "list_2", Enabled: true, Domains: []string{"2001:db8::1"}, Subnets: []string{"2001:db8::/32"},
+		Routes: []RouteTarget{{Interface: "OpkgTun0", TunnelID: "t1"}}, SkipIPv6: &skip}
+	ts = buildTargetState(&StoreData{Lists: []DomainList{only}}, nil, nil)
+	if len(ts.groups) != 0 || len(ts.routes) != 0 {
+		t.Fatalf("an all-IPv6 list must produce no group and no route: %+v", ts)
+	}
+	// Снос туннеля снимает строки по хранилищу, без сверки (tunnelRouteRefs):
+	// число групп обязано совпасть со сверкой, иначе `no` по строке, которой
+	// нет, — E в журнале ndm.
+	if refs := tunnelRouteRefs(&only, "OpkgTun0"); len(refs) != 0 {
+		t.Fatalf("an all-IPv6 list has no router lines to remove: %+v", refs)
 	}
 }

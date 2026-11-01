@@ -1,3 +1,4 @@
+import { m } from '$lib/i18n';
 import { api } from '$lib/api/client';
 import type {
   SingboxRouterOutbound,
@@ -14,7 +15,7 @@ import { parseInlineRuleList, isInlineRuleListEmpty } from '$lib/utils/singboxIn
 import { expandGeoLinesInInput } from '$lib/utils/singboxInlineGeoExpand';
 import { submitTemplates, type SubmitResult } from './templatesActions';
 import type { TemplateGroup, TemplateItem } from './templatesData';
-import type { CustomMatcherFields, OutboundCategory } from './addWizardStore';
+import type { CustomMatcherFields, OutboundCategory, WizardCompositeMode } from './addWizardStore';
 import type { WizardEditMode } from './ruleWizardPrefill';
 import { singleRuleSetTagFromTemplateId } from './simpleRule';
 
@@ -28,15 +29,18 @@ export class ValidationError extends Error {
 export async function resolveTunnelOutbound(
   tunnelTags: string[],
   existingOutbounds: SingboxRouterOutbound[],
+  compositeMode?: WizardCompositeMode,
 ): Promise<string> {
-  if (tunnelTags.length === 0) throw new ValidationError('Выберите туннель');
+  if (tunnelTags.length === 0) throw new ValidationError(m.sb_router_wizard_err_pick_tunnel());
   if (tunnelTags.length === 1) return tunnelTags[0];
 
-  const existing = findMatchingComposite(existingOutbounds, tunnelTags);
+  const existing = findMatchingComposite(existingOutbounds, tunnelTags, compositeMode)
+    ?? (!compositeMode ? findMatchingComposite(existingOutbounds, tunnelTags) : undefined);
   if (existing) return existing.tag;
 
+  const mode = compositeMode || 'urltest';
   const tag = nextCustomCompositeTag(existingOutbounds.map((o) => o.tag));
-  await api.singboxRouterAddOutbound(buildWizardCompositeOutbound(tag, tunnelTags));
+  await api.singboxRouterAddOutbound(buildWizardCompositeOutbound(tag, tunnelTags, mode));
   return tag;
 }
 
@@ -44,9 +48,10 @@ export async function resolveOutbound(
   category: OutboundCategory,
   tunnelTags: string[],
   existingOutbounds: SingboxRouterOutbound[] = [],
+  compositeMode?: WizardCompositeMode,
 ): Promise<string> {
   if (category === 'tunnel') {
-    return resolveTunnelOutbound(tunnelTags, existingOutbounds);
+    return resolveTunnelOutbound(tunnelTags, existingOutbounds, compositeMode);
   }
   if (category === 'direct') return 'direct';
   return 'block';
@@ -62,14 +67,14 @@ export function nextCustomRuleSetTag(existing: string[]): string {
 
 /** Парсит smart-list (с geo-expand) в правила inline rule_set. Бросает ValidationError. */
 export async function parseCustomList(rulesList: string): Promise<Record<string, unknown>[]> {
-  if (isInlineRuleListEmpty(rulesList)) throw new ValidationError('Список пуст');
+  if (isInlineRuleListEmpty(rulesList)) throw new ValidationError(m.sb_router_wizard_err_list_empty());
   const { text } = await expandGeoLinesInInput(
     rulesList,
     async (kind, tag) => (await api.expandGeoTag(kind, tag)).lines,
   );
   const parsed = parseInlineRuleList(text);
   if (parsed.errors.length > 0) throw new ValidationError(parsed.errors.join('\n'));
-  if (parsed.rules.length === 0) throw new ValidationError('Нет валидных строк');
+  if (parsed.rules.length === 0) throw new ValidationError(m.sb_router_wizard_err_no_valid_lines());
   return parsed.rules;
 }
 
@@ -78,6 +83,7 @@ export interface SubmitWizardArgs {
   customFields: CustomMatcherFields;
   outboundCategory: OutboundCategory;
   tunnelTags: string[];
+  compositeMode?: WizardCompositeMode;
   groups: TemplateGroup[];
   existingRuleSetTags: string[];
   existingOutbounds: SingboxRouterOutbound[];
@@ -88,11 +94,12 @@ export async function submitWizard(args: SubmitWizardArgs): Promise<SubmitResult
     args.outboundCategory,
     args.tunnelTags,
     args.existingOutbounds,
+    args.compositeMode,
   );
   const hasCustom = !isInlineRuleListEmpty(args.customFields.rulesList);
 
   if (args.selectedTemplates.length === 0 && !hasCustom) {
-    throw new ValidationError('Выберите шаблон или опишите правило');
+    throw new ValidationError(m.sb_router_wizard_err_pick_template_or_rule());
   }
 
   // Кастом валидируем ДО любых сетевых вызовов — никаких частичных провалов из-за невалидного ввода.
@@ -161,6 +168,7 @@ export interface SubmitWizardEditArgs {
   customFields: CustomMatcherFields;
   outboundCategory: OutboundCategory;
   tunnelTags: string[];
+  compositeMode?: WizardCompositeMode;
   groups: TemplateGroup[];
   presets: SingboxRouterPreset[];
   existingRuleSetTags: string[];
@@ -175,14 +183,15 @@ export async function submitWizardEdit(args: SubmitWizardEditArgs): Promise<void
     args.outboundCategory,
     args.tunnelTags,
     args.existingOutbounds,
+    args.compositeMode,
   );
 
   if (args.editMode === 'external') {
     if (args.selectedTemplates.length !== 1) {
-      throw new ValidationError('Выберите один шаблон');
+      throw new ValidationError(m.sb_router_wizard_err_pick_one_template());
     }
     const tag = ruleSetTagFromTemplateId(args.selectedTemplates[0], args.groups, args.presets);
-    if (!tag) throw new ValidationError('Шаблон не найден');
+    if (!tag) throw new ValidationError(m.sb_router_wizard_err_template_not_found());
     await api.singboxRouterUpdateRule(args.ruleIndex, buildRoutedRule(outbound, [tag]));
     return;
   }

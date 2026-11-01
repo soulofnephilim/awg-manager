@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,16 +18,19 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
 	ndmscommand "github.com/hoaxisr/awg-manager/internal/ndms/command"
+	ndmsevents "github.com/hoaxisr/awg-manager/internal/ndms/events"
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	ndmstransport "github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/netdev"
 	"github.com/hoaxisr/awg-manager/internal/obfuscator"
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
+	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/env"
+	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
-	"github.com/hoaxisr/awg-manager/internal/tunnel"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/backend"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/firewall"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
@@ -74,14 +78,18 @@ func runCleanup(dataDir string) {
 	// the same transport + commands further down.
 	cleanupEventBus := events.NewBus()
 	cleanupNDMSTransport := ndmstransport.New(ndmstransport.NewSemaphore(4))
+	// Свой барьер подмены устройства (D-N1): уборка — отдельный процесс со
+	// своими списками и своим бэкендом.
+	gate := &netdev.SwapGate{}
 	cleanupNDMSQueries := ndmsquery.NewQueries(ndmsquery.Deps{
-		Getter: cleanupNDMSTransport,
-		Logger: nil,
-		IsOS5:  osdetect.Is5,
+		Getter:   cleanupNDMSTransport,
+		Logger:   nil,
+		IsOS5:    osdetect.Is5,
+		SwapGate: gate,
 	})
 
-	// Init NDMS info (needed for OS detection). Запасной канал (ndmc через
-	// unix-сокет) живёт внутри Init, так что деинсталляция получает его даром.
+	// Init NDMS info (needed for OS detection). Каналы (ndmc, RCI, файл)
+	// живут внутри Init, так что деинсталляция получает их даром.
 	//
 	// В отличие от демона, здесь НЕ ждём: повиснуть в деинсталляции хуже, чем
 	// прибрать по умолчанию. Цена известна и названа в сообщении — если
@@ -95,19 +103,18 @@ func runCleanup(dataDir string) {
 		bootLog.Warn("ndms-version", "",
 			"версия NDMS не определена ни через RCI, ни через ndmc, ни из файла ("+err.Error()+
 				") — уборка идёт по умолчанию "+string(osdetect.Get())+", часть остатков может уцелеть")
-	} else if ndmsinfo.Source() != ndmsinfo.SourceRCI {
+	} else if ndmsinfo.Source() != ndmsinfo.SourceNdmc {
 		bootLog.Info("ndms-version", "",
-			"ndm не ответил, версия получена каналом "+ndmsinfo.Source()+": "+osdetect.ReleaseString())
+			"ndmc не ответил, версия получена каналом "+ndmsinfo.Source()+": "+osdetect.ReleaseString())
 	}
 
 	// Create service components
 	wgClient := wg.New()
-	backendImpl := backend.NewKernel()
+	backendImpl := backend.NewKernel(gate)
 	stateMgr := state.New(cleanupNDMSQueries.Interfaces, wgClient, backendImpl, nil)
 	firewallMgr := firewall.New(true /* mssClamp */, osdetect.Is5(), nil)
 
-	// Build NDMS Commands early so the Operator can consume them. HookNotifier
-	// is wired below once the orchestrator exists (see SetHookNotifier call).
+	// Build NDMS Commands early so the Operator can consume them.
 	cleanupNDMSSave := ndmscommand.NewSaveCoordinator(
 		cleanupNDMSTransport,
 		cleanupEventBus,
@@ -116,6 +123,16 @@ func runCleanup(dataDir string) {
 		env.DurationDefault("AWG_NDMS_SAVE_SETTLE_DELAY", 2*time.Second),
 		cleanupNDMSQueries.RunningConfig,
 	)
+	// Шина событий ndm — как у демона (M2 финального ревью F595): уборка
+	// сносит записи (туннели, managed `no interface` после сохранения
+	// dnsRoutes.CleanupAll), и `no` во время записи — D-N3. ndm при `opkg
+	// remove` жив; сокета нет — сохранения ждут saveFallback (fail-closed).
+	cleanupBus := ndmsevents.NewSaveBusReader(ndmsevents.DefaultBusPath, cleanupNDMSSave, eventsLogger(loggingService))
+	if err := cleanupBus.Start(); err != nil {
+		bootLog.Warn("ndm-event-bus", "", err.Error())
+	} else {
+		defer cleanupBus.Stop()
+	}
 	cleanupNDMSCommands := ndmscommand.NewCommands(ndmscommand.Deps{
 		Poster:  cleanupNDMSTransport,
 		Save:    cleanupNDMSSave,
@@ -127,26 +144,31 @@ func runCleanup(dataDir string) {
 
 	nwgOp := nwg.NewOperator(cleanupNDMSQueries, cleanupNDMSCommands, cleanupNDMSTransport, nil)
 	// Без раннера снос туннеля не гасит релей: процесс пережил бы удаление
-	// пакета. Бинарь тут только с диска — качать на удалении нечего.
-	nwgOp.SetObfuscator(obfuscator.NewRunner(obfuscator.RunnerDeps{
-		BinaryFor: func(_ context.Context, flavor string) (string, error) {
-			return filepath.Join(obfuscator.BinDir, obfuscator.BinaryName(flavor)), nil
-		},
-		Log: logging.NewScopedLogger(loggingService, logging.GroupTunnel, logging.SubOps),
-	}))
+	// пакета. Бинарь тут только с диска — качать на удалении нечего. Ядро
+	// диспетчер не выбирает никогда: Stop без выбора гасит оба бэкенда, а
+	// модуль на удалении грузить незачем.
+	cleanupRelayKmod := nwg.NewRelayKmod(loggingService, nil, nil)
+	cleanupKernel := obfuscator.NewKernelRunner(obfuscator.KernelDeps{
+		Ensure:    func(context.Context) error { return errors.New("cleanup: модуль не грузим") },
+		ProcWrite: func(p string, b []byte) error { return os.WriteFile(p, b, 0) },
+		ProcRead:  kmod.ReadProc,
+	})
+	nwgOp.SetObfuscator(obfuscator.NewDispatcher(
+		obfuscator.NewRunner(obfuscator.RunnerDeps{
+			BinaryFor: func(_ context.Context, flavor string) (string, error) {
+				return filepath.Join(obfuscator.BinDir, obfuscator.BinaryName(flavor)), nil
+			},
+			Log: logging.NewScopedLogger(loggingService, logging.GroupTunnel, logging.SubOps),
+		}),
+		cleanupKernel,
+		func(*storage.Obfuscator, string) bool { return false },
+		nil,
+	))
 	tunnelService := service.New(awgStore, nwgOp, operator, stateMgr, wan.NewModel(), nil)
 
 	// Wire orchestrator for lifecycle operations (Delete needs it)
 	cleanupOrch := orchestrator.New(awgStore, operator, nwgOp, stateMgr, wan.NewModel(), nil)
 	tunnelService.SetOrchestrator(cleanupOrch)
-	nwgOp.SetHookNotifier(cleanupOrch)
-	if os5Op, ok := operator.(interface {
-		SetHookNotifier(tunnel.HookNotifier)
-	}); ok {
-		os5Op.SetHookNotifier(cleanupOrch)
-	}
-	// Wire HookNotifier on NDMS Commands now that the orchestrator exists.
-	cleanupNDMSCommands.SetHookNotifier(cleanupOrch)
 
 	// Create auxiliary services
 	dnsStore := dnsroute.NewStore(dataDir)
@@ -185,8 +207,31 @@ func runCleanup(dataDir string) {
 		initialManuallyStopped: cleanupSettings != nil && cleanupSettings.SingboxManuallyStopped,
 	})
 	singboxOp := core.op
+	// Прокси подписок и сводных групп — тот же набор, что видит демон: без
+	// него Cleanup снимал только ProxyN туннелей (F724). Сбой чтения — уборка
+	// без них, как раньше.
+	subStore, err := subscription.NewStore(filepath.Join(dataDir, "subscriptions.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: subscriptions: %v\n", err)
+	}
+	subGroupStore, err := subscription.NewGroupStore(filepath.Join(dataDir, "subscription-groups.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: subscription groups: %v\n", err)
+	}
+	singboxOp.SetSubscriptionProxySet(subProxySet{store: subStore, groups: subGroupStore})
 
 	accessPolicySvc := accesspolicy.New(cleanupNDMSCommands.Policies, cleanupNDMSCommands.Interfaces, cleanupNDMSQueries, settingsStore, nil, ndmsquery.NewPolicyMarkStore(cleanupNDMSTransport, nil))
+
+	// Перехват sb-router живёт в ядре и переживает и остановку sing-box, и
+	// снос хука в prerm (F623). ДО CleanupAll: тот первым шагом гасит
+	// sing-box, и до конца уборки (до 60 с) трафик устройств политики уходил
+	// бы в порты без слушателя; так он эти секунды идёт мимо sing-box. Хук 50
+	// правил не вернёт: Uninstall удаляет их файлы. Свой бюджет — общий
+	// принадлежит CleanupAll.
+	fmt.Println("  Removing sb-router netfilter...")
+	nfCtx, nfCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer nfCancel()
+	router.ReleaseNetfilterForRemoval(nfCtx, router.Deps{AppLog: loggingService})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -196,6 +241,15 @@ func runCleanup(dataDir string) {
 	cleanupSvc := cleanup.New(tunnelService, awgStore, dnsSvc, managedSvc, accessPolicySvc, clientRouteSvc, singboxOp, probeHostSvc, configSaver{sc: cleanupNDMSSave})
 	if err := cleanupSvc.CleanupAll(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Cleanup error: %v\n", err)
+	}
+
+	// Слоты awgm_relay и сам модуль переживают удаление файлов пакета (§4.6).
+	// Свой бюджет: CleanupAll мог съесть общие 60 с целиком, а с истёкшим
+	// контекстом rmmod не запустился бы — повторить снятие некому.
+	kmodCtx, kmodCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer kmodCancel()
+	if err := cleanupRelayKmod.Unload(kmodCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "awgm_relay unload: %v\n", err)
 	}
 
 	// Интерфейс policy-tun живёт в NDMS и переживает удаление файлов: снимаем
@@ -209,13 +263,14 @@ func runCleanup(dataDir string) {
 	tunDeps := router.Deps{
 		AppLog:       loggingService,
 		Settings:     settingsStore,
-		OpkgTun:      cleanupNDMSCommands.Interfaces,
-		DefaultRoute: cleanupNDMSCommands.Routes,
-		SegmentNAT:   cleanupNDMSCommands.NAT,
+		OpkgTun:      confirmingOpkgTun{cleanupNDMSCommands.Interfaces, cleanupNDMSQueries.Interfaces},
+		DefaultRoute: confirmingDefaultRoute{cleanupNDMSCommands.Routes, cleanupNDMSQueries.Interfaces},
+		SegmentNAT:   confirmingSegmentNAT{cleanupNDMSCommands.NAT, cleanupNDMSQueries.Interfaces},
 		NATState:     &routerNATStateAdapter{nat: cleanupNDMSQueries.NAT, static: cleanupNDMSQueries.StaticNAT},
 		// Скан по описанию: без него снятие шло бы по индексу вслепую и на
 		// удалении пакета разобрало бы ЧУЖОЙ OpkgTun, занявший наш номер.
 		OpkgTunScan: opkgTunScanner(cleanupNDMSQueries.Interfaces),
+		SwapGate:    gate,
 	}
 	if err := router.ReleasePolicyTunForRemoval(ptCtx, tunDeps); err != nil {
 		fmt.Fprintf(os.Stderr, "policy-tun cleanup error: %v\n", err)
@@ -228,12 +283,16 @@ func runCleanup(dataDir string) {
 	// а процесс сейчас завершится: без явного сброса удаление интерфейса не
 	// доехало бы до startup-config и вернулось бы после перезагрузки роутера.
 	// CleanupAll свой сброс уже сделал — до этих снятий.
-	if err := (configSaver{sc: cleanupNDMSSave}).Save(ptCtx); err != nil {
+	// Свой бюджет (R1 ревью F595): снятия выше могли съесть ptCtx, а с шиной
+	// сохранение ждёт конец записи — отказ до POST оставил бы сирот.
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer saveCancel()
+	if err := (configSaver{sc: cleanupNDMSSave}).Save(saveCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "save config after tun cleanup: %v\n", err)
 	}
 
 	// Токен RCI — последним: всё выше ходит в RCI с ним.
-	if err := ndmstransport.RevokeToken(); err != nil {
+	if err := ndmstransport.RevokeToken(ndmsinfo.KnownWithoutRCIToken()); err != nil {
 		fmt.Fprintf(os.Stderr, "revoke rci token: %v\n", err)
 	}
 

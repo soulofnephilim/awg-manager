@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
+	"github.com/hoaxisr/awg-manager/internal/ndms/command"
+	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/singbox/vlink"
 	sysfiles "github.com/hoaxisr/awg-manager/internal/sys/files"
 )
@@ -25,16 +28,31 @@ type ConfigMutator interface {
 	AddOutbound(tag string, jsonBody []byte) error
 	UpdateOutbound(tag string, jsonBody []byte) error
 	RemoveOutbound(tag string) error
+	// ReferencedAmong — какие из tags упомянуты в файлах остальных слотов
+	// (черновик, активный, выключенный): такую сироту не снимаем (#1081).
+	ReferencedAmong(tags []string) (map[string]bool, error)
 	AddInbound(tag string, jsonBody []byte) error
 	RemoveInbound(tag string) error
 	AddRouteRule(jsonBody []byte) error
 	RemoveRouteRule(inboundTag, outboundTag string) error
-	EnsureProxy(ctx context.Context, idx, port int, description string) error
-	RemoveProxy(ctx context.Context, idx int) error
+	// EnsureProxy — ProxyN индекса из store: создать, если записи нет, или
+	// перенастроить, если запись наша (description == ownedDesc — прежний
+	// Label при переименовании); иначе singbox.ErrProxyForeign (F577).
+	EnsureProxy(ctx context.Context, idx, port int, description, ownedDesc string) error
+	// CreateProxy — создание ProxyN на только что выделенном индексе; индекс
+	// занят чужим — ошибка (на ≥5.01, F577); ours — откат вправе снести
+	// ProxyN (создан этой командой, F574).
+	CreateProxy(ctx context.Context, idx, port int, description string) (ours bool, err error)
+	// RemoveProxy снимает ProxyN, только если его description равен desc
+	// (Label); иначе singbox.ErrProxyForeign без команд (F577).
+	RemoveProxy(ctx context.Context, idx int, desc string) error
 	// Reload commits the batch of mutations since the last commit with a
 	// single validate+save+reload (#331). Mutations (Add*/Remove*/Update*)
 	// only accumulate in memory; nothing reaches sing-box until Reload.
 	Reload(ctx context.Context) error
+	// PersistSelectorDefault пишет default селектора в файл слота без
+	// проверки и reload — для старта движка после смены сервера (F427).
+	PersistSelectorDefault(selectorTag, memberTag string) error
 	// Rollback discards an uncommitted batch (mutations since the last
 	// commit), restoring the last committed config. Used on a failed Create
 	// so a partial materialisation can't linger in the in-memory slot.
@@ -50,7 +68,7 @@ type ConfigMutator interface {
 	// as "no live data" rather than as an error.
 	GetClashSelectorActive(selectorTag string) (string, error)
 	// DeclaredOutboundTags returns the outbound tags currently present in
-	// the committed subscriptions slot (after the last flush). The Service
+	// the working subscriptions slot (including staged changes). The Service
 	// reconciles stored MemberTags against this so servers that flush
 	// dropped (sing-box rejected) don't linger and get re-introduced as
 	// dangling group members on later rebuilds. Empty slice = "can't
@@ -151,6 +169,15 @@ func (s *Service) proxyEnabled() bool {
 	return s.ndmsProxyEnabled()
 }
 
+// proxySkippable — в проходе SyncProxies запись на индексе чужая или
+// созданное осталось на роутере (метку отложенного сноса уже поставил
+// ProxyManager): Warn и следующий элемент — обрыв лишил бы обслуживания все
+// следующие подписки и группы (F577).
+func proxySkippable(err error) bool {
+	var left *command.LeftCreatedError
+	return errors.Is(err, singbox.ErrProxyForeign) || errors.As(err, &left)
+}
+
 // SyncProxies ensures every subscription has its NDMS ProxyN interface when
 // the global toggle is on. It is the toggle-ON counterpart to the gated
 // Create: subscriptions created while the toggle was off carry ProxyIndex=-1
@@ -184,8 +211,14 @@ func (s *Service) SyncProxies(ctx context.Context) error {
 		err := func() error {
 			mu.Lock()
 			defer mu.Unlock()
-			return s.mutator.EnsureProxy(ctx, sub.ProxyIndex, int(sub.ListenPort), sub.Label)
+			return s.mutator.EnsureProxy(ctx, sub.ProxyIndex, int(sub.ListenPort), sub.Label, sub.Label)
 		}()
+		if proxySkippable(err) {
+			// Чужая запись на индексе — постоянное состояние: обрыв прохода
+			// лишил бы обслуживания все следующие подписки (F577).
+			s.logWarn("subscription-sync-proxies", sub.ID, "skipped: "+err.Error())
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("subscription %s: ensure proxy: %w", sub.ID, err)
 		}
@@ -199,7 +232,12 @@ func (s *Service) SyncProxies(ctx context.Context) error {
 		if g.ListenPort == 0 || g.ProxyIndex < 0 {
 			continue
 		}
-		if err := s.mutator.EnsureProxy(ctx, g.ProxyIndex, int(g.ListenPort), g.Label); err != nil {
+		err := s.mutator.EnsureProxy(ctx, g.ProxyIndex, int(g.ListenPort), g.Label, g.Label)
+		if proxySkippable(err) {
+			s.logWarn("subscription-sync-proxies", g.ID, "skipped: "+err.Error())
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("subscription group %s: ensure proxy: %w", g.ID, err)
 		}
 	}
@@ -218,7 +256,7 @@ func (s *Service) SyncProxies(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("alloc proxy index: %w", err)
 			}
-			if err := s.mutator.EnsureProxy(ctx, idx, int(sub.ListenPort), sub.Label); err != nil {
+			if err := s.mutator.EnsureProxy(ctx, idx, int(sub.ListenPort), sub.Label, sub.Label); err != nil {
 				return fmt.Errorf("ensure proxy: %w", err)
 			}
 			if err := s.store.SetProxyIndex(sub.ID, idx); err != nil {
@@ -226,6 +264,10 @@ func (s *Service) SyncProxies(ctx context.Context) error {
 			}
 			return nil
 		}()
+		if proxySkippable(err) {
+			s.logWarn("subscription-sync-proxies", sub.ID, "skipped: "+err.Error())
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("subscription %s: %w", sub.ID, err)
 		}
@@ -239,7 +281,12 @@ func (s *Service) SyncProxies(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("subscription group %s: alloc proxy index: %w", g.ID, err)
 		}
-		if err := s.mutator.EnsureProxy(ctx, idx, int(g.ListenPort), g.Label); err != nil {
+		err = s.mutator.EnsureProxy(ctx, idx, int(g.ListenPort), g.Label, g.Label)
+		if proxySkippable(err) {
+			s.logWarn("subscription-sync-proxies", g.ID, "skipped: "+err.Error())
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("subscription group %s: ensure proxy: %w", g.ID, err)
 		}
 		if err := s.groups.SetProxyIndex(g.ID, idx); err != nil {
@@ -418,11 +465,18 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Subscription, er
 			s.store.Delete(sub.ID)
 			return nil, err
 		}
-		proxyIdx = idx
-		if err := s.mutator.EnsureProxy(ctx, idx, int(port), sub.Label); err != nil {
-			// Best-effort cleanup: EnsureProxy may have partially registered
-			// the interface before failing. RemoveProxy is idempotent.
-			_ = s.mutator.RemoveProxy(ctx, idx)
+		ours, err := s.mutator.CreateProxy(ctx, idx, int(port), sub.Label)
+		if ours {
+			proxyIdx = idx
+		}
+		if err != nil {
+			// Best-effort cleanup: CreateProxy may have partially registered
+			// the interface before failing. RemoveProxy is idempotent. Снос —
+			// только своего: индекс мог занять чужой, ещё не видимый ProxyN
+			// (F574).
+			if ours {
+				_ = s.mutator.RemoveProxy(ctx, idx, sub.Label)
+			}
 			s.store.Delete(sub.ID)
 			s.logWarn("subscription-create", sub.ID, "failed to ensure NDMS proxy: "+err.Error())
 			return nil, fmt.Errorf("subscription: register NDMS proxy: %w", err)
@@ -432,21 +486,22 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Subscription, er
 	if _, err := s.refreshLocked(ctx, sub.ID); err != nil {
 		// refreshLocked accumulates member outbounds / selector / inbound /
 		// route into the in-memory slot but commits only at Reload (#331).
-		// On a mid-failure nothing was flushed to 40-subscriptions.json, so
+		// On a mid-failure nothing was flushed to 13-subscriptions.json, so
 		// discard the uncommitted batch — otherwise the partial would linger
 		// in memory and get committed by the next operation (issue #287).
 		// Ошибки applyDiff уже откатаны внутри его txMu-секции; этот Rollback
 		// страхует ранние ошибки (fetch/parse) и потому берёт txMu сам —
 		// иначе он мог бы сбросить открытый батч параллельной операции.
 		_ = s.withTx(func() error { s.mutator.Rollback(); return nil })
-		// EnsureProxy succeeded above — the NDMS Proxy interface is now
-		// live in the router. We must roll it back before dropping the
+		// CreateProxy succeeded above — the NDMS Proxy interface is now
+		// live in the router (proxyIdx >= 0 — только если создан нами).
+		// We must roll it back before dropping the
 		// storage row; otherwise every failed Create leaks a ProxyN that
 		// only the startup cleanup sweep would eventually reap. Swallow
 		// the RemoveProxy error: the storage row is going away regardless,
 		// and a stranded ProxyN is recoverable via Settings → cleanup.
 		if proxyIdx >= 0 {
-			_ = s.mutator.RemoveProxy(ctx, proxyIdx)
+			_ = s.mutator.RemoveProxy(ctx, proxyIdx, sub.Label)
 		}
 		s.store.Delete(sub.ID)
 		s.logWarn("subscription-create", sub.ID, "initial refresh failed: "+err.Error())
@@ -593,14 +648,14 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 		var errMsg string
 		switch {
 		case isClash && emptyClean:
-			errMsg = "subscription: подписка пуста (proxies: []). Возможно, истекла или ещё не активирована — проверь на стороне провайдера."
+			errMsg = "subscription: " + EmptyFeedMarker + " (proxies: []). Возможно, истекла или ещё не активирована — проверь на стороне провайдера."
 		case isSbJSON && emptyClean:
-			errMsg = "subscription: подписка пуста (outbounds: []). Возможно, истекла или ещё не активирована — проверь на стороне провайдера."
+			errMsg = "subscription: " + EmptyFeedMarker + " (outbounds: []). Возможно, истекла или ещё не активирована — проверь на стороне провайдера."
 		case len(parseRes.Errors) > 0:
-			hint := "ни одной валидной ссылки. Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, tt:// (TrustTunnel), Clash YAML / mihomo, sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru), а также mieru JSON config (формат mieru apply config, экспорт панелей), TOML-конфиг TrustTunnel (экспорт endpoint или конфиг клиента). Записи vmess пропускаются."
+			hint := NoValidLinksMarker + ". Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, tt:// (TrustTunnel), Clash YAML / mihomo, sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru), а также mieru JSON config (формат mieru apply config, экспорт панелей), TOML-конфиг TrustTunnel (экспорт endpoint или конфиг клиента). Записи vmess пропускаются."
 			errMsg = fmt.Sprintf("subscription: %s Первая ошибка парсера: %s", hint, parseRes.Errors[0].Error())
 		default:
-			hint := "ни одной валидной ссылки. Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, tt:// (TrustTunnel), Clash YAML / mihomo, sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru), а также mieru JSON config (формат mieru apply config, экспорт панелей), TOML-конфиг TrustTunnel (экспорт endpoint или конфиг клиента). Записи vmess пропускаются."
+			hint := NoValidLinksMarker + ". Поддерживаются: base64-encoded share-links, HTML с share-link якорями, plain text со ссылками vless://, trojan://, ss://, hysteria2://, mieru://, mierus://, tt:// (TrustTunnel), Clash YAML / mihomo, sing-box JSON (одиночный, массив конфигов, или массив outbounds; типы vless, trojan, ss, hysteria2, mieru), а также mieru JSON config (формат mieru apply config, экспорт панелей), TOML-конфиг TrustTunnel (экспорт endpoint или конфиг клиента). Записи vmess пропускаются."
 			if len(parts.Info) > 0 {
 				hint += fmt.Sprintf(" (инфо-строк провайдера: %d — не являются серверами)", len(parts.Info))
 			}
@@ -693,11 +748,17 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 	// Reconcile against what actually materialized: flush() may have dropped
 	// servers sing-box rejected. Keeping them in MemberTags would re-create
 	// dangling group members on the next rebuild (cross-slot unknown-outbound).
-	declared := make(map[string]bool)
-	for _, t := range s.mutator.DeclaredOutboundTags() {
+	declaredTags := s.mutator.DeclaredOutboundTags()
+	declared := make(map[string]bool, len(declaredTags))
+	for _, t := range declaredTags {
 		declared[t] = true
 	}
 	newMembers, prunedTags := filterDeclaredMembers(newMembers, declared)
+	memberTags := make([]string, len(newMembers))
+	for i, m := range newMembers {
+		memberTags[i] = m.Tag
+	}
+	orphans := slotOrphans(sub, declaredTags, memberTags, diff.Orphan)
 	// Added считается по членам, реально попавшим в подписку: серверы,
 	// скрытые фильтром или исключением, в MemberTags не пишутся и потому
 	// приходят из ApplyDiff новыми на КАЖДОМ обновлении. len(diff.New) завышал
@@ -731,7 +792,7 @@ func (s *Service) refreshLockedOpts(ctx context.Context, id string, forceInlineR
 		}
 		s.logInfo("subscription-refresh", id, fmt.Sprintf("migrated %d excluded tag(s) to the current identity scheme", len(sub.ExcludedTags)))
 	}
-	if err := s.store.SetMembersExtras(id, newMembers, diff.Orphan, rejected, info, excludedMembers, filteredMembers); err != nil {
+	if err := s.store.SetMembersExtras(id, newMembers, orphans, rejected, info, excludedMembers, filteredMembers); err != nil {
 		return nil, err
 	}
 
@@ -792,10 +853,39 @@ func filterDeclaredMembers(members []MemberInfo, declared map[string]bool) (kept
 	return kept, dropped
 }
 
+// slotOrphans — outbound'ы подписки, лежащие в слоте вне её состава (issue
+// #1081). Считаются по слоту, а не копятся списком: OrphanTags хранил только
+// сирот последнего обновления, старые поколения выпадали из учёта и навсегда
+// оставались в конфиге. Свои outbound'ы узнаём по префиксу selector-тега —
+// все теги членов строит stableTagFromKey, а "sub-" зарезервирован за
+// подписками (validateGroupTag). Пустой declared — мутатор не умеет
+// отчитаться (как в filterDeclaredMembers): тогда fallback.
+func slotOrphans(sub *Subscription, declared, members, fallback []string) []string {
+	if len(declared) == 0 {
+		return fallback
+	}
+	keep := make(map[string]bool, len(members))
+	for _, t := range members {
+		keep[t] = true
+	}
+	prefix := sub.SelectorTag + "-"
+	var out []string
+	for _, t := range declared {
+		if strings.HasPrefix(t, prefix) && !keep[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // applyDiff commits the diff to sing-box config. Selector + mixed inbound +
 // route rule are recreated each refresh (they may not exist yet on first
-// run). Per-member outbounds are added/updated/left alone — orphans are NOT
-// removed (the UI offers explicit deletion).
+// run). Per-member outbounds are added/updated; orphans — серверы подписки,
+// выпавшие из выдачи, — снимаются в том же пакете (#1081): в группе их нет,
+// трафик через них не идёт, а без снятия они копились без предела (тысячи
+// outbound и мегабайты слота при почасовом обновлении у провайдера с ротацией).
+// Сироту, тег которой упомянут в любом другом слоте (включая выключенный и
+// черновик), не трогаем (removeUnreferencedOrphans).
 //
 // Сервер пропускается (а для Existing — снимается из конфига), когда он
 // исключён по тегу ИЛИ отвергнут regex-фильтром по имени. Оба механизма
@@ -832,10 +922,16 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 		return ErrAllMembersFiltered
 	}
 
+	inSlot := make(map[string]bool)
+	for _, t := range s.mutator.DeclaredOutboundTags() {
+		inSlot[t] = true
+	}
 	for _, n := range diff.New {
-		if skip(n.Tag, n.Out.Label) {
+		if skip(n.Tag, n.Out.Label) && !inSlot[n.Tag] {
 			continue // исключённый / отфильтрованный сервер не материализуем
 		}
+		// Пропускаемый, но лежащий в слоте (исключён, на него ссылается другой
+		// слот, F761) — обновляем тело; снимет его, если нужно, чистка сирот.
 		jsonWithTag := materializeMemberOutbound(n.Out.Outbound, n.Tag, sub.BindInterface, s.logWarn)
 		if err := s.mutator.AddOutbound(n.Tag, jsonWithTag); err != nil {
 			return err
@@ -843,7 +939,9 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 	}
 	for _, e := range diff.Existing {
 		if skip(e.Tag, e.Out.Label) {
-			s.mutator.RemoveOutbound(e.Tag) // на случай, если ранее был активен
+			// Не снимаем сами: вне состава он — сирота, и ниже его снимет
+			// removeUnreferencedOrphans, если на него не ссылается другой слот
+			// (F761). Тело на следующих обновлениях освежает ветка New выше.
 			continue
 		}
 		jsonWithTag := materializeMemberOutbound(e.Out.Outbound, e.Tag, sub.BindInterface, s.logWarn)
@@ -869,6 +967,13 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 	if err := s.mutator.AddOutbound(sub.SelectorTag, BuildGroupOutbound(*sub, memberTags, defaultTag)); err != nil {
 		return err
 	}
+	// Сироты — по слоту, как у ручной очистки: все поколения, а не только
+	// выпавшие в этом обновлении. Без отчёта мутатора (пустой declared) —
+	// не трогаем ничего.
+	removed, kept, rerr := s.removeUnreferencedOrphans(slotOrphans(sub, s.mutator.DeclaredOutboundTags(), memberTags, nil))
+	if rerr != nil {
+		s.logWarn("subscription-refresh", sub.ID, "orphans kept, other slots unreadable: "+rerr.Error())
+	}
 
 	// Mixed inbound — add only if not present (first time).
 	if sub.ListenPort != 0 {
@@ -893,7 +998,51 @@ func (s *Service) applyDiff(ctx context.Context, sub *Subscription, diff DiffRes
 	}
 	s.stageGroups(map[string][]MemberInfo{sub.ID: fresh})
 
-	return s.mutator.Reload(ctx)
+	if err := s.mutator.Reload(ctx); err != nil {
+		return err
+	}
+	if removed > 0 {
+		s.logInfo("subscription-refresh", sub.ID, fmt.Sprintf("orphans removed: %d, kept: %d (referenced by other slots)", removed, len(kept)))
+	}
+	return nil
+}
+
+// removeUnreferencedOrphans снимает (staged) сирот, которых не упоминает ни
+// один другой слот, и возвращает число снятых и оставленные теги. Сирота со
+// ссылкой остаётся: группа соседнего слота иначе молча потеряла бы члена —
+// висячих членов валидатор вычищает без ошибки, а Reload — на диске (#1081).
+// Слоты не прочитаны — не снимаем ничего (по неполному ответу нельзя) и
+// возвращаем ошибку: обновление, исключение и удаление члена её глотают
+// (outbound остаётся сиротой до следующей попытки), ручная очистка — отдаёт.
+func (s *Service) removeUnreferencedOrphans(orphans []string) (removed int, kept []string, err error) {
+	if len(orphans) == 0 {
+		return 0, nil, nil
+	}
+	refs, err := s.mutator.ReferencedAmong(orphans)
+	if err != nil {
+		return 0, orphans, err
+	}
+	for _, t := range orphans {
+		if refs[t] {
+			kept = append(kept, t)
+			continue
+		}
+		if s.mutator.RemoveOutbound(t) != nil {
+			kept = append(kept, t) // не снят — остаётся сиротой в учёте
+			continue
+		}
+		removed++
+	}
+	return removed, kept, nil
+}
+
+// OwnedOutboundTags — группа подписки, её члены и сироты (slotOrphans: в т.ч.
+// исключённые, оставленные из-за ссылок). По ним проверяются ссылки перед
+// удалением подписки (F761) — группы и членов мало: остальные лежат в слоте
+// именно потому, что на них ссылаются.
+func (s *Service) OwnedOutboundTags(sub *Subscription) []string {
+	tags := append([]string{sub.SelectorTag}, sub.MemberTags...)
+	return append(tags, slotOrphans(sub, s.mutator.DeclaredOutboundTags(), sub.MemberTags, sub.OrphanTags)...)
 }
 
 // Delete tears down a subscription unconditionally: the NDMS ProxyN, mixed
@@ -930,7 +1079,7 @@ func (s *Service) deleteLocked(ctx context.Context, id string) error {
 	// держать общий транзакционный мьютекс во время I/O. Ошибка не блокирует
 	// удаление (как и раньше) — осиротевший ProxyN подберёт cleanup-свип.
 	if sub.ProxyIndex >= 0 {
-		if err := s.mutator.RemoveProxy(ctx, sub.ProxyIndex); err != nil {
+		if err := s.mutator.RemoveProxy(ctx, sub.ProxyIndex, sub.Label); err != nil {
 			s.store.UpdateState(id, RefreshResult{When: time.Now(), Err: err})
 		}
 	}
@@ -942,6 +1091,9 @@ func (s *Service) deleteLocked(ctx context.Context, id string) error {
 		s.mutator.RemoveOutbound(sub.SelectorTag)
 		for _, m := range sub.MemberTags {
 			s.mutator.RemoveOutbound(m)
+		}
+		for _, t := range slotOrphans(sub, s.mutator.DeclaredOutboundTags(), sub.MemberTags, sub.OrphanTags) {
+			s.mutator.RemoveOutbound(t)
 		}
 		return s.reloadWithGroups(ctx)
 	}); err != nil {
@@ -981,6 +1133,9 @@ func toMemberInfo(tag string, p vlink.ParsedOutbound) MemberInfo {
 		}
 	}
 	mi.TransportKey = transportKey(ob)
+	if r, ok := ob["realm"].(map[string]any); ok {
+		mi.RealmID, _ = r["realm_id"].(string)
+	}
 	if tls, ok := ob["tls"].(map[string]any); ok {
 		if serverName, ok := tls["server_name"].(string); ok {
 			mi.SNI = strings.TrimSpace(serverName)
@@ -1095,6 +1250,13 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 		Enabled:       &current.Enabled,
 		Label:         &current.Label,
 	}
+	// Label ProxyN-подписки — его description на роутере: в store он пишется
+	// только после того, как роутер его принял, иначе store и роутер
+	// разошлись бы, и владение по description сочло бы ProxyN чужим (F577).
+	var proxyLabel *string
+	if patch.Label != nil && s.proxyEnabled() && current.ProxyIndex >= 0 {
+		proxyLabel, patch.Label = patch.Label, nil
+	}
 	sub, err := s.store.Update(id, patch)
 	if err != nil {
 		return nil, err
@@ -1172,15 +1334,21 @@ func (s *Service) Update(id string, patch UpdatePatch) (*Subscription, error) {
 			return rollback(err, "enabled change")
 		}
 	}
-	if patch.Label != nil && s.proxyEnabled() && sub.ProxyIndex >= 0 {
-		// EnsureProxy is idempotent — re-running with new description updates
-		// NDMS Proxy.description in place. Best-effort: on failure the store
-		// already has the new label, the proxy description stays stale until
-		// next refresh; we surface the error so the UI can show a warning.
+	if proxyLabel != nil {
+		// EnsureProxy обновляет description ProxyN на месте. Отказ — Label в
+		// store остаётся прежним (ошибка наверх, UI покажет); частично
+		// применённое повтор примет: EnsureProxy признаёт и прежний, и новый.
+		// Слот занят чужим — на роутере переименовывать нечего, Label пишется.
 		// Skipped when the toggle is off or the subscription has no ProxyN
-		// (created while off): there is no interface to relabel.
-		if err := s.mutator.EnsureProxy(context.Background(), sub.ProxyIndex, int(sub.ListenPort), sub.Label); err != nil {
+		// (created while off): the label goes in with the patch.
+		err := s.mutator.EnsureProxy(context.Background(), sub.ProxyIndex, int(sub.ListenPort), *proxyLabel, current.Label)
+		if errors.Is(err, singbox.ErrProxyForeign) {
+			s.logWarn("subscription-update", id, "proxy description not synced: "+err.Error())
+		} else if err != nil {
 			return sub, fmt.Errorf("sync proxy description: %w", err)
+		}
+		if sub, err = s.store.Update(id, UpdatePatch{Label: proxyLabel}); err != nil {
+			return nil, err
 		}
 	}
 	return sub, nil
@@ -1226,17 +1394,17 @@ func (s *Service) stageGroupRebuild(sub *Subscription) error {
 }
 
 // ErrActiveMemberOnURLTest is returned by SetActiveMember when the
-// caller tries to pin a member on a urltest-mode subscription. Sing-box's
-// Clash-compat API only exposes member-selection on `selector` outbounds —
-// urltest groups are auto-managed and reject the switch with a runtime
+// caller tries to pin a member on an auto-select subscription (urltest,
+// fallback). Sing-box's Clash-compat API only exposes
+// member-selection on `selector` outbounds — auto-select groups and reject the switch with a runtime
 // error. Callers (HTTP handlers) should map this to 409 Conflict so the
 // UI can hide the picker rather than spam errors.
-var ErrActiveMemberOnURLTest = errors.New("subscription: SetActiveMember not supported in urltest mode")
+var ErrActiveMemberOnURLTest = errors.New("subscription: SetActiveMember not supported in auto-select modes")
 
 // SetActiveMember updates the selector's "default" pointer to memberTag.
-// It persists the active member in the store, then hits the Clash API for an
-// instant runtime switch — no SIGHUP, no connection drop. The config slot is
-// deliberately left alone (see the comment at the store write below).
+// It persists the active member in the store and in the slot file (no
+// reload), then hits the Clash API for an instant runtime switch — no SIGHUP,
+// no connection drop.
 func (s *Service) SetActiveMember(ctx context.Context, id, memberTag string) error {
 	s.logInfo("subscription-active-member", id, "set requested: "+memberTag)
 	mu := s.lockSub(id)
@@ -1247,7 +1415,7 @@ func (s *Service) SetActiveMember(ctx context.Context, id, memberTag string) err
 	if err != nil {
 		return err
 	}
-	if sub.EffectiveMode() == ModeURLTest {
+	if sub.EffectiveMode().AutoSelect() {
 		return ErrActiveMemberOnURLTest
 	}
 	found := false
@@ -1262,13 +1430,16 @@ func (s *Service) SetActiveMember(ctx context.Context, id, memberTag string) err
 	}
 
 	// Persist the choice in the store — the source of truth for the active
-	// member. The config slot is deliberately NOT rewritten: refresh rebuilds
-	// selector.default from the stored active member (F424), and a slot write
-	// without Reload would only leave an uncommitted batch open in the
-	// adapter. Trade-off: until the next refresh/rebuild the slot still holds
-	// the previous default, so a sing-box restart starts from it.
+	// member; refresh rebuilds selector.default from it (F424).
 	if err := s.store.SetActiveMember(id, memberTag); err != nil {
 		return err
+	}
+	// И в файл слота — без проверки и reload: иначе рестарт sing-box или ребут
+	// до ближайшего refresh поднимал подписку на прежнем сервере, хотя UI
+	// показывает новый (F427). Отказ записи не фатален: store уже держит выбор,
+	// refresh его применит.
+	if err := s.mutator.PersistSelectorDefault(sub.SelectorTag, memberTag); err != nil {
+		s.logWarn("subscription-active-member", id, "persist selector default failed: "+err.Error())
 	}
 
 	// Switch the live selector via the Clash API — instant, no SIGHUP, no
@@ -1319,14 +1490,22 @@ var ErrInvalidInput = errors.New("subscription: invalid input")
 // the problem, not the daemon.
 var ErrValidation = errors.New("subscription: validation failed")
 
+// Маркеры текста LastError, по которым MCP различает вид отказа обновления
+// (localdeps.lastErrorKind). Константы, а не договорённость о формулировке:
+// правка текста здесь же правит и классификатор (MC14).
+const (
+	EmptyFeedMarker    = "подписка пуста"
+	NoValidLinksMarker = "ни одной валидной ссылки"
+)
+
 // ErrShareLinkInvalid is returned when AddManualMember could not parse
 // the supplied share-link into exactly one outbound.
 var ErrShareLinkInvalid = errors.New("subscription: share-link did not parse to a single outbound")
 
-// ErrMemberDuplicate is returned when AddManualMember would create a
-// member with a tag that already exists for this subscription. Tags are
-// derived from the server identity (StableTag), so the same vless://
-// twice produces the same tag.
+// ErrMemberDuplicate is returned when AddManualMember is given a server the
+// subscription already has: same outbound body by the widest identity key
+// (credentials, cipher and ports included), or, for a member without a body
+// in the config slot, the same metadata.
 var ErrMemberDuplicate = errors.New("subscription: member already exists")
 
 // ErrMemberNotFound is returned by RemoveMember when the supplied tag
@@ -1334,9 +1513,8 @@ var ErrMemberDuplicate = errors.New("subscription: member already exists")
 var ErrMemberNotFound = errors.New("subscription: member not found")
 
 // AddManualMember parses a single share-link, validates it, and adds it
-// to an inline subscription as a new member. Re-uses the same StableTag
-// derivation as the URL refresh path so adding the same server twice
-// short-circuits with ErrMemberDuplicate.
+// to an inline subscription as a new member. Adding a server the
+// subscription already has short-circuits with ErrMemberDuplicate.
 //
 // On selector-mode subs the new member becomes available for picking;
 // on urltest-mode subs it joins the auto-test pool. Active member is
@@ -1384,21 +1562,32 @@ func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*S
 		return updated, nil
 	}
 	out := parts.Valid[0]
-	// Набор для chooseKeys недоступен (credential существующих членов не
-	// хранится), поэтому тег считаем по полному ключу: два эндпоинта одного
-	// сервера, различающиеся
-	// только транспортом, обязаны получить РАЗНЫЕ теги, иначе второй outbound
-	// перезаписал бы первый (issue #625).
+	// Набор для chooseKeys недоступен, поэтому тег считаем по самому широкому
+	// ключу: два эндпоинта одного сервера, различающиеся только транспортом
+	// (issue #625), логином при общем пароле (F734), шифром (F737) или портами
+	// (F738/F739), обязаны получить РАЗНЫЕ теги, иначе второй outbound
+	// перезаписал бы первый.
 	//
-	// Повтор по-прежнему ловим по метаданным: точного ключа существующих
-	// членов взять неоткуда (мутатор не отдаёт тела outbound'ов), а их теги
-	// могли быть посчитаны на любом уровне ключа. TransportKey закрывает ту
-	// дыру, из-за которой разные ws-пути считались одним сервером; у записей,
-	// сделанных до появления поля, он пуст — для них остаётся прежнее грубое
-	// сравнение, иначе точный повтор проскочил бы под тем же тегом.
-	tag := stableTagFromKey(sub.ID, fullKey(out))
+	// Повтор ловим по телам существующих членов из слота конфига — тем же
+	// широким ключом, с учётными данными. Их теги могли быть посчитаны на
+	// любом уровне ключа, поэтому сравниваются тела, а не теги. Члена без
+	// тела в слоте (сброшен flush'ем) сравниваем по метаданным, как раньше:
+	// TransportKey закрывает разные ws-пути, у записей до появления поля он
+	// пуст — для них грубое сравнение, иначе точный повтор проскочил бы.
+	keys := keysOf(out)
+	tag := stableTagFromKey(sub.ID, keys.ports)
 	mi := toMemberInfo(tag, out)
+	bodies := make(map[string]map[string]any)
+	for _, ob := range s.mutator.SubscriptionOutbounds() {
+		bodies[outboundTag(ob)] = ob
+	}
 	for _, existing := range sub.Members {
+		if ob, ok := bodies[existing.Tag]; ok {
+			if keysFromOutbound(existing.Protocol, existing.Server, existing.Port, ob).ports == keys.ports {
+				return nil, ErrMemberDuplicate
+			}
+			continue
+		}
 		if existing.Server != mi.Server || existing.Port != mi.Port ||
 			existing.Protocol != mi.Protocol || existing.SNI != mi.SNI {
 			continue
@@ -1407,6 +1596,11 @@ func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*S
 			continue
 		}
 		return nil, ErrMemberDuplicate
+	}
+	// Тот же тег при других метаданных — коллизия 4-байтового хэша тега:
+	// AddOutbound пишет по тегу и молча перезаписал бы чужой сервер (F733).
+	if slices.Contains(sub.MemberTags, tag) {
+		return nil, fmt.Errorf("%w: tag %s collides with an existing member", ErrMemberDuplicate, tag)
 	}
 
 	// Fail-closed write order: mutate sing-box config (idempotent
@@ -1449,9 +1643,33 @@ func (s *Service) AddManualMember(ctx context.Context, id, shareLink string) (*S
 			return err
 		}
 
+		// Запись подписки — к прежнему составу, когда новый член в конфиг не
+		// попал: иначе UI показал бы сервер, которого в селекторе нет, а выбор
+		// его падал бы на Clash (F652).
+		restore := func() error {
+			return s.store.SetMembersExtras(id, sub.Members, sub.OrphanTags, sub.RejectedMembers, sub.InfoItems, sub.ExcludedMembers, sub.FilteredMembers)
+		}
 		if err := s.reloadWithGroups(ctx); err != nil {
+			// Адаптер откатил пакет к снимку — без члена.
 			s.logWarn("subscription-member-add", id, "reload failed: "+err.Error())
+			if rErr := restore(); rErr != nil {
+				return fmt.Errorf("reload: %w (store rollback: %v)", err, rErr)
+			}
 			return fmt.Errorf("reload: %w", err)
+		}
+		// Flush мог отбросить сервер (тег сборки, отказ sing-box check) и снять
+		// ссылки на него. Сверка — та же, что у Refresh (filterDeclaredMembers:
+		// пустой список объявленных — «неизвестно», не сверяем).
+		declared := make(map[string]bool)
+		for _, t := range s.mutator.DeclaredOutboundTags() {
+			declared[t] = true
+		}
+		if _, dropped := filterDeclaredMembers(newMembers, declared); slices.Contains(dropped, tag) {
+			if err := restore(); err != nil {
+				return err
+			}
+			s.logWarn("subscription-member-add", id, "member dropped by validation: "+tag)
+			return fmt.Errorf("%w: сервер отброшен при применении конфигурации sing-box", ErrValidation)
 		}
 		return nil
 	}); err != nil {
@@ -1532,8 +1750,11 @@ func (s *Service) RemoveMember(ctx context.Context, id, memberTag string) (*Subs
 		}
 
 		// Selector now references newTags only; safe to drop the old member
-		// outbound. RemoveOutbound is idempotent.
-		s.mutator.RemoveOutbound(memberTag)
+		// outbound — кроме упомянутого в другом слоте: соседняя группа иначе
+		// молча потеряла бы члена (F761), такой остаётся сиротой.
+		if _, _, err := s.removeUnreferencedOrphans([]string{memberTag}); err != nil {
+			s.logWarn("subscription-member-remove", id, "member outbound kept, other slots unreadable: "+err.Error())
+		}
 
 		newMembers := append([]MemberInfo{}, sub.Members[:idx]...)
 		newMembers = append(newMembers, sub.Members[idx+1:]...)
@@ -1617,9 +1838,15 @@ func (s *Service) ExcludeMembers(ctx context.Context, id string, tags []string) 
 		if err := s.mutator.AddOutbound(sub.SelectorTag, BuildGroupOutbound(*sub, keepTags, newActive)); err != nil {
 			return fmt.Errorf("rebuild group outbound: %w", err)
 		}
-		// (2) снять outbounds исключённых (идемпотентно).
-		for _, m := range moved {
-			s.mutator.RemoveOutbound(m.Tag)
+		// (2) снять outbounds исключённых (идемпотентно) — кроме упомянутых в
+		// других слотах: группа соседнего слота иначе молча потеряла бы члена
+		// (F761). Такой остаётся в слоте сиротой; слоты не прочитаны — тоже.
+		movedTags := make([]string, len(moved))
+		for i, m := range moved {
+			movedTags[i] = m.Tag
+		}
+		if _, _, err := s.removeUnreferencedOrphans(movedTags); err != nil {
+			s.logWarn("subscription-exclude", id, "excluded outbounds kept, other slots unreadable: "+err.Error())
 		}
 		// (3) union ExcludedTags + ExcludedMembers, atomic store-write.
 		excludedTags := append(append([]string{}, sub.ExcludedTags...), tags...)
@@ -1711,7 +1938,10 @@ func parseSubscriptionBody(body []byte, ct string) vlink.BatchResult {
 	case vlink.IsTrustTunnelTOML(body):
 		return vlink.ParseTrustTunnelTOML(body)
 	default:
-		return vlink.ParseBatch(NormalizeBody(body, ct))
+		links, unsupported := normalizeBodyCounted(body, ct)
+		res := vlink.ParseBatch(links)
+		res.SkippedUnsupp += unsupported
+		return res
 	}
 }
 
@@ -2010,8 +2240,10 @@ func (s *Service) RemoveInfoItem(ctx context.Context, id, itemID string) (*Subsc
 	return s.store.Get(id)
 }
 
-// DeleteOrphans removes orphan-flagged outbounds from sing-box config and
-// clears the OrphanTags slice in the store.
+// DeleteOrphans removes the subscription's orphan outbounds from sing-box
+// config. Сироты считаются по слоту на момент вызова (slotOrphans), а не по
+// сохранённому списку; упомянутые в других слотах остаются в слоте и в
+// OrphanTags (removeUnreferencedOrphans), не прочитаны слоты — отказ.
 func (s *Service) DeleteOrphans(ctx context.Context, id string) error {
 	s.logInfo("subscription-orphans-delete", id, "delete requested")
 	mu := s.lockSub(id)
@@ -2021,12 +2253,30 @@ func (s *Service) DeleteOrphans(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	var orphans []string
+	removed, keptCount := 0, 0
 	// Stage + store + Reload — одна txMu-секция (общий батч адаптера).
 	if err := s.withTx(func() error {
-		for _, t := range sub.OrphanTags {
-			s.mutator.RemoveOutbound(t)
+		orphans = slotOrphans(sub, s.mutator.DeclaredOutboundTags(), sub.MemberTags, sub.OrphanTags)
+		// Refresh may commit the slot before failing to persist MemberTags.
+		// Refuse before staging any deletion: the live group is newer than
+		// the store, and removing its members would cascade into its route.
+		if used := orphansUsedBySelector(sub, s.mutator.SubscriptionOutbounds(), orphans); len(used) > 0 {
+			err := fmt.Errorf("%w: очистка отменена: состав подписки расходится с конфигом — серверы %s используются группой %q", ErrValidation, strings.Join(used, ", "), sub.SelectorTag)
+			s.logWarn("subscription-orphans-delete", id, err.Error())
+			return err
 		}
-		if err := s.store.SetMembership(id, sub.MemberTags, nil); err != nil {
+		// Та же проверка ссылок, что у автоудаления: член группы соседнего
+		// слота иначе вычистился бы на диске молча (#1081).
+		var kept []string
+		var rerr error
+		if removed, kept, rerr = s.removeUnreferencedOrphans(orphans); rerr != nil {
+			err := fmt.Errorf("%w: очистка отменена: не удалось прочитать конфигурацию других слотов, проверить ссылки на серверы нельзя: %v", ErrValidation, rerr)
+			s.logWarn("subscription-orphans-delete", id, err.Error())
+			return err
+		}
+		keptCount = len(kept)
+		if err := s.store.SetMembership(id, sub.MemberTags, kept); err != nil {
 			s.logWarn("subscription-orphans-delete", id, "failed to clear orphan list in store: "+err.Error())
 			return err
 		}
@@ -2038,6 +2288,35 @@ func (s *Service) DeleteOrphans(ctx context.Context, id string) error {
 	}); err != nil {
 		return err
 	}
-	s.logInfo("subscription-orphans-delete", id, fmt.Sprintf("deleted %d orphan outbounds", len(sub.OrphanTags)))
+	s.logInfo("subscription-orphans-delete", id, fmt.Sprintf("deleted %d orphan outbounds, kept %d", removed, keptCount))
 	return nil
+}
+
+// orphansUsedBySelector checks the group's reference fields that
+// cleanReferencesToTag would prune during a flush. Only the subscription's
+// own group is considered; this is not a general cross-slot reference check.
+func orphansUsedBySelector(sub *Subscription, outbounds []map[string]any, orphans []string) []string {
+	if len(orphans) == 0 {
+		return nil
+	}
+	refs := make(map[string]bool)
+	for _, ob := range outbounds {
+		if outboundTag(ob) != sub.SelectorTag {
+			continue
+		}
+		members, _ := ob["outbounds"].([]any)
+		for _, member := range members {
+			refs[stringOf(member)] = true
+		}
+		if def := stringOf(ob["default"]); def != "" {
+			refs[def] = true
+		}
+	}
+	var used []string
+	for _, tag := range orphans {
+		if refs[tag] {
+			used = append(used, tag)
+		}
+	}
+	return used
 }

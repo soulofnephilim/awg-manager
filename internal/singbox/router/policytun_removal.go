@@ -2,9 +2,18 @@ package router
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 )
+
+// errNoSwapGate — Release*ForRemoval собраны без барьера списков. ServiceImpl
+// здесь собирается мимо NewService (тот ставит гейт по умолчанию), и снос
+// opkgtunN (fakeIPLinkDelete) разыменовал бы nil — паника в `--cleanup` при
+// удалении пакета. Гейт по умолчанию не подходит: он был бы не общим с
+// читателями списка уборки (D-N1), то есть барьером только на вид.
+var errNoSwapGate = errors.New("router: SwapGate обязателен для снятия при удалении пакета")
 
 // ReleasePolicyTunForRemoval снимает интерфейс policy-tun при удалении пакета
 // (`opkg remove` → `--cleanup`): вернуть NAT сегментов → снять NDMS-дефолт →
@@ -26,6 +35,9 @@ import (
 // переписывает netfilter-хук на диске, а на пути удаления пакета возвращать
 // файлы — ровно обратное тому, что требуется.
 func ReleasePolicyTunForRemoval(ctx context.Context, d Deps) error {
+	if d.SwapGate == nil {
+		return errNoSwapGate
+	}
 	if d.Settings == nil || d.OpkgTun == nil {
 		return nil
 	}
@@ -55,8 +67,12 @@ func ReleasePolicyTunForRemoval(ctx context.Context, d Deps) error {
 	// Индекс из записи мог занять ЧУЖОЙ OpkgTun после смерти нашего: и снятие
 	// дефолта, и удаление по имени разобрали бы посторонний туннель. Записи
 	// сегментов выше вернуть всё равно надо — они про сегменты, а не про
-	// интерфейс. «Не знаем» ≠ «чужой»: без скана работаем как раньше.
-	if s.skipForeignTeardown(ctx, ndmsName, policyTunDescription, "policy-tun-remove") {
+	// интерфейс. Скан упал — отказ ошибкой (F493): дефолт и интерфейс не
+	// трогаем, `--cleanup` печатает причину.
+	if proceed, err := s.teardownGate(ctx, ndmsName, "policy-tun-remove", policyTunOwnDescriptions(st)...); !proceed {
+		if err != nil {
+			return fmt.Errorf("%s: %w", ndmsName, err)
+		}
 		return nil
 	}
 

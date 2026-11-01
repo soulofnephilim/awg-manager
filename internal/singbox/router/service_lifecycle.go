@@ -203,6 +203,10 @@ func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
 				}
 			}
 		})
+	// Только штатное описание: пользовательское (PolicyTunDescription) не
+	// уникально по построению, и реап по нему снёс бы чужой OpkgTun с тем же
+	// именем (policytun_description.go). Свой переименованный интерфейс
+	// исключён по NDMS-имени, как и прежде.
 	s.reapOrphansByDescription(ctx, policyTunDescription, ownedPolicy, "policy-tun-reap", nil)
 
 	// Миграционный артефакт: policy-payload на записи ЧУЖОГО режима (v34
@@ -229,8 +233,11 @@ func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
 		// живут в персисте, который очищается только при успешном delete).
 		removed, err := s.releaseForeignOpkgTun(ctx, st, "policy-tun-reap")
 		if err != nil {
-			// Персист остаётся — следующий тик/бут повторит.
-			s.appLog.Warn("policy-tun-reap", ownedPolicy, "reap opkgtun: "+err.Error())
+			// Персист остаётся — следующий тик/бут повторит (в т.ч.
+			// errOpkgTunOwnershipUnknown: скан упал, F493; Warn уже дал гейт).
+			if !errors.Is(err, errOpkgTunOwnershipUnknown) {
+				s.appLog.Warn("policy-tun-reap", ownedPolicy, "reap opkgtun: "+err.Error())
+			}
 		} else {
 			// Info — только на реальном сносе: на пропуске чужого интерфейса
 			// сносить было нечего, а запись всё равно снимается (скан успешен,
@@ -238,6 +245,10 @@ func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
 			// протухла). Та же форма, что в fakeip-реапе ниже.
 			if removed {
 				s.appLog.Info("policy-tun-reap", ownedPolicy, "removed orphaned policy-tun OpkgTun (mode != policy-tun)")
+			} else {
+				// !removed без ошибки — пропуск чужого интерфейса (провал сноса
+				// и «скан упал» приходят ошибкой); запись снимается ниже.
+				s.warnPermitIndexChange("policy-tun-reap", ownedPolicy)
 			}
 			if err := s.deps.Settings.SetOpkgTunState(nil); err != nil {
 				s.appLog.Warn("policy-tun-reap", ownedPolicy, "clear policy-tun persist: "+err.Error())
@@ -307,8 +318,16 @@ func (s *ServiceImpl) ReapOrphanedFakeIPTun(ctx context.Context) error {
 	}
 	// Доказанно чужой интерфейс на нашем индексе не сносим (нашего там нет);
 	// запись при этом снимается как отработанная — гоняться за чужим индексом
-	// каждый тик значило бы churn без шанса на успех.
-	if !s.skipForeignTeardown(ctx, owned, fakeIPTunDescription, "fakeip-reap") {
+	// каждый тик значило бы churn без шанса на успех. Скан упал — ни сноса, ни
+	// снятия записи: следующий тик/бут повторит (F493); Warn уже дал гейт,
+	// поэтому наружу nil — иначе планировщик писал бы второе предупреждение.
+	proceed, gateErr := s.teardownGate(ctx, owned, "fakeip-reap", fakeIPTunDescription)
+	if gateErr != nil {
+		return nil
+	}
+	if !proceed {
+		s.warnPermitIndexChange("fakeip-reap", owned)
+	} else {
 		if err := s.teardownOpkgTun(ctx, owned, "fakeip-reap"); err != nil {
 			// Keep the persist on failure: the next tick/boot retries the reap
 			// rather than leaking the orphan forever. teardownOpkgTun has already
@@ -371,7 +390,7 @@ func (s *ServiceImpl) fakeIPReadyInputs() (iface, dnsAddr string, fakeipNet neti
 		return "", "", netip.Prefix{}, false
 	}
 	iface = tunIfaceName(st.Index)
-	dnsAddr, err = DeriveTunDNS(s.deps.FakeIPTun.TunAddr4)
+	dnsAddr, err = DeriveTunDNS(s.resolveFakeIPParams(settings.SingboxRouter).TunAddr4)
 	if err != nil {
 		return "", "", netip.Prefix{}, false
 	}
@@ -738,13 +757,13 @@ func cleanValidateError(err error) string {
 	return strings.TrimSpace(msg)
 }
 
-// Enable is the USER-INITIATED router enable (HTTP handler + SwitchRoutingMode).
+// enable is the USER-INITIATED router enable (SwitchRoutingMode).
 // It clears the sticky master-stop intent — an explicit enable is an explicit
 // intent to run sing-box, which must override a prior master-Stop — then runs
 // the idempotent provisioning. Drift-heal (Reconcile / reconcileFakeIPTun) must
 // NOT clear the intent (the watchdog must respect a user's manual stop and not
 // resurrect the daemon on drift), so it calls enableLocked(ctx, false) instead.
-func (s *ServiceImpl) Enable(ctx context.Context) error {
+func (s *ServiceImpl) enable(ctx context.Context) error {
 	return s.enableLocked(ctx, true)
 }
 
@@ -837,7 +856,13 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 		return err
 	}
 	cfg.Inbounds = ensureTProxyInbound(cfg.Inbounds, sr.UDPTimeout, sr.UDPNATMax)
-	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds)
+	// Инбаунды v6-слоя — из того же снимка настроек, что и его правила ниже
+	// (syncV6), чтобы порты и мосты не могли разойтись.
+	v6Want, v6Mode := s.desiredV6(ctx, sr, mark, policyMode)
+	if v6Mode != v6Unknown {
+		cfg.Inbounds, _ = ensureV6Inbounds(cfg.Inbounds, v6Want, v6Mode == v6On, sr.UDPTimeout, sr.UDPNATMax)
+	}
+	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds, s.foreignIfaces())
 	cfg.EnsureSystemRules(sr.SnifferEnabled)
 	// Neutralize sing-box's short per-protocol UDP timeouts (QUIC/DTLS 30s,
 	// STUN/DNS 10s) applied on sniff/port inference — they ignore the inbound
@@ -850,7 +875,7 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	// cannot drift between the two. The managed route rules live in their
 	// own slot (18-qos-routes.json) and are synced after the config write
 	// below — see qos_routes.go for why they must not live in 20-router.json.
-	qosClasses := activeQoSClasses(sr.QoSClasses)
+	qosClasses := qosClassesFor(sr)
 	cfg.Inbounds, _ = ensureQoSInbounds(cfg.Inbounds, qosClasses, sr.UDPTimeout, sr.UDPNATMax)
 	// Settings was already loaded above; revalidate here in case the
 	// store is corrupted or hand-edited around a schema migration. We
@@ -933,15 +958,19 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	// the same policy). EnsureXtDscpModule first: prepareNetfilter already
 	// tried, this is the belt-and-suspenders retry closest to Install.
 	qosSpecs := qosIPTablesSpecs(qosClasses)
+	qosSpecs6 := qosIPTablesSpecs6(qosClasses)
 	if len(qosSpecs) > 0 {
 		if err := EnsureXtDscpModule(ctx); err != nil {
 			s.appLog.Warn("ensure-xt-dscp", "", err.Error())
 		}
 		if !s.xtDscpUsable(ctx) {
 			s.appLog.Warn("qos-dscp", "", "xt_dscp недоступен — классы QoS пропущены (см. статус xtDscpAvailable)")
-			qosSpecs = nil
+			qosSpecs, qosSpecs6 = nil, nil
 		}
 	}
+	// Классы QoS для IPv6 — та же проекция и тот же гейт xt_dscp: модуль общий
+	// для обоих семейств.
+	v6Want.QoSClasses = qosSpecs6
 
 	// Набор geoip-обхода должен существовать ДО установки правил: правило
 	// `-m set --match-set AWGM-BYPASS` на отсутствующий набор роняет весь
@@ -984,6 +1013,11 @@ func (s *ServiceImpl) enableLocked(ctx context.Context, clearManualStop bool) er
 	// Правила переустановлены и на AWGM-SELECTIVE больше не ссылаются —
 	// теперь набор выпиленного селектива можно снести (однократно).
 	s.destroyLegacySelectiveSetOnce(ctx)
+
+	// v6-слой — после v4 и без права уронить Enable: IPv4-перехват уже поднят.
+	// Конфиг с его инбаундами записан и применён выше, поэтому ждём сокеты как
+	// после правки (inboundsHealed).
+	s.syncV6(ctx, v6Want, v6Mode, false, true, true)
 
 	if err := s.deps.Settings.Update(func(cur *storage.Settings) error {
 		cur.SingboxRouter = sr
@@ -1077,6 +1111,11 @@ func (s *ServiceImpl) healTProxyInbound(ctx context.Context, udpTimeout string, 
 // inbound alone would leave a missing/stale rule unhealed forever once the
 // inbound fields happen to already be correct (fix round 1, review finding).
 func (s *ServiceImpl) healTunSettings(ctx context.Context, slot orchestrator.Slot, sr storage.SingboxRouterSettings) (externalFlipped bool) {
+	if slot == orchestrator.SlotFakeIP {
+		// Слот fakeip без черновика: fakeipWithConfig пишет тот же файл (F741).
+		s.fakeipCfgMu.Lock()
+		defer s.fakeipCfgMu.Unlock()
+	}
 	var (
 		cfg *RouterConfig
 		err error
@@ -1121,13 +1160,16 @@ func (s *ServiceImpl) healTunSettings(ctx context.Context, slot orchestrator.Slo
 		external = in.ExternalConfiguration
 	}
 	inboundOK := in.UDPTimeout == effective && in.UDPNATMax == sr.UDPNATMax &&
-		in.Stack == sr.FakeIPStack && in.ExternalConfiguration == external
+		in.Stack == sr.FakeIPStack && in.ExternalConfiguration == external &&
+		in.DNSMode == tunDNSMode
 	if inboundOK && systemUDPTimeoutRuleOK(cfg.Route.Rules, effective) {
 		return
 	}
 	in.UDPTimeout = effective
 	in.UDPNATMax = sr.UDPNATMax
 	in.Stack = sr.FakeIPStack
+	// Слоты, записанные до F634, несут tun-in без dns_mode.
+	in.DNSMode = tunDNSMode
 	flip := external && !in.ExternalConfiguration
 	in.ExternalConfiguration = external
 	cfg.EnsureUDPTimeoutRule(effective)
@@ -1194,6 +1236,11 @@ func systemUDPTimeoutRuleOK(rules []Rule, effective string) bool {
 // active/disabled-only read in referencedRuleSetArtifactBases) and persists
 // via persistFakeIPConfig.
 func (s *ServiceImpl) heal1140SlotMigration(ctx context.Context, slot orchestrator.Slot) {
+	if slot == orchestrator.SlotFakeIP {
+		// Слот fakeip без черновика: fakeipWithConfig пишет тот же файл (F741).
+		s.fakeipCfgMu.Lock()
+		defer s.fakeipCfgMu.Unlock()
+	}
 	if s.deps.Orch != nil {
 		activePath, err := s.deps.Orch.ActivePath(slot)
 		if err != nil {
@@ -1612,7 +1659,7 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 	// re-point or disable it.
 	if sr.RoutingMode != "fakeip-tun" {
 		for _, c := range qosActive {
-			if !s.isKnownOutboundTag(ctx, c.Outbound, cfg) {
+			if !s.isKnownQoSOutbound(ctx, c.Outbound, cfg) {
 				issues = append(issues, Issue{
 					Severity: "warning",
 					Kind:     "qos-outbound-missing",
@@ -1636,6 +1683,16 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 		}
 		issues = append(issues, Issue{Severity: "warning", Kind: "qos-xt-dscp", Message: msg})
 	}
+	// Перехват IPv6 выбран, но правила не стоят — причина из последней сверки.
+	if issue, ok := s.v6Issue(sr); ok {
+		issues = append(issues, issue)
+	}
+	if issue, ok := s.bypass6Issue(sr); ok {
+		issues = append(issues, issue)
+	}
+	if issue, ok := inertV6SubnetsIssue(sr); ok {
+		issues = append(issues, issue)
+	}
 	// fakeip-tun active iface: surface the provisioned kernel iface name
 	// ("opkgtun<idx>") so the UI can show it in the engine-settings panel. Only
 	// when in fakeip-tun mode AND actually provisioned (persisted FakeIPState);
@@ -1646,10 +1703,11 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 	if fakeIPSt, ok := opkgTunOwned(settings, stateFakeIPTun); sr.RoutingMode == "fakeip-tun" &&
 		ok && fakeIPSt.Provisioned {
 		fakeIPIface = tunIfaceName(fakeIPSt.Index)
-		if d, derr := DeriveTunDNS(s.deps.FakeIPTun.TunAddr4); derr == nil {
+		tunAddr4 := s.resolveFakeIPParams(sr).TunAddr4
+		if d, derr := DeriveTunDNS(tunAddr4); derr == nil {
 			fakeIPDns = d
 		}
-		if addr, _, aerr := splitCIDRToAddrMask(s.deps.FakeIPTun.TunAddr4); aerr == nil {
+		if addr, _, aerr := splitCIDRToAddrMask(tunAddr4); aerr == nil {
 			fakeIPTunAddr = addr
 		}
 	}
@@ -1747,6 +1805,7 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 		FakeIPIface:             fakeIPIface,
 		FakeIPDns:               fakeIPDns,
 		FakeIPTunAddr:           fakeIPTunAddr,
+		TunAddrLocked:           tunAddrLocked(settings),
 		CacheDBPath:             cacheDBPath,
 		PolicyTunIface:          policyTunIface,
 		PolicyTunNDMSName:       policyTunNDMS,
@@ -1759,7 +1818,7 @@ func (s *ServiceImpl) GetStatus(ctx context.Context) (Status, error) {
 	}, nil
 }
 
-func (s *ServiceImpl) Disable(ctx context.Context) error {
+func (s *ServiceImpl) disable(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1796,6 +1855,10 @@ func (s *ServiceImpl) Disable(ctx context.Context) error {
 	}
 
 	s.deps.IPTables.Uninstall(ctx)
+	// v6-слой сносится вместе с v4 и так же безусловно, включая набор
+	// AWGM-BYPASS6: общий проход наполнения создаёт его и тогда, когда правила
+	// слоя так и не встали (на LAN нет IPv6).
+	s.sweepV6(ctx)
 	// Только ПОСЛЕ Uninstall: пока правило `--match-set` в ядре, ipset
 	// откажется сносить набор («set is in use»). Безусловно, а не по
 	// currentBypassGeoIPTags: после рестарта демона поле пустое, а набор и
@@ -1960,7 +2023,7 @@ func (s *ServiceImpl) Reconcile(ctx context.Context) error {
 		// do not clear the sticky intent (clearManualStop=false).
 		return s.enableLocked(ctx, false)
 	case !sr.Enabled && installedAny:
-		return s.Disable(ctx)
+		return s.disable(ctx)
 	case sr.Enabled && installedComplete:
 		return s.reconcileInstalled(ctx, sr)
 	}
@@ -2035,7 +2098,7 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 			// удалена. Fail-safe disable, no auto-recovery; причина — в журнал.
 			s.appLog.Warn("reconcile", sr.PolicyName,
 				"политика не найдена в NDMS — движок маршрутизации выключается (fail-safe)")
-			return s.Disable(ctx)
+			return s.disable(ctx)
 		}
 		s.ensurePolicyWAN(ctx, sr, s.runningConfigLines(ctx, "tproxy"))
 	}
@@ -2050,22 +2113,25 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	bypassGeoTagsChanged := !slices.Equal(s.currentBypassGeoIPTags, sr.BypassGeoIPTags)
 
 	// QoS-DSCP change detection: only the iptables-relevant projection
-	// (DSCP + ports). An outbound-only change does not need an iptables
-	// re-Install — the healQoSConfig call below converges the sing-box side.
+	// (DSCP + ports + Bypass). An outbound-only change between real outbounds
+	// does not need an iptables re-Install — the healQoSConfig call below
+	// converges the sing-box side; a switch to/from QoSBypassOutbound flips
+	// Bypass and does.
 	// Graceful degradation happens HERE, before change detection: when
 	// xt_dscp support is missing the desired dispatch set degrades to empty
 	// (feature-off; xtDscpUsable logs availability transitions) — gating
 	// later would leave desired≠installed forever and re-Install on every
 	// tick. When the module/extension shows up, the (TTL-bounded) probe
 	// flips and qosChanged triggers one re-Install with rules.
-	qosClasses := activeQoSClasses(sr.QoSClasses)
+	qosClasses := qosClassesFor(sr)
 	qosSpecs := qosIPTablesSpecs(qosClasses)
+	qosSpecs6 := qosIPTablesSpecs6(qosClasses)
 	if len(qosSpecs) > 0 {
 		if err := EnsureXtDscpModule(ctx); err != nil {
 			s.appLog.Warn("ensure-xt-dscp", "", err.Error())
 		}
 		if !s.xtDscpUsable(ctx) {
-			qosSpecs = nil
+			qosSpecs, qosSpecs6 = nil, nil
 		}
 	}
 	// Применённые классы читаются прямо из снимка, как и соседние три входа
@@ -2092,10 +2158,24 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	if err := s.healTProxyInbound(ctx, sr.UDPTimeout, sr.UDPNATMax); err != nil {
 		s.appLog.Warn("heal-tproxy", "", err.Error())
 	}
+	// Инбаунды v6-слоя — тем же порядком: сначала конфиг, правила в самом
+	// конце (syncV6), когда sing-box уже слушает.
+	v6Want, v6Mode := s.desiredV6(ctx, sr, mark, policyMode)
+	v6Want.QoSClasses = qosSpecs6
+	v6Healed, err := s.healV6Inbounds(ctx, sr, v6Want, v6Mode)
+	if err != nil {
+		s.appLog.Warn("heal-ipv6", "", err.Error())
+	}
 	// healQoSConfig: per-class inbound pairs (20-router.json) + managed route
 	// rules (18-qos-routes.json). Converges class add/remove/disable and
 	// outbound edits applied through UpdateSettings→Reconcile, and cleans
 	// stale qos-* artifacts. No-op (no write, no reload) when converged.
+	// Долечивание F703/F704: выбор WAN и сниффер, сохранённые до версии с
+	// мгновенным применением, доезжают до слота без пересохранения настроек.
+	// Сошлось — ни записи, ни reload.
+	if err := s.reapplyRouterSettings(ctx, sr); err != nil {
+		s.appLog.Warn("reconcile", "router-settings", err.Error())
+	}
 	qosHealed := false
 	if healed, err := s.healQoSConfig(ctx, sr); err != nil {
 		s.appLog.Warn("heal-qos", "", err.Error())
@@ -2146,7 +2226,9 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 	// явный fail-closed blackhole — DROP policy-трафика (с теми же RETURN-
 	// исключениями LAN/router/WAN, что и у перехвата), чтобы гарантированно НЕ
 	// течь в WAN, пока движок не вернётся. Снимается ниже, когда движок оживёт.
-	wantBlackhole := jumpsMissing && engineDown
+	// При V4Off (ipv6_only) блокировку не ставим: IPv4 не перехватывается, и
+	// DROP уронил бы трафик, который должен идти мимо sing-box.
+	wantBlackhole := jumpsMissing && engineDown && !want.V4Off
 	if wantBlackhole {
 		// Спек блокировки — ТОТ ЖЕ спек перехвата, а не выборка полей из него.
 		// Так блокировка дропает ровно то, что уехало бы в sing-box (включая
@@ -2282,6 +2364,9 @@ func (s *ServiceImpl) reconcileInstalled(ctx context.Context, sr storage.Singbox
 			s.mu.Unlock()
 		}
 	}
+
+	// v6-слой — последним: его отказ не должен мешать ничему выше.
+	s.syncV6(ctx, v6Want, v6Mode, engineDown, forceInitialSync, v6Healed)
 
 	return nil
 }

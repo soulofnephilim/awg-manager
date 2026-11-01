@@ -10,6 +10,7 @@
 	}
 </script>
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { formatBytes } from '$lib/utils/format';
 
 	interface Props {
@@ -99,11 +100,11 @@
 			<div class="pie-lbl">conn</div>
 		</div>
 
-		<div class="legend">
+		<div class="breakdown-legend">
 			{#each donutSlices as s}
 				<div class="legend-row">
 					<span class="legend-dot" style="background:{s.color}"></span>
-					<span class="legend-name">{buckets.find((b) => b.key === s.key)?.label || (s.key === '@other' ? 'Прочее' : s.key)}</span>
+					<span class="legend-name">{buckets.find((b) => b.key === s.key)?.label || (s.key === '@other' ? m.connections_other() : s.key)}</span>
 					<span class="legend-pct">{s.pct}%</span>
 				</div>
 			{/each}
@@ -138,7 +139,7 @@
 			</button>
 		{/each}
 		{#if buckets.length === 0}
-			<div class="empty">Нет данных</div>
+			<div class="empty">{m.connections_no_data()}</div>
 		{/if}
 	</div>
 </div>
@@ -190,7 +191,7 @@
 		font-size: 9px; color: var(--color-text-muted);
 		text-transform: uppercase; letter-spacing: 0.05em;
 	}
-	.legend {
+	.breakdown-legend {
 		display: flex; flex-direction: column;
 		gap: 4px; font-size: 11px; flex: 1; min-width: 0;
 	}

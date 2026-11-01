@@ -35,6 +35,10 @@ type Request struct {
 	// же идут подписки по введённому пользователем URL — туда версия и
 	// арка панели уходить не должны. Пусто = заголовка нет вовсе.
 	UserAgent string
+	// Headers — дополнительные заголовки; то же правило, что у UserAgent:
+	// только для наших адресов. Сейчас это лишь анонимная статистика
+	// установок в запросе проверки обновлений (internal/updater/stats.go).
+	Headers http.Header
 }
 
 type ResponseMeta struct {
@@ -102,6 +106,9 @@ func (s *Service) ReadAll(ctx context.Context, req Request) ([]byte, ResponseMet
 	}
 	if req.UserAgent != "" {
 		httpReq.Header.Set("User-Agent", req.UserAgent)
+	}
+	for k, v := range req.Headers {
+		httpReq.Header[k] = v
 	}
 	if strings.EqualFold(httpReq.Header.Get("Connection"), "close") {
 		httpReq.Close = true
@@ -172,6 +179,9 @@ func (s *Service) DownloadFile(ctx context.Context, req FileRequest) (FileResult
 	}
 	if req.UserAgent != "" {
 		httpReq.Header.Set("User-Agent", req.UserAgent)
+	}
+	for k, v := range req.Headers {
+		httpReq.Header[k] = v
 	}
 	if strings.EqualFold(httpReq.Header.Get("Connection"), "close") {
 		httpReq.Close = true

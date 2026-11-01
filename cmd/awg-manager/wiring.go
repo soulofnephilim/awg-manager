@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hoaxisr/awg-manager/internal/accesspolicy"
 	"github.com/hoaxisr/awg-manager/internal/api"
@@ -22,6 +23,8 @@ import (
 	ndmsmetrics "github.com/hoaxisr/awg-manager/internal/ndms/metrics"
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	ndmstransport "github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/netdev"
+	"github.com/hoaxisr/awg-manager/internal/obfuscator"
 	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
@@ -53,6 +56,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wg"
 	"github.com/hoaxisr/awg-manager/internal/updater"
+	"github.com/hoaxisr/awg-manager/internal/zapret"
 )
 
 // app is the composition root of the daemon: every subsystem constructed by
@@ -102,18 +106,28 @@ type app struct {
 	ndmsSaveCoord       *ndmscommand.SaveCoordinator
 	ndmsCommands        *ndmscommand.Commands
 	ndmsDispatcher      *ndmsevents.Dispatcher
+	ndmsHookSink        *api.HookSink
 	ndmsMetricsPoller   *ndmsmetrics.Poller
 
 	// tunnel core
 	kmodLoader    *kmod.Loader
 	wgClient      *wg.ClientImpl
 	backendImpl   *backend.KernelBackend
+	swapGate      *netdev.SwapGate // барьер списков на подмене устройства (D-N1), один на процесс
 	stateMgr      *state.ManagerImpl
 	eventBus      *events.Bus
 	operator      ops.Operator
 	nwgOp         *nwg.OperatorNativeWG
 	wanModel      *wan.Model
 	tunnelService *service.ServiceImpl
+
+	// obfDispatcher — выбор бэкенда релея обфускатора (ядро/процесс); ставит
+	// wireProxyrt, читает хук выключателя (только после srv.Start).
+	obfDispatcher *obfuscator.Dispatcher
+	// obfKmodTripped — сторож выключил kernel-релей в этой жизни демона
+	// (§4.9); снимается только явным возвратом пользователя к ядру.
+	obfKmodTripped atomic.Bool
+
 	// opkgTunOwners — пять поставщиков занятости пула OpkgTun. Состав общий на
 	// всех, кто выдаёт номера, и потому собирается один раз (opkgTunOwners).
 	opkgTunOwners opkgTunOwners
@@ -131,6 +145,7 @@ type app struct {
 
 	// routing / aux services
 	hydraService        *hydraroute.Service
+	zapretService       *zapret.Service
 	geoDataStore        *hydraroute.GeoDataStore
 	geoRefreshScheduler *hydraroute.GeoRefreshScheduler
 	dnsRouteStore       *dnsroute.Store

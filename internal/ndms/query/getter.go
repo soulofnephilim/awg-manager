@@ -89,18 +89,15 @@ type FakeGetter struct {
 	errFor     map[string]error  // path → error to return
 	defaultErr error             // returned when no specific entry set
 
-	// POST-side scripting. POST payloads are not paths, so we key by the
-	// interface name extracted from {"show":{"interface":{"name":...}}}
-	// payloads — the only POST shape currently used in this package.
-	// Non-interface POSTs fall through to postHandler.
-	postIfaceResp  map[string][]byte
-	postIfaceErr   map[string]error
-	postIfaceCalls map[string]int
+	// rcTree — записи дерева rc (SetRC): GET /show/rc/interface/ отдаёт их
+	// картой id → rc, если путь не заскриптован явно.
+	rcTree map[string]json.RawMessage
 
-	// system-name resolver POSTs.
+	// system-name resolver POSTs. Прочие POST — postHandler.
 	postSystemName      map[string][]byte
 	postSystemNameErr   map[string]error
 	postSystemNameCalls map[string]int
+	batchPosts          int
 
 	postHandler func(payload any) (json.RawMessage, error)
 }
@@ -109,13 +106,10 @@ type FakeGetter struct {
 // SetRaw / SetError / SetDefaultError.
 func NewFakeGetter() *FakeGetter {
 	return &FakeGetter{
-		calls:          make(map[string]int),
-		jsonResp:       make(map[string]string),
-		rawResp:        make(map[string][]byte),
-		errFor:         make(map[string]error),
-		postIfaceResp:  make(map[string][]byte),
-		postIfaceErr:   make(map[string]error),
-		postIfaceCalls: make(map[string]int),
+		calls:    make(map[string]int),
+		jsonResp: make(map[string]string),
+		rawResp:  make(map[string][]byte),
+		errFor:   make(map[string]error),
 	}
 }
 
@@ -141,6 +135,29 @@ func (f *FakeGetter) SetError(path string, err error) {
 	f.mu.Unlock()
 }
 
+// SetRC — rc интерфейса name в дереве /show/rc/interface/ (одно чтение на
+// все интерфейсы, как у NDMS; по имени rc не читается, F546).
+func (f *FakeGetter) SetRC(name, body string) {
+	f.mu.Lock()
+	if f.rcTree == nil {
+		f.rcTree = make(map[string]json.RawMessage)
+	}
+	f.rcTree[name] = json.RawMessage(body)
+	f.mu.Unlock()
+}
+
+// rcTreeLocked — тело дерева rc из SetRC; false — SetRC не звали.
+func (f *FakeGetter) rcTreeLocked(path string) (string, bool) {
+	if path != "/show/rc/interface/" || f.rcTree == nil {
+		return "", false
+	}
+	b, err := json.Marshal(f.rcTree)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
 func (f *FakeGetter) SetDefaultError(err error) {
 	f.mu.Lock()
 	f.defaultErr = err
@@ -157,6 +174,9 @@ func (f *FakeGetter) Get(ctx context.Context, path string, dst any) error {
 	f.mu.Lock()
 	f.calls[path]++
 	body, haveBody := f.jsonResp[path]
+	if !haveBody {
+		body, haveBody = f.rcTreeLocked(path)
+	}
 	err, haveErr := f.errFor[path]
 	defaultErr := f.defaultErr
 	f.mu.Unlock()
@@ -178,10 +198,13 @@ func (f *FakeGetter) GetRaw(ctx context.Context, path string) ([]byte, error) {
 	f.calls[path]++
 	body, haveBody := f.rawResp[path]
 	// Fall back to jsonResp so fixtures primed with SetJSON also satisfy
-	// GetRaw callers (e.g. InterfaceStore.ResolveSystemName).
+	// GetRaw callers.
 	if !haveBody {
 		if jsonBody, haveJSON := f.jsonResp[path]; haveJSON {
 			body = []byte(jsonBody)
+			haveBody = true
+		} else if tree, ok := f.rcTreeLocked(path); ok {
+			body = []byte(tree)
 			haveBody = true
 		}
 	}
@@ -213,29 +236,8 @@ func (e errNoFakeResp) Error() string { return "FakeGetter: no response for path
 
 func errNoFakeResponse(path string) error { return errNoFakeResp(path) }
 
-// SetPostInterface scripts the Post response for a ShowInterface(name, …)
-// payload. body must include the full {"show":{"interface":{…}}} wrapper,
-// matching what NDMS actually returns over HTTP. The store unwraps it.
-func (f *FakeGetter) SetPostInterface(name, body string) {
-	f.mu.Lock()
-	f.postIfaceResp[name] = []byte(body)
-	f.mu.Unlock()
-}
-
-// SetPostInterfaceError scripts an error for a Post call against the given
-// interface name. nil clears the entry.
-func (f *FakeGetter) SetPostInterfaceError(name string, err error) {
-	f.mu.Lock()
-	if err == nil {
-		delete(f.postIfaceErr, name)
-	} else {
-		f.postIfaceErr[name] = err
-	}
-	f.mu.Unlock()
-}
-
 // SetPostHandler installs a catch-all handler for POST payloads that
-// aren't ShowInterface-shaped (e.g. listings or future commands). Pass
+// aren't system-name resolver payloads (e.g. listings or commands). Pass
 // nil to clear.
 func (f *FakeGetter) SetPostHandler(fn func(payload any) (json.RawMessage, error)) {
 	f.mu.Lock()
@@ -274,6 +276,13 @@ func (f *FakeGetter) SetPostSystemNameError(name string, err error) {
 	f.mu.Unlock()
 }
 
+// BatchPostCalls — сколько пакетных POST (массив команд) пришло.
+func (f *FakeGetter) BatchPostCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.batchPosts
+}
+
 // PostSystemNameCalls returns how many Post calls hit the system-name
 // resolver with the given NDMS id.
 func (f *FakeGetter) PostSystemNameCalls(name string) int {
@@ -305,18 +314,25 @@ func extractShowSystemName(payload any) string {
 	return name
 }
 
-// PostInterfaceCalls returns how many Post calls targeted the given
-// interface name via a ShowInterface payload.
-func (f *FakeGetter) PostInterfaceCalls(name string) int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.postIfaceCalls[name]
-}
-
-// Post implements Getter.Post. ShowInterface-shaped payloads dispatch on
-// the embedded "name"; system-name resolver payloads dispatch on the
-// embedded id; everything else falls through to postHandler.
-func (f *FakeGetter) Post(_ context.Context, payload any) (json.RawMessage, error) {
+// Post implements Getter.Post. System-name resolver payloads dispatch on
+// the embedded id; everything else falls through to postHandler.
+func (f *FakeGetter) Post(ctx context.Context, payload any) (json.RawMessage, error) {
+	// Пакет команд, как у NDMS: каждый элемент отвечается отдельно, ответ —
+	// массив в том же порядке.
+	if batch, ok := payload.([]any); ok {
+		f.mu.Lock()
+		f.batchPosts++
+		f.mu.Unlock()
+		items := make([]json.RawMessage, len(batch))
+		for i, cmd := range batch {
+			item, err := f.Post(ctx, cmd)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		return json.Marshal(items)
+	}
 	if name := extractShowSystemName(payload); name != "" {
 		f.mu.Lock()
 		if f.postSystemNameCalls == nil {
@@ -343,28 +359,6 @@ func (f *FakeGetter) Post(_ context.Context, payload any) (json.RawMessage, erro
 		return wrapped, nil
 	}
 
-	if name := extractShowInterfaceName(payload); name != "" {
-		f.mu.Lock()
-		f.postIfaceCalls[name]++
-		body, haveBody := f.postIfaceResp[name]
-		err, haveErr := f.postIfaceErr[name]
-		defaultErr := f.defaultErr
-		f.mu.Unlock()
-
-		if haveErr {
-			return nil, err
-		}
-		if !haveBody {
-			if defaultErr != nil {
-				return nil, defaultErr
-			}
-			return nil, errNoFakeResponse("POST show.interface name=" + name)
-		}
-		out := make([]byte, len(body))
-		copy(out, body)
-		return out, nil
-	}
-
 	f.mu.Lock()
 	handler := f.postHandler
 	defaultErr := f.defaultErr
@@ -376,24 +370,4 @@ func (f *FakeGetter) Post(_ context.Context, payload any) (json.RawMessage, erro
 		return nil, defaultErr
 	}
 	return nil, errNoFakeResponse("POST (unscripted payload)")
-}
-
-// extractShowInterfaceName walks a {"show":{"interface":{"name":X,…}}}
-// payload — the only POST shape this fake recognises by name. Returns ""
-// for any other shape so callers can fall back to the catch-all handler.
-func extractShowInterfaceName(payload any) string {
-	top, ok := payload.(map[string]any)
-	if !ok {
-		return ""
-	}
-	show, ok := top["show"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	iface, ok := show["interface"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	name, _ := iface["name"].(string)
-	return name
 }

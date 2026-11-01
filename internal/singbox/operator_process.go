@@ -407,7 +407,8 @@ func (o *Operator) CrashStats() (recentCrashes int, lastCrashReason string, rest
 }
 
 // setLastError stores the most recent fatal/exit reason. Cleared on
-// a successful Start (see startAndWait below).
+// a successful Start (see startAndWait below). Writers pass text through
+// sanitizeSingboxLogText, which also cuts URLs (MC8).
 func (o *Operator) setLastError(s string) {
 	o.lastErrorMu.Lock()
 	o.lastError = s
@@ -431,10 +432,39 @@ func (o *Operator) IsRunning() (bool, int) { return o.proc.IsRunning() }
 // this passthrough exists for legacy fallback paths and the
 // SingboxController contract (router uses it when Orch is unwired in
 // tests, and the scheduler / RefreshRuleSet call it directly).
-func (o *Operator) Reload() error { return o.proc.Reload() }
+func (o *Operator) Reload() error {
+	_, before := o.proc.IsRunning()
+	if err := o.proc.Reload(); err != nil {
+		return err
+	}
+	_, after := o.proc.IsRunning()
+	o.confirmReadyByClash(after != before && after != 0)
+	return nil
+}
+
+// confirmReadyByClash — признак готовности, не зависящий от уровня журнала
+// (F656, решение владельца 14.10): строку «sing-box started» печатает только
+// INFO, и при warn/error старт мимо startAndWait (Reload, Start) не снимал
+// прежний СБОЙ, а backoff не узнавал о новом процессе. Здесь готовность — ответ
+// Clash API: снимается lastError, на свежем процессе (spawned) backoff узнаёт
+// время старта. Строка ожидается — работает handleStderrLine, сюда не ходим.
+func (o *Operator) confirmReadyByClash(spawned bool) {
+	if o.proc.StartedLineExpected == nil || o.proc.StartedLineExpected() || !o.configDeclaresClashAPI() {
+		return
+	}
+	go func() {
+		if err := o.waitClashReady(context.Background(), maxSingboxBootWait); err != nil {
+			return
+		}
+		o.setLastError("")
+		if spawned {
+			o.restartBackoff.NoteProcessStart(time.Now())
+		}
+	}()
+}
 
 // Start cold-starts sing-box after validating the config.d. Public
-// version of the internal startAndWait — used by router.Service.Enable
+// version of the internal startAndWait — used by router.ServiceImpl.enable
 // when sing-box wasn't already running.
 func (o *Operator) Start() error {
 	_, err := o.startSpawned()
@@ -458,6 +488,8 @@ func (o *Operator) startSpawned() (bool, error) {
 		// См. startAndWait: время старта нужно backoff'у для распознавания
 		// «здорового» аптайма перед следующим падением.
 		o.restartBackoff.NoteProcessStart(time.Now())
+		// Время старта уже отмечено — по Clash снимается только lastError.
+		o.confirmReadyByClash(false)
 	}
 	return spawned, nil
 }
@@ -478,13 +510,22 @@ func isExecutable(path string) bool {
 // must not bring sing-box back up. Cleared by Control("start"/"restart") or an
 // explicit router Enable (ClearManualStop).
 //
-// В режиме NDMS Proxy disabled пропускает SyncProxies и, при наличии
-// сигнала, делает one-shot orphan cleanup.
+// В режиме NDMS Proxy disabled пропускает SyncProxies; уборку по флагу
+// needsOrphanCleanup делает тик сторожа (orphanCleanupIfFlagged).
 func (o *Operator) Reconcile(ctx context.Context) error {
 	defer perftrace.LogDuration(o.runtimeLogger, "perf", "Reconcile", "total", time.Now())
 	if o.manuallyStopped.Load() {
 		if o.runtimeLogger != nil {
 			o.runtimeLogger.Debug("reconcile", "", "skipped: manually stopped")
+		}
+		return nil
+	}
+	// Бинаря нет (удалён кнопкой «Удалить» или руками) — запускать нечего:
+	// включённые слоты в settings.json переживают удаление, и без гарда
+	// сторож каждые 30 с упирался в fork/exec (F722).
+	if !isExecutable(o.binary) {
+		if o.runtimeLogger != nil {
+			o.runtimeLogger.Debug("reconcile", "", "skipped: sing-box not installed")
 		}
 		return nil
 	}
@@ -536,13 +577,6 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 		return nil
 	}
 	if !o.isNDMSProxyEnabled() {
-		if o.needsOrphanCleanup.CompareAndSwap(true, false) {
-			if err := o.removeOrphanSingboxProxies(ctx); err != nil {
-				if o.runtimeLogger != nil {
-					o.runtimeLogger.Warn("reconcile", "", "orphan cleanup: "+err.Error())
-				}
-			}
-		}
 		if o.runtimeLogger != nil {
 			o.runtimeLogger.Info("reconcile", "", fmt.Sprintf("done (ndms-proxy disabled) tunnels=%d", len(tunnels)))
 		}
@@ -857,7 +891,9 @@ func (o *Operator) startAndWait(ctx context.Context) (spawned bool, err error) {
 	if o.runtimeLogger != nil {
 		o.runtimeLogger.Info("start-and-wait", "", "starting sing-box process")
 	}
-	spawned, err = o.proc.StartSpawned()
+	if err = o.preflightStatic(); err == nil {
+		spawned, err = o.proc.StartSpawned()
+	}
 	if err != nil {
 		safeErr := sanitizeSingboxLogText(err.Error())
 		o.setLastError(safeErr)

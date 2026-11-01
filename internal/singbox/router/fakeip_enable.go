@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -25,7 +26,7 @@ const fakeIPPoolRouteComment = "awgm fakeip pool"
 
 // enableFakeIPTun provisions the full fakeip-tun path: persist index → create
 // OpkgTun → addr/mtu/up → write+start sing-box slot → wait readiness →
-// pool routes → persist enabled. Called with s.mu held by Enable. Honors the
+// pool routes → persist enabled. Called with s.mu held by enable. Honors the
 // persist-before-create invariant (the startup reap only sees orphans by
 // persisted index) and rolls back ALL partial work in reverse on any failure so
 // no orphaned iface / stale persist is left behind.
@@ -58,10 +59,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	if err != nil {
 		return fmt.Errorf("enable fakeip-tun: load fakeip config: %w", err)
 	}
-	if fakeIPConfigEmpty(fcfg) {
-		fcfg.DNS.Rules = append(fcfg.DNS.Rules, DNSRule{Action: "route", Server: "fakeip", QueryType: []string{"A", "AAAA"}})
-		fcfg.Route.Final = "direct"
-	}
+	seedFakeIPDefaults(fcfg)
 
 	// C. Egress validation from the fakeip config.
 	// "direct" is a built-in known outbound — passes. Refuse to provision with
@@ -121,7 +119,8 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	pin := noPin
 	if prevRecord != nil && prevRecord.Mode != storage.OpkgTunModeFakeIP {
 		removed, rerr := s.releaseForeignOpkgTun(ctx, prevRecord, "fakeip-enable")
-		if rerr != nil {
+		// Скан упал — Warn уже дал teardownGate, второй не нужен.
+		if rerr != nil && !errors.Is(rerr, errOpkgTunOwnershipUnknown) {
 			s.appLog.Warn("fakeip-enable", tunNDMSName(prevRecord.Index), "release foreign opkgtun: "+rerr.Error())
 		}
 		// live после сноса НЕ перечитывается: занятость собирает пул сам, а
@@ -224,7 +223,8 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	// steering is via specific pool/CIDR static routes onto the tun, not via an
 	// access-policy exit (the old policy-exit model is abandoned). A private,
 	// non-global tun routes traffic fine (stand-verified).
-	if err = s.deps.OpkgTun.CreateOpkgTunWithSecurityLevel(ctx, ndmsName, fakeIPTunDescription, "private"); err != nil {
+	var reused bool
+	if reused, err = s.provisionOpkgTun(ctx, ndmsName, fakeIPTunDescription, "private", fakeIPTunDescription); err != nil {
 		return fmt.Errorf("enable fakeip-tun: create opkgtun: %w", err)
 	}
 	// rbCtx: рулбэк обязан доехать и когда Enable упал ИЗ-ЗА отмены ctx (клиент
@@ -232,19 +232,15 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	// с context.Canceled и OpkgTun остаётся с настроенным адресом (nginx-loop, см.
 	// teardownOpkgTun). Тот же приём, что у scheduleFakeIPDrain.
 	rbCtx := context.WithoutCancel(ctx)
+	// Переиспользованную запись откат удерживает (M1): её создавал не этот
+	// enable, и снос унёс бы привязанные к имени разрешения.
 	push(func() {
+		if reused {
+			_ = s.holdOpkgTun(rbCtx, ndmsName, "fakeip-rollback")
+			return
+		}
 		_ = s.teardownOpkgTun(rbCtx, ndmsName, "fakeip-rollback")
 	})
-
-	// NDMS-native разрешение трафика в tun: permit-all access-list
-	// `_WEBADMIN_<iface>` + `ip access-group … in` + auto-delete (как галка
-	// доступа в веб-морде). Восстановлено — потеряно при интеграции PoC; без
-	// него firewall NDMS (isolate-private и т.п.) режет LAN→tun форвард и DNS
-	// на tun-адрес. Снятие — в teardownOpkgTun (rollback идёт через него же);
-	// auto-delete дополнительно каскадит ACL при удалении интерфейса.
-	if err = s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); err != nil {
-		return fmt.Errorf("enable fakeip-tun: permit acl: %w", err)
-	}
 
 	if err = s.deps.OpkgTun.SetAddress(ctx, ndmsName, addr4, mask4); err != nil {
 		return fmt.Errorf("enable fakeip-tun: set address: %w", err)
@@ -260,11 +256,19 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 		if err = s.deps.OpkgTun.SetIPv6Address(ctx, ndmsName, addr6); err != nil {
 			return fmt.Errorf("enable fakeip-tun: set ipv6 address: %w", err)
 		}
-		// v6-разрешение — ПОСЛЕ адреса: v4-ACL выше v6-трафик не покрывает,
-		// у NDMS под него отдельное пространство списков.
-		if err = s.deps.OpkgTun.SetPermitAllACLv6(ctx, ndmsName); err != nil {
-			return fmt.Errorf("enable fakeip-tun: permit acl v6: %w", err)
-		}
+	}
+	// NDMS-native разрешение трафика в tun: permit-all access-list
+	// `_WEBADMIN_<iface>` + `ip access-group … in` + auto-delete (как галка
+	// доступа в веб-морде). Восстановлено — потеряно при интеграции PoC; без
+	// него firewall NDMS (isolate-private и т.п.) режет LAN→tun форвард и DNS
+	// на tun-адрес. Снятие — в teardownOpkgTun (rollback идёт через него же);
+	// auto-delete дополнительно каскадит ACL при удалении интерфейса. v6 —
+	// отдельное пространство списков, v4-ACL v6-трафик не покрывает. Оба
+	// семейства — одним чтением running-config (F607) и ПОСЛЕ адресов: v6 и
+	// раньше ставился после v6-адреса; v4 переехал за адрес — интерфейс ещё не
+	// поднят, трафика до ACL нет.
+	if err = s.deps.OpkgTun.SetPermitAllACLs(ctx, ndmsName, p.TunAddr6 != ""); err != nil {
+		return fmt.Errorf("enable fakeip-tun: permit acl: %w", err)
 	}
 	if err = s.deps.OpkgTun.SetMTU(ctx, ndmsName, p.MTU); err != nil {
 		return fmt.Errorf("enable fakeip-tun: set mtu: %w", err)
@@ -309,7 +313,6 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 
 		ExternalConfiguration: s.tunExternalWant(),
 	}
-	ensureFakeIPOverlay(fcfg, spec)
 
 	// D. Slot XOR: enable SlotFakeIP, disable SlotRouter (fakeip and tproxy router
 	// slots are mutually exclusive — sing-box must load exactly one routing config).
@@ -365,7 +368,7 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 			s.appLog.Warn("fakeip-enable", "awg-outbounds", "refresh 15-awg.json: "+e.Error())
 		}
 	}
-	if err = s.persistFakeIPConfig(ctx, fcfg); err != nil {
+	if err = s.persistFakeIPConfigFresh(ctx, spec); err != nil {
 		return fmt.Errorf("enable fakeip-tun: persist fakeip config: %w", err)
 	}
 	// Slot XOR выше поменял видимость композитов (20 припаркован, 21 активен) —
@@ -422,28 +425,48 @@ func (s *ServiceImpl) enableFakeIPTun(ctx context.Context, settings *storage.Set
 	// Specific CIDR routes for proxy-routed dst CIDRs (loop-safe pure-dst rules
 	// only — see desiredTunCIDRs): full apply on enable. Best-effort per CIDR — one
 	// bad entry must not fail the whole enable; rollback removes the ones that succeeded.
+	// Интерфейс подтверждается один раз на оба цикла (F546); откат — одним
+	// своим подтверждением на все поставленные маршруты.
 	enableCIDRV4, enableCIDRV6 := desiredTunCIDRs(fcfg)
-	for _, c := range enableCIDRV4 {
-		if e := s.addCIDRRoute(ctx, ndmsName, c, false); e != nil {
-			s.appLog.Warn("fakeip", iface, "add cidr route "+c+": "+e.Error())
-			continue
-		}
-		cc := c
-		push(func() {
-			if e := s.removeCIDRRoute(rbCtx, ndmsName, cc, false); e != nil {
-				s.appLog.Warn("fakeip-rollback", iface, "remove cidr route "+cc+": "+e.Error())
+	var addedV4, addedV6 []string
+	if len(enableCIDRV4)+len(enableCIDRV6) > 0 {
+		if rt, e := s.cidrRoutes(ctx, ndmsName)(); e != nil {
+			s.appLog.Warn("fakeip", iface, "add cidr routes: "+e.Error())
+		} else {
+			for _, c := range enableCIDRV4 {
+				if e := s.addCIDRRoute(ctx, rt, ndmsName, c, false); e != nil {
+					s.appLog.Warn("fakeip", iface, "add cidr route "+c+": "+e.Error())
+					continue
+				}
+				addedV4 = append(addedV4, c)
 			}
-		})
-	}
-	for _, c := range enableCIDRV6 {
-		if e := s.addCIDRRoute(ctx, ndmsName, c, true); e != nil {
-			s.appLog.Warn("fakeip", iface, "add cidr route v6 "+c+": "+e.Error())
-			continue
+			for _, c := range enableCIDRV6 {
+				if e := s.addCIDRRoute(ctx, rt, ndmsName, c, true); e != nil {
+					s.appLog.Warn("fakeip", iface, "add cidr route v6 "+c+": "+e.Error())
+					continue
+				}
+				addedV6 = append(addedV6, c)
+			}
 		}
-		cc := c
+	}
+	if len(addedV4)+len(addedV6) > 0 {
 		push(func() {
-			if e := s.removeCIDRRoute(rbCtx, ndmsName, cc, true); e != nil {
-				s.appLog.Warn("fakeip-rollback", iface, "remove cidr route v6 "+cc+": "+e.Error())
+			rt, e := s.cidrRoutes(rbCtx, ndmsName)()
+			if e != nil {
+				if !errors.Is(e, ErrIfaceAbsent) {
+					s.appLog.Warn("fakeip-rollback", iface, "remove cidr routes: "+e.Error())
+				}
+				return
+			}
+			for _, cc := range addedV4 {
+				if e := s.removeCIDRRoute(rbCtx, rt, ndmsName, cc, false); e != nil {
+					s.appLog.Warn("fakeip-rollback", iface, "remove cidr route "+cc+": "+e.Error())
+				}
+			}
+			for _, cc := range addedV6 {
+				if e := s.removeCIDRRoute(rbCtx, rt, ndmsName, cc, true); e != nil {
+					s.appLog.Warn("fakeip-rollback", iface, "remove cidr route v6 "+cc+": "+e.Error())
+				}
 			}
 		})
 	}
@@ -541,4 +564,30 @@ func bareAddrFromCIDR(cidr string) (string, error) {
 		return "", fmt.Errorf("parse %q: %w", cidr, err)
 	}
 	return p.Addr().String(), nil
+}
+
+// seedFakeIPDefaults: на пустом слоте (первое включение) — стартовое правило
+// A/AAAA→fakeip, чтобы чип показал полезные умолчания, и route.final на
+// встроенный "direct" (всегда известен, висячей ссылки нет).
+func seedFakeIPDefaults(cfg *RouterConfig) {
+	if fakeIPConfigEmpty(cfg) {
+		cfg.DNS.Rules = append(cfg.DNS.Rules, DNSRule{Action: "route", Server: "fakeip", QueryType: []string{"A", "AAAA"}})
+		cfg.Route.Final = "direct"
+	}
+}
+
+// persistFakeIPConfigFresh пишет слот fakeip по свежему чтению под
+// fakeipCfgMu, а не снимок, прочитанный в начале включения: после записи
+// provisioned слот уже правят fakeipWithConfig (веб, MCP), и запись снимка
+// затёрла бы их правку (F741).
+func (s *ServiceImpl) persistFakeIPConfigFresh(ctx context.Context, spec FakeIPTunSpec) error {
+	s.fakeipCfgMu.Lock()
+	defer s.fakeipCfgMu.Unlock()
+	cfg, err := s.loadFakeIPConfig()
+	if err != nil {
+		return err
+	}
+	seedFakeIPDefaults(cfg)
+	ensureFakeIPOverlay(cfg, spec)
+	return s.persistFakeIPConfig(ctx, cfg)
 }

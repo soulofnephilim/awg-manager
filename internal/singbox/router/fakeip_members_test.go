@@ -192,3 +192,77 @@ func TestCompositeOutbound_TproxyRejectsUnknownMembers(t *testing.T) {
 		t.Fatalf("tproxy update with unknown member must be rejected, got: %v", err)
 	}
 }
+
+// F732: тег группы сверяется и с чужими каталогами — туннелем sing-box,
+// встроенным direct; с одинаковым тегом в двух слотах sing-box не стартует.
+// Правка без смены тега не перепроверяется.
+func TestCompositeOutbound_RejectsTagOfOtherCatalog(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+	svc.deps.SingboxTunnels = &fakeSingboxTunnels{tags: []string{"vless-1"}}
+	ctx := context.Background()
+
+	routerCfg := `{"outbounds":[{"tag":"have","type":"socks","server":"1.2.3.4"},{"tag":"direct","type":"direct"}],"route":{"final":"direct","rules":[]}}`
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"), []byte(routerCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tag := range []string{"vless-1", "block"} {
+		err := svc.AddCompositeOutbound(ctx, Outbound{Tag: tag, Type: "selector", Outbounds: []string{"have"}})
+		if !errors.Is(err, ErrOutboundTagConflict) {
+			t.Fatalf("add %q: want ErrOutboundTagConflict, got %v", tag, err)
+		}
+	}
+
+	if err := svc.AddCompositeOutbound(ctx, Outbound{Tag: "combo", Type: "selector", Outbounds: []string{"have"}}); err != nil {
+		t.Fatalf("free tag rejected: %v", err)
+	}
+	err := svc.UpdateCompositeOutbound(ctx, "combo", Outbound{Tag: "vless-1", Type: "selector", Outbounds: []string{"have"}})
+	if !errors.Is(err, ErrOutboundTagConflict) {
+		t.Fatalf("rename onto tunnel tag: want ErrOutboundTagConflict, got %v", err)
+	}
+	if err := svc.UpdateCompositeOutbound(ctx, "combo", Outbound{Tag: "combo", Type: "selector", Outbounds: []string{"have", "vless-1"}}); err != nil {
+		t.Fatalf("update keeping own tag rejected: %v", err)
+	}
+}
+
+// F732 (стенд): каталоги не знают отдельных серверов подписки (sub-<id>-<hash>)
+// — тег группы сверяется и с outbound'ами включённых слотов оркестратора.
+func TestCompositeOutbound_RejectsTagOfEnabledSlotOutbound(t *testing.T) {
+	svc, dir := newOrchedTestService(t)
+	orch := orchestrator.NewWithAppliedPath(dir, nil, filepath.Join(t.TempDir(), "applied.json"))
+	t.Cleanup(orch.Close)
+	for _, m := range []orchestrator.SlotMeta{
+		{Slot: orchestrator.SlotRouter, Filename: "20-router.json"},
+		{Slot: orchestrator.SlotFakeIP, Filename: "21-fakeip.json"},
+		{Slot: orchestrator.SlotSubscriptions, Filename: "13-subscriptions.json"},
+	} {
+		if err := orch.Register(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := orch.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	svc.deps.Orch = orch
+	ctx := context.Background()
+
+	sub := `{"outbounds":[{"tag":"sub-babfab82-f4f40c6b","type":"socks","server":"9.9.9.9"}]}`
+	if err := orch.Save(orchestrator.SlotSubscriptions, []byte(sub)); err != nil {
+		t.Fatal(err)
+	}
+	if err := orch.SetEnabledSilent(orchestrator.SlotSubscriptions, true); err != nil {
+		t.Fatal(err)
+	}
+	routerCfg := `{"outbounds":[{"tag":"have","type":"socks","server":"1.2.3.4"}],"route":{"final":"direct","rules":[]}}`
+	if err := os.WriteFile(filepath.Join(dir, "20-router.json"), []byte(routerCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := svc.AddCompositeOutbound(ctx, Outbound{Tag: "sub-babfab82-f4f40c6b", Type: "selector", Outbounds: []string{"have"}})
+	if !errors.Is(err, ErrOutboundTagConflict) {
+		t.Fatalf("subscription server tag: want ErrOutboundTagConflict, got %v", err)
+	}
+	if err := svc.AddCompositeOutbound(ctx, Outbound{Tag: "free", Type: "selector", Outbounds: []string{"have"}}); err != nil {
+		t.Fatalf("free tag rejected: %v", err)
+	}
+}

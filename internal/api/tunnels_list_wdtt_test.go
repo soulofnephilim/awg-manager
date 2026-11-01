@@ -42,12 +42,13 @@ func (s *listSvcStub) SetDefaultRoute(context.Context, string, bool) error { ret
 func (s *listSvcStub) Import(context.Context, string, string, string, service.ImportLink) (*service.TunnelWithStatus, error) {
 	return nil, nil
 }
-func (s *listSvcStub) ReplaceConfig(context.Context, string, string, string, service.ReplaceOptions) error {
+func (s *listSvcStub) ReplaceConfig(context.Context, string, string, string) error {
 	return nil
 }
-func (s *listSvcStub) WANModel() *wan.Model                     { return nil }
-func (s *listSvcStub) GetResolvedISP(string) string             { return "" }
-func (s *listSvcStub) SetSelfCreateGate(tunnel.SelfCreateGater) {}
+func (s *listSvcStub) WANModel() *wan.Model         { return nil }
+func (s *listSvcStub) GetResolvedISP(string) string { return "" }
+
+func (s *listSvcStub) SyncDescription(context.Context, string, string, string, string) {}
 
 // TestList_ExposesWdttClientID pins the list response contract: the WDTT link
 // is carried by wdttClientId, so clients need not guess it from the endpoint.

@@ -2,20 +2,22 @@
  * tunnels — polling store for the {tunnels, external, system} snapshot
  * that used to be delivered via SSE `snapshot:tunnels`.
  *
- * Polling cadence: 5s (matches servers). Components subscribe directly;
+ * Polling cadence: 30s (live fields ride on `tunnel:traffic`). Components subscribe directly;
  * the SSE `resource:invalidated` hint (Resource="tunnels") triggers an
  * immediate refetch via the storeRegistry pipeline.
  *
  * Streams that remain on SSE (untouched by this store):
  *   - `tunnel:traffic`   — feeds the per-tunnel rate chart via
  *                          `feedTraffic()` in `lib/stores/traffic.ts`.
- *                          updateTraffic() here only resolves NDMS name
- *                          → awg-manager tunnel ID so the layout can
- *                          call feedTraffic under the correct key.
+ *                          updateTraffic() here patches rx/tx/handshake
+ *                          into the snapshot (both `tunnels` and `system`)
+ *                          and resolves the event id to the key the
+ *                          layout feeds the chart under.
  *   - `tunnel:connectivity` — feeds the `connectivityMap` side-channel
  *                          below; components read it to display the
  *                          connected/disconnected badge + latency.
  */
+import { m } from '$lib/i18n';
 import { writable, get } from 'svelte/store';
 import { api } from '$lib/api/client';
 import { clearTraffic } from '$lib/stores/traffic';
@@ -159,8 +161,20 @@ function updateTraffic(data: TunnelTrafficEvent): string | null {
 		return next;
 	});
 
+	// Системные туннели метрик-поллер шлёт тем же событием под NDMS-именем.
+	// Без этой ветки событие выбрасывалось, и их карточка и график жили
+	// только фоновым опросом раз в 30 с (F466, #950).
+	const system = (snap?.system ?? []).map((st) => {
+		if (resolved !== null || st.id !== data.id || !st.peer) return st;
+		resolved = st.id;
+		patched = true;
+		const peer = { ...st.peer, rxBytes: data.rxBytes, txBytes: data.txBytes };
+		if (data.lastHandshake) peer.lastHandshake = data.lastHandshake;
+		return { ...st, peer };
+	});
+
 	if (patched && snap) {
-		basePolling.applyMutationResponse({ ...snap, tunnels });
+		basePolling.applyMutationResponse({ ...snap, tunnels, system });
 	}
 	return resolved;
 }
@@ -178,7 +192,7 @@ async function updateTunnel(id: string, tunnel: Partial<AWGTunnel>): Promise<AWG
 
 async function remove(id: string): Promise<DeleteResult> {
 	if (!startOperation(id)) {
-		throw new Error('Операция уже выполняется');
+		throw new Error(m.store_tunnels_operation_busy());
 	}
 	try {
 		const result = await api.deleteTunnel(id);
@@ -199,7 +213,7 @@ async function remove(id: string): Promise<DeleteResult> {
 
 async function start(id: string): Promise<void> {
 	if (!startOperation(id)) {
-		throw new Error('Операция уже выполняется');
+		throw new Error(m.store_tunnels_operation_busy());
 	}
 	try {
 		await api.startTunnel(id);
@@ -211,7 +225,7 @@ async function start(id: string): Promise<void> {
 
 async function stop(id: string): Promise<void> {
 	if (!startOperation(id)) {
-		throw new Error('Операция уже выполняется');
+		throw new Error(m.store_tunnels_operation_busy());
 	}
 	try {
 		await api.stopTunnel(id);
@@ -223,7 +237,7 @@ async function stop(id: string): Promise<void> {
 
 async function restart(id: string): Promise<void> {
 	if (!startOperation(id)) {
-		throw new Error('Операция уже выполняется');
+		throw new Error(m.store_tunnels_operation_busy());
 	}
 	try {
 		await api.restartTunnel(id);

@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"net"
 	"path/filepath"
 	"runtime"
 
@@ -28,7 +29,7 @@ type singboxCoreDeps struct {
 	bus      *events.Bus
 	bootLog  *logging.ScopedLogger
 	dataDir  string // awg3.json
-	// dir — каталог управляемого sing-box; пусто = дефолт оператора
+	// dir — каталог управляемого sing-box; пусто = singboxDataDir (applyDataDir), в проде — дефолт оператора
 	// (каталог рядом с бинарём).
 	dir string
 	// initialManuallyStopped — снимок Settings.SingboxManuallyStopped,
@@ -40,7 +41,7 @@ type singboxCore struct {
 	op        *singbox.Operator
 	orch      *singboxorch.Orchestrator
 	awg3Store *awg3endpoint.Store
-	migrated  bool // миграции (ruleset-URL, address-or, device-proxy) переписали файлы — runtime решает про reload
+	migrated  bool // миграции (ruleset-URL, address-or, device-proxy, порядок слотов) переписали файлы — runtime решает про reload
 }
 
 // buildSingboxCore собирает общую для демона и cleanup часть sing-box-рантайма:
@@ -48,9 +49,20 @@ type singboxCore struct {
 // AWG3-endpoint'ов.
 func buildSingboxCore(d singboxCoreDeps) singboxCore {
 	// Sing-box integration
+	dir := d.dir
+	if dir == "" {
+		dir = singboxDataDir
+	}
+	// Небоевой каталог — и бинарь там же: установка и обновление из песочницы
+	// иначе переписывали бы боевой sing-box (F305). Пусто — умолчание оператора.
+	binary := ""
+	if dir != "" {
+		binary = filepath.Join(dir, filepath.Base(installer.DefaultBinaryPath))
+	}
 	op := singbox.NewOperator(singbox.OperatorDeps{
 		Log:               slog.Default().With("component", "singbox"),
-		Dir:               d.dir,
+		Dir:               dir,
+		Binary:            binary,
 		Queries:           d.queries,
 		Commands:          d.commands,
 		AppLogger:         d.appLog,
@@ -69,18 +81,21 @@ func buildSingboxCore(d singboxCoreDeps) singboxCore {
 		Bus:                    d.bus,
 	})
 	// Если на старте флаг disabled — orphan-cleanup (после возможного
-	// обрыва прошлой MigrateOff в любой момент). Reconcile подберёт
-	// сигнал на первом тике watchdog'а.
+	// обрыва прошлой MigrateOff в любой момент). Сигнал подберёт первый
+	// тик watchdog'а.
 	if !d.settings.IsSingboxNDMSProxyEnabled() {
 		op.MarkNeedsOrphanCleanup()
 	}
 
 	// config.d orchestrator — the single writer of slot files (00-base /
-	// 10-tunnels / 15-awg / 20-router / 30-deviceproxy). Producers route
+	// 10-tunnels / 12-deviceproxy / 15-awg / 20-router / …). Producers route
 	// their writes through Save / SetEnabled so a "disabled" domain
 	// actually moves the file out of sing-box's view (config.d/disabled/)
 	// instead of leaving stale content behind.
 	singboxConfigDir := op.ConfigDir()
+	// Слоты привязок (F701) переименовал уже NewOperator — до своих шагов
+	// примирения; здесь только флаг для reload.
+	bindingSlotsMigrated := op.BindingSlotsMigrated()
 	deviceProxyMigrated, err := singbox.MigrateDeviceProxyOutOfTunnels(singboxConfigDir)
 	if err != nil {
 		d.bootLog.Warn("deviceproxy-migration", "", err.Error())
@@ -97,7 +112,15 @@ func buildSingboxCore(d singboxCoreDeps) singboxCore {
 	if err != nil {
 		d.bootLog.Warn("dns-matchsource-migration", "", err.Error())
 	}
-	orch := singboxorch.New(singboxConfigDir, op.Process())
+	localDNSBindMigrated, err := router.MigrateLocalDNSBind(singboxConfigDir, net.InterfaceAddrs)
+	if err != nil {
+		d.bootLog.Warn("local-dns-bind-migration", "", err.Error())
+	}
+	groupMembersMigrated, err := router.MigrateDuplicateGroupMembers(singboxConfigDir)
+	if err != nil {
+		d.bootLog.Warn("group-members-migration", "", err.Error())
+	}
+	orch := singboxorch.New(singboxConfigDir, op.OrchestratorProcess())
 	orch.SetLogger(func(level, msg string) {
 		switch level {
 		case "warn":
@@ -108,11 +131,15 @@ func buildSingboxCore(d singboxCoreDeps) singboxCore {
 			d.appLog.AppLog(logging.LevelInfo, logging.GroupSingbox, logging.SubSBProcess, "orchestrator", "", msg)
 		}
 	})
-	orch.SetValidator(&orchValidatorAdapter{v: singbox.NewValidator(installer.DefaultBinaryPath)})
+	orch.SetValidator(&orchValidatorAdapter{v: singbox.NewValidator(op.Binary())})
 	// Propagate the sticky-stop intent so reload-triggered cold-starts
 	// (slot-file writes from router/deviceproxy/subscriptions) respect a
-	// user-pressed Stop in the same way the watchdog does.
-	orch.SetShouldRun(func() bool { return !op.IsManuallyStopped() })
+	// user-pressed Stop in the same way the watchdog does. Удалённый движок
+	// тоже не стартуем — гард сторожа по той же причине (F722).
+	orch.SetShouldRun(func() bool {
+		installed, _ := op.IsInstalled()
+		return installed && !op.IsManuallyStopped()
+	})
 	// AWG3 imported endpoints — store owns awg3.json, service projects it into
 	// the 16-awg3.json slot. Constructed here so the SlotAwg3 HasContent closure
 	// (below) can read the store, mirroring SlotTunnels' HasUserTunnels gate.
@@ -154,7 +181,7 @@ func buildSingboxCore(d singboxCoreDeps) singboxCore {
 		op:        op,
 		orch:      orch,
 		awg3Store: awg3Store,
-		migrated:  ruleSetURLsMigrated || addressOrMigrated || deviceProxyMigrated || dnsMatchSourceMigrated,
+		migrated:  ruleSetURLsMigrated || addressOrMigrated || deviceProxyMigrated || dnsMatchSourceMigrated || bindingSlotsMigrated || localDNSBindMigrated || groupMembersMigrated,
 	}
 }
 
@@ -232,7 +259,7 @@ func (a *app) setupSingboxRuntime() {
 		// он здесь уже распаркован).
 	}
 
-	// Subscription service — owns 40-subscriptions.json in config.d.
+	// Subscription service — owns 13-subscriptions.json in config.d.
 	// Слот регистрирует цикл KnownSlots внутри buildSingboxCore, до
 	// Bootstrap; Register внутри NewOperatorAdapter — no-op дубль с той же
 	// meta (ErrSlotAlreadyRegistered там глотается, см. его докстринг).
@@ -242,9 +269,15 @@ func (a *app) setupSingboxRuntime() {
 	a.subStore, err = subscription.NewStore(subStorePath)
 	if err != nil {
 		a.bootLog.Error("subscription-store", "", err.Error())
+	} else {
+		// Любая запись подписки — подсказка фронту вместо 30-секундного
+		// опроса (MC9).
+		a.subStore.SetOnChange(func() {
+			a.eventBus.PublishInvalidated(events.ResourceSingboxSubscriptions, "subscriptions")
+		})
 	}
 	subProxyMgr := singbox.NewProxyManager(a.ndmsQueries, a.ndmsCommands)
-	a.subAdapter = subscription.NewOperatorAdapter(a.sbOrch, subProxyMgr, a.singboxOp.Clash())
+	a.subAdapter = subscription.NewOperatorAdapter(a.sbOrch, a.singboxOp.SubscriptionProxyRegistrar(subProxyMgr), a.singboxOp.Clash())
 	// Wire the Operator's sing-box build tags into the subscription
 	// adapter so flush() Pass 1 can cheaply pre-filter outbounds whose
 	// type requires a missing optional build tag (naive). Tags come from
@@ -305,7 +338,8 @@ func (a *app) setupSingboxRuntime() {
 		if !ok {
 			a.bootLog.Warn("managed-singbox", arch, "no embedded BinarySpec — install/update disabled")
 		} else {
-			a.singboxInstaller = installer.New(installer.DefaultBinaryPath, arch, spec, a.loggingService)
+			// Путь — оператора: в песочнице -data-dir установка не трогает боевой бинарь (F305).
+			a.singboxInstaller = installer.New(a.singboxOp.Binary(), arch, spec, a.loggingService)
 			a.singboxOp.SetInstaller(a.singboxInstaller)
 
 			// Stream sing-box install/update lifecycle over SSE so the UI

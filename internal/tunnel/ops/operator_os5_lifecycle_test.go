@@ -3,6 +3,8 @@ package ops
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,28 +12,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms"
 	ndmscommand "github.com/hoaxisr/awg-manager/internal/ndms/command"
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/exec"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/backend"
 )
 
 // newOS5Lifecycle — OS5-оператор над записывающим RCI-постером и записывающим
-// ip: ни один вызов не уходит на хост. queries=nil: opkgTunExists отвечает
-// «нет», и ColdStart идёт по ветке CreateOpkgTun (это тоже RCI в poster).
+// ip: ни один вызов не уходит на хост. Записи OpkgTun10 в оракуле нет, её
+// создание объявлено (ExpectCreate): ColdStart идёт по ветке CreateOpkgTun.
 func newOS5Lifecycle(t *testing.T) (*OperatorOS5Impl, *recordingPoster, *ipRunRecorder) {
 	t.Helper()
-	poster := &recordingPoster{}
-	o, rec := newOS5LifecycleOn(t, poster, ndmsquery.NewFakeGetter(), &MockBackend{}, false)
+	f := ndmsquery.NewFakeNDMS()
+	f.ExpectCreate("OpkgTun10")
+	o, poster, rec := newOS5Oracle(t, f, &MockBackend{})
+	return o, poster, rec
+}
+
+// newOS5Oracle — оператор над оракулом f: список, точечные чтения и команды
+// идут в один FakeNDMS (E и фантомы считаются там).
+func newOS5Oracle(t *testing.T, f *ndmsquery.FakeNDMS, be *MockBackend) (*OperatorOS5Impl, *recordingPoster, *ipRunRecorder) {
+	t.Helper()
+	poster := &recordingPoster{f: f}
+	o, rec := newOS5LifecycleOn(t, poster, f, be, true)
 	return o, poster, rec
 }
 
 // newOS5LifecycleOn — та же сборка с подставными постером, снимком NDMS и
-// бэкендом; withQueries=true отдаёт оператору queries, и opkgTunExists
-// отвечает по снимку getter'а (`/show/interface/`).
-func newOS5LifecycleOn(t *testing.T, poster ndmscommand.Poster, getter *ndmsquery.FakeGetter,
-	backend *MockBackend, withQueries bool) (*OperatorOS5Impl, *ipRunRecorder) {
+// бэкендом; withQueries=true отдаёт оператору queries, и confirmOpkgTun
+// отвечает по списку getter'а (`/show/interface/`).
+func newOS5LifecycleOn(t *testing.T, poster ndmscommand.Poster, getter ndmsquery.Getter,
+	backend Backend, withQueries bool) (*OperatorOS5Impl, *ipRunRecorder) {
 	t.Helper()
 	queries := ndmsquery.NewQueries(ndmsquery.Deps{
 		Getter: getter,
@@ -82,7 +96,7 @@ func TestColdStart_ExistingRecordWithoutDevice_BackendBeforeAddress(t *testing.T
 	backend := &MockBackend{}
 	poster := &deviceGatedPoster{backend: backend}
 	getter := ndmsquery.NewFakeGetter()
-	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"error","link":"down"}}`)
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"error","link":"down","description":"Germany"}}`)
 	o, _ := newOS5LifecycleOn(t, poster, getter, backend, true)
 
 	if err := o.ColdStart(context.Background(), lifecycleCfg(t)); err != nil {
@@ -93,6 +107,204 @@ func TestColdStart_ExistingRecordWithoutDevice_BackendBeforeAddress(t *testing.T
 	}
 	if !hasPayload(poster.payloads, `{"interface":{"OpkgTun10":{"ip":{"address":{"address":"10.9.7.2","mask":"255.255.255.192"}}}}}`) {
 		t.Fatalf("адрес не поставлен:\n%v", poster.payloads)
+	}
+}
+
+// F517: запись OpkgTun10 в NDMS есть. Наша — описание равно имени туннеля
+// (так её создаёт CreateOpkgTun и так же NDMS восстанавливает сохранённую
+// запись после ребута) — старт идёт дальше. Чужое описание без живого
+// amneziawg — отказ ДО backend.Start и до любой RCI-записи, без отката. Чужое
+// описание под живым amneziawg — запись наша (описание разошлось): старт
+// переписывает описание на имя туннеля и идёт дальше.
+func TestColdStart_ExistingRecordOwnership(t *testing.T) {
+	cases := []struct {
+		name        string
+		description string
+		running     bool
+		wantForeign bool
+	}{
+		{"описание = имя туннеля", "Germany", false, false},
+		{"чужое описание, устройства нет", "csqtt", false, true},
+		{"пустое описание, устройства нет", "", false, true},
+		{"чужое описание, живое amneziawg", "csqtt", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &MockBackend{running: tc.running}
+			poster := &recordingPoster{}
+			getter := ndmsquery.NewFakeGetter()
+			getter.SetJSON("/show/interface/", fmt.Sprintf(
+				`{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":%q}}`, tc.description))
+			o, rec := newOS5LifecycleOn(t, poster, getter, be, true)
+
+			err := o.ColdStart(context.Background(), lifecycleCfg(t))
+
+			var foreign *ForeignRecordError
+			if got := errors.As(err, &foreign); got != tc.wantForeign {
+				t.Fatalf("err = %v, want ForeignRecordError = %v", err, tc.wantForeign)
+			}
+			if !tc.wantForeign {
+				if err != nil {
+					t.Fatalf("ColdStart: %v", err)
+				}
+				// Запись наша. Описание разошлось (живое amneziawg) — старт
+				// лечит его на имя туннеля; совпало — не пишет ничего.
+				var descr []string
+				for _, p := range poster.payloads {
+					if js, _ := json.Marshal(p); strings.Contains(string(js), `"description"`) {
+						descr = append(descr, string(js))
+					}
+				}
+				want := 0
+				if tc.description != "Germany" {
+					want = 1
+				}
+				if len(descr) != want || (want == 1 && descr[0] != `{"interface":{"OpkgTun10":{"description":"Germany"}}}`) {
+					t.Fatalf("описание на старте = %v, want %d запись с «Germany»", descr, want)
+				}
+				return
+			}
+			if foreign.NDMSName != "OpkgTun10" || foreign.Description != tc.description || foreign.Want != "Germany" {
+				t.Fatalf("ForeignRecordError = %+v", foreign)
+			}
+			if len(poster.payloads) != 0 {
+				t.Fatalf("RCI тронут при чужой записи: %v", poster.payloads)
+			}
+			if len(be.StartCalls) != 0 || len(be.StopCalls) != 0 {
+				t.Fatalf("бэкенд тронут при чужой записи (откат?): start=%v stop=%v", be.StartCalls, be.StopCalls)
+			}
+			if len(rec.Calls) != 0 {
+				t.Fatalf("ip вызван при чужой записи:\n%s", strings.Join(rec.Calls, "\n"))
+			}
+		})
+	}
+}
+
+// F532: смена описания записи снаружи (`interface OpkgTunN description …`)
+// не даёт NDMS-хука, и кэш InterfaceStore может годами помнить прежнее
+// значение. Гейт Фазы 1 обязан решать по свежему ответу NDMS, а не по
+// кэшу: устарел кэш — «чужая» → старт идёт.
+func TestColdStart_GateUsesFreshReadNotStaleCache(t *testing.T) {
+	getter := ndmsquery.NewFakeGetter()
+	// Кэш (bootstrap-снимок) считает запись чужой.
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"csqtt"}}`)
+	o, rec := newOS5LifecycleOn(t, &recordingPoster{}, getter, &MockBackend{}, true)
+
+	// Поднимаем кэш на устаревшем значении — как будто он уже был прочитан
+	// до внешней правки.
+	if _, err := o.queries.Interfaces.Get(context.Background(), "OpkgTun10"); err != nil {
+		t.Fatalf("precondition Get: %v", err)
+	}
+
+	// NDMS сейчас (снаружи awg-manager описание переписали на имя туннеля)
+	// отвечает по-другому — хука на это не было, кэш остался «csqtt».
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"Germany"}}`)
+
+	if err := o.ColdStart(context.Background(), lifecycleCfg(t)); err != nil {
+		t.Fatalf("ColdStart должен был пройти по свежему ответу (наша запись): %v", err)
+	}
+	if len(rec.Calls) == 0 {
+		t.Fatalf("старт не тронул ip — гейт отказал по устаревшему кэшу")
+	}
+}
+
+// Обратный случай F532: кэш ещё помнит нашу запись, а NDMS сейчас отвечает
+// про чужую (например номер вернулся другой программе) — гейт обязан
+// отказать по свежему ответу, а не пропустить по кэшу.
+func TestColdStart_GateRefusesOnFreshForeignRecord(t *testing.T) {
+	getter := ndmsquery.NewFakeGetter()
+	// Кэш (bootstrap-снимок) считает запись нашей.
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"Germany"}}`)
+	o, rec := newOS5LifecycleOn(t, &recordingPoster{}, getter, &MockBackend{}, true)
+
+	if _, err := o.queries.Interfaces.Get(context.Background(), "OpkgTun10"); err != nil {
+		t.Fatalf("precondition Get: %v", err)
+	}
+
+	// NDMS сейчас отвечает про чужую запись — кэш этого не видел.
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"csqtt"}}`)
+
+	err := o.ColdStart(context.Background(), lifecycleCfg(t))
+	var foreign *ForeignRecordError
+	if !errors.As(err, &foreign) {
+		t.Fatalf("err = %v, want *ForeignRecordError (свежая запись чужая)", err)
+	}
+	if len(rec.Calls) != 0 {
+		t.Fatalf("ip вызван при свежей чужой записи:\n%s", strings.Join(rec.Calls, "\n"))
+	}
+}
+
+// Тот же гейт в Reconcile (рестарт демона, устройство исчезло, на номере чужая
+// запись): ни своего ip link del, ни backend.Start. Текст доходит до человека.
+func TestReconcile_ForeignRecord_Refused(t *testing.T) {
+	be := &MockBackend{}
+	getter := ndmsquery.NewFakeGetter()
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"csqtt"}}`)
+	o, rec := newOS5LifecycleOn(t, &recordingPoster{}, getter, be, true)
+
+	err := o.Reconcile(context.Background(), lifecycleCfg(t))
+
+	var foreign *ForeignRecordError
+	if !errors.As(err, &foreign) {
+		t.Fatalf("err = %v, want *ForeignRecordError", err)
+	}
+	if !strings.Contains(err.Error(), "запись OpkgTun10 в NDMS не принадлежит туннелю «Germany»: её описание — «csqtt»") {
+		t.Fatalf("текст отказа не для человека: %q", err.Error())
+	}
+	if len(be.StartCalls) != 0 || hasCall(rec.Calls, "/opt/sbin/ip link del dev opkgtun10") {
+		t.Fatalf("чужая запись тронута: start=%v\n%s", be.StartCalls, strings.Join(rec.Calls, "\n"))
+	}
+}
+
+// Рестарт демона (opkg upgrade → Reconcile) лечит разошедшееся описание
+// работающего туннеля; провал записи описания старт не валит — запись наша.
+func TestReconcile_HealsDriftedDescription(t *testing.T) {
+	const want = `{"interface":{"OpkgTun10":{"description":"Germany"}}}`
+	for name, fail := range map[string]bool{"запись прошла": false, "запись отвергнута": true} {
+		t.Run(name, func(t *testing.T) {
+			poster := &descriptionPoster{fail: fail}
+			getter := ndmsquery.NewFakeGetter()
+			getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"up","description":"old"}}`)
+			o, _ := newOS5LifecycleOn(t, poster, getter, &MockBackend{running: true}, true)
+			if err := o.Reconcile(context.Background(), lifecycleCfg(t)); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if !hasPayload(poster.payloads, want) {
+				t.Fatalf("описание не вылечено: %v", poster.payloads)
+			}
+		})
+	}
+}
+
+// descriptionPoster — recordingPoster, который при fail отвергает запись описания.
+type descriptionPoster struct {
+	recordingPoster
+	fail bool
+}
+
+func (p *descriptionPoster) Post(ctx context.Context, payload any) (json.RawMessage, error) {
+	p.payloads = append(p.payloads, payload)
+	if js, _ := json.Marshal(payload); p.fail && strings.Contains(string(js), `"description"`) {
+		return nil, errors.New("injected: description")
+	}
+	return json.RawMessage(`[{"status":[{"status":"ok"}]}]`), nil
+}
+
+// Кэш записей NDMS не поднялся — «не знаем», а не «записи нет»: Create поверх
+// существующей записи переписал бы её описание. Отказ без единой RCI-записи;
+// оркестратор повторит старт следующим decide.
+func TestColdStart_RecordReadError_RefusesWithoutCreate(t *testing.T) {
+	poster := &recordingPoster{}
+	getter := ndmsquery.NewFakeGetter()
+	getter.SetError("/show/interface/", errors.New("injected: ndms"))
+	o, _ := newOS5LifecycleOn(t, poster, getter, &MockBackend{}, true)
+
+	err := o.ColdStart(context.Background(), lifecycleCfg(t))
+	if err == nil || !strings.Contains(err.Error(), "read OpkgTun record") {
+		t.Fatalf("err = %v, want отказ чтения записи", err)
+	}
+	if len(poster.payloads) != 0 {
+		t.Fatalf("RCI тронут при недоступном кэше NDMS: %v", poster.payloads)
 	}
 }
 
@@ -167,7 +379,7 @@ func TestColdStart_KernelAddressCarriesUserPrefix(t *testing.T) {
 	if !hasCall(rec.Calls, "/opt/sbin/ip address replace dev opkgtun10 10.9.7.2/26") {
 		t.Fatalf("адрес с маской пользователя не выставлен:\n%s", strings.Join(rec.Calls, "\n"))
 	}
-	if !hasCall(rec.Calls, "/opt/sbin/ip link set dev opkgtun10 txqueuelen 1000 mtu 1342") {
+	if !hasCall(rec.Calls, "/opt/sbin/ip link set dev opkgtun10 mtu 1342") {
 		t.Fatalf("MTU из конфига не выставлен:\n%s", strings.Join(rec.Calls, "\n"))
 	}
 }
@@ -187,8 +399,9 @@ func TestReconcile_KernelAddressCarriesUserPrefix(t *testing.T) {
 // interfaceDownBestEffort не исполняется (шва у сна нет — реальный тест
 // его не пинует).
 func TestStop_DownsKernelAndNDMS(t *testing.T) {
-	o, poster, rec := newOS5Lifecycle(t)
-	if err := o.Stop(context.Background(), "awg10"); err != nil {
+	f := ndmsquery.NewFakeNDMS(ndms.Interface{ID: "OpkgTun10", Type: "OpkgTun", Description: "Germany"})
+	o, poster, rec := newOS5Oracle(t, f, &MockBackend{running: true})
+	if err := o.Stop(context.Background(), "awg10", "Germany"); err != nil {
 		t.Fatal(err)
 	}
 	if !hasCall(rec.Calls, "/opt/sbin/ip link set down dev opkgtun10") {
@@ -197,6 +410,69 @@ func TestStop_DownsKernelAndNDMS(t *testing.T) {
 	if !hasPayload(poster.payloads, `{"interface":{"OpkgTun10":{"up":false}}}`) {
 		t.Fatalf("NDMS не получил up:false:\n%v", poster.payloads)
 	}
+}
+
+// F500/F517: на номере чужой plain tun (устройство не amneziawg) под чужой
+// записью — Stop не опускает чужое устройство и не ставит чужой записи
+// `conf: disabled`. Наша запись без нашего устройства (plain tun после
+// ребута) по-прежнему получает `conf: disabled`, но устройство не трогаем.
+func TestStop_NotOurDevice(t *testing.T) {
+	for _, tc := range []struct {
+		name, description string
+		stopName          string
+		wantDisabled      bool
+	}{
+		{"чужая запись", "csqtt", "Germany", false},
+		{"наша запись", "Germany", "Germany", true},
+		{"карточки нет, запись без описания", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			poster := &recordingPoster{}
+			getter := ndmsquery.NewFakeGetter()
+			getter.SetJSON("/show/interface/", fmt.Sprintf(
+				`{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","description":%q}}`, tc.description))
+			o, rec := newOS5LifecycleOn(t, poster, getter, &MockBackend{}, true)
+
+			if err := o.Stop(context.Background(), "awg10", tc.stopName); err != nil {
+				t.Fatal(err)
+			}
+			if hasCall(rec.Calls, "/opt/sbin/ip link set down dev opkgtun10") {
+				t.Fatalf("опущено не наше устройство:\n%s", strings.Join(rec.Calls, "\n"))
+			}
+			if got := hasPayload(poster.payloads, `{"interface":{"OpkgTun10":{"up":false}}}`); got != tc.wantDisabled {
+				t.Fatalf("conf: disabled = %v, want %v: %v", got, tc.wantDisabled, poster.payloads)
+			}
+		})
+	}
+}
+
+// F500: Delete сносит устройство через backend.Stop с гейтом держателя.
+// Устройство держит чужая программа — не сносим, удаление не падает;
+// наше amneziawg — сносится.
+func TestDelete_DeviceGoesThroughHolderGate(t *testing.T) {
+	t.Run("чужой держатель", func(t *testing.T) {
+		be := &MockBackend{stopError: &backend.HeldError{Iface: "opkgtun10", PID: 42, Comm: "csqtt"}}
+		o, rec := newOS5LifecycleOn(t, &recordingPoster{}, ndmsquery.NewFakeGetter(), be, false)
+		if err := o.Delete(context.Background(), &storage.AWGTunnel{ID: "awg10", Name: "Germany"}); err != nil {
+			t.Fatalf("HeldError не должен валить удаление: %v", err)
+		}
+		if hasCall(rec.Calls, "/opt/sbin/ip link del dev opkgtun10") {
+			t.Fatalf("ip link del мимо гейта:\n%s", strings.Join(rec.Calls, "\n"))
+		}
+		if len(be.StopCalls) != 1 || be.StopCalls[0] != "opkgtun10" {
+			t.Fatalf("backend.Stop: %v", be.StopCalls)
+		}
+	})
+	t.Run("наше amneziawg", func(t *testing.T) {
+		be := &MockBackend{running: true}
+		o, _ := newOS5LifecycleOn(t, &recordingPoster{}, ndmsquery.NewFakeGetter(), be, false)
+		if err := o.Delete(context.Background(), &storage.AWGTunnel{ID: "awg10", Name: "Germany"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(be.StopCalls) != 1 || be.StopCalls[0] != "opkgtun10" || be.running {
+			t.Fatalf("наше устройство не снесено: stop=%v running=%v", be.StopCalls, be.running)
+		}
+	})
 }
 
 // Пять команд ip rule/route policy-routing — литералами; при готовом
@@ -489,25 +765,86 @@ func TestReconcile_KeepsRunningKernelInterface(t *testing.T) {
 
 // Устройство пересоздаётся, если его нет (rmmod, ручной ip link del) — и если
 // записи OpkgTun в NDMS не было: на живом kernel-устройстве NDMS отвергает
-// ip address (exit 122), запись надо ставить на свежее.
+// ip address (exit 122), запись надо ставить на свежее. Живое amneziawg под
+// свежей записью пересоздаёт backend.Recreate (del + add одной подменой под
+// барьером, R61); отсутствующее или не-amneziawg устройство — backend.Start
+// (там гейт F500). Своего `ip link del` у Reconcile нет.
+// Мутация: Recreate → Start в ветке running → живое не пересоздано, красный.
 func TestReconcile_RecreatesKernelInterface(t *testing.T) {
 	cases := []struct {
-		name    string
-		backend *MockBackend
+		name         string
+		backend      *MockBackend
+		wantRecreate bool
 	}{
-		{"устройства нет", &MockBackend{}},
-		{"устройство живо, записи OpkgTun нет", &MockBackend{running: true, pid: 1}},
+		{"устройства нет", &MockBackend{}, false},
+		{"устройство живо, записи OpkgTun нет", &MockBackend{running: true, pid: 1}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			o, rec := newOS5LifecycleOn(t, &recordingPoster{}, ndmsquery.NewFakeGetter(), tc.backend, false)
+			f := ndmsquery.NewFakeNDMS()
+			f.ExpectCreate("OpkgTun10")
+			o, _, rec := newOS5Oracle(t, f, tc.backend)
 			if err := o.Reconcile(context.Background(), lifecycleCfg(t)); err != nil {
 				t.Fatal(err)
 			}
-			if !hasCall(rec.Calls, "/opt/sbin/ip link del dev opkgtun10") || !slices.Equal(tc.backend.StartCalls, []string{"opkgtun10"}) {
-				t.Fatalf("устройство не пересоздано: start=%v\n%s", tc.backend.StartCalls, strings.Join(rec.Calls, "\n"))
+			if hasCall(rec.Calls, "/opt/sbin/ip link del dev opkgtun10") {
+				t.Fatalf("голый ip link del мимо барьера:\n%s", strings.Join(rec.Calls, "\n"))
+			}
+			created := tc.backend.StartCalls
+			if tc.wantRecreate {
+				created = tc.backend.RecreateCalls
+			}
+			if !slices.Equal(created, []string{"opkgtun10"}) || len(tc.backend.StartCalls)+len(tc.backend.RecreateCalls) != 1 {
+				t.Fatalf("устройство не пересоздано: start=%v recreate=%v", tc.backend.StartCalls, tc.backend.RecreateCalls)
 			}
 		})
+	}
+}
+
+// F500: на номере туннеля plain tun, который держит чужая программа (запись
+// OpkgTun10 в NDMS есть — стенд 27.09: запись раньше процесса). Reconcile не
+// сносит его ни своим `ip link del`, ни через backend.Start — наружу
+// HeldError с pid и именем программы.
+func TestReconcile_ForeignHeldDevice_RefusedWithoutDelete(t *testing.T) {
+	held := &backend.HeldError{Iface: "opkgtun10", PID: 4242, Comm: "csqtt"}
+	be := &MockBackend{startError: held}
+	getter := ndmsquery.NewFakeGetter()
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"Germany"}}`)
+	o, rec := newOS5LifecycleOn(t, &recordingPoster{}, getter, be, true)
+
+	err := o.Reconcile(context.Background(), lifecycleCfg(t))
+
+	var got *backend.HeldError
+	if !errors.As(err, &got) || got.PID != 4242 {
+		t.Fatalf("err = %v, want *backend.HeldError{PID:4242}", err)
+	}
+	if hasCall(rec.Calls, "/opt/sbin/ip link del dev opkgtun10") {
+		t.Fatalf("чужое устройство снесено оператором:\n%s", strings.Join(rec.Calls, "\n"))
+	}
+}
+
+// Тот же сценарий на ColdStart (boot / ручной старт). Откат идёт через
+// backend.Stop — реальный бэкенд отказывает и там (backend.TestStop_Held…),
+// здесь проверяется, что оператор сам `ip link del` не зовёт и ошибку не
+// прячет за откатом.
+func TestColdStart_ForeignHeldDevice_RefusedWithoutDelete(t *testing.T) {
+	held := &backend.HeldError{Iface: "opkgtun10", PID: 4242, Comm: "csqtt"}
+	be := &MockBackend{startError: held}
+	getter := ndmsquery.NewFakeGetter()
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"Germany"}}`)
+	o, rec := newOS5LifecycleOn(t, &recordingPoster{}, getter, be, true)
+
+	err := o.ColdStart(context.Background(), lifecycleCfg(t))
+
+	var got *backend.HeldError
+	if !errors.As(err, &got) || got.Comm != "csqtt" {
+		t.Fatalf("err = %v, want *backend.HeldError{Comm:csqtt}", err)
+	}
+	if !strings.Contains(err.Error(), "занят сторонней программой csqtt (pid 4242)") {
+		t.Fatalf("текст отказа не дошёл до пользователя: %q", err.Error())
+	}
+	if hasCall(rec.Calls, "/opt/sbin/ip link del dev opkgtun10") {
+		t.Fatalf("чужое устройство снесено оператором:\n%s", strings.Join(rec.Calls, "\n"))
 	}
 }
 
@@ -529,6 +866,36 @@ func TestSetupEndpointRoute_ReplacesSharedHostRouteAtomically(t *testing.T) {
 	}
 	if !hasCall(s.Calls, "/opt/sbin/ip route replace 203.0.113.7/32 via 192.0.2.1") {
 		t.Fatalf("маршрут не поставлен через replace:\n%s", strings.Join(s.Calls, "\n"))
+	}
+}
+
+// F612/#1004: шлюз не-предпочтительного WAN лежит не в main, а в таблице
+// интерфейса за правилом `from <адрес> lookup N` (роутер репортёра:
+// `1176: from 192.168.8.100 lookup 16397` → `default via 192.168.8.1 dev
+// cdc_br1`). Без `from` ядро с заданным oif и без маршрута в main считает
+// адрес on-link — вывод без `via`, и маршрут вставал `dev cdc_br1` (ARP в
+// сеть модема). Подмена отвечает так же, как ядро.
+func TestSetupEndpointRoute_NonPreferredWANUsesInterfaceTable(t *testing.T) {
+	o, _, _ := newOS5Lifecycle(t)
+	rec := &ipRunRecorder{}
+	o.ipRun = func(ctx context.Context, name string, args ...string) (*exec.Result, error) {
+		rec.run(ctx, name, args...)
+		line := strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(line, "-o -4 addr show dev cdc_br1"):
+			return &exec.Result{Stdout: "7: cdc_br1    inet 192.168.8.100/24 brd 192.168.8.255 scope global cdc_br1\\       valid_lft forever preferred_lft forever\n"}, nil
+		case strings.HasPrefix(line, "route get 198.51.100.20 from 192.168.8.100 oif cdc_br1"):
+			return &exec.Result{Stdout: "198.51.100.20 from 192.168.8.100 via 192.168.8.1 dev cdc_br1 table 16397 uid 0\n"}, nil
+		case strings.HasPrefix(line, "route get"):
+			return &exec.Result{Stdout: "198.51.100.20 dev cdc_br1 src 192.168.8.100 uid 0\n"}, nil
+		}
+		return &exec.Result{}, nil
+	}
+	if _, err := o.SetupEndpointRoute(context.Background(), "awg10", "198.51.100.20:51820", "cdc_br1", "CdcEthernet1"); err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(rec.Calls, "/opt/sbin/ip route replace 198.51.100.20/32 via 192.168.8.1") {
+		t.Fatalf("маршрут не через шлюз интерфейса:\n%s", strings.Join(rec.Calls, "\n"))
 	}
 }
 
@@ -624,7 +991,7 @@ func TestStop_RemovesEndpointRoute(t *testing.T) {
 			t.Fatalf("RestoreEndpointTracking: %v", err)
 		}
 
-		if err := o.Stop(context.Background(), "awg10"); err != nil {
+		if err := o.Stop(context.Background(), "awg10", "Germany"); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
 
@@ -651,7 +1018,7 @@ func TestStop_RemovesEndpointRoute(t *testing.T) {
 			}
 		}
 
-		if err := o.Stop(context.Background(), "awg10"); err != nil {
+		if err := o.Stop(context.Background(), "awg10", "Germany"); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
 
@@ -678,7 +1045,7 @@ func TestStop_NeighbourWithOtherAddressDoesNotHold(t *testing.T) {
 		t.Fatalf("RestoreEndpointTracking awg11: %v", err)
 	}
 
-	if err := o.Stop(context.Background(), "awg10"); err != nil {
+	if err := o.Stop(context.Background(), "awg10", "Germany"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
@@ -705,7 +1072,7 @@ func TestStop_KeepsRouteHeldByOtherBackend(t *testing.T) {
 		t.Fatalf("RestoreEndpointTracking: %v", err)
 	}
 
-	if err := o.Stop(context.Background(), "awg10"); err != nil {
+	if err := o.Stop(context.Background(), "awg10", "Germany"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
@@ -775,5 +1142,119 @@ func TestRestoreEndpointTracking_SkipsUnroutableEndpoint(t *testing.T) {
 				t.Errorf("пропуск не виден в журнале: %v", spy.entries)
 			}
 		})
+	}
+}
+
+// Переименование переписывает описание только НАШЕЙ записи — по тому же
+// правилу, что и гейт старта (F517): описание = прежнему имени туннеля или под
+// записью живое amneziawg. Иначе туннель, которому старт отказал на чужой
+// записи, после переименования перезаписал бы её описание — и следующий старт
+// взял бы чужую запись как свою. Отсутствующую запись не создаём: RCI-форма
+// описания на ней создала бы запись без security-level; её заведёт Фаза 1.
+func TestUpdateDescription_OnlyOurRecord(t *testing.T) {
+	const want = `{"interface":{"OpkgTun10":{"description":"Norway"}}}`
+	rec := func(descr string) string {
+		return fmt.Sprintf(`{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","description":%q}}`, descr)
+	}
+	for _, tc := range []struct {
+		name, snapshot string
+		prevName       string
+		running        bool
+		wantPost       bool
+		wantForeign    bool
+	}{
+		{"наша: описание = прежнему имени", rec("Germany"), "Germany", false, true, false},
+		{"наша: чужое описание, живое amneziawg", rec("csqtt"), "Germany", true, true, false},
+		{"чужая: описание не наше, устройства нет", rec("csqtt"), "Germany", false, false, true},
+		{"записи нет", `{}`, "Germany", false, false, false},
+		{"пустое прежнее имя, запись без описания", rec(""), "", false, false, true},
+		{"пустое прежнее имя, живое amneziawg", rec(""), "", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			poster := &recordingPoster{}
+			getter := ndmsquery.NewFakeGetter()
+			getter.SetJSON("/show/interface/", tc.snapshot)
+			o, _ := newOS5LifecycleOn(t, poster, getter, &MockBackend{running: tc.running}, true)
+			err := o.UpdateDescription(context.Background(), "awg10", tc.prevName, "Norway")
+			var foreign *ForeignRecordError
+			if errors.As(err, &foreign) != tc.wantForeign || (!tc.wantForeign && err != nil) {
+				t.Fatalf("err = %v, want ForeignRecordError = %v", err, tc.wantForeign)
+			}
+			if got := hasPayload(poster.payloads, want); got != tc.wantPost || (!tc.wantPost && len(poster.payloads) != 0) {
+				t.Fatalf("описание отправлено = %v, want %v: %v", got, tc.wantPost, poster.payloads)
+			}
+		})
+	}
+}
+
+// Взятие стороннего туннеля (Adopt) забирает запись ОСОЗНАННО: описание
+// переписывается без проверки владения. Отсутствующую запись не создаём.
+func TestCaptureDescription_TakesForeignRecord(t *testing.T) {
+	const want = `{"interface":{"OpkgTun10":{"description":"Norway"}}}`
+	for _, tc := range []struct {
+		name, snapshot string
+		wantPost       bool
+	}{
+		{"чужая запись", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","description":"csqtt"}}`, true},
+		{"записи нет", `{}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			poster := &recordingPoster{}
+			getter := ndmsquery.NewFakeGetter()
+			getter.SetJSON("/show/interface/", tc.snapshot)
+			o, _ := newOS5LifecycleOn(t, poster, getter, &MockBackend{}, true)
+			if err := o.CaptureDescription(context.Background(), "awg10", "Norway"); err != nil {
+				t.Fatalf("CaptureDescription: %v", err)
+			}
+			if got := hasPayload(poster.payloads, want); got != tc.wantPost || (!tc.wantPost && len(poster.payloads) != 0) {
+				t.Fatalf("описание отправлено = %v, want %v: %v", got, tc.wantPost, poster.payloads)
+			}
+		})
+	}
+}
+
+// Кэш записей не поднялся — «не знаем»: отказ, а не молчаливый пропуск
+// (вызывающий пишет Warn — после ребута F517 откажет) и не слепая запись.
+func TestUpdateDescription_RecordReadError(t *testing.T) {
+	for name, call := range map[string]func(o *OperatorOS5Impl) error{
+		"update": func(o *OperatorOS5Impl) error {
+			return o.UpdateDescription(context.Background(), "awg10", "Germany", "Norway")
+		},
+		"capture": func(o *OperatorOS5Impl) error { return o.CaptureDescription(context.Background(), "awg10", "Norway") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			poster := &recordingPoster{}
+			getter := ndmsquery.NewFakeGetter()
+			getter.SetError("/show/interface/", errors.New("injected: ndms"))
+			o, _ := newOS5LifecycleOn(t, poster, getter, &MockBackend{}, true)
+			if err := call(o); err == nil {
+				t.Fatal("ошибка чтения записи проглочена")
+			}
+			if len(poster.payloads) != 0 {
+				t.Fatalf("RCI тронут при недоступном кэше: %v", poster.payloads)
+			}
+		})
+	}
+}
+
+// F535: переименование не дописало описание записи (отказ записи, ребут до
+// save), устройства после ребута нет — запись с ПРЕЖНИМ именем всё ещё наша:
+// старт не отказывает, а переписывает описание на текущее имя.
+func TestReconcile_PrevNameDescriptionIsOurs(t *testing.T) {
+	const want = `{"interface":{"OpkgTun10":{"description":"Germany"}}}`
+	poster := &descriptionPoster{}
+	getter := ndmsquery.NewFakeGetter()
+	getter.SetJSON("/show/interface/", `{"OpkgTun10":{"id":"OpkgTun10","type":"OpkgTun","state":"up","link":"down","description":"Old name"}}`)
+	o, _ := newOS5LifecycleOn(t, poster, getter, &MockBackend{}, true) // amneziawg не живо
+	cfg := lifecycleCfg(t)
+	cfg.PrevName = "Old name"
+
+	err := o.Reconcile(context.Background(), cfg)
+	var foreign *ForeignRecordError
+	if errors.As(err, &foreign) {
+		t.Fatalf("запись с прежним именем сочтена чужой: %v", err)
+	}
+	if !hasPayload(poster.payloads, want) {
+		t.Fatalf("описание не переписано на текущее имя: %v", poster.payloads)
 	}
 }

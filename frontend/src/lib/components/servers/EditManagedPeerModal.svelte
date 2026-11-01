@@ -1,10 +1,12 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { ManagedPeer } from '$lib/types';
 	import { Modal, FormToggle, Button, FieldHint } from '$lib/components/ui';
 	import { protocols, calcTotalChars, MAX_SIGNATURE_CHARS, type ProtocolKey, type SignaturePackets } from '$lib/utils/protocols';
 	import PeerSignatureEditor from './PeerSignatureEditor.svelte';
 	import { routerDnsHint } from './routerDnsHint';
-	import { validateTunnelIP, validateDNSList } from '$lib/utils/peerForm';
+	import { validateTunnelIP, validateDNSList, validatePeerNetworks, parseRemoteSubnets, normalizeClientAllowedIPs, formatClientAllowedIPs } from '$lib/utils/peerForm';
+	import PeerNetworksFields from './PeerNetworksFields.svelte';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
 	import { servers } from '$lib/stores/servers';
@@ -24,6 +26,8 @@
 	let tunnelIP = $state('');
 	let dns = $state('');
 	let useRouterDNS = $state(false);
+	let clientAllowedIPs = $state('');
+	let remoteSubnets = $state('');
 	let saving = $state(false);
 	let wasOpen = $state(false);
 	let sigProfile = $state<ProtocolKey | ''>('');
@@ -52,6 +56,8 @@
 			useRouterDNS = routerIP !== '' && dns === routerIP;
 			sigProfile = peerProfile();
 			sigPackets = peerPackets();
+			clientAllowedIPs = formatClientAllowedIPs(peer.clientAllowedIPs ?? '');
+			remoteSubnets = (peer.remoteSubnets ?? []).join('\n');
 		}
 		wasOpen = open;
 	});
@@ -67,12 +73,15 @@
 	const sigOver = $derived(calcTotalChars(sigPackets) > MAX_SIGNATURE_CHARS);
 	const ipError = $derived(validateTunnelIP(tunnelIP));
 	const dnsError = $derived(validateDNSList(dns));
+	const netError = $derived(validatePeerNetworks(clientAllowedIPs, remoteSubnets));
 
 	const isDirty = $derived(
 		description !== peer.description ||
 		tunnelIP !== peer.tunnelIP ||
 		dns !== (peer.dns || '') ||
 		useRouterDNS !== (routerIP !== '' && (peer.dns || '') === routerIP) ||
+		normalizeClientAllowedIPs(clientAllowedIPs) !== (peer.clientAllowedIPs ?? '') ||
+		remoteSubnets !== (peer.remoteSubnets ?? []).join('\n') ||
 		sigDirty
 	);
 
@@ -83,46 +92,54 @@
 				description,
 				tunnelIP,
 				dns: dns || undefined,
+				clientAllowedIPs: normalizeClientAllowedIPs(clientAllowedIPs),
+				remoteSubnets: parseRemoteSubnets(remoteSubnets),
 				signature: sigDirty ? { profile: sigProfile, ...sigPackets } : undefined,
 			});
 			servers.applyMutationResponse(fresh);
-			notifications.success('Клиент обновлён');
+			notifications.success(m.servers_peer_updated());
 			onclose();
 			onUpdated();
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка сохранения');
+			notifications.error(e instanceof Error ? e.message : m.system_tunnels_save_failed());
 		} finally {
 			saving = false;
 		}
 	}
 </script>
 
-<Modal {open} title="Редактировать клиента" size="sm" {onclose} hasUnsavedChanges={() => isDirty}>
+<Modal {open} title={m.servers_peer_edit_title()} size="sm" {onclose} hasUnsavedChanges={() => isDirty}>
 	<div class="form-fields">
 		<div class="form-group">
-			<label class="label" for="emp-desc">Имя / описание</label>
-			<input type="text" id="emp-desc" class="input" bind:value={description} />
+			<label class="field-label" for="emp-desc">{m.servers_peer_label_desc()}</label>
+			<input type="text" id="emp-desc" class="field-input" bind:value={description} />
 		</div>
 		<div class="form-group">
-			<label class="label" for="emp-ip">Tunnel IP (CIDR)</label>
-			<input type="text" id="emp-ip" class="input" bind:value={tunnelIP} />
+			<label class="field-label" for="emp-ip">Tunnel IP (CIDR)</label>
+			<input type="text" id="emp-ip" class="field-input" bind:value={tunnelIP} />
 			{#if ipError}<span class="field-hint is-error">{ipError}</span>{/if}
 		</div>
 		<div class="form-group">
-			<label class="label" for="emp-dns">DNS серверы</label>
-			<input type="text" id="emp-dns" class="input" bind:value={dns} placeholder="192.168.1.1" disabled={useRouterDNS} />
+			<label class="field-label" for="emp-dns">{m.servers_peer_label_dns()}</label>
+			<input type="text" id="emp-dns" class="field-input" bind:value={dns} placeholder="192.168.1.1" disabled={useRouterDNS} />
 			{#if routerIP}
 				<div class="toggle-row">
-					<span class="toggle-label">DNS роутера ({routerIP})<FieldHint text={routerDnsHint} ariaLabel="Подсказка: DNS роутера" /></span>
+					<span class="toggle-label">{m.servers_peer_router_dns({ ip: routerIP })}<FieldHint text={routerDnsHint()} ariaLabel={m.servers_peer_router_dns_aria()} /></span>
 					<FormToggle bind:checked={useRouterDNS} onchange={(val) => { dns = val ? routerIP : ''; }} size="sm" />
 				</div>
 			{/if}
 			{#if dnsError}
 				<span class="field-hint is-error">{dnsError}</span>
 			{:else}
-				<span class="field-hint">Используется в конфиге клиента. Пусто — DNS роутера</span>
+				<span class="field-hint">{m.servers_peer_dns_used_hint()}</span>
 			{/if}
 		</div>
+		<PeerNetworksFields
+			bind:clientAllowedIPs
+			bind:remoteSubnets
+			idPrefix="emp"
+			loadPresets={() => api.getManagedPeerPresets(serverId, dns)}
+		/>
 		<PeerSignatureEditor
 			profile={sigProfile}
 			packets={sigPackets}
@@ -131,9 +148,9 @@
 	</div>
 
 	{#snippet actions()}
-		<Button variant="ghost" size="md" onclick={onclose}>Отмена</Button>
-		<Button variant="primary" size="md" onclick={handleSave} loading={saving} disabled={saving || sigOver || !!ipError || !!dnsError}>
-			Сохранить
+		<Button variant="ghost" size="md" onclick={onclose}>{m.common_cancel()}</Button>
+		<Button variant="primary" size="md" onclick={handleSave} loading={saving} disabled={saving || sigOver || !!ipError || !!dnsError || !!netError}>
+			{m.common_save()}
 		</Button>
 	{/snippet}
 </Modal>
@@ -149,26 +166,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.375rem;
-	}
-
-	.label {
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--text-secondary);
-	}
-
-	.input {
-		padding: 8px 12px;
-		font-size: 13px;
-		background: var(--bg-primary);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		color: var(--text-primary);
-	}
-
-	.input:focus {
-		outline: none;
-		border-color: var(--accent);
 	}
 
 	.field-hint {

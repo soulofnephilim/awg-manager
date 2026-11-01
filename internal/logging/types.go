@@ -54,6 +54,7 @@ const (
 	SubSubscription   = "subscription"
 	SubDeviceProxy    = "deviceproxy"
 	SubHrNeo          = "hrneo"
+	SubZapret         = "zapret"
 	SubRoutingCatalog = "catalog"
 	SubAWGOutbounds   = "awg-outbounds"
 	SubManaged        = "managed"
@@ -77,6 +78,12 @@ const (
 	SubStorage        = "storage"      // tunnel store + settings persistence
 	SubHTTP           = "http"         // HTTP server lifecycle and listener events
 	SubMonitoring     = "monitoring"   // matrix probe transitions (ok→fail / restore)
+	SubProxy          = "proxy"        // proxy runtime (proxyrt): WDTT/FreeTurn instances
+	SubNDMSQuery      = "ndms-query"   // NDMS query layer (cache, lists)
+	SubNDMSEvents     = "ndms-events"  // NDMS hook events
+	SubNDMSMetrics    = "ndms-metrics" // NDMS metrics poller
+	SubServerListen   = "server-listen"
+	SubTools          = "tools" // expert system tools (files, services, opkg)
 
 	// Singbox bucket subgroups
 	SubSBInbound  = "inbound"
@@ -117,19 +124,21 @@ var KnownSubgroups = map[string][]string{
 	},
 	GroupRouting: {
 		SubDnsRoute, SubStaticRoute, SubAccessPolicy, SubClientRoute,
-		SubSingboxRouter, SubBypassSet, SubSubscription, SubDeviceProxy, SubHrNeo, SubRoutingCatalog,
-		SubAWGOutbounds,
+		SubSingboxRouter, SubBypassSet, SubSubscription, SubDeviceProxy, SubHrNeo, SubZapret, SubRoutingCatalog,
+		SubAWGOutbounds, SubProxy,
 	},
 	GroupServer: {
-		SubHTTP, SubManaged,
+		SubHTTP, SubManaged, SubWan, // wan — ServersHandler (F289)
 	},
 	GroupSystem: {
 		SubBoot, SubAuth, SubMcp, SubSettings, SubUpdate, SubWan, SubSystemTunnel,
 		SubCleanup, SubDnsCheck, SubConnections, SubTraffic, SubDiagnostics,
 		SubProfiling, SubRCI, SubNDMS, SubStorage, SubMonitoring,
+		SubNDMSQuery, SubNDMSEvents, SubNDMSMetrics, SubServerListen, SubTools,
 	},
 	GroupSingbox: {
 		SubSBProcess, SubSBInbound, SubSBOutbound, SubSBDNS, SubSBRouter, SubSBRuntime,
+		SubAwg3,
 	},
 }
 

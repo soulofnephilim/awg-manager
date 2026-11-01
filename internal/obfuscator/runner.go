@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,23 +55,32 @@ func errPath(id string) string { return filepath.Join(RunDir, id+".err.log") }
 // Start пишет конфиг и поднимает процесс. Живой процесс с тем же конфигом
 // не трогает; с другим — перезапускает (Q21: правка параметров = рестарт
 // только релея).
-func (r *Runner) Start(ctx context.Context, tunnelID string, o *storage.Obfuscator) error {
+func (r *Runner) Start(ctx context.Context, tunnelID string, o *storage.Obfuscator, ip string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	want := RenderConf(o)
-	if cur, err := os.ReadFile(ConfPath(tunnelID)); err == nil && string(cur) == want && r.alive(tunnelID) {
+	want := RenderConf(o, ip)
+	cur, err := os.ReadFile(ConfPath(tunnelID))
+	same := err == nil && string(cur) == want
+	if same && r.alive(tunnelID) {
 		return nil
+	}
+	// Бинарь — до остановки старого релея: без него новый не стартует, и
+	// туннель остался бы вовсе без релея (F119 1.8). Порт проверяется после:
+	// его обычно держит наш же старый релей.
+	bin, err := r.deps.BinaryFor(ctx, o.Flavor)
+	if err != nil {
+		return fmt.Errorf("бинарь обфускатора %s: %w", o.Flavor, err)
 	}
 	_ = r.stopLocked(tunnelID)
 	if !PortFree(o.LocalPort) {
 		return fmt.Errorf("loopback-порт %d занят другим процессом (родная установка Phobos?)", o.LocalPort)
 	}
-	bin, err := r.deps.BinaryFor(ctx, o.Flavor)
-	if err != nil {
-		return fmt.Errorf("бинарь обфускатора %s: %w", o.Flavor, err)
-	}
-	if err := WriteConf(tunnelID, o); err != nil {
-		return err
+	// Тот же текст уже на диске — не переписываем: /opt — флеш, а рестарт
+	// релея с прежним конфигом (Stop→Start, бут) частый (F119 4.5).
+	if !same {
+		if err := WriteConf(tunnelID, o, ip); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(RunDir, 0o755); err != nil {
 		return err
@@ -95,7 +105,8 @@ func (r *Runner) Start(ctx context.Context, tunnelID string, o *storage.Obfuscat
 		return err
 	}
 	r.startTailLocked(tunnelID, false)
-	r.deps.Log.Info("obfuscator", tunnelID, fmt.Sprintf("%s запущен, 127.0.0.1:%d -> %s (%s)", o.Flavor, o.LocalPort, o.Target, o.Masking))
+	_, port, _ := TargetHostPort(o)
+	r.deps.Log.Info("obfuscator", tunnelID, fmt.Sprintf("%s запущен, 127.0.0.1:%d -> %s (%s)", o.Flavor, o.LocalPort, net.JoinHostPort(ip, port), o.Masking))
 	return nil
 }
 
@@ -141,6 +152,14 @@ func (r *Runner) alive(tunnelID string) bool {
 	return ok && childproc.IsAlive(pid) && r.matchFn(pid)
 }
 
+// Backend — для StateInfo: процессный бэкенд.
+func (r *Runner) Backend(tunnelID string) string {
+	if r.alive(tunnelID) {
+		return BackendProcess
+	}
+	return ""
+}
+
 func (r *Runner) pid(tunnelID string) int { p, _ := readPID(tunnelID); return p }
 
 // AdoptAll после рестарта демона: pidfile живого нашего процесса — усыновить,
@@ -158,10 +177,16 @@ func (r *Runner) AdoptAll(keep func(tunnelID string) bool) []string {
 			// Через stopLocked, а не os.Remove: у мёртвого процесса мог
 			// остаться хвост stderr — иначе горутина висит вечно.
 			_ = r.stopLocked(id)
+			if !keep(id) {
+				RemoveConf(id)
+			}
 			continue
 		}
 		if !keep(id) {
 			_ = r.stopLocked(id)
+			// Конфиг сироты несёт ключ: у удалённого туннеля его иначе не
+			// уберёт никто. Включённому туннелю Start напишет его заново (F119 1.9).
+			RemoveConf(id)
 			r.deps.Log.Info("obfuscator", id, "сирота остановлен (туннель удалён или выключен)")
 			continue
 		}

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
 )
 
@@ -23,8 +24,8 @@ const ruleSetDecompileTimeout = 5 * time.Minute
 // Exec/IO seams (mirror ruleSetMatchExec / inlineRuleSetCompileExec) so the
 // network + binary integration is replaced in tests. Production paths call the
 // default* implementations against the real cache + sing-box.
-var ruleSetDownload = func(ctx context.Context, url, format string) (string, error) {
-	return defaultRuleSetDownload(ctx, url, format)
+var ruleSetDownload = func(ctx context.Context, url, format, via string) (string, error) {
+	return defaultRuleSetDownload(ctx, url, format, via)
 }
 var ruleSetDecompileExec = func(ctx context.Context, binary, srsPath string) ([]byte, error) {
 	return defaultRuleSetDecompile(ctx, binary, srsPath)
@@ -51,11 +52,11 @@ func sharedRemoteCIDRCache() *ruleSetCache {
 // local file path. Reuses ruleSetCache.getOrDownload — the same machinery the
 // inspector uses. format influences only the cache filename extension. emit is
 // nil here (no Inspect progress channel during reconcile); tag is best-effort.
-func defaultRuleSetDownload(_ context.Context, url, format string) (string, error) {
+func defaultRuleSetDownload(_ context.Context, url, format, via string) (string, error) {
 	if format == "" {
 		format = inferFormat(url)
 	}
-	return sharedRemoteCIDRCache().getOrDownload(url, format, nil, "")
+	return sharedRemoteCIDRCache().getOrDownload(url, format, nil, "", via)
 }
 
 // defaultRuleSetDecompileToFile runs sing-box rule-set decompile into a temp JSON
@@ -176,9 +177,11 @@ func (s *ServiceImpl) factsForRuleSetFile(ctx context.Context, path, format stri
 // matchers are ip_cidr/rule_set, so a by-IP packet to those CIDRs is guaranteed to
 // proxy and never fall through to route.final=direct (which would loop back to the
 // tun). Best-effort: any per-set failure is skipped (logged, not fatal).
-func (s *ServiceImpl) remoteTunCIDRs(ctx context.Context, cfg *RouterConfig) (v4 []string, v6 []string) {
+// complete=false — хотя бы один набор не скачан или не разобран: результат
+// неполон, и снимать маршруты по нему нельзя (F756).
+func (s *ServiceImpl) remoteTunCIDRs(ctx context.Context, cfg *RouterConfig) (v4 []string, v6 []string, complete bool) {
 	if cfg == nil {
-		return nil, nil
+		return nil, nil, true
 	}
 	byTag := make(map[string]RuleSet, len(cfg.Route.RuleSet))
 	for _, rs := range cfg.Route.RuleSet {
@@ -224,15 +227,18 @@ func (s *ServiceImpl) remoteTunCIDRs(ctx context.Context, cfg *RouterConfig) (v4
 			v6 = append(v6, norm)
 		}
 	}
+	complete = true
 	for _, rs := range want {
-		path, err := ruleSetDownload(ctx, rs.URL, rs.Format)
+		path, err := ruleSetDownload(ctx, rs.URL, rs.Format, ruleSetFetchVia(orchestrator.SlotFakeIP, rs))
 		if err != nil {
 			s.appLog.Warn("fakeip-cidr-remote", rs.Tag, "download: "+err.Error())
+			complete = false
 			continue
 		}
 		facts, err := s.factsForRuleSetFile(ctx, path, rs.Format)
 		if err != nil {
 			s.appLog.Warn("fakeip-cidr-remote", rs.Tag, err.Error())
+			complete = false
 			continue
 		}
 		// Тот же beta.1-гейт merged matching, что в desiredTunCIDRs, но по
@@ -249,5 +255,5 @@ func (s *ServiceImpl) remoteTunCIDRs(ctx context.Context, cfg *RouterConfig) (v4
 			add(c)
 		}
 	}
-	return v4, v6
+	return v4, v6, complete
 }

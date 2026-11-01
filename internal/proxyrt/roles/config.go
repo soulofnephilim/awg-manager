@@ -3,8 +3,11 @@ package roles
 import (
 	"fmt"
 	"net"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Конфиги ролей — намерение и только намерение: ни одного кэшированного факта
@@ -60,6 +63,9 @@ type WdttClientConfig struct {
 	// Policies — намерение членства в политиках доступа. Единственный
 	// писатель — пользователь (спека §4.4).
 	Policies []PolicyPermit `json:"policies,omitempty"`
+
+	AutoReconnect         bool   `json:"autoReconnect,omitempty"`
+	AutoReconnectInterval string `json:"autoReconnectInterval,omitempty"`
 }
 
 func (c WdttClientConfig) Validate() error {
@@ -82,7 +88,7 @@ func (c WdttClientConfig) Validate() error {
 	if c.Mode == "raw" && (c.NdmsIface == "" || c.RawIface == "") {
 		return fmt.Errorf("raw-клиенту не выделен индекс OpkgTun (пин ставит писатель конфига)")
 	}
-	return nil
+	return validateAutoReconnect(c.AutoReconnect, c.AutoReconnectInterval)
 }
 
 // DefaultWorkers — дефолт числа потоков (-n) клиента WDTT по архитектуре
@@ -236,6 +242,12 @@ func (c WdttServerConfig) Validate() error {
 	if strings.TrimSpace(c.Listen) == "" {
 		return fmt.Errorf("не задан listen сервера")
 	}
+	// ConfigDir уходит в бинарь как -config-dir, туда пишется passwords.json:
+	// только абсолютный путь без «..» (F654). Пусто — дефолт под каталогом
+	// данных (normalize).
+	if d := strings.TrimSpace(c.ConfigDir); d != "" && (!filepath.IsAbs(d) || slices.Contains(strings.Split(d, "/"), "..")) {
+		return fmt.Errorf("configDir %q: нужен абсолютный путь без «..»", d)
+	}
 	if err := c.validatePorts(); err != nil {
 		return err
 	}
@@ -360,22 +372,26 @@ func (c WdttServerConfig) EffectiveRawListen() string {
 
 // FreeTurnClientConfig — клиент FreeTurn (паритет с freeturn/service.go:876).
 type FreeTurnClientConfig struct {
-	Listen         string `json:"listen"`
-	Peer           string `json:"peer,omitempty"`
-	Provider       string `json:"provider,omitempty"`
-	Links          string `json:"links,omitempty"`
-	Streams        int    `json:"streams,omitempty"`
-	Transport      string `json:"transport,omitempty"`
-	Mode           string `json:"mode,omitempty"`
-	ObfProfile     string `json:"obfProfile,omitempty"`
-	ObfKey         string `json:"obfKey,omitempty"`
-	StreamsPerCred int    `json:"streamsPerCred,omitempty"`
-	Platform       string `json:"platform,omitempty"` // ""|desktop|mobile
-	DNSMode        string `json:"dnsMode,omitempty"`
-	DNSServers     string `json:"dnsServers,omitempty"`
-	ClientID       string `json:"clientId,omitempty"`
-	Sub            string `json:"sub,omitempty"`
-	Debug          bool   `json:"debug,omitempty"`
+	Listen                string `json:"listen"`
+	Peer                  string `json:"peer,omitempty"`
+	Provider              string `json:"provider,omitempty"`
+	Links                 string `json:"links,omitempty"`
+	Streams               int    `json:"streams,omitempty"`
+	Transport             string `json:"transport,omitempty"`
+	Mode                  string `json:"mode,omitempty"`
+	Bond                  bool   `json:"bond,omitempty"` // upstream 4.0+, только -mode tcp
+	ObfProfile            string `json:"obfProfile,omitempty"`
+	ObfKey                string `json:"obfKey,omitempty"`
+	ObfTimingMs           int    `json:"obfTimingMs,omitempty"` // -obf-timing, только с профилем обфускации
+	StreamsPerCred        int    `json:"streamsPerCred,omitempty"`
+	Platform              string `json:"platform,omitempty"` // ""|desktop|mobile
+	DNSMode               string `json:"dnsMode,omitempty"`
+	DNSServers            string `json:"dnsServers,omitempty"`
+	ClientID              string `json:"clientId,omitempty"`
+	Sub                   string `json:"sub,omitempty"`
+	Debug                 bool   `json:"debug,omitempty"`
+	AutoReconnect         bool   `json:"autoReconnect,omitempty"`
+	AutoReconnectInterval string `json:"autoReconnectInterval,omitempty"`
 	// KCP — профиль ARQ tcp-режима (freeturn 3.2+, F144): приезжает полем `kcp`
 	// ссылки freeturn://, редактора в UI нет. Рендерится в -kcp-* только при
 	// Mode tcp: вне tcp клиент отвергает любое отклонение от дефолта на старте.
@@ -401,7 +417,40 @@ func (c FreeTurnClientConfig) Validate() error {
 	if strings.TrimSpace(c.Peer) == "" && strings.TrimSpace(c.Links) == "" && strings.TrimSpace(c.Sub) == "" {
 		return fmt.Errorf("не задан адрес реле (-peer / -links / подписка)")
 	}
+	if err := c.validateBond(); err != nil {
+		return err
+	}
+	if err := validateAutoReconnect(c.AutoReconnect, c.AutoReconnectInterval); err != nil {
+		return err
+	}
 	return c.KCP.validate()
+}
+
+// validateBond зеркалит validateBond клиента freeturn (internal/config/validate.go):
+// на каждую ссылку-группу не больше 256/групп сессий, иначе клиент не стартует.
+// Вне tcp -bond в argv не уходит (FreeTurnClientArgs) — там и проверять нечего.
+func (c FreeTurnClientConfig) validateBond() error {
+	if !c.Bond || c.Mode != "tcp" {
+		return nil
+	}
+	groups := 1
+	if p := strings.TrimSpace(c.Provider); p == "" || p == "vk" {
+		n := 0
+		for _, l := range strings.Split(c.Links, ",") {
+			if strings.TrimSpace(l) != "" {
+				n++
+			}
+		}
+		groups = max(n, 1)
+	}
+	streams := c.Streams
+	if streams <= 0 {
+		streams = 12 // DefaultStreams бинаря
+	}
+	if limit := 256 / groups; streams > limit {
+		return fmt.Errorf("bond: потоков %d, при %d ссылках допустимо не больше %d", streams, groups, limit)
+	}
+	return nil
 }
 
 // validate зеркалит validateKCP клиента freeturn (internal/config/kcp.go):
@@ -484,4 +533,38 @@ func localListen(addr string) error {
 		return fmt.Errorf("listen %q: клиент слушает только 127.0.0.1 (пул %d..%d)", addr, ListenPortMin, ListenPortMax)
 	}
 	return nil
+}
+
+// validAutoReconnectIntervals — допустимые значения интервала автопереподключения.
+var validAutoReconnectIntervals = map[string]time.Duration{
+	"on_failure": 0,
+	"30m":        30 * time.Minute,
+	"1h":         1 * time.Hour,
+	"2h":         2 * time.Hour,
+	"4h":         4 * time.Hour,
+	"8h":         8 * time.Hour,
+	"12h":        12 * time.Hour,
+	"24h":        24 * time.Hour,
+}
+
+func validateAutoReconnect(enabled bool, interval string) error {
+	if !enabled {
+		return nil
+	}
+	if interval == "" || interval == "on_failure" {
+		return nil
+	}
+	if _, ok := validAutoReconnectIntervals[interval]; !ok {
+		return fmt.Errorf("недопустимый интервал автопереподключения %q (допустимы: on_failure, 30m, 1h, 2h, 4h, 8h, 12h, 24h)", interval)
+	}
+	return nil
+}
+
+// ParseReconnectInterval преобразует строковый интервал в time.Duration.
+// Для неизвестных значений или on_failure возвращает 0.
+func ParseReconnectInterval(s string) time.Duration {
+	if s == "" || s == "on_failure" {
+		return 0
+	}
+	return validAutoReconnectIntervals[s]
 }

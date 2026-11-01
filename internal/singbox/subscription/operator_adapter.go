@@ -16,10 +16,10 @@ import (
 
 // SlotSubscriptionsMeta is the SlotMeta registered on startup.
 // The slot constant itself lives in internal/singbox/orchestrator as
-// SlotSubscriptions ("subscriptions" / 40-subscriptions.json).
+// SlotSubscriptions ("subscriptions" / 13-subscriptions.json).
 var SlotSubscriptionsMeta = orchestrator.SlotMeta{
 	Slot:     orchestrator.SlotSubscriptions,
-	Filename: "40-subscriptions.json",
+	Filename: "13-subscriptions.json",
 	AlwaysOn: false,
 }
 
@@ -31,7 +31,7 @@ const subscriptionPortBase = 11000
 // subscriptionPortMax is the inclusive upper bound of the subscription port range.
 const subscriptionPortMax = 11999
 
-// slotConfig is the in-memory shape persisted to 40-subscriptions.json.
+// slotConfig is the in-memory shape persisted to 13-subscriptions.json.
 // It intentionally omits log/dns/experimental (those are in 00-base.json).
 type slotConfig struct {
 	Inbounds  []any          `json:"inbounds"`
@@ -45,8 +45,9 @@ type slotConfig struct {
 // package.
 type ProxyRegistrar interface {
 	NextFreeIndex(ctx context.Context, reserved map[int]bool) (int, error)
-	EnsureProxy(ctx context.Context, idx, port int, description string) error
-	RemoveProxy(ctx context.Context, idx int) error
+	EnsureProxy(ctx context.Context, idx, port int, description, ownedDesc string) error
+	CreateProxy(ctx context.Context, idx, port int, description string) (ours bool, err error)
+	RemoveProxy(ctx context.Context, idx int, desc string) error
 }
 
 // ClashSelector is the narrow interface for switching a selector outbound's
@@ -58,7 +59,7 @@ type ClashSelector interface {
 }
 
 // OperatorAdapter implements ConfigMutator by maintaining its own
-// config slot (40-subscriptions.json) written through the orchestrator.
+// config slot (13-subscriptions.json) written through the orchestrator.
 //
 // Mutations (Add*/Update*/Remove*) only accumulate in-memory; the full slot
 // is validated, written via orch.Save and SIGHUP'd ONCE when Reload() commits
@@ -88,7 +89,7 @@ type OperatorAdapter struct {
 	mu  sync.Mutex
 	cfg slotConfig
 	// loadErr — отказ LoadFromDisk прочитать существующий слот. flush()
-	// пишет 40-subscriptions.json ЦЕЛИКОМ из памяти, поэтому память, не
+	// пишет 13-subscriptions.json ЦЕЛИКОМ из памяти, поэтому память, не
 	// сверенная с диском, стирает ВСЕ подписки при первой же операции над
 	// одной из них — а зовёт эту операцию планировщик автообновления сам,
 	// раз в минуту, без участия человека. Пока признак стоит, писать нельзя.
@@ -177,12 +178,12 @@ func NewOperatorAdapter(orch *orchestrator.Orchestrator, pm ProxyRegistrar, clas
 	}
 }
 
-// LoadFromDisk reads an existing 40-subscriptions.json (if any) into the
+// LoadFromDisk reads an existing 13-subscriptions.json (if any) into the
 // in-memory config. Call once after orch.Bootstrap() so the adapter is
 // consistent with what is on disk. Missing file is treated as an empty
 // slot (not an error).
 func (a *OperatorAdapter) LoadFromDisk(configDir string) error {
-	path := fmt.Sprintf("%s/40-subscriptions.json", configDir)
+	path := fmt.Sprintf("%s/13-subscriptions.json", configDir)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -322,6 +323,12 @@ func (a *OperatorAdapter) RemoveOutbound(tag string) error {
 	}
 	a.cfg.Outbounds = out
 	return nil
+}
+
+// ReferencedAmong — какие из tags упомянуты в файлах остальных слотов
+// (orchestrator.ReferencedAmong): такую сироту не снимаем (#1081).
+func (a *OperatorAdapter) ReferencedAmong(tags []string) (map[string]bool, error) {
+	return a.orch.ReferencedAmong(orchestrator.SlotSubscriptions, tags)
 }
 
 // SubscriptionOutbounds returns a snapshot of every outbound currently
@@ -475,6 +482,93 @@ func (a *OperatorAdapter) Reload(_ context.Context) error {
 	return err
 }
 
+// PersistSelectorDefault пишет memberTag в default селектора selectorTag в
+// файле слота — без sing-box check и без reload (F427). Живой селектор
+// переключает Clash API, а файл нужен следующему старту движка: иначе рестарт
+// или ребут поднимает подписку на прежнем сервере, хотя UI показывает новый.
+// sing-box check не нужен: default ставится только на член, который уже есть
+// в outbounds этого селектора. sub.MemberTags для этого не годится — после
+// flush, отбросившего сервер, тег там остаётся, а default на необъявленный
+// outbound роняет старт движка мимо Reload (watchdog → FATAL).
+//
+// Пишется ЗАКОММИЧЕННОЕ состояние: если открыт пакет другой подписки, память
+// несёт его незакоммиченные правки, и записать их мимо flush нельзя. Тогда
+// default ставится и в снимок пакета (переживёт его откат), и в память
+// (переживёт его коммит).
+func (a *OperatorAdapter) PersistSelectorDefault(selectorTag, memberTag string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.loadErr != nil {
+		return fmt.Errorf("%w: слот подписок не прочитан при старте (%v)", ErrValidation, a.loadErr)
+	}
+	committed := slotConfig{Inbounds: a.cfg.Inbounds, Outbounds: a.cfg.Outbounds, Route: a.cfg.Route}
+	if a.pending != nil {
+		route := make(map[string]any, len(a.cfg.Route))
+		for k, v := range a.cfg.Route {
+			route[k] = v
+		}
+		route["rules"] = a.pending.rules
+		committed = slotConfig{Inbounds: a.pending.inbounds, Outbounds: a.pending.outbounds, Route: route}
+	}
+	outbounds, ok := withSelectorDefault(committed.Outbounds, selectorTag, memberTag)
+	if !ok {
+		return fmt.Errorf("subscription adapter: selector %q with member %q not in slot", selectorTag, memberTag)
+	}
+	committed.Outbounds = outbounds
+	data, err := json.MarshalIndent(committed, "", "  ")
+	if err != nil {
+		return fmt.Errorf("subscription adapter: marshal slot: %w", err)
+	}
+	if err := a.orch.SaveSilent(orchestrator.SlotSubscriptions, data); err != nil {
+		return fmt.Errorf("subscription adapter: save slot: %w", err)
+	}
+	if a.pending != nil {
+		a.pending.outbounds = outbounds
+		if inBatch, ok := withSelectorDefault(a.cfg.Outbounds, selectorTag, memberTag); ok {
+			a.cfg.Outbounds = inBatch
+		}
+	} else {
+		a.cfg.Outbounds = outbounds
+	}
+	return nil
+}
+
+// withSelectorDefault — копия outbounds, где у селектора tag стоит default.
+// false — селектора нет или member не входит в его outbounds. Карты не
+// правятся на месте: снимок пакета делит их с памятью (slotSnapshot).
+func withSelectorDefault(outbounds []any, tag, member string) ([]any, bool) {
+	for i, v := range outbounds {
+		ob, ok := v.(map[string]any)
+		if !ok || ob["tag"] != tag || ob["type"] != "selector" {
+			continue
+		}
+		if !selectorHasMember(ob, member) {
+			return nil, false
+		}
+		cp := make(map[string]any, len(ob))
+		for k, val := range ob {
+			cp[k] = val
+		}
+		cp["default"] = member
+		out := append([]any(nil), outbounds...)
+		out[i] = cp
+		return out, true
+	}
+	return nil, false
+}
+
+// selectorHasMember: outbounds в памяти слота всегда []any — слот собирается
+// json.Unmarshal (AddOutbound, LoadFromDisk).
+func selectorHasMember(ob map[string]any, member string) bool {
+	members, _ := ob["outbounds"].([]any)
+	for _, m := range members {
+		if m == member {
+			return true
+		}
+	}
+	return false
+}
+
 // SelectClashProxy hits the running sing-box Clash API to switch the
 // selector's active member at runtime, without triggering a config reload.
 func (a *OperatorAdapter) SelectClashProxy(selectorTag, memberTag string) error {
@@ -558,6 +652,39 @@ var (
 	dropLoopBudget   = 90 * time.Second
 )
 
+// flushCheckIterations — сколько раз Pass 2 вправе перепроверить merged-
+// снапшот. Каждая итерация либо снимает outbound, либо чистит новую висячую
+// ссылку группы, поэтому outbound'ов + ссылок в группах + 1 хватает заведомо:
+// исчерпание — уже не «долго сходилось», а дефект, и писать слот нельзя (F760).
+// Var — тесты ужимают.
+var flushCheckIterations = func(outboundsAndRefs int) int { return outboundsAndRefs + 1 }
+
+// groupMemberRefs — сколько ссылок на outbound'ы держит слот: члены и default
+// групп плюс правила маршрута и final (их чистит тот же cleanReferencesToTag) —
+// верхняя граница числа чисток висячих ссылок в Pass 2.
+func groupMemberRefs(cfg *slotConfig) int {
+	n := 1 // route.final
+	if cfg.Route != nil {
+		rules, _ := cfg.Route["rules"].([]any)
+		n += len(rules)
+	}
+	for _, raw := range cfg.Outbounds {
+		ob, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ, _ := ob["type"].(string); !isGroupOutbound(typ) {
+			continue
+		}
+		members, _ := ob["outbounds"].([]any)
+		n += len(members)
+		if def, _ := ob["default"].(string); def != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // dropLoopExhaustedErr — честная ошибка вместо бесконечного «крутится»:
 // подписка с сотнями неподдерживаемых записей прерывается с внятным
 // объяснением и списком уже отброшенного.
@@ -601,8 +728,9 @@ func (a *OperatorAdapter) flush() error {
 	// entries are drained via cheap standalone checks (issue #491) before
 	// the next merged re-check. Cap iterations to outbound count so a
 	// parser bug cannot loop forever.
-	maxIter := len(a.cfg.Outbounds) + 1
+	maxIter := flushCheckIterations(len(a.cfg.Outbounds) + groupMemberRefs(&a.cfg))
 	xSlotCleaned := map[string]bool{} // cross-slot tags already cleaned — guards against re-reporting a ref we can't actually remove
+	checked := false
 	for iter := 0; iter < maxIter; iter++ {
 		data, err := json.MarshalIndent(a.cfg, "", "  ")
 		if err != nil {
@@ -613,6 +741,7 @@ func (a *OperatorAdapter) flush() error {
 			return fmt.Errorf("subscription adapter: check-merged: %w", err)
 		}
 		if res.Ok() {
+			checked = true
 			break
 		}
 		// Ошибки, атрибутированные user-слоту (90-user.json), drop-циклом
@@ -654,11 +783,14 @@ func (a *OperatorAdapter) flush() error {
 			// Unknown error class — cannot isolate, give up.
 			return fmt.Errorf("%w: could not isolate outbound: %s", ErrValidation, res.Error())
 		}
+		reason := strings.TrimSpace(res.Error())
+		if err := rejectedGroupErr(&a.cfg, idx, reason); err != nil {
+			return err
+		}
 		tag, err := dropOutboundAndCleanRefs(&a.cfg, idx)
 		if err != nil {
 			return fmt.Errorf("subscription adapter: drop idx %d: %w", idx, err)
 		}
-		reason := strings.TrimSpace(res.Error())
 		dropped = append(dropped, DropReason{Tag: tag, Reason: reason})
 		// Остальные пер-outbound отбраковки собираем дешёвыми standalone-
 		// проверками (issue #491), чтобы не пересобирать merged-снапшот
@@ -666,6 +798,11 @@ func (a *OperatorAdapter) flush() error {
 		if err := a.drainStandaloneRejects(&dropped); err != nil {
 			return err
 		}
+	}
+	// Лимит исчерпан, а последняя проверка не прошла: записывать нельзя —
+	// иначе слот уходит на диск и в движок непроверенным (F760).
+	if !checked {
+		return fmt.Errorf("%w: проверка конфига подписок не сошлась за %d итераций — слот не записан", ErrValidation, maxIter)
 	}
 
 	// An empty slot is fatal only for an additive op (Create/Refresh) where
@@ -730,6 +867,9 @@ func (a *OperatorAdapter) drainStandaloneRejects(dropped *[]DropReason) error {
 			// cross-slot ссылки.
 			return nil
 		}
+		if err := rejectedGroupErr(&a.cfg, idx, res.Error()); err != nil {
+			return err
+		}
 		if time.Now().After(deadline) {
 			return dropLoopExhaustedErr(*dropped)
 		}
@@ -742,8 +882,9 @@ func (a *OperatorAdapter) drainStandaloneRejects(dropped *[]DropReason) error {
 	return dropLoopExhaustedErr(*dropped)
 }
 
-// DeclaredOutboundTags returns the outbound tags present in the committed
-// subscriptions slot (after the last flush). The Service uses it to prune
+// DeclaredOutboundTags returns the outbound tags present in the working
+// subscriptions slot: the last flush plus any staged changes of an open
+// batch. The Service uses it to prune
 // stored MemberTags down to servers that actually materialized, so
 // flush-dropped servers don't linger as dangling group members.
 func (a *OperatorAdapter) DeclaredOutboundTags() []string {
@@ -826,20 +967,31 @@ func (a *OperatorAdapter) AllocProxyIndex(ctx context.Context) (int, error) {
 	return a.pm.NextFreeIndex(ctx, nil)
 }
 
-// EnsureProxy creates or refreshes the NDMS ProxyN interface at the given index.
-func (a *OperatorAdapter) EnsureProxy(ctx context.Context, idx, port int, description string) error {
+// EnsureProxy creates or refreshes the NDMS ProxyN interface at the given
+// index; an existing record is refreshed only when it is ours (F577).
+func (a *OperatorAdapter) EnsureProxy(ctx context.Context, idx, port int, description, ownedDesc string) error {
 	if a.pm == nil {
 		return fmt.Errorf("subscription adapter: ProxyRegistrar not configured")
 	}
-	return a.pm.EnsureProxy(ctx, idx, port, description)
+	return a.pm.EnsureProxy(ctx, idx, port, description, ownedDesc)
 }
 
-// RemoveProxy tears down the NDMS ProxyN interface at the given index.
-func (a *OperatorAdapter) RemoveProxy(ctx context.Context, idx int) error {
+// CreateProxy creates the NDMS ProxyN at a freshly allocated index; ours —
+// откат вправе её снести (F574).
+func (a *OperatorAdapter) CreateProxy(ctx context.Context, idx, port int, description string) (bool, error) {
+	if a.pm == nil {
+		return false, fmt.Errorf("subscription adapter: ProxyRegistrar not configured")
+	}
+	return a.pm.CreateProxy(ctx, idx, port, description)
+}
+
+// RemoveProxy tears down the NDMS ProxyN interface at the given index when
+// its description is desc (ours, F577).
+func (a *OperatorAdapter) RemoveProxy(ctx context.Context, idx int, desc string) error {
 	if a.pm == nil {
 		return fmt.Errorf("subscription adapter: ProxyRegistrar not configured")
 	}
-	return a.pm.RemoveProxy(ctx, idx)
+	return a.pm.RemoveProxy(ctx, idx, desc)
 }
 
 // toAnyInt extracts an integer from json-decoded interface values (float64, int, int64).

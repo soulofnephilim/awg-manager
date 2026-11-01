@@ -1,12 +1,12 @@
 <script lang="ts">
-    import { Crown, TriangleAlert } from 'lucide-svelte';
+    import { TriangleAlert } from 'lucide-svelte';
     import { Modal, Button } from '$lib/components/ui';
     import TunnelConfigImportPanel from './TunnelConfigImportPanel.svelte';
-    import { AmneziaPremiumWizard } from '$lib/components/amneziapremium';
-    import type { PremiumWizardResult } from '$lib/components/amneziapremium';
     import { api } from '$lib/api/client';
     import { notifications } from '$lib/stores/notifications';
     import { isVpnLink } from '$lib/utils/vpnlink';
+    import { tunnelNameError } from '$lib/utils/tunnelName';
+    import { m } from '$lib/i18n';
 
     interface Props {
         open: boolean;
@@ -15,8 +15,6 @@
         tunnelState: string;
         backendLabel: string;
         ndmsName: string;
-        /** Страна подписки, которой туннель помечен сейчас: объекта туннеля здесь нет. */
-        tunnelCountry?: string;
         onclose: () => void;
         onreplaced?: () => void;
     }
@@ -28,7 +26,6 @@
         tunnelState,
         backendLabel,
         ndmsName,
-        tunnelCountry,
         onclose,
         onreplaced
     }: Props = $props();
@@ -40,7 +37,10 @@
     let vpnPasteInput = $state('');
     let linkPreview = $state('');
     let wasOpen = $state(false);
-    let premiumOpen = $state(false);
+    // Сервер валидирует длину имени только при его изменении
+    // (internal/api/tunnels_crud.go) — иначе неизменённое старое длинное имя
+    // ловилось бы полем, хотя запрос его даже не тронет.
+    let nameError = $derived(newName !== tunnelName ? tunnelNameError(newName) : '');
 
     // Reset state when modal opens (only once per open cycle so polling-tick
     // re-runs don't wipe user edits).
@@ -57,43 +57,15 @@
         vpnPasteInput = '';
         linkPreview = '';
         loading = false;
-        premiumOpen = false;
     });
-
-    /**
-     * Замена конфигурации тем, что выдал мастер подписки. Страна уезжает
-     * вместе с конфигурацией: без неё туннель остался бы помеченным прежней
-     * страной, к которой новая конфигурация отношения не имеет.
-     */
-    async function replaceFromPremium(result: PremiumWizardResult) {
-        loading = true;
-        try {
-            const replaced = await api.replaceConfig(
-                tunnelId,
-                result.config,
-                newName !== tunnelName ? newName : undefined,
-                result.countryCode
-            );
-            if (replaced.warnings?.length) {
-                replaced.warnings.forEach((w: string) => notifications.warning(w));
-            }
-            notifications.success('Конфигурация заменена');
-            onclose();
-            onreplaced?.();
-        } catch (e) {
-            notifications.error(e instanceof Error ? e.message : 'Ошибка замены конфигурации');
-        } finally {
-            loading = false;
-        }
-    }
 
     async function handleReplace() {
         let content = importContent.trim();
-        if (!content) return;
+        if (!content || nameError) return;
 
         // Auto-detect vpn:// in paste tab (vpn tab already decodes via VpnLinkPasteImport)
         if (activeTab === 'paste' && isVpnLink(content)) {
-            notifications.error('Для vpn:// используйте вкладку «Ссылка»');
+            notifications.error(m.tunnel_edit_replace_use_link_tab());
             return;
         }
 
@@ -103,32 +75,32 @@
             if (result.warnings?.length) {
                 result.warnings.forEach((w: string) => notifications.warning(w));
             }
-            notifications.success('Конфигурация заменена');
+            notifications.success(m.tunnel_edit_replace_done());
             onclose();
             onreplaced?.();
         } catch (e) {
-            notifications.error(e instanceof Error ? e.message : 'Ошибка замены конфигурации');
+            notifications.error(e instanceof Error ? e.message : m.tunnel_edit_replace_failed());
         } finally {
             loading = false;
         }
     }
 </script>
 
-<Modal {open} title="Замена конфигурации" size="lg" {onclose}>
+<Modal {open} title={m.tunnel_edit_replace_title()} size="lg" {onclose}>
     <div class="replace-info">
         <span class="replace-tunnel-label">{ndmsName}</span>
         <span class="replace-dot">&middot;</span>
         <span>{backendLabel}</span>
         <span class="replace-dot">&middot;</span>
         <span class="replace-state" class:state-running={tunnelState === 'running'}>
-            {tunnelState === 'running' ? 'Работает' : 'Остановлен'}
+            {tunnelState === 'running' ? m.tunnels_state_running() : m.tunnels_state_stopped()}
         </span>
     </div>
 
     {#if tunnelState === 'running'}
         <div class="replace-warning">
             <TriangleAlert size={16} aria-hidden="true" style="flex-shrink: 0; margin-top: 1px;" />
-            Туннель будет остановлен, переконфигурирован и запущен автоматически. Все правила маршрутизации сохранятся.
+            {m.tunnel_edit_replace_warning()}
         </div>
     {/if}
 
@@ -140,34 +112,20 @@
         bind:linkPreview
     />
 
-    <button type="button" class="premium-entry" disabled={loading} onclick={() => (premiumOpen = true)}>
-        <Crown size={14} aria-hidden="true" />
-        Взять конфиг из Amnezia Premium
-    </button>
-
     <div class="name-field">
-        <label class="field-label" for="replace-name">Имя туннеля</label>
+        <label class="field-label" for="replace-name">{m.tunnel_edit_replace_name()}</label>
         <input type="text" id="replace-name" class="name-input" bind:value={newName} placeholder={tunnelName}>
-        <div class="field-hint">Оставьте без изменений чтобы сохранить текущее имя</div>
+        <div class="field-hint">{m.tunnel_edit_replace_name_hint()}</div>
+        <p class="error-text" class:visible={!!nameError}>{nameError}</p>
     </div>
 
     {#snippet actions()}
-        <Button variant="secondary" onclick={onclose} disabled={loading}>Отмена</Button>
-        <Button variant="primary" onclick={handleReplace} disabled={!importContent.trim()} loading={loading}>
-            Заменить
+        <Button variant="secondary" onclick={onclose} disabled={loading}>{m.common_cancel()}</Button>
+        <Button variant="primary" onclick={handleReplace} disabled={!importContent.trim() || !!nameError} loading={loading}>
+            {m.tunnels_replace()}
         </Button>
     {/snippet}
 </Modal>
-
-<!-- Карта «страна → туннель» здесь состоит из одного туннеля — того, который
-     заменяем: за списком ради метки «туннель …» модалка не ходит. -->
-<AmneziaPremiumWizard
-    open={premiumOpen}
-    replaceTarget={{ id: tunnelId, name: tunnelName, country: tunnelCountry }}
-    countryTunnels={[{ name: tunnelName, amneziaCountry: tunnelCountry }]}
-    onclose={() => (premiumOpen = false)}
-    onconfig={(result) => void replaceFromPremium(result)}
-/>
 
 <style>
     .replace-info {
@@ -236,27 +194,5 @@
         font-size: 0.6875rem;
         color: var(--text-muted);
         margin-top: 2px;
-    }
-
-    .premium-entry {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        margin-top: 12px;
-        padding: 0;
-        font-size: 0.75rem;
-        background: none;
-        border: none;
-        color: var(--accent);
-        cursor: pointer;
-    }
-
-    .premium-entry:hover:not(:disabled) {
-        text-decoration: underline;
-    }
-
-    .premium-entry:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
     }
 </style>

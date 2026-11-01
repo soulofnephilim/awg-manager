@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -77,22 +80,14 @@ type dnsRouteDetailOut struct {
 // pages should be able to stop on an empty result.
 func pageDNSRouteDetail(detail DNSRouteDetail, offset int) dnsRouteDetailOut {
 	total := len(detail.Domains)
-	start := min(offset, total)
-	end := min(start+MaxDomainsInDetail, total)
-	// Three-index slice: the page must not be able to grow into the rest
-	// of the list through an append somewhere downstream.
-	detail.Domains = detail.Domains[start:end:end]
-	if detail.Domains == nil {
-		detail.Domains = []string{}
-	}
-	if detail.Routes == nil {
-		detail.Routes = []RouteTarget{}
-	}
+	page, start, truncated := pageOf(detail.Domains, offset, MaxDomainsInDetail)
+	detail.Domains = page
+	detail.Routes = orEmpty(detail.Routes)
 	return dnsRouteDetailOut{
 		DNSRouteDetail:   detail,
 		DomainCount:      total,
 		DomainsOffset:    start,
-		DomainsTruncated: end < total,
+		DomainsTruncated: truncated,
 	}
 }
 
@@ -119,9 +114,9 @@ type devicesOut struct {
 
 // validateDomains checks only that the list is non-empty and every entry
 // is non-blank. The grammar itself belongs to the dnsroute service, which
-// accepts plain domains, bare labels, CIDR subnets and geosite:/geoip:
-// tags — a second, stricter grammar here would reject entries the service
-// is happy with (and would drift from it on the next change).
+// accepts plain domains, bare labels and CIDR subnets and rejects
+// geosite:/geoip: tags for NDMS lists (F700) — a second grammar here would
+// drift from the service's on the next change.
 func validateDomains(domains []string) error {
 	if len(domains) == 0 {
 		return fmt.Errorf("domains must not be empty")
@@ -132,6 +127,53 @@ func validateDomains(domains []string) error {
 		}
 	}
 	return nil
+}
+
+// routeTargetShape is the shape of a routing target id: a tunnel id, or a
+// prefixed one (wan:apcli1, system:Wireguard0). Whether it exists is for
+// Deps to say, against the same catalog the web interface lists.
+var routeTargetShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$`)
+
+// maxRouteTargets bounds a failover list: a handful in practice.
+const maxRouteTargets = 16
+
+func requireRouteTargets(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("targets must name at least one target (use list_routing_targets)")
+	}
+	if len(ids) > maxRouteTargets {
+		return nil, fmt.Errorf("targets holds more than %d entries", maxRouteTargets)
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if !routeTargetShape.MatchString(id) {
+			return nil, fmt.Errorf("target %q is not a target id (use list_routing_targets)", id)
+		}
+		if slices.Contains(out, id) {
+			return nil, fmt.Errorf("targets names %q twice", id)
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// subscriptionURLs checks domain list URLs before Deps: http or https with
+// a host. The service fetches each one; that is where a dead link fails.
+func subscriptionURLs(urls []string) ([]string, error) {
+	out := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		raw = strings.TrimSpace(raw)
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(raw, " \t\r\n") {
+			return nil, fmt.Errorf("subscription URL must be an http or https address")
+		}
+		// The same URL twice would be fetched twice on every refresh.
+		if !slices.Contains(out, raw) {
+			out = append(out, raw)
+		}
+	}
+	return out, nil
 }
 
 func validateCIDRs(subnets []string) error {
@@ -146,6 +188,10 @@ func validateCIDRs(subnets []string) error {
 	return nil
 }
 
+type routingTargetsOut struct {
+	Targets []RoutingTarget `json:"targets"`
+}
+
 func registerRoutingTools(s *mcp.Server, d Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_dns_routes",
@@ -153,9 +199,7 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 		Annotations: readOnly("List DNS routes"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, dnsRoutesOut, error) {
 		list, err := d.ListDNSRoutes(ctx)
-		if list == nil {
-			list = []DNSRoute{}
-		}
+		list = orEmpty(list)
 		return nil, dnsRoutesOut{Routes: list}, err
 	})
 
@@ -179,18 +223,42 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "add_dns_route",
-		Description: "Create a domain routing list that sends the given domains (and subdomains) through a tunnel. The list is created enabled and takes effect immediately.",
+		Name: "add_dns_route",
+		Description: "Create a domain routing list that sends the given domains (and subdomains) through a tunnel, or through several targets with failover (targets, from list_routing_targets: tunnels, NDMS interfaces such as Proxy0, WAN). " +
+			"killSwitch blocks the traffic when every target is down; excludes carves domains out; subscriptionUrls downloads domain lists into it now. The list is created enabled and takes effect immediately.",
 		Annotations: safeWrite("Add DNS route", false),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in DNSRouteInput) (*mcp.CallToolResult, DNSRoute, error) {
 		if strings.TrimSpace(in.Name) == "" {
 			return nil, DNSRoute{}, fmt.Errorf("name is required")
 		}
-		if err := requireTunnelID(in.TunnelID); err != nil {
+		switch {
+		case in.TunnelID != "" && len(in.Targets) > 0:
+			return nil, DNSRoute{}, fmt.Errorf("give tunnelId or targets, not both")
+		case len(in.Targets) > 0:
+			targets, err := requireRouteTargets(in.Targets)
+			if err != nil {
+				return nil, DNSRoute{}, err
+			}
+			in.Targets = targets
+		default:
+			if err := requireTunnelID(in.TunnelID); err != nil {
+				return nil, DNSRoute{}, err
+			}
+		}
+		subs, err := subscriptionURLs(in.SubscriptionURLs)
+		if err != nil {
 			return nil, DNSRoute{}, err
 		}
-		if err := validateDomains(in.Domains); err != nil {
-			return nil, DNSRoute{}, err
+		in.SubscriptionURLs = subs
+		if len(in.Domains) > 0 || len(subs) == 0 {
+			if err := validateDomains(in.Domains); err != nil {
+				return nil, DNSRoute{}, err
+			}
+		}
+		if len(in.Excludes) > 0 {
+			if err := validateDomains(in.Excludes); err != nil {
+				return nil, DNSRoute{}, fmt.Errorf("excludes: %w", err)
+			}
 		}
 		out, err := d.AddDNSRoute(ctx, in)
 		return nil, out, err
@@ -198,16 +266,46 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "update_dns_route",
-		Description: "Edit an existing domain routing list in place: rename it, replace its manual entries, or send it through a different tunnel. " +
-			"Omitted fields are left untouched; excludes, subscriptions and the backend always survive, which is why this is the way to change a list, " +
-			"not remove_dns_route followed by add_dns_route. manualDomains replaces EVERY manual entry, CIDR subnets included — read them from get_dns_route first. Check the returned warnings.",
-		Annotations: safeWrite("Update DNS route", true),
+		Description: "Edit an existing domain routing list in place: rename it, replace its manual entries or excludes, add or remove domain list subscriptions, send it through a different tunnel or an ordered set of targets with failover, or switch its kill switch. " +
+			"Omitted fields are left untouched and the backend always survives, which is why this is the way to change a list, " +
+			"not remove_dns_route followed by add_dns_route. manualDomains and excludes each replace EVERY entry of their kind — read them from get_dns_route first. " +
+			"HydraRoute lists take one target and no excludes, subscriptions or kill switch. Check the returned warnings.",
+		// Not idempotent: addSubscriptionUrls fetches the lists again, and a
+		// retried removeSubscriptions is refused once the ref is gone.
+		Annotations: safeWrite("Update DNS route", false),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in DNSRouteUpdate) (*mcp.CallToolResult, updateDNSOut, error) {
 		if in.RouteID == "" {
 			return nil, updateDNSOut{}, fmt.Errorf("routeId is required")
 		}
-		if strings.TrimSpace(in.Name) == "" && in.ManualDomains == nil && in.TunnelID == "" {
-			return nil, updateDNSOut{}, fmt.Errorf("nothing to update: pass at least one of name, manualDomains or tunnelId")
+		if strings.TrimSpace(in.Name) == "" && in.ManualDomains == nil && in.TunnelID == "" && in.Targets == nil &&
+			in.KillSwitch == nil && in.Excludes == nil && len(in.AddSubscriptionURLs) == 0 && len(in.RemoveSubscriptions) == 0 {
+			return nil, updateDNSOut{}, fmt.Errorf("nothing to update: pass at least one field to change")
+		}
+		if in.TunnelID != "" && in.Targets != nil {
+			return nil, updateDNSOut{}, fmt.Errorf("give tunnelId or targets, not both")
+		}
+		if in.Targets != nil {
+			targets, err := requireRouteTargets(in.Targets)
+			if err != nil {
+				return nil, updateDNSOut{}, err
+			}
+			in.Targets = targets
+		}
+		if len(in.Excludes) > 0 {
+			if err := validateDomains(in.Excludes); err != nil {
+				return nil, updateDNSOut{}, fmt.Errorf("excludes: %w", err)
+			}
+		}
+		subs, err := subscriptionURLs(in.AddSubscriptionURLs)
+		if err != nil {
+			return nil, updateDNSOut{}, err
+		}
+		in.AddSubscriptionURLs = subs
+		for i, ref := range in.RemoveSubscriptions {
+			in.RemoveSubscriptions[i] = strings.TrimSpace(ref)
+			if in.RemoveSubscriptions[i] == "" {
+				return nil, updateDNSOut{}, fmt.Errorf("removeSubscriptions holds refs from get_dns_route's subscriptions; an empty one names nothing")
+			}
 		}
 		if in.ManualDomains != nil {
 			if err := validateDomains(in.ManualDomains); err != nil {
@@ -243,7 +341,7 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "remove_dns_route",
 		Description: "Delete a domain routing list by id. DESTRUCTIVE: the list is deleted permanently and cannot be restored through MCP — " +
-			"add_dns_route only takes name/domains/tunnelId, so subnets, excludes, backend, subscriptions and extra route targets are lost for good. " +
+			"add_dns_route cannot bring back the backend, the icon, subscriptions whose full address you do not have, or the list's id. " +
 			"Confirm with the user first; the deleted record is returned so you can show what was destroyed.",
 		Annotations: destructiveWrite("Remove DNS route", true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in routeIDIn) (*mcp.CallToolResult, removedDNSOut, error) {
@@ -263,28 +361,68 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 		Annotations: readOnly("List static routes"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, staticRoutesOut, error) {
 		list, err := d.ListStaticRoutes(ctx)
-		if list == nil {
-			list = []StaticRoute{}
-		}
+		list = orEmpty(list)
 		return nil, staticRoutesOut{Routes: list}, err
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "add_static_route",
-		Description: "Create a static routing list that sends the given CIDR subnets through a tunnel.",
+		Name: "add_static_route",
+		Description: "Create a static routing list that sends the given CIDR subnets through a target from list_routing_targets (a tunnel, an NDMS interface such as Proxy0, or WAN). " +
+			"killSwitch blocks the traffic when the target is down instead of letting it out through the provider.",
 		Annotations: safeWrite("Add static route", false),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in StaticRouteInput) (*mcp.CallToolResult, StaticRoute, error) {
 		if strings.TrimSpace(in.Name) == "" {
 			return nil, StaticRoute{}, fmt.Errorf("name is required")
 		}
-		if err := requireTunnelID(in.TunnelID); err != nil {
-			return nil, StaticRoute{}, err
+		target, err := requireRouteTargets([]string{in.TunnelID})
+		if err != nil {
+			return nil, StaticRoute{}, fmt.Errorf("tunnelId: %w", err)
 		}
+		in.TunnelID = target[0]
 		if err := validateCIDRs(in.Subnets); err != nil {
 			return nil, StaticRoute{}, err
 		}
 		out, err := d.AddStaticRoute(ctx, in)
 		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "update_static_route",
+		Description: "Edit a static (CIDR) routing list in place: rename it, replace its subnets, send it through another target from list_routing_targets, or switch its kill switch. " +
+			"Omitted fields are kept, as is whether the list is on. subnets replaces EVERY subnet of the list. Takes effect immediately.",
+		Annotations: safeWrite("Update static route", true),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in StaticRouteUpdate) (*mcp.CallToolResult, StaticRoute, error) {
+		if in.RouteID == "" {
+			return nil, StaticRoute{}, fmt.Errorf("routeId is required")
+		}
+		in.Name = strings.TrimSpace(in.Name)
+		if in.Name == "" && in.TunnelID == "" && in.Subnets == nil && in.KillSwitch == nil {
+			return nil, StaticRoute{}, fmt.Errorf("nothing to update: pass at least one field to change")
+		}
+		if in.TunnelID != "" {
+			target, err := requireRouteTargets([]string{in.TunnelID})
+			if err != nil {
+				return nil, StaticRoute{}, fmt.Errorf("tunnelId: %w", err)
+			}
+			in.TunnelID = target[0]
+		}
+		if in.Subnets != nil {
+			if err := validateCIDRs(in.Subnets); err != nil {
+				return nil, StaticRoute{}, err
+			}
+		}
+		out, err := d.UpdateStaticRoute(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "list_routing_targets",
+		Description: "Everything a routing list (add_dns_route, add_static_route and their updates) can send traffic through: tunnels of awg-manager, NDMS interfaces such as Proxy0 or a WireGuard made in the router, and WAN connections. " +
+			"available=false means it cannot carry traffic right now.",
+		Annotations: readOnly("List routing targets"),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, routingTargetsOut, error) {
+		list, err := d.ListRoutingTargets(ctx)
+		return nil, routingTargetsOut{Targets: orEmpty(list)}, err
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -322,9 +460,7 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 		Annotations: readOnly("List client routes"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, clientRoutesOut, error) {
 		list, err := d.ListClientRoutes(ctx)
-		if list == nil {
-			list = []ClientRoute{}
-		}
+		list = orEmpty(list)
 		return nil, clientRoutesOut{Routes: list}, err
 	})
 
@@ -381,9 +517,7 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 		Annotations: readOnly("List access policies"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, policiesOut, error) {
 		list, err := d.ListAccessPolicies(ctx)
-		if list == nil {
-			list = []AccessPolicy{}
-		}
+		list = orEmpty(list)
 		return nil, policiesOut{Policies: list}, err
 	})
 
@@ -393,9 +527,7 @@ func registerRoutingTools(s *mcp.Server, d Deps) {
 		Annotations: readOnly("List devices"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, devicesOut, error) {
 		list, err := d.ListDevices(ctx)
-		if list == nil {
-			list = []Device{}
-		}
+		list = orEmpty(list)
 		return nil, devicesOut{Devices: list}, err
 	})
 }

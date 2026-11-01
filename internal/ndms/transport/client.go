@@ -185,8 +185,9 @@ func (c *Client) postJSON(ctx context.Context, payload any) (json.RawMessage, er
 		return nil, fmt.Errorf("rci POST: read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.appLog.Error("POST", "/", fmt.Sprintf("status %d", resp.StatusCode))
-		return nil, &HTTPError{Method: "POST", Path: "/", Status: resp.StatusCode, Body: data}
+		herr := newHTTPError("POST", "/", resp, data)
+		c.appLog.Error("POST", "/", herr.status())
+		return nil, herr
 	}
 
 	// NDMS returns HTTP 200 even on application errors — check body envelope.
@@ -211,11 +212,9 @@ func (c *Client) GetRaw(ctx context.Context, path string) ([]byte, error) {
 // NDMS-ответ в batch-форме не совпадает по shape с direct GET, и
 // unwrapKeys не могут это восстановить.
 //
-// `/show/interface/<name>/summary` здесь БЫЛ и снят: сводку никто не берёт
-// сырым GET'ом — FetchSummary ходит командой show interface через батчер
-// (query/interfaces.go), а ветка не могла сработать с 26079ef4b (FetchSummary
-// переведён на POST). Понадобится снова сырой путь — вернуть вместе с
-// вызывающим.
+// `/show/interface/<name>/summary` здесь БЫЛ и снят: чтений по имени в демоне
+// нет (F546), сводка берётся из полного списка. Понадобится снова сырой путь —
+// вернуть вместе с вызывающим. `/show/rc/interface/` — дерево rc целиком.
 func bypassBatch(path string) bool {
 	if strings.HasPrefix(path, "/show/rc/interface/") {
 		return true
@@ -253,8 +252,9 @@ func (c *Client) getRawDirect(ctx context.Context, path string) ([]byte, error) 
 		return nil, fmt.Errorf("rci GET %s: read: %w", path, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.appLog.Error("GET", path, fmt.Sprintf("status %d", resp.StatusCode))
-		return nil, &HTTPError{Method: "GET", Path: path, Status: resp.StatusCode, Body: body}
+		herr := newHTTPError("GET", path, resp, body)
+		c.appLog.Error("GET", path, herr.status())
+		return nil, herr
 	}
 	return body, nil
 }
@@ -286,8 +286,9 @@ func (c *Client) GetStream(ctx context.Context, path string, fn func(io.Reader) 
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		c.appLog.Error("GET", path, fmt.Sprintf("status %d", resp.StatusCode))
-		return &HTTPError{Method: "GET", Path: path, Status: resp.StatusCode, Body: body}
+		herr := newHTTPError("GET", path, resp, body)
+		c.appLog.Error("GET", path, herr.status())
+		return herr
 	}
 	if err := fn(resp.Body); err != nil {
 		c.appLog.Error("GET", path, fmt.Sprintf("process: %v", err))

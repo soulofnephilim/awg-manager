@@ -1426,7 +1426,7 @@ func TestStripStrayDirectPlaceholder_NoOpWhenCleanTree(t *testing.T) {
 		"00-base.json":          `{"outbounds":[{"type":"direct","tag":"direct"}]}`,
 		"10-tunnels.json":       `{"outbounds":[{"type":"vless","tag":"x","server":"h","server_port":443,"uuid":"u"}]}`,
 		"15-awg.json":           `{"outbounds":[{"type":"direct","tag":"awg-x","bind_interface":"t2s0"}]}`,
-		"40-subscriptions.json": `{"outbounds":[{"type":"selector","tag":"sub","outbounds":["sub-x"]}]}`,
+		"13-subscriptions.json": `{"outbounds":[{"type":"selector","tag":"sub","outbounds":["sub-x"]}]}`,
 	}
 	mtimes := map[string]int64{}
 	for name, body := range files {
@@ -2104,7 +2104,7 @@ func TestRemoveDNSFinalFromBase_MalformedJSON_NoOp(t *testing.T) {
 	}
 }
 
-func TestOperator_Install_NoSpace_ReturnsNil(t *testing.T) {
+func TestOperator_Install_NoSpace_ReturnsErrNoSpace(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "sing-box") // не существует
 	op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
@@ -2114,15 +2114,15 @@ func TestOperator_Install_NoSpace_ReturnsNil(t *testing.T) {
 	inst.SetFreeDiskFn(func(string) (int64, bool) { return 50 << 20, true })
 	op.SetInstaller(inst)
 
-	if err := op.Install(context.Background()); err != nil {
-		t.Fatalf("Install returned error, expected nil: %v", err)
+	if err := op.Install(context.Background()); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("Install = %v, want ErrNoSpace", err)
 	}
 	if got := inst.EvaluateInstallState(""); got != installer.InstallStateMissingNoSpace {
 		t.Fatalf("EvaluateInstallState=%q, want %q", got, installer.InstallStateMissingNoSpace)
 	}
 }
 
-func TestOperator_Update_NoSpace_ReturnsNil(t *testing.T) {
+func TestOperator_Update_NoSpace_ReturnsErrNoSpace(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "sing-box")
 	if err := os.WriteFile(binary, []byte("old-content"), 0o755); err != nil {
@@ -2135,11 +2135,86 @@ func TestOperator_Update_NoSpace_ReturnsNil(t *testing.T) {
 	inst.SetFreeDiskFn(func(string) (int64, bool) { return 50 << 20, true })
 	op.SetInstaller(inst)
 
-	if err := op.Update(context.Background()); err != nil {
-		t.Fatalf("Update returned error, expected nil: %v", err)
+	if err := op.Update(context.Background()); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("Update = %v, want ErrNoSpace", err)
 	}
 	if got := inst.EvaluateInstallState(""); got != installer.InstallStateOutdatedNoSpace {
 		t.Fatalf("EvaluateInstallState=%q, want %q", got, installer.InstallStateOutdatedNoSpace)
+	}
+}
+
+// Install поверх устаревшего бинаря и Update без бинаря — тот же гейт места:
+// раньше каждый метод сверял только «своё» NoSpace-состояние и скачивал.
+func TestOperator_InstallUpdate_CrossStateNoSpace(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		present bool
+		call    func(*Operator) error
+	}{
+		{"Install поверх старого", true, func(o *Operator) error { return o.Install(context.Background()) }},
+		{"Update без бинаря", false, func(o *Operator) error { return o.Update(context.Background()) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, "sing-box")
+			if c.present {
+				if err := os.WriteFile(binary, []byte("old-content"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+			inst := installer.New(binary, "test-arch", installer.BinarySpec{
+				Version: "1.2.3", URL: "u", SHA256: "different-sha", Size: 100 << 20,
+			}, nil)
+			inst.SetFreeDiskFn(func(string) (int64, bool) { return 50 << 20, true })
+			op.SetInstaller(inst)
+			if err := c.call(op); !errors.Is(err, ErrNoSpace) {
+				t.Fatalf("got %v, want ErrNoSpace", err)
+			}
+		})
+	}
+}
+
+// Брошенный оборванным скачиванием .tmp съедает место. Install/Update сносят
+// его до гейта, иначе отказ «нет места» был бы вечным.
+func TestOperator_InstallUpdate_DiscardStaleTmpBeforeGate(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		present bool
+		call    func(*Operator) error
+	}{
+		{"Install", false, func(o *Operator) error { return o.Install(context.Background()) }},
+		{"Update", true, func(o *Operator) error { return o.Update(context.Background()) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, "sing-box")
+			if c.present {
+				if err := os.WriteFile(binary, []byte("old-content"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tmp := binary + ".tmp"
+			if err := os.WriteFile(tmp, []byte("half"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			op := NewOperator(OperatorDeps{Dir: dir, Binary: binary})
+			inst := installer.New(binary, "test-arch", installer.BinarySpec{
+				Version: "1.2.3", URL: "u", SHA256: "different-sha", Size: 100 << 20,
+			}, nil)
+			// Места хватает, только пока tmp удалён.
+			inst.SetFreeDiskFn(func(string) (int64, bool) {
+				if _, err := os.Stat(tmp); err == nil {
+					return 50 << 20, true
+				}
+				return 1 << 30, true
+			})
+			op.SetInstaller(inst)
+			// Downloader не подключён — дальше гейта упадёт с другой ошибкой.
+			if err := c.call(op); errors.Is(err, ErrNoSpace) {
+				t.Fatalf("got ErrNoSpace: брошенный tmp не снесён до гейта")
+			}
+		})
 	}
 }
 
@@ -2249,5 +2324,62 @@ func TestNewOperator_WiresEventBus(t *testing.T) {
 	})
 	if op.bus != bus {
 		t.Fatalf("bus mismatch: got %p, want %p", op.bus, bus)
+	}
+}
+
+// F487: Cleanup сносит СВОЙ каталог, а не каталог бинаря. В проде это один
+// путь; в песочнице (-data-dir) бинарь боевой, и его каталог не наш.
+func TestCleanup_RemovesOwnDirNotBinaryDir(t *testing.T) {
+	own := t.TempDir()
+	binDir := t.TempDir()
+	bin := filepath.Join(binDir, "sing-box")
+	if err := os.WriteFile(bin, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	op := NewOperator(OperatorDeps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Dir: own, Binary: bin})
+	t.Cleanup(op.Process().Close)
+	if err := op.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("Cleanup снёс чужой каталог бинаря: %v", err)
+	}
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		t.Fatalf("свой каталог не снесён: %v", err)
+	}
+}
+
+// upx на месте и cp -p сохраняют mtime: подменённый бинарь другого размера
+// с прежним mtime сайдкаром больше не верится (F137). Сайдкар без размера
+// (старый или положенный руками) — по-прежнему по mtime.
+func TestReadFreshSidecar_SizeMismatchIsStale(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(binary, []byte("v1-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSidecar(binary, "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := readFreshSidecar(binary); !ok || m.Version != "1.0.0" {
+		t.Fatalf("свежий сайдкар: %+v %v", m, ok)
+	}
+	// Подмена с сохранением mtime.
+	fi, _ := os.Stat(binary)
+	if err := os.WriteFile(binary, []byte("v2-binary-other-size"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(binary, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readFreshSidecar(binary); ok {
+		t.Fatal("сайдкар поверили при другом размере бинаря")
+	}
+	// Сайдкар без размера — сверка только по mtime.
+	if err := os.WriteFile(binary+singboxMetaSidecarSuffix, []byte(`{"version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readFreshSidecar(binary); !ok {
+		t.Fatal("сайдкар без размера отвергнут")
 	}
 }

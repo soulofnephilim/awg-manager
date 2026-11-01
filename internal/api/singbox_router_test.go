@@ -86,17 +86,18 @@ func (m *mockRouterSvc) UpdateSettings(ctx context.Context, s storage.SingboxRou
 	m.settings = s
 	return nil
 }
+func (m *mockRouterSvc) UpdateSettingsWith(ctx context.Context, edit func(*storage.SingboxRouterSettings) error) error {
+	sr := m.settings
+	if err := edit(&sr); err != nil {
+		return err
+	}
+	return m.UpdateSettings(ctx, sr)
+}
 func (m *mockRouterSvc) ListWANInterfaces(ctx context.Context) ([]router.WANInterfaceInfo, error) {
 	return nil, nil
 }
 func (m *mockRouterSvc) ListBindableInterfaces(ctx context.Context) ([]router.WANInterfaceInfo, error) {
 	return []router.WANInterfaceInfo{{Name: "ipsec0", Label: "IPSec", Up: true}}, nil
-}
-func (m *mockRouterSvc) ListAllBindableInterfaces(ctx context.Context) ([]router.WANInterfaceInfo, error) {
-	return []router.WANInterfaceInfo{{Name: "ipsec0", Label: "IPSec", Up: true}}, nil
-}
-func (m *mockRouterSvc) ListIngressEligibleInterfaces(ctx context.Context) ([]router.WANInterfaceInfo, error) {
-	return nil, nil
 }
 func (m *mockRouterSvc) PolicyTunNATPreview(ctx context.Context) (router.NATPreview, error) {
 	return router.NATPreview{Segments: m.natPreview}, m.natPreviewErr
@@ -147,6 +148,24 @@ func (m *mockRouterSvc) AddCompositeOutbound(ctx context.Context, o router.Outbo
 func (m *mockRouterSvc) UpdateCompositeOutbound(ctx context.Context, tag string, o router.Outbound) error {
 	return nil
 }
+func (m *mockRouterSvc) SetCompositeOutboundMembers(ctx context.Context, tag string, members []string) error {
+	return nil
+}
+func (m *mockRouterSvc) InsertRule(ctx context.Context, index int, r router.Rule, check router.RuleCheck) error {
+	return nil
+}
+func (m *mockRouterSvc) ReplaceUserRule(ctx context.Context, index int, r router.Rule, check router.RuleCheck) error {
+	return nil
+}
+func (m *mockRouterSvc) DeleteUserRule(ctx context.Context, index int, check router.RuleCheck) (router.Rule, error) {
+	return router.Rule{}, nil
+}
+func (m *mockRouterSvc) MoveUserRule(ctx context.Context, from, to int, check router.RuleCheck) error {
+	return nil
+}
+func (m *mockRouterSvc) SetUserRuleOutbound(ctx context.Context, index int, outbound string, check router.RuleCheck) error {
+	return nil
+}
 func (m *mockRouterSvc) DeleteCompositeOutbound(ctx context.Context, tag string, force bool) error {
 	return nil
 }
@@ -174,6 +193,9 @@ func (m *mockRouterSvc) ListDNSServers(ctx context.Context) ([]router.DNSServer,
 }
 func (m *mockRouterSvc) AddDNSServer(ctx context.Context, s router.DNSServer) error { return nil }
 func (m *mockRouterSvc) UpdateDNSServer(ctx context.Context, tag string, s router.DNSServer) error {
+	return nil
+}
+func (m *mockRouterSvc) SetDNSServerDetour(ctx context.Context, tag, detour string) error {
 	return nil
 }
 func (m *mockRouterSvc) DeleteDNSServer(ctx context.Context, tag string, force bool) error {
@@ -275,6 +297,25 @@ func TestRouterPutSettings_QoSClassesInvalid_Returns400(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "DSCP") {
 		t.Errorf("want detailed DSCP message in body: %s", rr.Body.String())
+	}
+}
+
+// IPv6-подсети в исключениях при неработающем перехвате IPv6 — 400 со своим
+// кодом и текстом, называющим подсеть: интерфейс показывает его как есть.
+func TestRouterPutSettings_IPv6BypassInactive_Returns400(t *testing.T) {
+	svc := &mockRouterSvc{updateSettingsErr: fmt.Errorf("%w: 2001:db8::/48", router.ErrIPv6BypassInactive)}
+	h := newMockRouterHandler(svc)
+	req := httptest.NewRequest(http.MethodPut, "/api/singbox/router/settings",
+		strings.NewReader(`{"wanAutoDetect":true,"bypassExtraSubnets":"2001:db8::/48"}`))
+	rr := httptest.NewRecorder()
+	h.PutSettings(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	for _, want := range []string{"IPV6_BYPASS_INACTIVE", "2001:db8::/48"} {
+		if !strings.Contains(rr.Body.String(), want) {
+			t.Errorf("want %q in body: %s", want, rr.Body.String())
+		}
 	}
 }
 
@@ -1078,6 +1119,23 @@ func TestRouterPutSettings_OmittedPool6KeepsStored(t *testing.T) {
 	}
 }
 
+// fakeipTunAddr4: PUT клиента, не знающего поля, не возвращает адрес tun к
+// дефолту (конфликт с WAN) и не роняет правку при поднятом tun.
+func TestRouterPutSettings_OmittedTunAddr4KeepsStored(t *testing.T) {
+	svc := &mockRouterSvc{settings: storage.SingboxRouterSettings{FakeIPTunAddr4: "10.99.0.1/30"}}
+	h := newMockRouterHandler(svc)
+	req := httptest.NewRequest(http.MethodPut, "/api/singbox/router/settings",
+		strings.NewReader(`{"enabled":true,"wanAutoDetect":true,"fakeipPool6":"","interceptFamily":"ipv4_only"}`))
+	rr := httptest.NewRecorder()
+	h.PutSettings(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.settings.FakeIPTunAddr4 != "10.99.0.1/30" {
+		t.Errorf("fakeipTunAddr4 = %q, want сохранённое \"10.99.0.1/30\" (absent ≠ empty)", svc.settings.FakeIPTunAddr4)
+	}
+}
+
 // Обратное направление: явное "" доходит до сервиса как "" (осознанное
 // выключение). На уровне handler'а это СТРАХОВКА (decode и сегодня отдаёт ""),
 // краснота выключения целиком — сквозной тест роутера.
@@ -1096,6 +1154,52 @@ func TestRouterPutSettings_ExplicitEmptyPool6Passes(t *testing.T) {
 	}
 }
 
+// Тот же узор для interceptFamily: клиент, не знающий поля (старый фронтенд,
+// скрипт), не должен своим PUT молча выключать перехват IPv6.
+func TestRouterPutSettings_OmittedInterceptFamilyKeepsStored(t *testing.T) {
+	svc := &mockRouterSvc{settings: storage.SingboxRouterSettings{InterceptFamily: "both"}}
+	h := newMockRouterHandler(svc)
+	req := httptest.NewRequest(http.MethodPut, "/api/singbox/router/settings",
+		strings.NewReader(`{"enabled":true,"wanAutoDetect":true,"policyName":"awgm-router"}`))
+	rr := httptest.NewRecorder()
+	h.PutSettings(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.settings.InterceptFamily != "both" {
+		t.Errorf("interceptFamily = %q, want сохранённое \"both\" (absent ≠ empty)", svc.settings.InterceptFamily)
+	}
+}
+
+// Присланное значение доходит до сервиса, и подстановка одного поля не
+// затирает другое: fakeipPool6 прислан, interceptFamily — нет.
+func TestRouterPutSettings_InterceptFamilyAndPool6Independent(t *testing.T) {
+	svc := &mockRouterSvc{settings: storage.SingboxRouterSettings{InterceptFamily: "both", FakeIPPool6: "fc00::/18"}}
+	h := newMockRouterHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/singbox/router/settings",
+		strings.NewReader(`{"enabled":true,"wanAutoDetect":true,"fakeipPool6":""}`))
+	rr := httptest.NewRecorder()
+	h.PutSettings(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.settings.InterceptFamily != "both" || svc.settings.FakeIPPool6 != "" {
+		t.Errorf("family=%q pool6=%q, want \"both\" и \"\"", svc.settings.InterceptFamily, svc.settings.FakeIPPool6)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/singbox/router/settings",
+		strings.NewReader(`{"enabled":true,"wanAutoDetect":true,"interceptFamily":"ipv6_only"}`))
+	rr = httptest.NewRecorder()
+	h.PutSettings(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.settings.InterceptFamily != "ipv6_only" {
+		t.Errorf("interceptFamily = %q, want \"ipv6_only\"", svc.settings.InterceptFamily)
+	}
+}
+
 // F434 (#941): отказ по небезопасному тегу inline-набора — ошибка ввода, а не
 // сбой демона: 400 с кодом, который фронт покажет пользователю, вместо 500.
 func TestRouterAddRuleSet_UnsafeTag_Returns400(t *testing.T) {
@@ -1110,5 +1214,56 @@ func TestRouterAddRuleSet_UnsafeTag_Returns400(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "RULE_SET_TAG_UNSAFE") {
 		t.Errorf("want code RULE_SET_TAG_UNSAFE in body: %s", rr.Body.String())
+	}
+}
+
+// F429: bind_interface вне каталога — ввод (400 BIND_NOT_SELECTABLE), а не
+// 500 INTERNAL_ERROR; у слота fakeip свой handleErr, проверяются оба.
+func TestHandleErr_BindNotSelectable400(t *testing.T) {
+	err := fmt.Errorf("%w: %q", router.ErrBindNotSelectable, "eth9")
+	for name, h := range map[string]func(http.ResponseWriter, string, error){
+		"router": newMockRouterHandler(&mockRouterSvc{}).handleErr,
+		"fakeip": newTestFakeIPConfigHandler(t).handleErr,
+	} {
+		rr := httptest.NewRecorder()
+		h(rr, "add-outbound", err)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "BIND_NOT_SELECTABLE") {
+			t.Errorf("%s: status=%d body=%s", name, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// Адрес отправителя DNS-сервера — ввод (400 DNS_BIND_ADDRESS_INVALID), а не
+// 500; у слота fakeip свой handleErr, проверяются оба.
+func TestHandleErr_DNSBindAddress400(t *testing.T) {
+	err := fmt.Errorf("%w: 10.0.20.2 не назначен ни одному интерфейсу роутера", router.ErrDNSBindAddress)
+	for name, h := range map[string]func(http.ResponseWriter, string, error){
+		"router": newMockRouterHandler(&mockRouterSvc{}).handleErr,
+		"fakeip": newTestFakeIPConfigHandler(t).handleErr,
+	} {
+		rr := httptest.NewRecorder()
+		h(rr, "dns-server-add", err)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "DNS_BIND_ADDRESS_INVALID") {
+			t.Errorf("%s: status=%d body=%s", name, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// Отвергнутая validateOutbound форма группы (тип, участники, direct в
+// urltest) — ввод (400 OUTBOUND_INVALID), а не 500; проверяются оба слота.
+func TestHandleErr_OutboundInvalid400(t *testing.T) {
+	err := router.NewEmptyConfig().AddCompositeOutbound(router.Outbound{Tag: "lb", Type: "loadbalance", Outbounds: []string{"awg10"}})
+	if !errors.Is(err, router.ErrOutboundInvalid) {
+		t.Fatalf("AddCompositeOutbound err = %v, want ErrOutboundInvalid", err)
+	}
+	for name, h := range map[string]func(http.ResponseWriter, string, error){
+		"router": newMockRouterHandler(&mockRouterSvc{}).handleErr,
+		"fakeip": newTestFakeIPConfigHandler(t).handleErr,
+	} {
+		rr := httptest.NewRecorder()
+		h(rr, "add-outbound", err)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "OUTBOUND_INVALID") {
+			t.Errorf("%s: status=%d body=%s", name, rr.Code, rr.Body.String())
+		}
 	}
 }

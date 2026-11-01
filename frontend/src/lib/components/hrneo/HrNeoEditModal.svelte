@@ -17,7 +17,9 @@
 	import HrNeoGeoTagPicker from './HrNeoGeoTagPicker.svelte';
 	import { buildRoutingTunnelDropdownOptions } from '$lib/utils/routingTunnelOptions';
 	import { formatIconUrlHint } from '$lib/utils/custom-icon';
+	import { hrTokenError } from '$lib/utils/hrToken';
 	import { LayoutGrid } from 'lucide-svelte';
+	import { m } from '$lib/i18n';
 
 	interface AccessPolicy {
 		name: string;
@@ -35,7 +37,7 @@
 		geoipFiles: string[];
 		maxelem: number;
 		saving: boolean;
-		initialTarget?: { kind: 'interface' | 'policy'; name: string };
+		initialTarget?: { kind: 'interface' | 'policy'; name: string; tunnelId?: string };
 		initialPreset?: CatalogPreset | null;
 		onpickcatalog?: () => void;
 		onsave: (payload: Partial<DnsRoute>) => void;
@@ -66,6 +68,11 @@
 	let cidrText = $state('');
 	let mode = $state<'interface' | 'policy'>('interface');
 	let tunnelId = $state('');
+	// Цель правила, не найденная в каталоге: показывается как есть, другой
+	// туннель вместо неё не подставляется (иначе сохранение молча перенесло
+	// бы правило, а снимок для isDirty совпал бы с подставленным).
+	// null — цель найдена; '' — цели у правила нет вовсе.
+	let unknownTarget = $state<string | null>(null);
 	let policyChoice = $state<'existing' | 'new'>('existing');
 	let existingPolicyName = $state('');
 	let newPolicyName = $state('');
@@ -91,7 +98,7 @@
 	let initialNewPolicyIfaces = $state<AccessPolicyInterface[]>([]);
 
 	let isNew = $derived(rule === null);
-	let title = $derived(isNew ? 'Новое HR правило' : `Редактирование: ${rule?.name ?? ''}`);
+	let title = $derived(isNew ? m.hrneo_edit_new_title() : m.routing_ip_edit_title({ name: rule?.name || m.hrneo_group_unnamed() }));
 
 	$effect(() => {
 		if (!open) {
@@ -105,6 +112,7 @@
 		geositePickerOpen = false;
 		geoipPickerOpen = false;
 		iconPickerOpen = false;
+		unknownTarget = null;
 		if (rule) {
 			name = rule.name;
 			iconUrl = rule.iconUrl;
@@ -139,13 +147,14 @@
 				newPolicyIfaces = [];
 			} else {
 				// HR interface-mode rules come back from the backend with
-				// route.interface = route.tunnelId = kernel iface name
-				// ("nwg0"), not our internal tunnel id ("awg10"). Resolve
+				// route.interface = kernel iface name ("nwg0"); route.tunnelId
+				// is `system:<id>` for system exits and the same kernel name
+				// otherwise, not our internal tunnel id ("awg10"). Resolve
 				// the select's value by matching any of those fields against
-				// every tunnel property so the dropdown shows the right
-				// option instead of blanking out. Also handle the
-				// reclassification case above where the iface name lived in
-				// hrPolicyName.
+				// every tunnel property. Also handle the reclassification
+				// case above where the iface name lived in hrPolicyName.
+				// No match — no silent fallback: the target is shown as
+				// unknown and save waits for an explicit choice.
 				const route = rule.routes?.[0];
 				const candidate = route?.tunnelId || route?.interface || rule.hrPolicyName || '';
 				const match = tunnels.find(
@@ -154,7 +163,8 @@
 						x.iface === candidate ||
 						x.name === candidate,
 				);
-				tunnelId = match?.id ?? tunnels[0]?.id ?? '';
+				tunnelId = match?.id ?? '';
+				if (!match) unknownTarget = route?.interface || candidate;
 			}
 			// Capture snapshot for isDirty
 			initialName = rule.name;
@@ -179,9 +189,15 @@
 			} else if (initialTarget?.kind === 'interface') {
 				mode = 'interface';
 				const t = tunnels.find(
-					(x) => x.id === initialTarget.name || x.name === initialTarget.name || x.iface === initialTarget.name,
+					(x) =>
+						x.id === initialTarget.tunnelId ||
+						x.id === initialTarget.name ||
+						x.name === initialTarget.name ||
+						x.iface === initialTarget.name,
 				);
-				tunnelId = t?.id ?? tunnels[0]?.id ?? '';
+				// Незнакомая цель — как при редактировании: без подстановки.
+				tunnelId = t?.id ?? '';
+				if (!t) unknownTarget = initialTarget.name;
 			} else {
 				mode = 'interface';
 				tunnelId = tunnels[0]?.id ?? '';
@@ -256,12 +272,12 @@
 
 	function hrPolicyNameError(raw: string): string {
 		const v = raw.trim();
-		if (v === '') return 'Введите имя политики';
-		if (v.length > HR_POLICY_NAME_MAX) return `Максимум ${HR_POLICY_NAME_MAX} символов`;
+		if (v === '') return m.hrneo_edit_policy_name_required();
+		if (v.length > HR_POLICY_NAME_MAX) return m.hrneo_edit_policy_name_max({ max: HR_POLICY_NAME_MAX });
 		if (SYSTEM_POLICY_RE.test(v))
-			return `Имя ${v} зарезервировано для системных политик роутера — HR Neo не может в них маршрутизировать`;
+			return m.hrneo_edit_policy_name_reserved({ name: v });
 		if (!HR_POLICY_NAME_RE.test(v))
-			return 'Только латинские буквы (a-z, A-Z), без цифр, пробелов и спецсимволов';
+			return m.hrneo_edit_policy_name_latin();
 		return '';
 	}
 
@@ -275,7 +291,7 @@
 	// HR Neo will route directly to the interface instead of creating a policy.
 	let newPolicyNameInterfaceHint = $derived(
 		newPolicyName.trim() !== '' && ifaceNameSet.has(newPolicyName.trim())
-			? `Имя совпадает с интерфейсом "${newPolicyName.trim()}". Возможно, вы хотели выбрать Target = Интерфейс.`
+			? m.hrneo_edit_policy_name_is_interface({ name: newPolicyName.trim() })
 			: '',
 	);
 
@@ -283,7 +299,7 @@
 	let newPolicyNameDuplicateHint = $derived(
 		newPolicyName.trim() !== '' &&
 			hrCompatiblePolicies.some((p) => p.name === newPolicyName.trim())
-			? `Политика с именем "${newPolicyName.trim()}" уже существует. Выберите "Существующая" выше.`
+			? m.hrneo_edit_policy_name_exists({ name: newPolicyName.trim() })
 			: '',
 	);
 
@@ -295,13 +311,29 @@
 		splitLines(domainsText).length > 0 || splitLines(cidrText).length > 0,
 	);
 
+	// HRweb отказывается сохранять ЛЮБОЕ правило, пока в файлах есть хоть один
+	// такой токен (#1045), поэтому не пускаем их в файлы.
+	function tokenErrors(text: string): { chars: string[]; mask: string[] } {
+		const out = { chars: [] as string[], mask: [] as string[] };
+		for (const t of splitLines(text)) {
+			const kind = hrTokenError(t);
+			if (kind) out[kind].push(t);
+		}
+		return out;
+	}
+	let domainErrors = $derived(tokenErrors(domainsText));
+	let cidrErrors = $derived(tokenErrors(cidrText));
+	let hasTokenErrors = $derived(
+		domainErrors.chars.length + domainErrors.mask.length + cidrErrors.chars.length + cidrErrors.mask.length > 0,
+	);
+
 	let showCatalogEntry = $derived(!!onpickcatalog && !hasDomainOrCidrContent);
 
 	let canSave = $derived.by(() => {
-		if (!name.trim()) return false;
 		const d = splitLines(domainsText);
 		const c = splitLines(cidrText);
 		if (d.length === 0 && c.length === 0) return false;
+		if (hasTokenErrors) return false;
 		if (mode === 'interface') return !!tunnelId;
 		if (policyChoice === 'existing') return !!existingPolicyName;
 		// New policy: name must pass validation, must not duplicate an existing
@@ -366,7 +398,7 @@
 			backend: 'hydraroute',
 			manualDomains,
 			// Keep an explicit empty string so HR backend can clear the sidecar icon.
-			iconUrl: iconUrl ?? '',
+			iconUrl: name.trim() ? (iconUrl ?? '') : '',
 		};
 		if (mode === 'interface') {
 			payload.hrRouteMode = 'interface';
@@ -396,10 +428,10 @@
 					<div class="catalog-entry-info">
 						<div class="catalog-entry-name">{selectedPreset.name}</div>
 						<div class="catalog-entry-meta">
-							{resolvedPresetDnsEntryCount(selectedPreset, $presetCatalog)} записей из каталога
+							{m.hrneo_edit_catalog_entries({ count: resolvedPresetDnsEntryCount(selectedPreset, $presetCatalog) })}
 						</div>
 					</div>
-					<span class="catalog-change">Сменить</span>
+					<span class="catalog-change">{m.hrneo_edit_catalog_change()}</span>
 				</button>
 			{:else}
 				<button type="button" class="catalog-cta" onclick={onpickcatalog}>
@@ -407,8 +439,8 @@
 						<LayoutGrid size={20} strokeWidth={1.75} />
 					</span>
 					<span class="catalog-cta-text">
-						<span class="catalog-cta-title">Заполнить из каталога</span>
-						<span class="catalog-cta-hint">Выберите сервис — подставим домены и CIDR</span>
+						<span class="catalog-cta-title">{m.hrneo_edit_catalog_cta_title()}</span>
+						<span class="catalog-cta-hint">{m.hrneo_edit_catalog_cta_hint()}</span>
 					</span>
 				</button>
 			{/if}
@@ -417,7 +449,7 @@
 
 	<!-- Icon -->
 	<div class="icon-form-group">
-		<div class="field-label">Иконка</div>
+		<div class="field-label">{m.routing_ip_icon()}</div>
 		<div class="icon-row">
 			<ServiceIcon
 				{iconUrl}
@@ -427,76 +459,81 @@
 			/>
 			<div class="icon-meta">
 				{#if iconUrl}
-					<div class="icon-src">Пользовательская иконка</div>
+					<div class="icon-src">{m.hrneo_edit_icon_custom()}</div>
 					<div class="icon-hint" title={iconUrl}>{formatIconUrlHint(iconUrl)}</div>
 				{:else if selectedPreset}
-					<div class="icon-src">Иконка из пресета</div>
-					<div class="icon-hint">Можно заменить своей иконкой</div>
+					<div class="icon-src">{m.hrneo_edit_icon_preset()}</div>
+					<div class="icon-hint">{m.hrneo_edit_icon_preset_hint()}</div>
 				{:else}
-					<div class="icon-src">Авто-определение по имени</div>
-					<div class="icon-hint">Введите имя или загрузите свою иконку</div>
+					<div class="icon-src">{m.routing_ip_icon_auto()}</div>
+					{#if name.trim()}<div class="icon-hint">{m.hrneo_edit_icon_auto_hint()}</div>{/if}
 				{/if}
+				<!-- Иконка ключуется целью и именем группы (hrIconKey): без имени ключа нет. -->
+				{#if !name.trim()}<div class="icon-hint">{m.hrneo_edit_icon_needs_name()}</div>{/if}
 			</div>
-			<Button variant="ghost" size="sm" onclick={() => (iconPickerOpen = true)}>
-				{iconUrl ? 'Сменить иконку' : 'Выбрать иконку'}
+			<Button variant="ghost" size="sm" disabled={!name.trim()} onclick={() => (iconPickerOpen = true)}>
+				{iconUrl ? m.routing_ip_card_change_icon() : m.routing_ip_icon_choose()}
 			</Button>
 		</div>
 	</div>
 
 	<!-- Name -->
-	<div class="form-group" class:field-error={attempted && !name.trim()}>
-		<label class="field-label" for="hr-rule-name">Название</label>
+	<div class="form-group">
+		<label class="field-label" for="hr-rule-name">{m.routing_ip_name()}</label>
 		<input
 			id="hr-rule-name"
 			class="field-input"
 			type="text"
-			placeholder="Youtube"
+			placeholder={m.hrneo_group_unnamed()}
 			bind:value={name}
 		/>
-		{#if attempted && !name.trim()}<div class="error-text">Введите название</div>{/if}
 	</div>
 
 	<!-- Target — placed near the top so the routing decision (the most
 	     important user choice) is visible without scrolling past long
 	     domain/CIDR textareas. -->
 	<section class="form-section">
-		<div class="field-label">Цель</div>
+		<div class="field-label">{m.hrneo_edit_target()}</div>
 		<div class="seg-tabs">
 			<button
 				type="button"
 				class="seg-tab"
 				class:active={mode === 'interface'}
-				onclick={() => (mode = 'interface')}>Интерфейс</button
+				onclick={() => (mode = 'interface')}>{m.dns_routes_edit_mode_interface()}</button
 			>
 			<button
 				type="button"
 				class="seg-tab"
 				class:active={mode === 'policy'}
-				onclick={() => (mode = 'policy')}>Политика</button
+				onclick={() => (mode = 'policy')}>{m.dns_routes_edit_mode_policy()}</button
 			>
 		</div>
 
 		{#if mode === 'interface'}
 			<Dropdown bind:value={tunnelId} options={interfaceTunnelOpts} fullWidth />
+			{#if unknownTarget !== null && !tunnelId}
+				<div class="warn-text">
+					{unknownTarget ? m.hrneo_edit_target_unknown({ target: unknownTarget }) : m.hrneo_edit_target_unset()}
+				</div>
+			{/if}
 		{:else}
 			<div class="radio-block">
 				<label class="radio-option" class:active={policyChoice === 'existing'}>
 					<input type="radio" bind:group={policyChoice} value="existing" />
-					<span>Существующая</span>
+					<span>{m.hrneo_edit_policy_existing()}</span>
 				</label>
 				<label class="radio-option" class:active={policyChoice === 'new'}>
 					<input type="radio" bind:group={policyChoice} value="new" />
-					<span>Новая</span>
+					<span>{m.hrneo_edit_policy_new()}</span>
 				</label>
 			</div>
 
 			{#if policyChoice === 'existing'}
 				{#if hrCompatiblePolicies.length === 0}
 					<div class="form-hint muted">
-						Нет HR-совместимых политик. Создайте новую.
+						{m.hrneo_edit_no_compatible_policies()}
 						{#if policies.length > hrCompatiblePolicies.length}
-							Системные политики роутера (<code>PolicyN</code>) не отображаются —
-							HR Neo не может маршрутизировать в них.
+							{m.hrneo_edit_system_policies_prefix()}<code>PolicyN</code>{m.hrneo_edit_system_policies_suffix()}
 						{/if}
 					</div>
 				{:else}
@@ -506,14 +543,14 @@
 					}))}
 					<Dropdown bind:value={existingPolicyName} options={policyOpts} fullWidth />
 					<div class="form-hint">
-						Интерфейсы политики редактируются на её карточке в сайдбаре.
+						{m.hrneo_edit_policy_interfaces_hint()}
 					</div>
 				{/if}
 			{:else}
 				<div class="policy-card">
-					<div class="policy-card-header">Новая политика на роутере</div>
+					<div class="policy-card-header">{m.hrneo_edit_new_policy_header()}</div>
 					<div class="form-group" class:field-error={attempted && newPolicyNameValidationError !== ''}>
-						<label class="field-label" for="hr-new-policy-name">Имя политики</label>
+						<label class="field-label" for="hr-new-policy-name">{m.hrneo_edit_policy_name()}</label>
 						<input
 							id="hr-new-policy-name"
 							class="field-input"
@@ -523,14 +560,14 @@
 							bind:value={newPolicyName}
 						/>
 						{#if attempted && newPolicyNameValidationError !== ''}
-							<div class="error-text">{newPolicyNameValidationError}</div>
+							<div class="error-text visible">{newPolicyNameValidationError}</div>
 						{:else if newPolicyNameDuplicateHint !== ''}
-							<div class="error-text">{newPolicyNameDuplicateHint}</div>
+							<div class="error-text visible">{newPolicyNameDuplicateHint}</div>
 						{:else if newPolicyNameInterfaceHint !== ''}
 							<div class="warn-text">{newPolicyNameInterfaceHint}</div>
 						{:else}
 							<div class="form-hint">
-								Только латинские буквы (a–Z), до {HR_POLICY_NAME_MAX} символов.
+								{m.hrneo_edit_policy_name_hint({ max: HR_POLICY_NAME_MAX })}
 							</div>
 						{/if}
 					</div>
@@ -545,7 +582,7 @@
 						/>
 					</div>
 					<div class="form-hint">
-						Политика и привязки создаются после нажатия «Сохранить».
+						{m.hrneo_edit_policy_created_hint()}
 					</div>
 				</div>
 			{/if}
@@ -556,7 +593,7 @@
 	<section class="form-section">
 		<header class="section-row">
 			<div class="section-row-label">
-				<span class="section-row-title">Домены</span>
+				<span class="section-row-title">{m.hrneo_edit_domains()}</span>
 				<span class="section-row-count">{splitLines(domainsText).length}</span>
 			</div>
 			<div class="section-row-tools">
@@ -581,10 +618,16 @@
 		{/if}
 
 		<textarea class="field-textarea" rows="8" bind:value={domainsText}
-			placeholder="youtube.com&#10;.googlevideo.com&#10;geosite:GOOGLE"
+			placeholder="youtube.com&#10;googlevideo.com&#10;geosite:GOOGLE"
 		></textarea>
+		{#if domainErrors.chars.length > 0}
+			<div class="error-text visible">{m.hrneo_edit_tokens_invalid({ tokens: domainErrors.chars.join(', ') })}</div>
+		{/if}
+		{#if domainErrors.mask.length > 0}
+			<div class="error-text visible">{m.hrneo_edit_tokens_mask({ tokens: domainErrors.mask.join(', ') })}</div>
+		{/if}
 		<div class="form-hint">
-			Домены · .суффикс · geosite:TAG — строкой на запись. Записываются через запятую в одну строку.
+			{m.hrneo_edit_domains_hint()}
 		</div>
 	</section>
 
@@ -620,13 +663,19 @@
 		<textarea class="field-textarea" rows="5" bind:value={cidrText}
 			placeholder="10.0.0.0/8&#10;2001:db8::/32&#10;geoip:RU"
 		></textarea>
-		<div class="form-hint">CIDR · geoip:TAG — строкой на запись. Блок в ip.list.</div>
+		{#if cidrErrors.chars.length > 0}
+			<div class="error-text visible">{m.hrneo_edit_tokens_invalid({ tokens: cidrErrors.chars.join(', ') })}</div>
+		{/if}
+		{#if cidrErrors.mask.length > 0}
+			<div class="error-text visible">{m.hrneo_edit_tokens_mask({ tokens: cidrErrors.mask.join(', ') })}</div>
+		{/if}
+		<div class="form-hint">{m.hrneo_edit_cidr_hint()}</div>
 	</section>
 
 	{#snippet actions()}
-		<Button variant="secondary" onclick={onclose}>Отмена</Button>
+		<Button variant="secondary" onclick={onclose}>{m.common_cancel()}</Button>
 		<Button variant="primary" onclick={handleSave} disabled={!canSave} loading={saving}>
-			Сохранить
+			{m.common_save()}
 		</Button>
 	{/snippet}
 </Modal>
@@ -881,11 +930,6 @@
 
 	.form-hint.muted {
 		color: var(--color-text-muted);
-	}
-	.error-text {
-		color: var(--color-error);
-		font-size: 0.75rem;
-		margin-top: 4px;
 	}
 	.warn-text {
 		color: var(--warning, #f59e0b);

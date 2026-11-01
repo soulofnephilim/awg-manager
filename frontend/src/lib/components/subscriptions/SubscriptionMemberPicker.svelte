@@ -1,7 +1,9 @@
 <script lang="ts">
+    import { m } from '$lib/i18n';
     import { onMount } from 'svelte';
     import type { SubscriptionMember } from '$lib/types';
     import { singboxDelayHistory } from '$lib/stores/singbox';
+    import { formatHostPort } from '$lib/utils/endpoint';
 
     interface Props {
         members: SubscriptionMember[];
@@ -33,7 +35,7 @@
             await onPick(tag);
             onClose();
         } catch (e) {
-            pickError = e instanceof Error ? e.message : 'Не удалось переключить';
+            pickError = e instanceof Error ? e.message : m.subscriptions_picker_switch_failed();
         } finally {
             switching = null;
         }
@@ -44,20 +46,25 @@
         if (!popoverEl.contains(e.target as Node)) onClose();
     }
 
+    // Фаза перехвата на window: Modal слушает Esc на window во всплытии, и
+    // остановка здесь до него событие не пустит — иначе Esc закрыл бы и
+    // модалку под пикером (F432).
     function handleKey(e: KeyboardEvent): void {
-        if (e.key === 'Escape') onClose();
+        if (e.key !== 'Escape') return;
+        e.stopPropagation();
+        onClose();
     }
 
     onMount(() => {
         // Defer one tick so the click that opened the popover doesn't immediately close it.
         const t = setTimeout(() => {
             window.addEventListener('click', handleOutsideClick);
-            window.addEventListener('keydown', handleKey);
+            window.addEventListener('keydown', handleKey, true);
         }, 0);
         return () => {
             clearTimeout(t);
             window.removeEventListener('click', handleOutsideClick);
-            window.removeEventListener('keydown', handleKey);
+            window.removeEventListener('keydown', handleKey, true);
         };
     });
 </script>
@@ -78,7 +85,7 @@
             onclick={() => pick(m.tag)}
         >
             <span class="led" class:on={isActive}></span>
-            <span class="server">{m.server}:{m.port}</span>
+            <span class="server">{formatHostPort(m.server, m.port)}</span>
             <span class="proto">{m.protocol.toUpperCase()}</span>
             <span class="delay {d.cls}">{d.text}</span>
         </button>

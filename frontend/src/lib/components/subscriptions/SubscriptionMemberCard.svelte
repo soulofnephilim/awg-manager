@@ -1,9 +1,11 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { SubscriptionMember } from '$lib/types';
 	import type { SingboxLayoutMode } from '$lib/constants/singboxLayout';
 	import { PingButton } from '$lib/components/ui';
 	import { singboxDelayHistory, triggerDelayCheck } from '$lib/stores/singbox';
 	import { singboxDelayFromHistory } from '$lib/utils/singboxDelay';
+	import { formatHostPort } from '$lib/utils/endpoint';
 
 	interface Props {
 		member: SubscriptionMember;
@@ -70,7 +72,7 @@
 		</div>
 		<div class="c c-name">
 			<span class="n1" title={heading}>{heading}</span>
-			<span class="n2 mono" title={member.tag}>{member.server}:{member.port}</span>
+			<span class="n2 mono" title={member.tag}>{formatHostPort(member.server, member.port)}</span>
 		</div>
 	<div class="c c-badges">
 		<span class="badge proto">{protocolLabel}</span>
@@ -90,7 +92,7 @@
 				tabindex="0"
 				onclick={(e) => runTest(e)}
 				onkeydown={onSparkKeydown}
-				title="Клик — обновить delay"
+				title={m.tunnels_delay_refresh()}
 			>
 				{#if history.length === 0}
 					{#each Array(10) as _, i (i)}
@@ -107,7 +109,7 @@
 		<div class="c mono c-tag">{member.tag}</div>
 		<div class="c c-state">
 			{#if active}
-				<span class="state-badge active-badge">активен</span>
+				<span class="state-badge active-badge">{m.subscriptions_member_active()}</span>
 			{:else if switching}
 				<span class="state-badge switching-badge">…</span>
 			{/if}
@@ -140,7 +142,7 @@
 		{/if}
 	</div>
 	{#if member.label}
-		<div class="server-line mono" title={member.tag}>{member.server}:{member.port}</div>
+		<div class="server-line mono" title={member.tag}>{formatHostPort(member.server, member.port)}</div>
 	{/if}
 	{#if member.sni}
 		<div class="sni-row">
@@ -155,7 +157,7 @@
 			checking={testing}
 			size="mid"
 			forceBorder
-			title="Проверить delay"
+			title={m.subscriptions_member_delay_check()}
 			onclick={runTest}
 		/>
 		<div class="spark {delayState}">
@@ -172,9 +174,9 @@
 	<div class="footer">
 		<span class="tag mono" title={member.tag}>{member.tag}</span>
 		{#if active}
-			<span class="state-badge active-badge">активен</span>
+			<span class="state-badge active-badge">{m.subscriptions_member_active()}</span>
 		{:else if switching}
-			<span class="state-badge switching-badge">переключаем...</span>
+			<span class="state-badge switching-badge">{m.subscriptions_member_switching()}</span>
 		{/if}
 	</div>
 </button>

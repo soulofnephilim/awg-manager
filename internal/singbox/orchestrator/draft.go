@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,11 +21,29 @@ import (
 //
 // Returns ErrUnknownSlot if the slot is not registered.
 func (o *Orchestrator) SaveDraft(slot Slot, jsonBytes []byte) error {
+	return o.SaveDraftChecked(slot, jsonBytes, nil)
+}
+
+// SaveDraftChecked is SaveDraft that first hands check the slot's
+// effective bytes (LoadEffective's) under the same lock as the write: a
+// caller that edited a copy it read earlier refuses to overwrite a draft
+// saved since (the web editor's, say). A check error writes nothing and is
+// returned as is; nil check is SaveDraft.
+func (o *Orchestrator) SaveDraftChecked(slot Slot, jsonBytes []byte, check func(current []byte) error) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	meta, ok := o.slots[slot]
 	if !ok {
 		return ErrUnknownSlot
+	}
+	if check != nil {
+		current, err := o.loadEffectiveLocked(slot, meta)
+		if err != nil {
+			return err
+		}
+		if err := check(current); err != nil {
+			return err
+		}
 	}
 	if err := writeAtomic(o.pendingPath(meta), jsonBytes); err != nil {
 		return fmt.Errorf("SaveDraft %s: %w", slot, err)
@@ -50,6 +70,11 @@ func (o *Orchestrator) LoadEffective(slot Slot) ([]byte, error) {
 	if !ok {
 		return nil, ErrUnknownSlot
 	}
+	return o.loadEffectiveLocked(slot, meta)
+}
+
+// loadEffectiveLocked is LoadEffective under o.mu.
+func (o *Orchestrator) loadEffectiveLocked(slot Slot, meta SlotMeta) ([]byte, error) {
 	data, err := readIfExists(o.pendingPath(meta))
 	if err != nil {
 		return nil, fmt.Errorf("LoadEffective pending %s: %w", slot, err)
@@ -69,6 +94,77 @@ func (o *Orchestrator) LoadEffective(slot Slot) ([]byte, error) {
 		return nil, fmt.Errorf("LoadEffective disabled %s: %w", slot, err)
 	}
 	return data, nil
+}
+
+// ReferencedAmong — какие из tags упомянуты строкой хоть где-то в файлах
+// (черновик, активный, выключенный) зарегистрированных слотов, кроме except.
+// Для вопроса «ссылается ли кто-нибудь на тег» (сироты подписок, #1081): тег —
+// уникальная строка, по какому ключу он записан, неважно, а выключенный слот и
+// черновик включатся позже со своей ссылкой. Файлы читаются вне o.mu (пути —
+// под ним). Файл без общего префикса тегов пропускается одним проходом; иначе
+// — потоковый разбор по токенам, без карты всех строк конфига. Невалидный JSON
+// (черновик сохраняется без проверки) не блокирует ответ: в нём ищется сам
+// тег в кавычках — консервативно. Ошибка — только когда файл не прочитан.
+func (o *Orchestrator) ReferencedAmong(except Slot, tags []string) (map[string]bool, error) {
+	found := map[string]bool{}
+	if len(tags) == 0 {
+		return found, nil
+	}
+	want := make(map[string]bool, len(tags))
+	prefix := tags[0]
+	for _, t := range tags {
+		want[t] = true
+		for !strings.HasPrefix(t, prefix) {
+			prefix = prefix[:len(prefix)-1]
+		}
+	}
+	quotedPrefix := []byte(`"` + prefix)
+	o.mu.Lock()
+	var paths []string
+	for slot, meta := range o.slots {
+		if slot != except {
+			paths = append(paths, o.pendingPath(meta), o.activePath(meta), o.disabledPath(meta))
+		}
+	}
+	o.mu.Unlock()
+	for _, path := range paths {
+		data, err := readIfExists(path)
+		if err != nil {
+			return nil, fmt.Errorf("ReferencedAmong %s: %w", path, err)
+		}
+		if !bytes.Contains(data, quotedPrefix) {
+			continue
+		}
+		if !tokenStrings(data, want, found) {
+			for t := range want {
+				if bytes.Contains(data, []byte(`"`+t+`"`)) {
+					found[t] = true
+				}
+			}
+		}
+		if len(found) == len(want) {
+			break
+		}
+	}
+	return found, nil
+}
+
+// tokenStrings отмечает в found строки JSON-документа data, входящие в want;
+// false — документ не разобрался (found при этом мог частично заполниться).
+func tokenStrings(data []byte, want, found map[string]bool) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+		if s, ok := tok.(string); ok && want[s] {
+			found[s] = true
+		}
+	}
 }
 
 // LoadDraft returns the bytes of the slot's pending (draft) file, or
@@ -199,6 +295,14 @@ func (o *Orchestrator) DraftInfo(slot Slot) DraftInfo {
 // Returns (ZeroResult, wrapped error) on FS or external-check failures.
 // In all error paths, pending is preserved and active is unchanged.
 func (o *Orchestrator) ApplyDraft(slot Slot) (ValidationResult, error) {
+	return o.ApplyDraftChecked(slot, nil)
+}
+
+// ApplyDraftChecked is ApplyDraft that first hands check the draft it is
+// about to apply, under the same lock as the commit: a caller that means a
+// particular draft refuses one saved since by someone else. A check error
+// applies nothing and is returned as is; nil check is ApplyDraft.
+func (o *Orchestrator) ApplyDraftChecked(slot Slot, check func(draft []byte) error) (ValidationResult, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	meta, ok := o.slots[slot]
@@ -212,6 +316,11 @@ func (o *Orchestrator) ApplyDraft(slot Slot) (ValidationResult, error) {
 			return ValidationResult{}, ErrNoDraft
 		}
 		return ValidationResult{}, fmt.Errorf("ApplyDraft read pending %s: %w", slot, err)
+	}
+	if check != nil {
+		if err := check(draftBytes); err != nil {
+			return ValidationResult{}, err
+		}
 	}
 
 	// Cross-slot validation against draft. Результат сохраняем: при успехе
@@ -256,7 +365,7 @@ func (o *Orchestrator) ApplyDraft(slot Slot) (ValidationResult, error) {
 		}
 
 		if err := o.validator.Validate(context.Background(), tmpdir); err != nil {
-			return ValidationResult{}, fmt.Errorf("sing-box check: %w", err)
+			return ValidationResult{}, fmt.Errorf("%w: %w", ErrSingboxCheck, err)
 		}
 	}
 

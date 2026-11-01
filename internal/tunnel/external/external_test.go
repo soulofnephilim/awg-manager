@@ -2,12 +2,118 @@ package external
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
+	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/storage"
+	"github.com/hoaxisr/awg-manager/internal/tunnel"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/service"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/sysinfo"
 )
+
+// validAdoptConf — минимальный .conf, который config.Parse принимает без
+// ошибок (см. internal/tunnel/config/config_test.go). Без него Adopt падал бы
+// на разборе конфига и до новых проверок не доходил бы — тест был бы холостым.
+const validAdoptConf = `[Interface]
+PrivateKey = aPrivateKey123=
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey = aPublicKey456=
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+`
+
+func withSettings(t *testing.T, s *Service) *storage.SettingsStore {
+	t.Helper()
+	st := storage.NewSettingsStore(t.TempDir())
+	if _, err := st.Load(); err != nil {
+		t.Fatal(err)
+	}
+	s.settingsStore = st
+	return st
+}
+
+func TestList_ForeignOpkgTunShownNotRemovable(t *testing.T) {
+	stubScan(t, []int{7}, nil) // номер 7 есть в системе, AWG на нём нет
+	s := newTestService(t)
+	st := withSettings(t, s)
+	_ = st.MarkForeignInterface("opkgtun7")
+	_ = st.MarkForeignInterface("csqtt0")
+	s.SetOrphanSource(
+		func(context.Context) ([]OrphanIface, error) { return nil, nil }, // отмеченный уже не сирота
+		func(context.Context) map[int]string { return map[int]string{7: "csqtt"} },
+	)
+	got, err := s.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]TunnelInfo{}
+	for _, g := range got {
+		by[g.InterfaceName] = g
+	}
+	o, ok := by["opkgtun7"]
+	if !ok || !o.Foreign || o.Removable || o.Description != "csqtt" || o.TunnelNumber != 7 {
+		t.Fatalf("opkgtun7 = %+v (ok=%v)", o, ok)
+	}
+	k, ok := by["csqtt0"]
+	if !ok || !k.Foreign || k.Removable || k.TunnelNumber != -1 {
+		t.Fatalf("csqtt0 = %+v (ok=%v)", k, ok)
+	}
+}
+
+// Отмеченный OpkgTun, который источник сирот ещё отдаёт (кэш с TTL), уже
+// дописан withOrphans с Removable=true — withForeign обязан снять кнопку.
+func TestList_ForeignOverridesOrphanRemovable(t *testing.T) {
+	stubScan(t, []int{7}, nil)
+	s := newTestService(t)
+	_ = withSettings(t, s).MarkForeignInterface("opkgtun7")
+	s.SetOrphanSource(
+		func(context.Context) ([]OrphanIface, error) {
+			return []OrphanIface{{Iface: "opkgtun7", KernelDevice: true}}, nil
+		},
+		nil,
+	)
+	got, err := s.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].InterfaceName != "opkgtun7" || !got[0].Foreign || got[0].Removable {
+		t.Fatalf("список = %+v, ждали одну opkgtun7: Foreign, не Removable", got)
+	}
+}
+
+func stubLinkExists(t *testing.T, v bool) {
+	t.Helper()
+	prev := linkExists
+	linkExists = func(string) bool { return v }
+	t.Cleanup(func() { linkExists = prev })
+}
+
+func TestAdopt_RefusesLiveNonAWG(t *testing.T) {
+	stubScan(t, nil, nil) // isAWGInterface → не AWG
+	stubLinkExists(t, true)
+	s := newTestService(t)
+	withSettings(t, s)
+	_, err := s.Adopt(context.Background(), AdoptRequest{InterfaceName: "opkgtun7", ConfContent: validAdoptConf})
+	if !errors.Is(err, ErrAdoptNotAWG) {
+		t.Fatalf("err = %v, want ErrAdoptNotAWG", err)
+	}
+}
+
+func TestAdopt_RefusesForeign(t *testing.T) {
+	stubScan(t, nil, nil)
+	stubLinkExists(t, false)
+	s := newTestService(t)
+	withSettings(t, s).MarkForeignInterface("opkgtun8")
+	_, err := s.Adopt(context.Background(), AdoptRequest{InterfaceName: "opkgtun8", ConfContent: validAdoptConf})
+	if !errors.Is(err, ErrAdoptForeign) {
+		t.Fatalf("err = %v, want ErrAdoptForeign", err)
+	}
+}
 
 func newTestService(t *testing.T) *Service {
 	t.Helper()
@@ -124,5 +230,110 @@ func TestAnnotate_MarksAddressCollisionWithManagedTunnel(t *testing.T) {
 
 	if list[0].ConflictsWith != "Germany_AWG_3.1" {
 		t.Fatalf("ConflictsWith = %q, ждали имя туннеля", list[0].ConflictsWith)
+	}
+}
+
+// Взятие стороннего туннеля — тоже создание записи: имя упирается в тот же
+// предел описания NDMS, что и у импорта (256 байт).
+func TestAdopt_RefusesNameOverByteLimit(t *testing.T) {
+	stubScan(t, nil, nil)
+	stubLinkExists(t, false)
+	s := newTestService(t)
+	_, err := s.Adopt(context.Background(), AdoptRequest{InterfaceName: "opkgtun9", ConfContent: validAdoptConf,
+		TunnelName: strings.Repeat("ж", 128) + "a"})
+	if !errors.Is(err, tunnel.ErrNameTooLong) {
+		t.Fatalf("err = %v, want ErrNameTooLong", err)
+	}
+	if list, _ := s.store.List(); len(list) != 0 {
+		t.Fatalf("запись заведена при отказе: %d", len(list))
+	}
+}
+
+// fakeTunnelSvc — служба туннелей для Adopt: записывает порядок вызовов.
+// Остальные методы интерфейса Adopt не зовёт (встроенный nil уронил бы тест).
+type fakeTunnelSvc struct {
+	service.Service
+	calls []string
+}
+
+func (f *fakeTunnelSvc) CaptureDescription(_ context.Context, id, name string) {
+	f.calls = append(f.calls, "capture:"+id+":"+name)
+}
+func (f *fakeTunnelSvc) Start(_ context.Context, id string) error {
+	f.calls = append(f.calls, "start:"+id)
+	return nil
+}
+func (f *fakeTunnelSvc) Get(_ context.Context, id string) (*service.TunnelWithStatus, error) {
+	return &service.TunnelWithStatus{}, nil
+}
+
+// Взятая запись OpkgTunN несёт описание сторонней программы. F517 признаёт
+// запись своей по равенству описания имени туннеля — без переписывания
+// описания до первого старта туннель без живого устройства не стартовал бы
+// никогда (а с устройством — до первого ребута). Запись чужая по построению,
+// поэтому явный захват, а не проверяющее переименование.
+func TestAdopt_SyncsDescriptionBeforeStart(t *testing.T) {
+	stubScan(t, nil, nil)
+	stubLinkExists(t, false)
+	s := newTestService(t)
+	svc := &fakeTunnelSvc{}
+	s.tunnelService = svc
+	if _, err := s.Adopt(context.Background(), AdoptRequest{InterfaceName: "opkgtun9", ConfContent: validAdoptConf,
+		TunnelName: "Германия"}); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if strings.Join(svc.calls, ",") != "capture:awg9:Германия,start:awg9" {
+		t.Fatalf("вызовы: %v", svc.calls)
+	}
+}
+
+// F589: зеркало wdtt-raw (id без цифр) и NativeWG OpkgTun не занимают —
+// сторонний AWG на opkgtun0 обязан остаться в списке внешних.
+func TestList_NonOpkgTunRecordsDoNotHideExternal(t *testing.T) {
+	awg := map[string]*sysinfo.ExternalTunnelInfo{
+		"opkgtun0": {InterfaceName: "opkgtun0", TunnelNumber: 0, IsAWG: true},
+	}
+	stubScan(t, []int{0}, awg)
+	s := newTestService(t)
+	for _, rec := range []*storage.AWGTunnel{
+		{ID: "wdttraw-de", Backend: "wdtt-raw"},
+		{ID: "nwg0", Backend: "nativewg"},
+	} {
+		if err := s.store.Create(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got) != 1 || got[0].InterfaceName != "opkgtun0" {
+		t.Fatalf("список = %+v, ждали сторонний opkgtun0", got)
+	}
+}
+
+// F316: взятие пишет awg<N> под семафором пула — номер, который пул уже
+// выдал открытой резервацией, взять нельзя: иначе резервация и взятие делили
+// бы один OpkgTun<N>.
+func TestAdopt_RefusesNumberUnderReservation(t *testing.T) {
+	stubScan(t, nil, nil)
+	stubLinkExists(t, false)
+	s := newTestService(t)
+	s.tunnelService = &fakeTunnelSvc{}
+	pool := opkgtun.NewPool(16, opkgtun.Source{Name: "пусто", Read: func(context.Context) (opkgtun.Taken, error) { return opkgtun.Taken{}, nil }})
+	res, err := pool.Reserve(context.Background(), opkgtun.WantPinned(opkgtun.TunnelHolder("awg9", "kernel"), 9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Close()
+	s.SetOpkgTunPool(pool, func() bool { return true })
+
+	_, err = s.Adopt(context.Background(), AdoptRequest{InterfaceName: "opkgtun9", ConfContent: validAdoptConf, TunnelName: "Германия"})
+	if !errors.Is(err, opkgtun.ErrClaimed) {
+		t.Fatalf("err = %v, want ErrClaimed", err)
+	}
+	if list, _ := s.store.List(); len(list) != 0 {
+		t.Fatalf("запись заведена при отказе: %d", len(list))
 	}
 }

@@ -20,6 +20,11 @@ type MemberInfo struct {
 	// (issue #625). Empty on records written before this field existed —
 	// consumers must fall back to the coarse comparison for those.
 	TransportKey string `json:"transportKey,omitempty"`
+	// RealmID — realm_id узла hysteria2 за реле (приходит только из xray-JSON
+	// подписки): Server/Port у таких узлов — адрес реле, общий для всех за ним,
+	// и различаются они только этим (F366, F660). Пусто у узлов без реле и у
+	// записей до появления поля — для них сравнение грубое, как с TransportKey.
+	RealmID string `json:"realmId,omitempty"`
 }
 
 // SubscriptionMode picks which sing-box outbound type wraps the
@@ -35,7 +40,15 @@ type SubscriptionMode string
 const (
 	ModeSelector SubscriptionMode = "selector"
 	ModeURLTest  SubscriptionMode = "urltest"
+	ModeFallback SubscriptionMode = "fallback"
 )
+
+// AutoSelect reports whether sing-box picks the member itself from URL
+// tests (urltest, fallback): such a group carries URLTest config and has
+// no hand-picked active member.
+func (m SubscriptionMode) AutoSelect() bool {
+	return m == ModeURLTest || m == ModeFallback
+}
 
 // URLTestConfig holds the urltest-specific tuning. All fields have
 // safe defaults; an empty struct yields gstatic 60s 50ms.

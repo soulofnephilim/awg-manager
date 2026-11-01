@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hoaxisr/awg-manager/internal/ipfamily"
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/ndms/command"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
@@ -72,22 +73,26 @@ type rciDiff struct {
 	routeDisables []rciRouteDisable
 }
 
-// rciRouteRebuild — перезапись всего блока маршрутов одной группы: снос
-// текущих строк и запись целевых в порядке приоритета. Единица диффа именно
-// блок, а не отдельная строка, потому что порядок строк в NDMS и есть
-// приоритет, а переставить строку нечем: upsert существующей её не двигает,
-// новая уходит в хвост (проверено на 5.01). Поэтому любое расхождение состава
-// или порядка лечится только перезаписью блока целиком (#801).
+// rciRouteRebuild — перезапись всего блока маршрутов одной группы. Единица
+// диффа именно блок, а не отдельная строка, потому что порядок строк в NDMS и
+// есть приоритет (#801), причём и между группами: первая совпавшая выигрывает.
+// Блок существующей группы applyDiff переписывает на месте — правкой по index и
+// перестановкой `rule`, сохраняя его глобальную позицию (#1023); новую группу
+// и откат — сносом текущих строк и записью целевых (новая строка уходит в хвост).
 type rciRouteRebuild struct {
 	group   string
 	deletes []string     // интерфейсы текущих строк группы
 	upserts []rciRouteOp // целевые строки в порядке приоритета
+	// nearSiblings — новый пакет списка, у которого на роутере уже есть
+	// строки других пакетов: после записи в хвост его ставят к ним
+	// (placeNewPack, #1107). Пакеты нового списка пишутся подряд в числовом
+	// порядке и в перестановке не нуждаются — порядок строк не читается.
+	nearSiblings bool
 }
 
 // rciRouteDisable is a toggle of the `disable` flag on an existing route,
-// keyed by Keenetic's stable index hash. Pending disables for routes that
-// were just written (no index yet) are carried by rciRouteOp.Disabled
-// and applied after a post-write refetch.
+// keyed by Keenetic's stable index hash. Записанные строки флаг несут сами
+// (rciRouteOp.Disabled → `disable` в элементе записи, F692).
 type rciRouteDisable struct {
 	Index    string
 	Disabled bool
@@ -107,10 +112,11 @@ type rciRouteOp struct {
 	Iface  string `json:"interface"`
 	Auto   bool   `json:"auto,omitempty"`
 	Reject bool   `json:"reject,omitempty"`
-	// Disabled — desired disable state. The route payload has no `disable`
-	// field, and a rewritten route comes back enabled with a fresh index, so
-	// applyDiff re-fetches indexes after the rewrite and settles the flag with
-	// SetDisabled in BOTH directions (set on new-disabled, clear on re-enabled).
+	// Disabled — желаемая пауза. Запись (ReplaceRoutes и добавления
+	// RewriteInPlace) несёт её `disable:true` в той же строке (F692): sc на
+	// 5.02 добавленную строку до save не показывает, и выключить её после
+	// записи по index нечем. Строке, правленной на месте, флаг наводит
+	// planMoves через SetDisabled в обе стороны.
 	Disabled bool `json:"-"`
 }
 
@@ -146,16 +152,19 @@ func (s *ServiceImpl) reconcile(ctx context.Context) error {
 			}
 		}
 	}
-	target := buildTargetState(data, failedSet)
 
-	// Force-refresh caches: router state may have been mutated since the
-	// last fetch (60-minute TTL is too long for reconcile-time freshness).
-	if s.queries != nil {
-		s.queries.ObjectGroups.InvalidateAll()
-		s.queries.DNSProxy.InvalidateAll()
+	// Отложенный save — до чтения: sc-вид держит снесённые строки до
+	// сохранения, и сверка снесла бы их повторно (F568).
+	if err := s.commands.DNSRoutes.FlushPendingSave(ctx); err != nil {
+		s.logError("reconcile", "", "Failed to save configuration before reading dns-proxy routes", err.Error())
+		return fmt.Errorf("flush pending save: %w", err)
 	}
 
-	allRoutes, err := s.queries.DNSProxy.List(ctx)
+	// Fresh reads (Fetch — past the TTL and the singleflight): router state
+	// may have been mutated since the last fetch (60-minute TTL is too long
+	// for reconcile-time freshness), and InvalidateAll+List could join a
+	// fetch started before the mutation.
+	allRoutes, err := s.queries.DNSProxy.Fetch(ctx)
 	if errors.Is(err, query.ErrNotSupportedOnOS4) {
 		// OS4 has no NDMS dns-proxy; dnsroute is a no-op on this platform.
 		// HR Neo handles DNS routing on OS4 via the hr_delegate path.
@@ -166,11 +175,25 @@ func (s *ServiceImpl) reconcile(ctx context.Context) error {
 		return fmt.Errorf("show dns-proxy route: %w", err)
 	}
 
-	allGroups, err := s.queries.ObjectGroups.List(ctx)
+	allGroups, err := s.queries.ObjectGroups.Fetch(ctx)
 	if err != nil {
 		s.logError("reconcile", "", "Failed to read object-groups", err.Error())
 		return fmt.Errorf("show object-group fqdn: %w", err)
 	}
+
+	// Цель без интерфейса в NDMS (F548): строка dns-proxy route на неё — E в
+	// журнале ndm, и без этой проверки она перезаливалась бы при каждом
+	// применении правил. Такая цель уходит в fallback тем же путём, что и
+	// упавший туннель (решение 3), но решение принимается по интерфейсу, а не
+	// по TunnelID: он бывает пустым (REST его не требует) или общим у строк
+	// с разными интерфейсами. Все цели подтверждаются ОДНИМ свежим списком на
+	// прогон; список не прочитан — не знаем, куда писать, ошибка.
+	confirmed, absent, err := s.confirmTargets(ctx, data)
+	if err != nil {
+		s.logError("reconcile", "", "Failed to read interface list", err.Error())
+		return fmt.Errorf("confirm route targets: %w", err)
+	}
+	target := buildTargetState(data, failedSet, absent)
 
 	current := filterAWGState(allGroups, allRoutes)
 
@@ -203,7 +226,7 @@ func (s *ServiceImpl) reconcile(ctx context.Context) error {
 		s.logInfo("reconcile", "", fmt.Sprintf("Route disables: %v", pairs))
 	}
 
-	applyErr := s.applyDiff(ctx, diff)
+	applyErr := s.applyDiff(ctx, diff, confirmed)
 	if applyErr != nil {
 		s.logError("reconcile", "", "Partial apply failure", applyErr.Error())
 		return fmt.Errorf("apply diff: %w", applyErr)
@@ -213,8 +236,69 @@ func (s *ServiceImpl) reconcile(ctx context.Context) error {
 	return nil
 }
 
+// confirmTargets подтверждает интерфейсы целей NDMS-списков одним чтением
+// списка; absent — имена интерфейсов целей, которых в списке нет. Целей нет —
+// список не читается.
+func (s *ServiceImpl) confirmTargets(ctx context.Context, data *StoreData) (map[string]query.Confirmed, map[string]struct{}, error) {
+	var names []string
+	for _, list := range data.Lists {
+		if !isNDMS(list.Backend) {
+			continue
+		}
+		for _, rt := range list.Routes {
+			names = append(names, rt.Interface)
+		}
+	}
+	if len(names) == 0 {
+		return nil, nil, nil
+	}
+	confirmed, err := s.queries.Interfaces.ConfirmEach(ctx, names)
+	if err != nil {
+		return nil, nil, err
+	}
+	var absent map[string]struct{}
+	for _, name := range names {
+		if _, ok := confirmed[name]; ok {
+			continue
+		}
+		if _, seen := absent[name]; seen {
+			continue
+		}
+		if absent == nil {
+			absent = make(map[string]struct{})
+		}
+		absent[name] = struct{}{}
+		s.appLog.Warn("reconcile", name, "интерфейса нет в NDMS — цель в fallback")
+	}
+	return confirmed, absent, nil
+}
+
+// routedEntries — записи и исключения списка, которые уходят на роутер.
+// Domains и Subnets в object-group fqdn одинаковы (один слот include), поэтому
+// идут одним списком. Единственный источник для buildTargetState и
+// tunnelRouteRefs: число групп-кусков у них обязано совпадать, иначе снятие
+// строк туннеля без сверки бьёт мимо (E в журнале ndm) или оставляет хвост.
+//
+// SkipIPv6 drops IPv6 entries here, at render time, so the stored list keeps
+// them. An IPv6 exclude has nothing left to carve from and would still take a
+// slot in every chunk, so it goes too. A list left with no entries gets no
+// groups: chunkWithReserve returns none for an empty input.
+func routedEntries(list *DomainList) (items, excludes []string) {
+	items = make([]string, 0, len(list.Domains)+len(list.Subnets))
+	items = append(items, list.Domains...)
+	items = append(items, list.Subnets...)
+	excludes = list.Excludes
+	if list.SkipsIPv6() {
+		items = ipfamily.WithoutIPv6(items)
+		excludes = ipfamily.WithoutIPv6(excludes)
+	}
+	return items, excludes
+}
+
 // buildTargetState converts stored domain lists into the desired router state.
-func buildTargetState(data *StoreData, failedTunnels map[string]struct{}) targetState {
+// absentIfaces — интерфейсы целей, которых нет в NDMS (F548): такая цель
+// пропускается так же, как упавший туннель.
+func buildTargetState(data *StoreData, failedTunnels, absentIfaces map[string]struct{}) targetState {
 	var ts targetState
 
 	for _, list := range data.Lists {
@@ -235,34 +319,43 @@ func buildTargetState(data *StoreData, failedTunnels map[string]struct{}) target
 		// object-group fqdn — both consume one `include` slot and count
 		// against the same MaxDomainsPerGroup limit. Merge them before
 		// chunking so a huge CIDR list still gets split across groups.
-		items := make([]string, 0, len(list.Domains)+len(list.Subnets))
-		items = append(items, list.Domains...)
-		items = append(items, list.Subnets...)
+		items, excludes := routedEntries(&list)
 
 		// NDMS applies an exclude only inside its own object-group, so the
 		// full exclude set goes into every chunk. Excludes also count
 		// against the group's capacity — shrink each chunk's budget.
-		chunks := chunkWithReserve(items, MaxDomainsPerGroup, len(list.Excludes))
+		chunks := chunkWithReserve(items, MaxDomainsPerGroup, len(excludes))
 
 		for i, chunk := range chunks {
-			groupName := buildGroupName(list.ID, list.Name, i+1)
+			groupName := buildGroupName(ListGroupSlug(&list), i+1)
 
 			g := targetGroup{
 				name:     groupName,
 				includes: chunk,
-				excludes: list.Excludes,
+				excludes: excludes,
 			}
 
 			ts.groups = append(ts.groups, g)
 
 			// Filter out failed tunnels, reassign fallback to last active route.
+			// Повтор интерфейса (список, записанный до проверки на записи, F691)
+			// схлопывается до первого вхождения: NDMS держит одну строку на
+			// (группа, интерфейс), иначе цель никогда не сошлась бы с роутером.
 			var activeRoutes []RouteTarget
+			seen := make(map[string]bool, len(list.Routes))
 			for _, rt := range list.Routes {
 				if failedTunnels != nil {
 					if _, failed := failedTunnels[rt.TunnelID]; failed {
 						continue
 					}
 				}
+				if _, gone := absentIfaces[rt.Interface]; gone {
+					continue
+				}
+				if seen[rt.Interface] {
+					continue
+				}
+				seen[rt.Interface] = true
 				activeRoutes = append(activeRoutes, rt)
 			}
 			for j, rt := range activeRoutes {
@@ -435,16 +528,24 @@ func computeDiff(current currentState, target targetState) rciDiff {
 
 	// Для каждой целевой группы: совпало — ничего; различается только пауза —
 	// дешёвый toggle по index (#489); всё остальное (состав, порядок, форма
-	// fallback) — перезапись блока целиком, потому что порядок строк = приоритет
-	// и переставить строку в NDMS нечем (#801).
+	// fallback) — перезапись блока целиком, потому что порядок строк =
+	// приоритет (#801); как именно переписывать, решает applyDiff (#1023).
 	//
 	// Обход по отсортированным именам: map даёт случайный порядок, и без
 	// сортировки последовательность POST-ов гуляла бы от прогона к прогону.
+	// Пакеты одного списка — по номеру (p2 раньше p10): новые строки ложатся в
+	// хвост в порядке записи, и лексический порядок перемешал бы пакеты.
 	groupNames := make([]string, 0, len(targetByGroup))
 	for group := range targetByGroup {
 		groupNames = append(groupNames, group)
 	}
-	sort.Strings(groupNames)
+	sort.Slice(groupNames, func(i, j int) bool { return packLess(groupNames[i], groupNames[j]) })
+	routedSlugs := make(map[string]bool, len(current.routes))
+	for _, cr := range current.routes {
+		if slug, _, ok := packOf(cr.group); ok {
+			routedSlugs[slug] = true
+		}
+	}
 
 	for _, group := range groupNames {
 		tgts := targetByGroup[group]
@@ -470,6 +571,9 @@ func computeDiff(current currentState, target targetState) rciDiff {
 		}
 
 		rb := rciRouteRebuild{group: group}
+		if slug, _, ok := packOf(group); ok && len(curs) == 0 && routedSlugs[slug] {
+			rb.nearSiblings = true
+		}
 		for _, cr := range curs {
 			rb.deletes = append(rb.deletes, cr.iface)
 		}
@@ -506,12 +610,14 @@ func computeDiff(current currentState, target targetState) rciDiff {
 
 // applyDiff issues the computed diff to NDMS via the new CQRS command layer.
 // Save is handled by the debounced SaveCoordinator inside each command group.
-func (s *ServiceImpl) applyDiff(ctx context.Context, diff rciDiff) error {
+// confirmed — интерфейсы целей, подтверждённые в reconcile: постановка идёт
+// только по ним; снос — по строкам из выдачи роутера (DNSRouteRef).
+func (s *ServiceImpl) applyDiff(ctx context.Context, diff rciDiff, confirmed map[string]query.Confirmed) error {
 	// Phase 1: Delete routes (before deleting groups they reference)
 	if len(diff.routeDeletes) > 0 {
-		specs := make([]command.DNSRouteSpec, 0, len(diff.routeDeletes))
+		specs := make([]command.DNSRouteRef, 0, len(diff.routeDeletes))
 		for _, rd := range diff.routeDeletes {
-			specs = append(specs, command.DNSRouteSpec{
+			specs = append(specs, command.DNSRouteRef{
 				Group:     rd.Group,
 				Interface: rd.Iface,
 			})
@@ -549,87 +655,82 @@ func (s *ServiceImpl) applyDiff(ctx context.Context, diff rciDiff) error {
 		}
 	}
 
-	// Phase 4: перезапись блоков маршрутов. На каждую группу ровно один POST:
-	// снос её текущих строк и запись целевых в порядке приоритета едут вместе,
+	// Phase 4: перезапись блоков маршрутов. Блок существующей группы правится
+	// на месте (rewriteInPlace): снос+запись через ReplaceRoutes увёл бы его в
+	// хвост, а строка в хвосте проигрывает пересечения доменов всем группам
+	// выше (#1023). ReplaceRoutes остаётся для новой группы (ей и так место в
+	// хвосте, а пакет существующего списка затем переставляется к своим —
+	// placeNewPack, #1107) и для отката. В обоих путях снос и запись едут одним POST-ом,
 	// иначе между POST-ами группа осталась бы без правил (на больших списках —
 	// сотни миллисекунд без DNS-маршрутизации).
+	//
+	// Записанные строки несут паузу сами (DNSRouteSpec.Disabled, F692); в
+	// postDisables для Phase 5 — toggles диффа и правки disable строк,
+	// переписанных на месте (planMoves по rc).
+	postDisables := append([]rciRouteDisable{}, diff.routeDisables...)
 	for _, rb := range diff.routeRebuilds {
-		dels := make([]command.DNSRouteSpec, 0, len(rb.deletes))
+		dels := make([]command.DNSRouteRef, 0, len(rb.deletes))
 		for _, iface := range rb.deletes {
-			dels = append(dels, command.DNSRouteSpec{Group: rb.group, Interface: iface})
+			dels = append(dels, command.DNSRouteRef{Group: rb.group, Interface: iface})
 		}
 		ups := make([]command.DNSRouteSpec, 0, len(rb.upserts))
+		ifaces := make([]string, 0, len(rb.upserts))
 		for _, ro := range rb.upserts {
+			iface, ok := confirmed[ro.Iface]
+			if !ok {
+				// Неподтверждённая цель в target не попадает (confirmTargets);
+				// нулевой Confirmed ушёл бы в NDMS пустым именем.
+				return fmt.Errorf("replace routes for %s: интерфейс %s не подтверждён", rb.group, ro.Iface)
+			}
 			ups = append(ups, command.DNSRouteSpec{
 				Group:     ro.Group,
-				Interface: ro.Iface,
+				Interface: iface,
 				Reject:    ro.Reject,
+				Disabled:  ro.Disabled,
 			})
+			ifaces = append(ifaces, iface.Name())
 		}
+
+		if len(rb.deletes) > 0 {
+			disables, err := s.rewriteInPlace(ctx, rb, confirmed)
+			if err == nil {
+				postDisables = append(postDisables, disables...)
+				s.logInfo("applyDiff", rb.group,
+					fmt.Sprintf("Phase4: route block rewritten in place: %v", ifaces))
+				continue
+			}
+			// Откат. Правки по index и `rule` на 5.00, по ГИПОТЕЗЕ, нет (на
+			// железе не мерено), а частичный POST 1 мог оставить в группе
+			// строку любого интерфейса из rb.deletes ∪ цель — сносим всё
+			// объединение. «Нет такой строки» терпит toleratesReplaceRoutes;
+			// цена — E «unable to find» в журнале ndm, только на пути отката.
+			s.logError("applyDiff", rb.group, "Phase4: in-place rewrite failed, falling back to ReplaceRoutes", err.Error())
+			gone := make(map[string]bool, len(rb.deletes)+len(rb.upserts))
+			for _, iface := range rb.deletes {
+				gone[iface] = true
+			}
+			for _, name := range ifaces {
+				if !gone[name] {
+					gone[name] = true
+					dels = append(dels, command.DNSRouteRef{Group: rb.group, Interface: name})
+				}
+			}
+		}
+
 		if err := s.commands.DNSRoutes.ReplaceRoutes(ctx, dels, ups); err != nil {
 			s.logError("applyDiff", rb.group,
 				fmt.Sprintf("Phase4: ReplaceRoutes(-%d/+%d) failed", len(dels), len(ups)), err.Error())
 			return fmt.Errorf("replace routes for %s: %w", rb.group, err)
 		}
-		ifaces := make([]string, 0, len(ups))
-		for _, u := range ups {
-			ifaces = append(ifaces, u.Interface)
-		}
 		s.logInfo("applyDiff", rb.group,
 			fmt.Sprintf("Phase4: route block rewritten in priority order: %v", ifaces))
-	}
-
-	// Phase 5a: re-fetch router state so rewritten routes get their freshly
-	// assigned indexes, needed for the disable toggles below. A rewritten route
-	// always comes back enabled, so a paused list must have its flag re-applied
-	// here — otherwise the UI shows it paused while the router routes traffic
-	// (#489).
-	postDisables := append([]rciRouteDisable{}, diff.routeDisables...)
-
-	var written []rciRouteOp
-	for _, rb := range diff.routeRebuilds {
-		written = append(written, rb.upserts...)
-	}
-
-	if len(written) > 0 {
-		s.queries.DNSProxy.InvalidateAll()
-		fresh, err := s.queries.DNSProxy.List(ctx)
-		if err != nil {
-			s.logError("applyDiff", "", "Phase5a: refetch dns-proxy after rewrite", err.Error())
-			// Non-fatal: the next reconcile will catch up.
-		} else {
-			indexByKey := make(map[string]string, len(fresh))
-			disabledByKey := make(map[string]bool, len(fresh))
-			for _, r := range fresh {
-				if r.Index == "" {
-					continue
-				}
-				key := r.Group + "|" + r.Interface
-				indexByKey[key] = r.Index
-				disabledByKey[key] = r.Disabled
-			}
-			for _, ro := range written {
-				key := ro.Group + "|" + ro.Iface
-				idx, ok := indexByKey[key]
-				if !ok || idx == "" {
-					s.logError("applyDiff", "", fmt.Sprintf("Phase5a: no index for %s", key), "route not in post-rewrite show")
-					continue
-				}
-				if disabledByKey[key] == ro.Disabled {
-					continue // router already in the desired state
-				}
-				postDisables = append(postDisables, rciRouteDisable{
-					Index:    idx,
-					Disabled: ro.Disabled,
-					Group:    ro.Group,
-					Iface:    ro.Iface,
-				})
-			}
+		if rb.nearSiblings {
+			s.placeNewPack(ctx, rb.group)
 		}
 	}
 
-	// Phase 5b: apply disable toggles (pre-existing routes + newly-upserted
-	// ones whose index we just learned).
+	// Phase 5: правки disable по index — строки, чьё содержимое совпало с
+	// целью (toggles диффа), и строки, переписанные на месте.
 	for _, rd := range postDisables {
 		if rd.Index == "" {
 			continue
@@ -637,19 +738,96 @@ func (s *ServiceImpl) applyDiff(ctx context.Context, diff rciDiff) error {
 		if err := s.commands.DNSRoutes.SetDisabled(ctx, rd.Index, rd.Disabled); err != nil {
 			s.logError("applyDiff",
 				fmt.Sprintf("%s->%s", rd.Group, rd.Iface),
-				fmt.Sprintf("Phase5b: SetDisabled(%v) failed", rd.Disabled),
+				fmt.Sprintf("Phase5: SetDisabled(%v) failed", rd.Disabled),
 				err.Error())
 			return fmt.Errorf("set disabled %s->%s: %w", rd.Group, rd.Iface, err)
 		}
 		s.logInfo("applyDiff",
 			fmt.Sprintf("%s->%s", rd.Group, rd.Iface),
-			fmt.Sprintf("Phase5b: SetDisabled=%v OK (index=%s)", rd.Disabled, rd.Index))
+			fmt.Sprintf("Phase5: SetDisabled=%v OK (index=%s)", rd.Disabled, rd.Index))
 	}
 
 	if len(groupErrors) > 0 {
 		return fmt.Errorf("%d group update(s) failed: %s", len(groupErrors), strings.Join(groupErrors, "; "))
 	}
 	return nil
+}
+
+// rewriteInPlace переписывает блок существующей группы, не трогая его
+// глобальную позицию (#1023). POST 1 — сносы по index, правки строк на месте и
+// добавления (planInPlace по свежему rc); POST 2 — перестановки `rule`,
+// выстраивающие строки группы подряд от первой в порядке приоритета
+// (planMoves по rc после POST 1), только если что-то стоит не на месте.
+// Возвращает правки disable строк, правленных на месте: правка флаг
+// сохраняет; добавленная строка паузу несёт сама (F692). Интерфейсы целей
+// подтверждены вызывающим; нулевой Confirmed RewriteInPlace всё равно
+// отвергает без POST (F546).
+func (s *ServiceImpl) rewriteInPlace(ctx context.Context, rb rciRouteRebuild, confirmed map[string]query.Confirmed) ([]rciRouteDisable, error) {
+	ordered, err := s.queries.DNSProxy.FetchOrdered(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var cur []ndms.DNSRouteRule
+	for _, r := range ordered {
+		if r.Group != rb.group {
+			continue
+		}
+		// Семантика `"index":""` в NDMS неизвестна — без index строку на месте
+		// не правим, откат на ReplaceRoutes.
+		if r.Index == "" {
+			return nil, fmt.Errorf("строка %s/%s без index", r.Group, r.Interface)
+		}
+		cur = append(cur, r)
+	}
+	spec := func(ro rciRouteOp) command.DNSRouteSpec {
+		return command.DNSRouteSpec{Group: ro.Group, Interface: confirmed[ro.Iface], Reject: ro.Reject, Disabled: ro.Disabled}
+	}
+	dels, edits, adds := planInPlace(cur, rb.upserts)
+	updates := make([]command.DNSRouteUpdate, 0, len(edits))
+	for _, u := range edits {
+		updates = append(updates, command.DNSRouteUpdate{Index: u.index, Spec: spec(u.op)})
+	}
+	addSpecs := make([]command.DNSRouteSpec, 0, len(adds))
+	for _, ro := range adds {
+		addSpecs = append(addSpecs, spec(ro))
+	}
+	if err := s.commands.DNSRoutes.RewriteInPlace(ctx, dels, updates, addSpecs); err != nil {
+		return nil, err
+	}
+
+	ordered, err = s.queries.DNSProxy.FetchOrdered(ctx)
+	if err != nil {
+		return nil, err
+	}
+	moves, disables, err := planMoves(ordered, rb.group, rb.upserts)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.commands.DNSRoutes.MoveRoutes(ctx, moves); err != nil {
+		return nil, err
+	}
+	return disables, nil
+}
+
+// placeNewPack переставляет строки только что записанной группы к пакетам её
+// списка (planPackMoves, #1107). Best-effort: отказ (5.00 без `rule` — по
+// гипотезе, как у rewriteInPlace; сбой RCI) оставляет пакет в хвосте — как
+// было до правки, reconcile не падает. На OS4 reconcile сюда не доходит.
+func (s *ServiceImpl) placeNewPack(ctx context.Context, group string) {
+	ordered, err := s.queries.DNSProxy.FetchOrdered(ctx)
+	if err != nil {
+		s.appLog.Warn("reconcile-pack-order", group, "порядок строк не прочитан, пакет остался в хвосте: "+err.Error())
+		return
+	}
+	moves := planPackMoves(ordered, group)
+	if len(moves) == 0 {
+		return
+	}
+	if err := s.commands.DNSRoutes.MoveRoutes(ctx, moves); err != nil {
+		s.appLog.Warn("reconcile-pack-order", group, "пакет не переставлен к своему списку, остался в хвосте: "+err.Error())
+		return
+	}
+	s.logInfo("applyDiff", group, fmt.Sprintf("Phase4: new pack moved next to its list (%d rows)", len(moves)))
 }
 
 // --- Helper functions ---
@@ -710,13 +888,11 @@ func routesEqual(current []currentRoute, target []targetRoute) bool {
 
 // buildGroupName generates a short NDMS object-group name.
 // Format: {slug}_p{chunk}
-// Example: list_2 "hetzner" chunk 1 → "hetzner_p1"
+// Example: slug "hetzner" chunk 1 → "hetzner_p1"
 //
-// slug is the sanitized list name. If the name sanitizes to empty (e.g. only
-// punctuation), the numeric portion of listID is used as a fallback so the
-// group name is never "_pN".
-func buildGroupName(listID, listName string, chunk int) string {
-	return fmt.Sprintf("%s_p%d", GroupSlug(listID, listName), chunk)
+// slug — ListGroupSlug списка (F694).
+func buildGroupName(slug string, chunk int) string {
+	return fmt.Sprintf("%s_p%d", slug, chunk)
 }
 
 // GroupSlug returns the slug segment of an awg-managed group name (the part
@@ -732,6 +908,38 @@ func GroupSlug(listID, listName string) string {
 		num = strings.TrimPrefix(listID, "list_")
 	}
 	return num
+}
+
+// ListGroupSlug — основа имени NDMS-группы списка: сохранённый GroupSlug.
+// Пустой бывает только у записи, не прошедшей Load/Create (тесты), — для неё
+// прежнее правило по имени. Exported for connections.rules.
+func ListGroupSlug(l *DomainList) string {
+	if l.GroupSlug != "" {
+		return l.GroupSlug
+	}
+	return GroupSlug(l.ID, l.Name)
+}
+
+// uniqueGroupSlug — слаг для списка id/name, не занятый ни одним из taken:
+// GroupSlug(id, name), а при занятости — с суффиксом _<num> (num — ID без
+// list_), дописываемым до свободного. Строка растёт на каждом шаге, taken
+// конечен — цикл сходится.
+func uniqueGroupSlug(id, name string, taken map[string]bool) string {
+	slug := GroupSlug(id, name)
+	suffix := "_" + strings.TrimPrefix(id, "list_")
+	for taken[slug] {
+		slug += suffix
+	}
+	return slug
+}
+
+// assignGroupSlug назначает новому списку слаг, не занятый списками lists.
+func assignGroupSlug(list *DomainList, lists []DomainList) {
+	taken := make(map[string]bool, len(lists))
+	for i := range lists {
+		taken[ListGroupSlug(&lists[i])] = true
+	}
+	list.GroupSlug = uniqueGroupSlug(list.ID, list.Name, taken)
 }
 
 // awgGroupNameRE matches group names produced by buildGroupName: a slug of

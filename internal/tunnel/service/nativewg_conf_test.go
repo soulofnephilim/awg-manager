@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,7 +45,7 @@ func TestReplaceConfigSkipsConfForNativeWG(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.ReplaceConfig(context.Background(), "awg20", sampleConf, "", ReplaceOptions{}); err != nil {
+	if err := s.ReplaceConfig(context.Background(), "awg20", sampleConf, ""); err != nil {
 		t.Fatalf("ReplaceConfig: %v", err)
 	}
 
@@ -60,7 +61,7 @@ func TestReplaceConfigWritesConfForKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.ReplaceConfig(context.Background(), "awg10", sampleConf, "", ReplaceOptions{}); err != nil {
+	if err := s.ReplaceConfig(context.Background(), "awg10", sampleConf, ""); err != nil {
 		t.Fatalf("ReplaceConfig: %v", err)
 	}
 
@@ -89,7 +90,7 @@ func TestReplaceConfig_ClearsPresharedKeyAbsentInNewConf(t *testing.T) {
 	}
 
 	// sampleConf секции PresharedKey не содержит.
-	if err := s.ReplaceConfig(context.Background(), "awg10", sampleConf, "", ReplaceOptions{}); err != nil {
+	if err := s.ReplaceConfig(context.Background(), "awg10", sampleConf, ""); err != nil {
 		t.Fatalf("ReplaceConfig: %v", err)
 	}
 
@@ -113,11 +114,19 @@ func TestReplaceConfig_RejectsOverlappingHeaders(t *testing.T) {
 	conf := strings.Replace(sampleConf, "Address = 10.8.0.2/32",
 		"Address = 10.8.0.2/32\nH1 = 10\nH2 = 10\nH3 = 30\nH4 = 40", 1)
 
-	err := s.ReplaceConfig(context.Background(), "awg10", conf, "", ReplaceOptions{})
+	err := s.ReplaceConfig(context.Background(), "awg10", conf, "")
 	if err == nil {
 		t.Fatal("ReplaceConfig принял конфиг с H1 = H2, ожидалась ошибка")
 	}
 	if !strings.Contains(err.Error(), "H1 и H2") {
 		t.Errorf("ошибка = %v, ожидалось упоминание H1 и H2", err)
+	}
+	// Ручка отвечает по сентинелу, а не по тексту обёртки (F666).
+	if !errors.Is(err, tunnel.ErrValidateConf) || errors.Is(err, tunnel.ErrParseConf) {
+		t.Errorf("ошибка = %v, ожидался только ErrValidateConf", err)
+	}
+	// Неразборный .conf — ErrParseConf.
+	if err := s.ReplaceConfig(context.Background(), "awg10", "[Interface]\nAddress = 10.8.0.2/32\n", ""); !errors.Is(err, tunnel.ErrParseConf) {
+		t.Errorf("ошибка = %v, ожидался ErrParseConf", err)
 	}
 }

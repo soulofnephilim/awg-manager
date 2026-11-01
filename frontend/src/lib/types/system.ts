@@ -29,6 +29,8 @@ export interface HydraRouteConfig {
 	geoIPFiles: string[];
 	geoSiteFiles: string[];
 	policyOrder: string[];
+	/** Ревизия файлов правил HR Neo (domain.conf + ip.list). */
+	hrRevision?: string;
 }
 
 export interface GeoFileEntry {
@@ -216,7 +218,6 @@ export interface PingCheckDefaults {
 	method: 'http' | 'icmp';
 	target: string;
 	interval: number;
-	deadInterval: number;
 	failThreshold: number;
 }
 
@@ -240,6 +241,9 @@ export interface UpdateSettings {
 	autoInstallEnabled: boolean;
 	autoInstallIntervalDays: number;
 	autoInstallTime: string;
+	statsEnabled: boolean;
+	/** Не сохранять снимок данных перед установкой обновления; по умолчанию false. */
+	snapshotDisabled?: boolean;
 }
 
 export interface DownloadSettings {
@@ -261,6 +265,17 @@ export interface GeoFileSettings {
 	refreshDailyTime?: string;
 }
 
+/** Частичное значение: вложенные объекты — тоже по полям, массивы — целиком. */
+type PatchOf<T> = T extends readonly unknown[] ? T : T extends object ? { [K in keyof T]?: PatchOf<T[K]> } : T;
+
+/**
+ * Тело POST /settings/update: только меняемые поля, в том числе внутри блоков —
+ * бэкенд накладывает их по полям, опущенное сохраняется (F684). Слать весь
+ * снимок настроек нельзя: устаревший снимок другой вкладки откатил бы чужие
+ * изменения (например, перевыпущенный apiKey).
+ */
+export type SettingsPatch = PatchOf<Settings>;
+
 export interface Settings {
 	schemaVersion?: number;
 	authEnabled: boolean;
@@ -270,16 +285,17 @@ export interface Settings {
 	 */
 	sessionTtlHours?: number;
 	/**
-	 * Allow login with Entware credentials (/opt/etc/shadow) in addition
-	 * to router admin credentials. Optional — legacy backends omit it;
-	 * UI treats absence as false.
-	 */
-	entwareAuthEnabled?: boolean;
-	/**
 	 * MCP-эндпоинт /mcp включён. По умолчанию выключен; ключи доступа
 	 * управляются через /mcp/keys*. Optional — legacy backends omit it.
 	 */
 	mcpEnabled?: boolean;
+	/**
+	 * Phobos-релей принудительно процессом (выключатель kernel-релея
+	 * awgm_relay). Optional — legacy backends omit it.
+	 */
+	obfuscatorRelayProcess?: boolean;
+	/** Причина, по которой сторож выключил kernel-релей (пусто — не срабатывал). */
+	obfuscatorKmodTripped?: string;
 	apiKey?: string;
 	server: ServerSettings;
 	pingCheck: PingCheckSettings;
@@ -291,7 +307,6 @@ export interface Settings {
 	geoFile: GeoFileSettings;
 	connectivityCheckUrl: string;
 	usageLevel: UsageLevel;
-	hiddenSystemTunnels?: string[];
 	monitoringExcludedTunnels?: string[];
 	/**
 	 * Адрес bootstrap-резолвера sing-box (dns-bootstrap в 00-base.json):
@@ -320,12 +335,10 @@ export interface AuthStatus {
 	authDisabled?: boolean;
 	login?: string;
 	expiresIn?: number;
-	/**
-	 * True when login via Entware credentials (/opt/etc/shadow) is enabled.
-	 * Present regardless of auth state; optional — legacy backends omit it.
-	 */
-	entwareAuthEnabled?: boolean;
 }
+
+/** Чем проверять логин: учётка роутера или Entware (/opt/etc/shadow). */
+export type LoginMethod = 'router' | 'entware';
 
 export interface LoginResult {
 	success: boolean;
@@ -351,6 +364,22 @@ export interface UpdateInfo {
 	nextAutoInstallAt?: string;
 	/** Absent until the first auto-install attempt has run. */
 	lastAutoInstallAt?: string;
+}
+
+/** Снимок настроек, который AWG Manager сохраняет перед установкой обновления. */
+export interface UpdateSnapshot {
+	id: string;
+	createdAt: string;
+	appVersion?: string;
+	size: number;
+}
+
+export interface UpdateSnapshotsData {
+	snapshots: UpdateSnapshot[];
+	/** Сколько последних снимков хранится. */
+	keep: number;
+	/** Срок жизни снимка в днях; самый новый живёт до следующего обновления. */
+	ttlDays: number;
 }
 
 export interface ChangelogGroup {

@@ -31,11 +31,20 @@ func (s *ServiceImpl) FakeIPListDNSServers(ctx context.Context) ([]DNSServer, er
 }
 
 func (s *ServiceImpl) FakeIPAddDNSServer(ctx context.Context, srv DNSServer) error {
+	if err := s.dnsBindAddressLocal(srv); err != nil {
+		return err
+	}
 	return s.fakeipWithConfig(ctx, "dns-servers", func(c *RouterConfig) error { return c.AddDNSServer(srv) })
 }
 
 func (s *ServiceImpl) FakeIPUpdateDNSServer(ctx context.Context, tag string, srv DNSServer) error {
-	return s.fakeipWithConfig(ctx, "dns-servers", func(c *RouterConfig) error { return c.UpdateDNSServer(tag, srv) })
+	bindErr := s.dnsBindAddressLocal(srv)
+	return s.fakeipWithConfig(ctx, "dns-servers", func(c *RouterConfig) error {
+		if bindErr != nil && !keepsDNSBindAddress(c, tag, srv) {
+			return bindErr
+		}
+		return c.UpdateDNSServer(tag, srv)
+	})
 }
 
 func (s *ServiceImpl) FakeIPDeleteDNSServer(ctx context.Context, tag string, force bool) error {
@@ -230,6 +239,9 @@ func (s *ServiceImpl) FakeIPAddCompositeOutbound(ctx context.Context, o Outbound
 		}
 	}
 	return s.fakeipWithConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if err := s.validateCompositeTag(ctx, "", o); err != nil {
+			return err
+		}
 		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
 			return err
 		}
@@ -238,17 +250,42 @@ func (s *ServiceImpl) FakeIPAddCompositeOutbound(ctx context.Context, o Outbound
 }
 
 func (s *ServiceImpl) FakeIPUpdateCompositeOutbound(ctx context.Context, tag string, o Outbound) error {
-	if strings.EqualFold(o.Type, "direct") {
-		if err := s.validateBindInterface(ctx, o.BindInterface); err != nil {
+	bindErr := s.directBindErr(ctx, o)
+	return s.fakeipWithConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if bindErr != nil && !keepsBind(c, tag, o) {
+			return bindErr
+		}
+		if err := s.validateCompositeTag(ctx, tag, o); err != nil {
 			return err
 		}
-	}
-	return s.fakeipWithConfig(ctx, "outbounds", func(c *RouterConfig) error {
 		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
 			return err
 		}
 		return c.UpdateCompositeOutbound(tag, o)
 	})
+}
+
+// validateCompositeTag отклоняет тег группы, занятый выходом другого каталога:
+// туннелем sing-box, AWG-выходом, композитом подписки или встроенным
+// (direct/block/dns). Конфликт внутри своего слота ловит сам RouterConfig;
+// пустой конфиг здесь оставляет в isKnownOutboundTag только чужие каталоги.
+// Каталоги знают не всё (серверы подписок, прокси устройств, ручной слот),
+// поэтому сверяемся и с outbound'ами включённых слотов, кроме своих двух.
+// sing-box с одинаковым тегом в двух слотах не стартует (F732). oldTag —
+// прежний тег при правке: неизменённый тег не перепроверяется.
+func (s *ServiceImpl) validateCompositeTag(ctx context.Context, oldTag string, o Outbound) error {
+	tag := strings.TrimSpace(o.Tag)
+	if tag == "" || tag == oldTag {
+		return nil
+	}
+	taken := s.isKnownOutboundTag(ctx, tag, NewEmptyConfig())
+	if !taken && s.deps.Orch != nil {
+		taken = s.deps.Orch.EnabledOutboundTags(orchestrator.SlotRouter, orchestrator.SlotFakeIP)[tag]
+	}
+	if taken {
+		return fmt.Errorf("%w: %q", ErrOutboundTagConflict, tag)
+	}
+	return nil
 }
 
 // validateCompositeMembers отклоняет selector/urltest с member-тегами,
@@ -258,7 +295,7 @@ func (s *ServiceImpl) FakeIPUpdateCompositeOutbound(ctx context.Context, tag str
 // не объясняя пользователю, что чинить (#567).
 func (s *ServiceImpl) validateCompositeMembers(ctx context.Context, o Outbound, c *RouterConfig) error {
 	switch strings.ToLower(o.Type) {
-	case "selector", "urltest":
+	case "selector", "urltest", "fallback":
 	default:
 		return nil
 	}

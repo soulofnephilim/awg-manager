@@ -16,12 +16,6 @@
 //   After Prism, injects data.tunnels: "" → Direct (count = stats.direct) plus
 //   MOCK_AWG_TUNNELS rows with counts split from stats.tunneled so the tunnel chip
 //   row matches diagnostics UI (same as a real router).
-// - Amnezia Premium: GET/POST/DELETE /amnezia/premium/key, GET /amnezia/premium/catalog,
-//   POST /amnezia/premium/config, POST /amnezia/premium/revoke,
-//   GET/POST /amnezia/premium/mirror, GET/POST /amnezia/premium/declared-country
-//   (paths without /api — Vite rewrite).
-//   Ключ подписки
-//   живёт в памяти мока, как на роутере: браузер его обратно не получает.
 // - Diagnostics «Окружение: GET /dns-check/client (Test-Phone @ 192.168.1.42,
 //   policy Policy1), /system/hydraroute-status, plus existing /routing/*, /tunnels/all,
 //   /proxy/*, /singbox/subscriptions.
@@ -81,6 +75,9 @@ const UPSTREAM = process.env.UPSTREAM ?? 'http://127.0.0.1:8080';
 // вероятностные сбои) становится воспроизводимой — скриншот-сравнение
 // рефакторингов UI требует бит-в-бит одинаковых ответов между прогонами.
 const DETERMINISTIC = ['1', 'true'].includes(String(process.env.MOCK_DETERMINISTIC ?? ''));
+// MOCK_POLICY_TUN_ROUTE_LOST=1 — в policy-tun статус несёт замечание
+// policy-tun-route-lost (severity error), F388.
+const POLICY_TUN_ROUTE_LOST = ['1', 'true'].includes(String(process.env.MOCK_POLICY_TUN_ROUTE_LOST ?? ''));
 const rand = () => (DETERMINISTIC ? 0.5 : Math.random());
 
 const PORT = Number(process.env.PORT ?? 8081);
@@ -169,7 +166,7 @@ let mockMcpKeys = [];
 let mockMcpKeySeq = 0;
 
 // Service-download fault injection: every "download via route" endpoint
-// (geo.dat, AWGM update, DNSRoute lists, Amnezia Premium, sing-box binary,
+// (geo.dat, AWGM update, DNSRoute lists, sing-box binary,
 // download-outbounds) randomly returns a realistic failure instead of the
 // normal/proxied success, so every UI surface can exercise all outcomes
 // (sing-box off, AWG iface down, timeout, network drop, generic). Enabled by
@@ -223,8 +220,6 @@ function resetRuntimeControls() {
 	mockSystemAscByTunnel = createInitialMockSystemAscByTunnel();
 	mockFreeturn = createInitialMockFreeturn();
 	mockWdtt = applyAllExpired(createInitialMockWdtt());
-	mockPremiumKey.stored = false;
-	mockPremiumKey.usable = false;
 	applyDefaultMockKeeneticProfile();
 }
 const MOCK_DOWNLOAD_OUTBOUNDS = [
@@ -1375,7 +1370,6 @@ function buildSingleTunnel(id) {
 			method: p?.method ?? 'icmp',
 			target: p?.target ?? '8.8.8.8',
 			interval: 30,
-			deadInterval: 120,
 			failThreshold: 3,
 			minSuccess: 1,
 			timeout: 5,
@@ -2383,7 +2377,7 @@ const MOCK_SYSTEM_SLOT_CONTENT = {
 		),
 	},
 	deviceproxy: {
-		filename: '30-deviceproxy.json',
+		filename: '12-deviceproxy.json',
 		content: JSON.stringify(
 			{
 				inbounds: [{ tag: 'device-proxy-in', type: 'mixed', listen: '0.0.0.0', listen_port: 1099 }],
@@ -2393,7 +2387,7 @@ const MOCK_SYSTEM_SLOT_CONTENT = {
 		),
 	},
 	subscriptions: {
-		filename: '40-subscriptions.json',
+		filename: '13-subscriptions.json',
 		content: JSON.stringify(
 			{
 				outbounds: [
@@ -3506,7 +3500,9 @@ function mockFreeturnAllowlistStatus(al, serverId) {
 	return {
 		enabled,
 		clientsFile: al.clientsFile,
-		clients: enabled ? al.clients.map(withLink) : [],
+		// Как бэкенд (ftlink.Service.List): у выключенного списка файл по
+		// умолчанию читается и записи отдаются (F368).
+		clients: al.clients.map(withLink),
 	};
 }
 
@@ -4227,13 +4223,23 @@ const MOCK_KEENETIC_PROFILES = {
 		firmwareRelease: '5.1.0 (5.01.A.0-0)',
 		isOS5: true,
 	},
+	// ASC прошивки знает параметры 3.x — доступен сервер AWG 3.1 (#688).
+	'5.2': {
+		key: '5.2',
+		extended: true,
+		asc3: true,
+		keeneticOS: '5.2',
+		firmwareVersion: '5.2.0 (5.02.B.1.0-3)',
+		firmwareRelease: '5.2.0 (5.02.B.1.0-3)',
+		isOS5: true,
+	},
 };
 
 const DEFAULT_MOCK_KEENETIC_OS = '5.1';
 
 function resolveMockKeeneticProfileKey() {
 	const forced = process.env.MOCK_KEENETIC_OS?.trim();
-	if (forced === '5.0' || forced === '5.1') return forced;
+	if (forced in MOCK_KEENETIC_PROFILES) return forced;
 	return DEFAULT_MOCK_KEENETIC_OS;
 }
 
@@ -4260,6 +4266,7 @@ function applyMockKeeneticProfile(data) {
 	data.isOS5 = mockKeeneticProfile.isOS5;
 	data.supportsExtendedASC = mockKeeneticProfile.extended;
 	data.supportsHRanges = mockKeeneticProfile.extended;
+	data.supportsWireguardASC3 = !!mockKeeneticProfile.asc3;
 	if (data.routerDetails && typeof data.routerDetails === 'object') {
 		data.routerDetails.firmwareRelease = mockKeeneticProfile.firmwareRelease;
 	}
@@ -4516,12 +4523,6 @@ const DOWNLOAD_FAULT_ROUTES = [
 	{ method: 'POST', path: '/hydraroute/geo-files/update', style: 'envelope', code: 'GEO_UPDATE_ERROR' },
 	{ method: 'POST', path: '/hydraroute/geo-files/add', style: 'envelope', code: 'GEO_DOWNLOAD_ERROR' },
 	{ method: 'POST', path: '/dns-routes/refresh', style: 'envelope', code: 'DNS_ROUTE_REFRESH_ERROR' },
-	{ method: 'POST', path: '/amnezia/premium/key', style: 'envelope', code: 'AMNEZIA_PREMIUM_KEY_REJECTED' },
-	{ method: 'GET', path: '/amnezia/premium/catalog', style: 'envelope', code: 'AMNEZIA_PREMIUM_UNAVAILABLE' },
-	{ method: 'POST', path: '/amnezia/premium/config', style: 'envelope', code: 'AMNEZIA_PREMIUM_OUTCOME_UNKNOWN' },
-	{ method: 'POST', path: '/amnezia/premium/revoke', style: 'envelope', code: 'AMNEZIA_PREMIUM_UNAVAILABLE' },
-	{ method: 'GET', path: '/amnezia/premium/mirror', style: 'envelope', code: 'AMNEZIA_PREMIUM_MIRROR_UNAVAILABLE' },
-	{ method: 'GET', path: '/amnezia/premium/declared-country', style: 'envelope', code: 'AMNEZIA_PREMIUM_UNAVAILABLE' },
 	{ method: 'POST', path: '/singbox/install', style: 'envelope', code: 'SINGBOX_INSTALL_ERROR' },
 	{ method: 'POST', path: '/singbox/update', style: 'envelope', code: 'SINGBOX_UPDATE_ERROR' },
 	// NB: /download/outbounds is route *discovery*, not a download — never fault
@@ -5056,117 +5057,6 @@ function randomizeDelays() {
 	}
 }
 
-// Ключ подписки живёт ТОЛЬКО в памяти мока — ровно как на роутере, где он
-// лежит зашифрованным в настройках и наружу не выходит. Наружу уезжает лишь
-// состояние: сохранён / читается ли.
-const mockPremiumKey = { stored: false, usable: false, session: false };
-
-// Адрес зеркала Amnezia. ХРАНИМОЕ значение, а не действующее: пустое означает
-// «зеркало по умолчанию», ровно как в storage.EffectiveAmneziaMirrorURL. Без
-// состояния здесь запрос уходил наверх в Prism и получал статический пример из
-// swagger — поле в мастере рисовалось, но сценарий «сохранил → перезагрузил
-// страницу → адрес на месте» проверить было нечем (F278).
-const MOCK_AMNEZIA_MIRROR_DEFAULT = 'https://storage.googleapis.com/amnezia/cp?m-path=/ru';
-let mockPremiumMirrorStored = '';
-// Страна подключения: пусто = выбора не было, как на чистом роутере. Портал
-// требует её в каждой выдаче, поэтому мок обязан отказывать так же — иначе
-// dev-режим показывал бы путь, которого в бою нет.
-let mockPremiumDeclaredCountry = '';
-const MOCK_PREMIUM_DECLARED_COUNTRIES = ['ru', 'ag'];
-
-/** Действующий адрес: пустое и непригодное хранимое означают дефолт. */
-function mockPremiumMirrorEffective() {
-	const v = mockPremiumMirrorStored.trim();
-	return v === '' || validateMockMirrorURL(v) !== null ? MOCK_AMNEZIA_MIRROR_DEFAULT : v;
-}
-
-/**
- * Те же правила, что у storage.ValidateAmneziaMirrorURL: пусто годно (дефолт),
- * иначе абсолютный https-адрес без user:pass@ и без #фрагмента, не длиннее
- * 2048 байт. Мок повторяет ОТКАЗЫ, а не только успех: иначе ветку ошибки в
- * мастере без роутера не пройти.
- */
-function validateMockMirrorURL(raw) {
-	const v = String(raw ?? '').trim();
-	if (v === '') return null;
-	if (Buffer.byteLength(v, 'utf8') > 2048) return 'адрес зеркала Amnezia длиннее 2048 байт';
-	let u;
-	try {
-		u = new URL(v);
-	} catch {
-		return 'адрес зеркала Amnezia непригоден';
-	}
-	if (u.protocol !== 'https:' || !u.host) return 'адрес зеркала Amnezia должен быть абсолютным https-адресом';
-	if (u.username || u.password) return 'адрес зеркала Amnezia не должен содержать user:pass@';
-	if (v.includes('#')) return 'адрес зеркала Amnezia не должен содержать #фрагмент';
-	return null;
-}
-
-// Страны мока покрывают три метки строки: свежую, устаревшую и vless-only
-// (последнюю мастер обязан скрыть — забрать её нечем).
-const MOCK_AMNEZIA_PREMIUM_COUNTRIES = [
-	{ server_country_code: 'nl', server_country_name: 'Netherlands (mock)', available_protocols: ['awg', 'vless'] },
-	{ server_country_code: 'ch', server_country_name: 'Switzerland (mock) [P2P]', available_protocols: ['awg'] },
-	{ server_country_code: 'ee', server_country_name: 'Estonia (mock stale)', available_protocols: ['awg'] },
-	{ server_country_code: 'jp', server_country_name: 'Japan (mock vless-only)', available_protocols: ['vless'] },
-];
-
-const MOCK_AMNEZIA_PREMIUM_ISSUED = [
-	{
-		server_country_code: 'nl',
-		worker_last_updated: '2026-02-03T13:49:07.090912Z',
-		last_downloaded: '2026-08-30T11:02:40.000000Z',
-		source_type: 'country_config',
-	},
-	{
-		// Портал обновил конфигурацию позже нашей выдачи → метка «конфиг устарел».
-		server_country_code: 'ee',
-		worker_last_updated: '2026-04-30T17:34:17.821424Z',
-		last_downloaded: '2026-04-23T16:07:43.367914Z',
-		source_type: 'country_config',
-	},
-	{
-		// gateway_account — активное устройство: в счётчик подтверждения идёт оно.
-		server_country_code: 'nl',
-		worker_last_updated: '2026-02-03T13:49:07.090912Z',
-		last_downloaded: '2026-08-30T11:02:40.000000Z',
-		source_type: 'gateway_account',
-	},
-];
-
-/** Срок подписки — через 45 суток от «сейчас», чтобы карточка была зелёной. */
-function mockPremiumEndDate() {
-	return new Date(Date.now() + 45 * 86400000).toISOString();
-}
-
-function sendPremiumKeyState(res, saveError = '') {
-	sendData(res, { stored: mockPremiumKey.stored, usable: mockPremiumKey.usable, saveError });
-}
-
-function sendPremiumNoKey(res) {
-	send(res, 400, {
-		error: true,
-		message: 'Ключ подписки Amnezia не задан',
-		code: 'AMNEZIA_PREMIUM_NO_KEY',
-	});
-}
-
-function buildMockAmneziaPremiumConf(countryCode) {
-	const cc = String(countryCode || 'xx').toLowerCase();
-	return `# Amnezia Premium mock — country ${cc}
-[Interface]
-PrivateKey = YNaK+9G1J6K1G3K1G3K1G3K1G3K1G3K1G3K1G2E=
-Address = 10.77.0.2/32
-DNS = 1.1.1.1
-
-[Peer]
-PublicKey = RT7K+9G1J6K1G3K1G3K1G3K1G3K1G3K1G3K1G2E=
-Endpoint = mock-premium-${cc}.example:51820
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
-`;
-}
-
 const server = http.createServer(async (req, res) => {
 	if (MOCK_DELAY_MS > 0) await new Promise((r) => setTimeout(r, MOCK_DELAY_MS));
 	const url = new URL(req.url, `http://${req.headers.host}`);
@@ -5496,242 +5386,6 @@ const server = http.createServer(async (req, res) => {
 			} catch (e) {
 				send(res, 500, { success: false, error: String(e) });
 			}
-		});
-		return;
-	}
-
-	// Ключ подписки: состояние (GET), вход с сохранением (POST), забыть (DELETE).
-	if (path === '/amnezia/premium/key') {
-		if (req.method === 'GET') {
-			sendPremiumKeyState(res);
-			return;
-		}
-		if (req.method === 'DELETE') {
-			mockPremiumKey.stored = false;
-			mockPremiumKey.usable = false;
-			// «Забыть» забывает и сессионный ключ — как DeleteKey на бэкенде:
-			// иначе после удаления каталог продолжал бы отвечать.
-			mockPremiumKey.session = false;
-			console.log('[mock-proxy] amnezia/premium/key: ключ забыт');
-			sendPremiumKeyState(res);
-			return;
-		}
-		if (req.method === 'POST') {
-			readRequestText(req).then((raw) => {
-				let payload;
-				try {
-					payload = JSON.parse(raw || '{}');
-				} catch {
-					send(res, 400, { error: true, message: 'invalid JSON', code: 'INVALID_JSON' });
-					return;
-				}
-				const key = String(payload.key ?? '').trim();
-				if (!key) {
-					sendPremiumNoKey(res);
-					return;
-				}
-				// Отказ по ключу — отдельный код: мастер на нём зовёт ввести другой.
-				if (key.includes('reject')) {
-					send(res, 422, {
-						error: true,
-						message: 'Портал Amnezia отклонил ключ подписки (mock)',
-						code: 'AMNEZIA_PREMIUM_KEY_REJECTED',
-					});
-					return;
-				}
-				// store — судьба секрета, и умолчание у него закрытое, как на бэкенде.
-				mockPremiumKey.stored = payload.store === true;
-				mockPremiumKey.session = true;
-				mockPremiumKey.usable = mockPremiumKey.stored;
-				console.log(`[mock-proxy] amnezia/premium/key: вход ок, store=${mockPremiumKey.stored}`);
-				sendPremiumKeyState(res);
-			});
-			return;
-		}
-		send(res, 405, { error: true, message: 'Метод не поддерживается', code: 'METHOD_NOT_ALLOWED' });
-		return;
-	}
-
-	if (req.method === 'GET' && path === '/amnezia/premium/catalog') {
-		// Ключ доступен и без сохранения: при store=false он живёт в памяти демона
-		// (sessionKey на бэкенде), и каталог обязан работать — иначе мок ломает
-		// главный путь мастера «ввёл ключ, не запоминая → каталог».
-		if (!mockPremiumKey.stored && !mockPremiumKey.session) {
-			sendPremiumNoKey(res);
-			return;
-		}
-		sendData(res, {
-			planName: 'Amnezia Premium (mock)',
-			subscriptionEndDate: mockPremiumEndDate(),
-			activeDeviceCount: MOCK_AMNEZIA_PREMIUM_ISSUED.filter(
-				(c) => c.source_type === 'gateway_account',
-			).length,
-			maxDeviceCount: 7,
-			countries: MOCK_AMNEZIA_PREMIUM_COUNTRIES.map((c) => ({
-				code: c.server_country_code,
-				name: c.server_country_name,
-				protocols: c.available_protocols,
-			})),
-			issuedConfigs: MOCK_AMNEZIA_PREMIUM_ISSUED.map((c) => ({
-				countryCode: c.server_country_code,
-				lastIssuedAt: c.last_downloaded,
-				portalUpdatedAt: c.worker_last_updated,
-				sourceType: c.source_type,
-			})),
-		});
-		return;
-	}
-
-	if (req.method === 'POST' && path === '/amnezia/premium/config') {
-		readRequestText(req).then((raw) => {
-			let payload;
-			try {
-				payload = JSON.parse(raw || '{}');
-			} catch {
-				send(res, 400, { error: true, message: 'invalid JSON', code: 'INVALID_JSON' });
-				return;
-			}
-			// Как и у каталога: ключ без сохранения живёт в памяти демона, и
-			// выдача обязана работать. Проверка только по stored ломала бы
-			// главный путь «ввёл ключ, не запоминая → выдал конфигурацию».
-			if (!mockPremiumKey.stored && !mockPremiumKey.session) {
-				sendPremiumNoKey(res);
-				return;
-			}
-			const countryCode = String(payload.countryCode ?? '').trim().toLowerCase();
-			if (!countryCode) {
-				send(res, 400, {
-					error: true,
-					message: 'Страна не выбрана',
-					code: 'AMNEZIA_PREMIUM_NO_COUNTRY',
-				});
-				return;
-			}
-			if (!mockPremiumDeclaredCountry) {
-				send(res, 400, {
-					error: true,
-					message: 'Не выбрана страна, из которой вы подключаетесь',
-					code: 'AMNEZIA_PREMIUM_NO_DECLARED_COUNTRY',
-				});
-				return;
-			}
-			// Выданное запоминается: без этого метка «конфиг уже выдавался» и
-			// кнопка отзыва в dev-режиме не проверяются — список выданных
-			// оставался бы фикстурой, не реагирующей на действия.
-			const now = new Date().toISOString();
-			MOCK_AMNEZIA_PREMIUM_ISSUED.push({
-				server_country_code: countryCode,
-				worker_last_updated: now,
-				last_downloaded: now,
-				source_type: 'country_config',
-			});
-			console.log(`[mock-proxy] amnezia/premium/config ${countryCode}`);
-			sendData(res, { countryCode, config: buildMockAmneziaPremiumConf(countryCode) });
-		});
-		return;
-	}
-
-	if (path === '/amnezia/premium/declared-country') {
-		if (req.method === 'GET') {
-			sendData(res, { declaredCountryCode: mockPremiumDeclaredCountry });
-			return;
-		}
-		if (req.method !== 'POST') {
-			send(res, 405, { error: true, message: 'method not allowed', code: 'METHOD_NOT_ALLOWED' });
-			return;
-		}
-		readRequestText(req).then((raw) => {
-			let payload;
-			try {
-				payload = JSON.parse(raw || '{}');
-			} catch {
-				send(res, 400, { error: true, message: 'invalid JSON', code: 'INVALID_JSON' });
-				return;
-			}
-			const code = String(payload.declaredCountryCode ?? '').trim().toLowerCase();
-			if (!MOCK_PREMIUM_DECLARED_COUNTRIES.includes(code)) {
-				send(res, 400, {
-					error: true,
-					message: 'Страна подключения должна быть "ru" (Россия) или "ag" (другие страны и регионы)',
-					code: 'AMNEZIA_PREMIUM_NO_DECLARED_COUNTRY',
-				});
-				return;
-			}
-			mockPremiumDeclaredCountry = code;
-			console.log(`[mock-proxy] amnezia/premium/declared-country: ${code}`);
-			sendData(res, { declaredCountryCode: code });
-		});
-		return;
-	}
-
-	if (path === '/amnezia/premium/mirror') {
-		if (req.method === 'GET') {
-			sendData(res, { mirrorUrl: mockPremiumMirrorEffective() });
-			return;
-		}
-		if (req.method !== 'POST') {
-			send(res, 405, { error: true, message: 'method not allowed', code: 'METHOD_NOT_ALLOWED' });
-			return;
-		}
-		readRequestText(req).then((raw) => {
-			let payload;
-			try {
-				payload = JSON.parse(raw || '{}');
-			} catch {
-				send(res, 400, { error: true, message: 'invalid JSON', code: 'INVALID_JSON' });
-				return;
-			}
-			// Нормализация ДО проверки, как на бэкенде: присланный дефолт
-			// схлопывается в пустое, и «вернуть по умолчанию» не оседает в
-			// хранимом значении отдельной строкой.
-			let sent = String(payload.mirrorUrl ?? '').trim();
-			if (sent === MOCK_AMNEZIA_MIRROR_DEFAULT) sent = '';
-			const bad = validateMockMirrorURL(sent);
-			if (bad !== null) {
-				send(res, 400, { error: true, message: bad, code: 'INVALID_AMNEZIA_MIRROR_URL' });
-				return;
-			}
-			mockPremiumMirrorStored = sent;
-			console.log(`[mock-proxy] amnezia/premium/mirror сохранён: ${sent === '' ? '(дефолт)' : sent}`);
-			// Отдаётся ДЕЙСТВУЮЩИЙ адрес, а не присланный: пустое присланное
-			// означает дефолт, и ответ обязан его назвать.
-			sendData(res, { mirrorUrl: mockPremiumMirrorEffective() });
-		});
-		return;
-	}
-
-	if (req.method === 'POST' && path === '/amnezia/premium/revoke') {
-		readRequestText(req).then((raw) => {
-			let payload;
-			try {
-				payload = JSON.parse(raw || '{}');
-			} catch {
-				send(res, 400, { error: true, message: 'invalid JSON', code: 'INVALID_JSON' });
-				return;
-			}
-			if (!mockPremiumKey.stored && !mockPremiumKey.session) {
-				sendPremiumNoKey(res);
-				return;
-			}
-			const countryCode = String(payload.countryCode ?? '').trim().toLowerCase();
-			if (!countryCode) {
-				send(res, 400, {
-					error: true,
-					message: 'Страна не выбрана',
-					code: 'AMNEZIA_PREMIUM_NO_COUNTRY',
-				});
-				return;
-			}
-			// Снимается ТОЛЬКО выданная нами конфигурация страны: устройство
-			// приложения (gateway_account) живёт за другой ручкой портала, и
-			// мок обязан вести себя так же, иначе в dev-режиме отзыв выглядел
-			// бы всесильным.
-			const idx = MOCK_AMNEZIA_PREMIUM_ISSUED.findIndex(
-				(c) => c.server_country_code === countryCode && c.source_type === 'country_config',
-			);
-			if (idx >= 0) MOCK_AMNEZIA_PREMIUM_ISSUED.splice(idx, 1);
-			console.log(`[mock-proxy] amnezia/premium/revoke ${countryCode} (найдено: ${idx >= 0})`);
-			sendData(res, { countryCode });
 		});
 		return;
 	}
@@ -6279,8 +5933,8 @@ const server = http.createServer(async (req, res) => {
 					{ slot: 'dns', filename: '05-dns.json', ownership: 'system', enabled: true, hasDraft: false, size: 612, mtime: '2026-07-05T21:14:02Z' },
 					{ slot: 'router', filename: '10-router.json', ownership: 'system', enabled: true, hasDraft: true, size: 3961, mtime: '2026-07-06T08:03:41Z' },
 					{ slot: 'tunnels', filename: '20-tunnels.json', ownership: 'system', enabled: true, hasDraft: false, size: 2210, mtime: '2026-07-05T21:14:02Z' },
-					{ slot: 'deviceproxy', filename: '30-deviceproxy.json', ownership: 'system', enabled: true, hasDraft: false, size: 344, mtime: '2026-07-05T21:14:02Z' },
-					{ slot: 'subscriptions', filename: '40-subscriptions.json', ownership: 'system', enabled: false, hasDraft: false, size: 5133, mtime: '2026-07-04T11:32:19Z' },
+					{ slot: 'deviceproxy', filename: '12-deviceproxy.json', ownership: 'system', enabled: true, hasDraft: false, size: 344, mtime: '2026-07-05T21:14:02Z' },
+					{ slot: 'subscriptions', filename: '13-subscriptions.json', ownership: 'system', enabled: false, hasDraft: false, size: 5133, mtime: '2026-07-04T11:32:19Z' },
 					{
 						slot: 'user',
 						filename: '90-user.json',
@@ -7717,6 +7371,17 @@ const server = http.createServer(async (req, res) => {
 									message:
 										'Интерфейс OpkgTun0 не разрешён ни в одной политике доступа — трафик устройств в туннель не заходит',
 								},
+								// MOCK_POLICY_TUN_ROUTE_LOST=1 — красное замечание бэкенда
+								// (service_lifecycle.go, issuePolicyTunRouteLost): без него вид
+								// error в секции замечаний в dev не воспроизводится (F388).
+								...(POLICY_TUN_ROUTE_LOST
+									? [{
+											severity: 'error',
+											kind: 'policy-tun-route-lost',
+											message:
+												'в таблице 42 нет дефолта через OpkgTun0 — трафик клиентов идёт мимо sing-box; переустанавливаю',
+										}]
+									: []),
 							],
 						}
 					: {}),
@@ -9571,7 +9236,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
 	console.log(`mock-proxy on http://127.0.0.1:${PORT} → ${UPSTREAM} (usageLevel=${usageLevel})`);
 	console.log('[mock-proxy] controls: GET /__mock/capabilities, GET /__mock/tunnels, POST /__mock/reset-runtime, POST /__mock/singbox-install-fail, POST /__mock/singbox-running, POST /__mock/hydraroute-installed, POST /__mock/download-faults, POST /__mock/keenetic-os');
-	console.log(`[mock-proxy] keenetic-os: ${mockKeeneticProfile.key} (supportsExtendedASC=${mockKeeneticProfile.extended}; default: 5.1, force: MOCK_KEENETIC_OS=5.0|5.1, switch: POST /__mock/keenetic-os)`);
+	console.log(`[mock-proxy] keenetic-os: ${mockKeeneticProfile.key} (supportsExtendedASC=${mockKeeneticProfile.extended}; default: 5.1, force: MOCK_KEENETIC_OS=5.0|5.1|5.2, switch: POST /__mock/keenetic-os)`);
 	console.log(`[mock-proxy] download faults: enabled=${downloadFaultsEnabled} p=${downloadFaultProbability} (disable: MOCK_DOWNLOAD_FAULTS=0)`);
 });
 

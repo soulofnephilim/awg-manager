@@ -2,12 +2,15 @@ package service
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/ops"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 )
 
@@ -58,12 +61,16 @@ type MockOperator struct {
 		ID  string
 		MTU int
 	}
-	UpdateDescriptionCalls []struct{ ID, Desc string }
-	SyncDNSCalls           [][]string
-	SyncAddressCalls       []struct {
+	UpdateDescriptionCalls []descCall
+	// UpdateDescriptionErr — ответ UpdateDescription по prevName (нет ключа — nil).
+	UpdateDescriptionErr map[string]error
+	SyncDNSCalls         [][]string
+	SyncAddressCalls     []struct {
 		ID, Addr, IPv6 string
 		Prefix         int
 	}
+
+	CaptureDescriptionCalls []descCall
 }
 
 func (m *MockOperator) ColdStart(ctx context.Context, cfg tunnel.Config) error {
@@ -71,7 +78,7 @@ func (m *MockOperator) ColdStart(ctx context.Context, cfg tunnel.Config) error {
 	return m.startError
 }
 
-func (m *MockOperator) Stop(ctx context.Context, tunnelID string) error {
+func (m *MockOperator) Stop(ctx context.Context, tunnelID, _ string) error {
 	m.StopCalls = append(m.StopCalls, tunnelID)
 	return m.stopError
 }
@@ -137,8 +144,17 @@ func (m *MockOperator) RemoveDefaultRoute(ctx context.Context, tunnelID string) 
 	return nil
 }
 
-func (m *MockOperator) UpdateDescription(ctx context.Context, tunnelID, description string) error {
-	m.UpdateDescriptionCalls = append(m.UpdateDescriptionCalls, struct{ ID, Desc string }{tunnelID, description})
+// descCall — вызов записи описания: Prev — имя до переименования (по нему
+// оператор проверяет владение записью), у захвата пусто.
+type descCall struct{ ID, Prev, Desc string }
+
+func (m *MockOperator) UpdateDescription(ctx context.Context, tunnelID, prevName, description string) error {
+	m.UpdateDescriptionCalls = append(m.UpdateDescriptionCalls, descCall{tunnelID, prevName, description})
+	return m.UpdateDescriptionErr[prevName]
+}
+
+func (m *MockOperator) CaptureDescription(ctx context.Context, tunnelID, description string) error {
+	m.CaptureDescriptionCalls = append(m.CaptureDescriptionCalls, descCall{ID: tunnelID, Desc: description})
 	return nil
 }
 
@@ -604,11 +620,13 @@ func TestNew_NativeWGStateWiring(t *testing.T) {
 
 // Правка обфусцированного туннеля обязана доехать до релея и без рукопожатия:
 // без ASC такой туннель висит в Starting, с ASC уезжает в Broken, упавший
-// релей — тоже Broken. Обычный туннель по-прежнему синхронизируется только
-// запущенным (Q21).
+// релей — тоже Broken (Q21). NativeWG без рукопожатия (Starting/Broken —
+// интерфейс NDMS поднят) синхронизируется целиком (F658); kernel — только
+// запущенным.
 func TestShouldSyncRuntime(t *testing.T) {
 	obf := &storage.AWGTunnel{Obfuscator: &storage.Obfuscator{Flavor: storage.ObfuscatorFlavorPhobos}}
-	plain := &storage.AWGTunnel{}
+	plain := &storage.AWGTunnel{Backend: "kernel"}
+	nwg := &storage.AWGTunnel{Backend: "nativewg"}
 	cases := []struct {
 		name   string
 		stored *storage.AWGTunnel
@@ -619,6 +637,11 @@ func TestShouldSyncRuntime(t *testing.T) {
 		{"обычный Starting", plain, tunnel.StateStarting, false},
 		{"обычный Broken", plain, tunnel.StateBroken, false},
 		{"обычный Stopped", plain, tunnel.StateStopped, false},
+		{"NativeWG Running", nwg, tunnel.StateRunning, true},
+		{"NativeWG Starting", nwg, tunnel.StateStarting, true},
+		{"NativeWG Broken", nwg, tunnel.StateBroken, true},
+		{"NativeWG Unknown", nwg, tunnel.StateUnknown, false},
+		{"NativeWG Stopped", nwg, tunnel.StateStopped, false},
 		{"обфускатор Running", obf, tunnel.StateRunning, true},
 		{"обфускатор Starting", obf, tunnel.StateStarting, true},
 		{"обфускатор Broken", obf, tunnel.StateBroken, true},
@@ -631,5 +654,72 @@ func TestShouldSyncRuntime(t *testing.T) {
 				t.Errorf("shouldSyncRuntime(%v) = %v, want %v", c.state, got, c.want)
 			}
 		})
+	}
+}
+
+// Смена пути у обычного NativeWG без рукопожатия отклоняется: он мог быть
+// подвешен на WAN-down, и Stop+Start обошёл бы приостановку (F658).
+// Остановленный идёт прежней веткой, запущенный и обфусцированный — как раньше.
+func TestRefusePathSwitch(t *testing.T) {
+	plain := &storage.AWGTunnel{Backend: "nativewg"}
+	obf := &storage.AWGTunnel{Backend: "nativewg", Obfuscator: &storage.Obfuscator{Flavor: storage.ObfuscatorFlavorPhobos}}
+	for _, c := range []struct {
+		name    string
+		stored  *storage.AWGTunnel
+		state   tunnel.State
+		switch_ bool
+		want    bool
+	}{
+		{"обычный Broken, смена пути", plain, tunnel.StateBroken, true, true},
+		{"обычный Starting, смена пути", plain, tunnel.StateStarting, true, true},
+		{"обычный Running, смена пути", plain, tunnel.StateRunning, true, false},
+		{"обычный Stopped, смена пути", plain, tunnel.StateStopped, true, false},
+		{"обычный Broken, путь тот же", plain, tunnel.StateBroken, false, false},
+		{"обфусцированный Broken, смена пути", obf, tunnel.StateBroken, true, false},
+	} {
+		if got := refusePathSwitch(c.stored, tunnel.StateInfo{State: c.state}, c.switch_); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// F535: прошлое переименование не дописало описание — в записи NDMS ещё более
+// раннее имя (stored.PrevName). Переименование повторяется с ним, иначе
+// цепочка переименований навсегда оставила бы запись «чужой».
+func TestSyncDescription_RetriesWithPrevName(t *testing.T) {
+	foreign := &ops.ForeignRecordError{NDMSName: "OpkgTun10", Description: "A", Want: "B"}
+	for _, tc := range []struct {
+		name      string
+		prevStore string
+		want      []string
+	}{
+		{"повтор с прежним именем", "A", []string{"B", "A"}},
+		{"прежнего имени нет — без повтора", "", []string{"B"}},
+		{"прежнее имя то же — без повтора", "B", []string{"B"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			op := &MockOperator{UpdateDescriptionErr: map[string]error{"B": foreign}}
+			s := &ServiceImpl{legacyOperator: op, state: NewMockStateManager()}
+			stored := &storage.AWGTunnel{ID: "awg10", Name: "C", PrevName: tc.prevStore}
+			s.syncDescription(context.Background(), "update", stored, "B", "C")
+			var got []string
+			for _, c := range op.UpdateDescriptionCalls {
+				got = append(got, c.Prev)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("prevName вызовов = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// F535: повтор — только на «запись чужая»; транспортный отказ не повод
+// переименовывать по прежнему имени.
+func TestSyncDescription_NoRetryOnOtherErrors(t *testing.T) {
+	op := &MockOperator{UpdateDescriptionErr: map[string]error{"B": errors.New("rci down")}}
+	s := &ServiceImpl{legacyOperator: op, state: NewMockStateManager()}
+	s.syncDescription(context.Background(), "update", &storage.AWGTunnel{ID: "awg10", Name: "C", PrevName: "A"}, "B", "C")
+	if len(op.UpdateDescriptionCalls) != 1 {
+		t.Fatalf("вызовов %d, want 1", len(op.UpdateDescriptionCalls))
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/firewall"
 )
 
 // applyDataDir перенацеливает пакеты, чьи каталоги производны от каталога
@@ -21,8 +22,8 @@ import (
 // перенацеливаться. Осознанно не тронуты: бинари Entware (/opt/bin); белый
 // список файлового редактора (`sys/files/sandbox.go`) — там боевой каталог
 // зашит константой, и с нестандартным -data-dir корень «AWG Manager» в UI
-// покажет чужой каталог; дерево sing-box (бинарь, config.d, cache.db) — его
-// пути константны и требуют правки сигнатур.
+// покажет чужой каталог. Дерево sing-box (бинарь, config.d, cache.db),
+// список и хук firewall туннелей и каталог модулей nwg следуют за флагом (F305).
 //
 // Под флагом работает и `--cleanup` (он удаляет туннели и конфиги релея из
 // того же каталога). `--service` перенацеленных путей не читает вовсе.
@@ -35,10 +36,12 @@ func applyDataDir(dataDir string) {
 	tunnel.ConfDir = dataDir
 	obfuscator.ConfDir = filepath.Join(dataDir, "obfuscator")
 	kmod.ModulesDir = filepath.Join(dataDir, "modules")
+	obfuscator.ArmPath = filepath.Join(kmod.ModulesDir, "awgm_relay.arming")
 	router.SetDataDir(dataDir)
 	ndmstransport.SetTokenFile(filepath.Join(dataDir, storage.RCITokenFile), ndmsinfo.SupportsRCIToken)
 
 	if dataDir == defaultDataDir {
+		singboxDataDir = ""
 		return
 	}
 	// Дальше — только для НЕбоевого каталога. Хук ndm лежит вне каталога
@@ -46,4 +49,10 @@ func applyDataDir(dataDir string) {
 	// месте, песочница переписала бы боевой скрипт ссылками на /tmp, и после
 	// её ухода ndm восстанавливал бы правила по мёртвым путям.
 	router.SetNetfilterHookPath(filepath.Join(dataDir, "ndm-netfilter.d", "50-awgm-tproxy.sh"))
+	firewall.SetSandboxPaths(dataDir)
+	singboxDataDir = filepath.Join(dataDir, "singbox")
 }
+
+// singboxDataDir — каталог sing-box для небоевого -data-dir (F487); пусто =
+// умолчание оператора рядом с боевым бинарём.
+var singboxDataDir string

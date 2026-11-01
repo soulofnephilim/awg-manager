@@ -2,13 +2,17 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
@@ -40,7 +44,12 @@ type ruleSetMaterializer struct {
 }
 
 var inlineRuleSetCompileExec = func(binary string, args []string) (stdout, stderr string, err error) {
-	cmd := exec.Command(binary, args...)
+	// Без таймаута зависший sing-box держал вызывающего вечно (F583, аудит
+	// короткоживущих вызовов); потолок и WaitDelay — как у decompile.
+	ctx, cancel := context.WithTimeout(context.Background(), ruleSetDecompileTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.WaitDelay = 5 * time.Second
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
 	cmd.Stderr = &se
@@ -119,8 +128,18 @@ func (m ruleSetMaterializer) materializeConfig(slot orchestrator.Slot, cfg *Rout
 	}
 	working := m.expandManagedToInline(cfg)
 	out := *working
+	// Слот — это конфиг sing-box: detour, которого sing-box видеть не должен
+	// (direct, любой у dns-direct), снимается при записи — на копии, out
+	// неглубокий (F333).
+	out.DNS.Servers = slices.Clone(working.DNS.Servers)
+	SanitizeDNSConfig(&out)
 	out.Route = working.Route
 	out.Route.RuleSet = make([]RuleSet, 0, len(working.Route.RuleSet))
+	// Правила — копией (с вложенными logical-подправилами): rewriteRuleSetRefs
+	// пишет в поля правил, и на общем слайсе X-srs-теги оставались бы в
+	// конфиге вызывающего (F334 п.4).
+	out.Route.Rules = cloneRules(working.Route.Rules)
+	out.DNS.Rules = slices.Clone(working.DNS.Rules)
 
 	var inlineSets []RuleSet
 	for _, rs := range working.Route.RuleSet {
@@ -161,8 +180,33 @@ func (m ruleSetMaterializer) materializeConfig(slot orchestrator.Slot, cfg *Rout
 		out.Route.RuleSet = append(out.Route.RuleSet, local)
 	}
 	applyHTTPClients(&out)
+	applyRuleSetFetch(slot, &out)
 	applyDNSRuleSetMatchSource(&out)
+	out.Route.Rules = append([]Rule{mdnsDropRule()}, withoutMDNSDrop(out.Route.Rules)...)
 	return &out, nil
+}
+
+// mdnsDropRule отбивает мультикаст до hijack-dns (#1037, F636). Сниффер
+// sing-box опознаёт mDNS-запрос как DNS на любом порту; `local.` уходит на
+// сервер type local, тот шлёт мультикаст во все multicast-интерфейсы, включая
+// t2s*, а оттуда пакет через SOCKS возвращается в sing-box — петля без
+// ограничителя. Матч по адресу, не по порту: unicast на :5353 не задевается,
+// а мультикасту через прокси делать нечего.
+// Правило живёт только в конфиге на диске: restoreConfig его снимает, так что
+// UI и индексы правил его не видят. Функция, а не переменная: срез IPCIDR
+// у каждого вызова свой, правка на месте не испортит шаблон.
+func mdnsDropRule() Rule {
+	return Rule{IPCIDR: []string{"224.0.0.0/4", "ff00::/8"}, Action: "reject"}
+}
+
+func withoutMDNSDrop(rules []Rule) []Rule {
+	out := make([]Rule, 0, len(rules))
+	for _, r := range rules {
+		if !reflect.DeepEqual(r, mdnsDropRule()) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // applyDNSRuleSetMatchSource помечает каждое DNS-правило со ссылкой на
@@ -188,6 +232,18 @@ func (m ruleSetMaterializer) materializeConfig(slot orchestrator.Slot, cfg *Rout
 //
 // Правила с match_response не трогаем: там ip_cidr набора матчится по
 // ответу (geoip по ответу — рабочий сценарий 1.14+), и флаг его сломал бы.
+// cloneRules — копия правил с вложенными подправилами logical.
+func cloneRules(rules []Rule) []Rule {
+	if rules == nil {
+		return nil
+	}
+	out := slices.Clone(rules)
+	for i := range out {
+		out[i].Rules = cloneRules(out[i].Rules)
+	}
+	return out
+}
+
 func applyDNSRuleSetMatchSource(cfg *RouterConfig) {
 	if len(cfg.DNS.Rules) == 0 {
 		return
@@ -379,6 +435,8 @@ func (m ruleSetMaterializer) restoreConfig(cfg *RouterConfig) *RouterConfig {
 	m.rewritePersistedSRSRefsToInline(cfg, &out)
 	m.rewriteSRSSuffixRuleSetRefs(&out)
 	restoreHTTPClients(&out)
+	stripRuleSetFetch(&out)
+	out.Route.Rules = withoutMDNSDrop(out.Route.Rules)
 	return &out
 }
 
@@ -673,11 +731,11 @@ func (m ruleSetMaterializer) restoreRuleSet(rs RuleSet) RuleSet {
 	}
 	raw, err := os.ReadFile(strings.TrimSuffix(rs.Path, ".srs") + ".json")
 	if err != nil {
-		return RuleSet{Tag: inlineTag, Type: "inline", MaterializedSRS: true}
+		return RuleSet{Tag: inlineTag, Type: "inline", MaterializedSRS: true, restoreFailed: true}
 	}
 	var source inlineRuleSetSource
 	if err := json.Unmarshal(raw, &source); err != nil {
-		return RuleSet{Tag: inlineTag, Type: "inline", MaterializedSRS: true}
+		return RuleSet{Tag: inlineTag, Type: "inline", MaterializedSRS: true, restoreFailed: true}
 	}
 	if len(source.Rules) == 0 {
 		return RuleSet{Tag: inlineTag, Type: "inline", MaterializedSRS: true}

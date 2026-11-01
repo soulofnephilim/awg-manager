@@ -13,6 +13,7 @@ export type ResourceKey =
 	| 'servers'                     // ResourceServers
 	| 'singbox.status'              // ResourceSingboxStatus
 	| 'singbox.tunnels'             // ResourceSingboxTunnels
+	| 'singbox.subscriptions'       // ResourceSingboxSubscriptions — любая запись подписки
 	| 'singbox.proxies'             // ResourceSingboxProxies (no backend publisher yet — invalidate via store.refetch)
 	| 'sysInfo'                     // ResourceSysInfo
 	| 'pingcheck'                   // ResourcePingcheck
@@ -26,6 +27,7 @@ export type ResourceKey =
 	| 'routing.clientRoutes'        // ResourceRoutingClientRoutes
 	| 'routing.tunnels'             // ResourceRoutingTunnels
 	| 'routing.hydrarouteStatus'    // ResourceRoutingHydrarouteStatus
+	| 'routing.zapretStatus'        // ResourceRoutingZapretStatus
 	| 'deviceproxy.config'           // ResourceDeviceProxyConfig   — also clears missing-target banner
 	| 'deviceproxy.outbounds'       // публикатора НЕТ: ключ живёт ради invalidateAll() при выходе из отказа
 	| 'deviceproxy.runtime'         // ResourceDeviceProxyRuntime
@@ -33,21 +35,7 @@ export type ResourceKey =
 	| 'singbox.router.rules'        // emitted by emitRulesEvent — triggers loadRulesSnapshot()
 	| 'proxyrt.instances'             // ResourceProxyInstances — состав инстансов прокси
 	| 'mcpKeys'                     // ResourceMcpKeys — ключи MCP-сервера
-	// Три ключа мастера Amnezia Premium: публикаторы есть, ПОДПИСЧИКОВ НЕТ
-	// СОЗНАТЕЛЬНО. Мастер — модальное окно, оно грузит и ключ, и зеркало, и
-	// каталог при открытии и перечитывает каталог само после выдачи и отзыва,
-	// так что в своей вкладке событие ничего не добавляет. Подписать каталог
-	// на PollingStore нельзя дёшево: контракт стора требует интервала опроса и
-	// перечитывает данные на возврате фокуса вкладки, а КАЖДОЕ чтение каталога
-	// — поход к порталу Amnezia (резолв зеркала → логин → account-info), то
-	// есть фоновый опрос чужого сервиса с лимитами. Цена отказа — вторая
-	// открытая вкладка мастера показывает прежний счётчик устройств до
-	// перезагрузки. Если понадобится больше, чинить надо адресной подпиской
-	// открытого мастера, а не фоновым стором.
-	| 'amneziaPremium.key'          // ResourceAmneziaPremiumKey — состояние ключа подписки Amnezia Premium
-	| 'amneziaPremium.catalog'     // ResourceAmneziaPremiumCatalog — данные подписки у портала (счётчик устройств, выданные конфигурации)
-	| 'amneziaPremium.mirror'      // ResourceAmneziaPremiumMirror — адрес зеркала Amnezia
-	| 'amneziaPremium.declaredCountry' // ResourceAmneziaPremiumDeclaredCountry — страна, из которой подключается пользователь
+	| 'updateSnapshots'             // ResourceUpdateSnapshots — снимки настроек перед обновлением
 	| 'bypass-set';                 // публикуется после наполнения AWGM-BYPASS (storeBypassSetOutcome)
 
 /**

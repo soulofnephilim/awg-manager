@@ -151,6 +151,8 @@ type Operator struct {
 	cacheFileLocation func() string
 	configPath        string
 	pidPath           string
+	// bindingSlotsMigrated — см. BindingSlotsMigrated.
+	bindingSlotsMigrated bool
 
 	proc      *Process
 	validator *Validator
@@ -188,7 +190,7 @@ type Operator struct {
 	// orch is the config.d orchestrator. When non-nil, ApplyConfig
 	// writes 10-tunnels.json through the orchestrator's slot writer
 	// (which handles validate + debounced reload). Wired post-construction
-	// via SetOrch — orchestrator construction needs Operator.Process()
+	// via SetOrch — orchestrator construction needs Operator.OrchestratorProcess()
 	// so we can't pass it through OperatorDeps without a cycle.
 	orch *orchestrator.Orchestrator
 
@@ -233,12 +235,26 @@ type Operator struct {
 	// nil means "treat as enabled" for back-compat (pre-dates this field).
 	ndmsProxyEnabledFn func() bool
 
-	// needsOrphanCleanup сигналит Reconcile запустить one-shot sweep
-	// орфанных ProxyN. CAS-флаг — после consume сбрасывается, следующие
-	// тики не делают повторных NDMS-вызовов. Поднимается из MigrateOff
-	// (best-effort fallback) и из main.go при старте, если settings уже
-	// в disabled-режиме (предыдущая сессия не успела дочистить).
+	// needsOrphanCleanup сигналит тику сторожа пометить наши ProxyN к сносу
+	// (orphanCleanupIfFlagged). Снимается после прочитанного списка, отказ
+	// его возвращает. Поднимается из MigrateOff (best-effort fallback) и из
+	// main.go при старте, если settings уже в disabled-режиме (предыдущая
+	// сессия не успела дочистить).
 	needsOrphanCleanup atomic.Bool
+
+	// deferredProxies — ProxyN (ключ — имя, плюс description на момент
+	// метки), который снять не удалось (список не прочитан — решение 4, или
+	// отказ сноса, F562), с выдержкой повтора. Добирает retryDeferredProxyRemovals
+	// с тика сторожа; пусто — ни одного чтения списка. Метки (без
+	// выдержки) переживают рестарт в deferredProxiesFile (R38).
+	// deferredNow — шов часов для тестов.
+	deferredProxyMu sync.Mutex
+	deferredProxies map[string]*deferredProxy
+	deferredNow     func() time.Time
+	// cleanupNext/cleanupDelay — общая выдержка тика уборки ProxyN при
+	// непрочитанном списке (F597, proxyCleanupTick). Под deferredProxyMu.
+	cleanupNext  time.Time
+	cleanupDelay time.Duration
 
 	// installBusy guards Install/Update against interleaving with each
 	// other — manual (UI) and scheduled (auto-update) calls both go
@@ -288,7 +304,7 @@ type Operator struct {
 	uptimeFn func() (float64, error)
 
 	// migrationMu serialises all lifecycle ops that touch ProxyManager:
-	// AddTunnels, RemoveTunnel, MigrateOff/On, Reconcile orphan cleanup.
+	// AddTunnels, RemoveTunnel, MigrateOff/On, уборка ProxyN с тика сторожа (F562).
 	// Required because toggle and tunnel lifecycle race — a flag flip
 	// during AddTunnels could leave a tunnel with NDMS state inconsistent
 	// with the new mode.
@@ -390,31 +406,43 @@ func NewOperator(d OperatorDeps) *Operator {
 	configPath := filepath.Join(dir, "config.d")
 	pidPath := filepath.Join(dir, "sing-box.pid")
 
+	// До шагов примирения: stepOutboundCompat уже читает слот подписок по
+	// новому имени.
+	bindingSlotsMigrated, err := MigrateBindingSlotOrder(configPath)
+	if err != nil {
+		log.Warn("singbox binding slot order migration", "err", err)
+	}
+
 	for _, s := range reconcileConfigSteps(dir, configPath, desiredSingboxLogLevel, desiredBootstrapDNS, desiredClashPort, desiredCacheLocation, log) {
 		s.run()
 	}
 
 	op := &Operator{
-		log:               log,
-		bootstrapDNS:      d.BootstrapDNS,
-		clashPort:         d.ClashPort,
-		singboxLogLevel:   d.SingboxLogLevel,
-		cacheFileLocation: d.CacheFileLocation,
-		dir:               dir,
-		binary:            binary,
-		configPath:        configPath,
-		pidPath:           pidPath,
-		proc:              NewProcess(binary, configPath, pidPath),
-		validator:         NewValidator(binary),
-		proxyMgr:          NewProxyManager(d.Queries, d.Commands),
-		clash:             NewClashClient(ClashAddr(desiredClashPort)),
-		processLogger:     logging.NewScopedLogger(d.AppLogger, logging.GroupSingbox, logging.SubSBProcess),
-		runtimeLogger:     logging.NewScopedLogger(d.AppLogger, logging.GroupSingbox, logging.SubSBRuntime),
-		persistManualStop: d.SetManuallyStopped,
-		bus:               d.Bus,
+		log:                  log,
+		bootstrapDNS:         d.BootstrapDNS,
+		clashPort:            d.ClashPort,
+		singboxLogLevel:      d.SingboxLogLevel,
+		cacheFileLocation:    d.CacheFileLocation,
+		dir:                  dir,
+		binary:               binary,
+		configPath:           configPath,
+		pidPath:              pidPath,
+		bindingSlotsMigrated: bindingSlotsMigrated,
+		proc:                 NewProcess(binary, configPath, pidPath),
+		validator:            NewValidator(binary),
+		proxyMgr:             NewProxyManager(d.Queries, d.Commands),
+		clash:                NewClashClient(ClashAddr(desiredClashPort)),
+		processLogger:        logging.NewScopedLogger(d.AppLogger, logging.GroupSingbox, logging.SubSBProcess),
+		runtimeLogger:        logging.NewScopedLogger(d.AppLogger, logging.GroupSingbox, logging.SubSBRuntime),
+		persistManualStop:    d.SetManuallyStopped,
+		bus:                  d.Bus,
 	}
 	op.manuallyStopped.Store(d.InitialManuallyStopped)
 	op.ndmsProxyEnabledFn = d.IsNDMSProxyEnabled
+	op.loadDeferredProxies()
+	if pm, ok := op.proxyMgr.(*ProxyManager); ok {
+		pm.marks = op
+	}
 	op.proc.OnStderrLine = op.handleStderrLine
 	op.proc.OnStdoutLine = op.handleStdoutLine
 	op.proc.OnExit = op.handleExit
@@ -429,6 +457,14 @@ func NewOperator(d OperatorDeps) *Operator {
 	op.proc.ReloadNeedsRestart = func() bool {
 		return op.orch != nil && op.orch.CurrentHasTun() && !op.TunHotReload()
 	}
+	// Строку готовности «sing-box started» (F637) печатает только INFO и ниже.
+	op.proc.StartedLineExpected = func() bool {
+		switch op.desiredSingboxLogLevel() {
+		case "trace", "debug", "info":
+			return true
+		}
+		return false
+	}
 	return op
 }
 
@@ -436,6 +472,26 @@ func NewOperator(d OperatorDeps) *Operator {
 // drive lifecycle (Start / Stop / Reload / IsRunning). The Process
 // type satisfies orchestrator.ProcessController by structural match.
 func (o *Operator) Process() *Process { return o.proc }
+
+// OrchestratorProcess — процесс для оркестратора: его холодный старт
+// (Reload → Start) проходит тот же дешёвый preflight, что startAndWait.
+// validateLocked оркестратора сверяет только теги и ссылки между слотами —
+// протокол вне сборки бинаря и legacy-стек tun он не видит (F397).
+func (o *Operator) OrchestratorProcess() orchestrator.ProcessController {
+	return preflightedProcess{Process: o.proc, preflight: o.preflightStatic}
+}
+
+type preflightedProcess struct {
+	*Process
+	preflight func() error
+}
+
+func (p preflightedProcess) Start() error {
+	if err := p.preflight(); err != nil {
+		return err
+	}
+	return p.Process.Start()
+}
 
 // SetOrch wires the config.d orchestrator after construction. ApplyConfig
 // uses it (when non-nil) to write 10-tunnels.json through the slot
@@ -494,6 +550,10 @@ func (o *Operator) SetInstallProgressReporter(fn InstallProgressFn) {
 // to drop additional config fragments alongside ours).
 func (o *Operator) ConfigDir() string { return o.configPath }
 
+// BindingSlotsMigrated — NewOperator переименовал слоты привязок (F701):
+// живому sing-box нужен reload.
+func (o *Operator) BindingSlotsMigrated() bool { return o.bindingSlotsMigrated }
+
 // Binary returns the path to the sing-box executable. Used by the
 // router's Inspect path to shell out to `sing-box rule-set match` when
 // evaluating rule_set matchers in the Route Inspector.
@@ -514,7 +574,8 @@ func (o *Operator) Clash() *ClashClient { return o.clash }
 
 // Cleanup tears down all sing-box-managed state during package uninstall:
 //   - stops the detached sing-box daemon (SIGTERM → SIGKILL)
-//   - deletes every NDMS Proxy interface we created
+//   - deletes every NDMS Proxy interface we created (tunnels, subscriptions,
+//     subscription groups)
 //   - removes the on-disk config and pid/log files
 //
 // Best-effort: individual errors are logged and do not abort the sequence —
@@ -526,22 +587,20 @@ func (o *Operator) Cleanup(ctx context.Context) error {
 		o.log.Warn("cleanup: stop sing-box failed", "err", err)
 	}
 
-	// Read the config (if present) to discover which Proxy interfaces we
-	// still own. A missing config means nothing to tear down.
-	cfg, err := o.loadConfig()
-	if err != nil && !os.IsNotExist(err) {
+	// Proxy-интерфейсы туннелей и подписок (F724: прокси подписок и групп
+	// переживали удаление пакета). Чужие пропускаются RemoveProxy.
+	owned, err := o.ownedEngineProxies()
+	if err != nil {
 		o.log.Warn("cleanup: load config failed", "err", err)
 	}
-	if cfg != nil {
-		for _, t := range cfg.Tunnels() {
-			idx, perr := parseProxyIdx(t.ProxyInterface)
-			if perr != nil {
-				o.log.Warn("cleanup: bad proxy iface", "tag", t.Tag, "iface", t.ProxyInterface, "err", perr)
-				continue
-			}
-			if err := o.proxyMgr.RemoveProxy(ctx, idx); err != nil {
-				o.log.Warn("cleanup: remove proxy failed", "tag", t.Tag, "err", err)
-			}
+	for _, m := range owned {
+		idx, perr := parseProxyIdx(m.Name)
+		if perr != nil {
+			o.log.Warn("cleanup: bad proxy iface", "desc", m.Desc, "iface", m.Name, "err", perr)
+			continue
+		}
+		if err := o.proxyMgr.RemoveProxy(ctx, idx, m.Desc); err != nil {
+			o.log.Warn("cleanup: remove proxy failed", "desc", m.Desc, "err", err)
 		}
 	}
 
@@ -559,12 +618,13 @@ func (o *Operator) Cleanup(ctx context.Context) error {
 		}
 	}
 
-	// Remove our managed binary directory entirely — the user explicitly
-	// asked for cleanup, and our singbox subtree carries the binary, pid,
-	// and any UPX-cached state. /opt/etc/awg-manager/singbox/...
-	binDir := filepath.Dir(o.binary)
-	if err := os.RemoveAll(binDir); err != nil {
-		o.log.Warn("cleanup: remove managed binary dir", "path", binDir, "err", err)
+	// Remove our managed directory entirely — the user explicitly asked for
+	// cleanup, and our singbox subtree carries config.d, pid, and (in
+	// production, where o.dir is the binary's directory) the binary and any
+	// UPX-cached state. Our own dir, not filepath.Dir(o.binary): under
+	// -data-dir the binary stays the production one (F487).
+	if err := os.RemoveAll(o.dir); err != nil {
+		o.log.Warn("cleanup: remove managed dir", "path", o.dir, "err", err)
 	}
 	return nil
 }

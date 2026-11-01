@@ -22,27 +22,33 @@ type Settings struct {
 	// Max-Age of already-issued sessions updates on next login (the
 	// server-side expiry check is authoritative either way).
 	SessionTtlHours int `json:"sessionTtlHours"`
-	// EntwareAuthEnabled allows login with Entware system credentials
-	// (/opt/etc/shadow) verified locally, without the NDMS /auth call
-	// that generates router-side notifications. When the local check
-	// fails for any reason, login falls back to the Keenetic path.
-	EntwareAuthEnabled bool `json:"entwareAuthEnabled"`
 	// McpEnabled turns on the Model Context Protocol endpoint at /mcp.
 	// Off by default; /mcp answers 404 while disabled. Access requires an
 	// MCP key from McpKeyStore regardless of AuthEnabled. Keys live in
 	// mcp_keys.json, not here, so hashes never leave via /settings/get.
-	McpEnabled           bool              `json:"mcpEnabled"`
-	Server               ServerSettings    `json:"server"`
-	PingCheck            PingCheckSettings `json:"pingCheck"`
-	Logging              LoggingSettings   `json:"logging"`
-	DisableMemorySaving  bool              `json:"disableMemorySaving"` // false = auto, true = soft mode
-	Updates              UpdateSettings    `json:"updates"`
-	Download             DownloadSettings  `json:"download"`
-	DNSRoute             DNSRouteSettings  `json:"dnsRoute"`
-	GeoFile              GeoFileSettings   `json:"geoFile"`
-	ConnectivityCheckURL string            `json:"connectivityCheckUrl"`
-	UsageLevel           string            `json:"usageLevel"`
-	ServerInterfaces     []string          `json:"serverInterfaces,omitempty"`
+	McpEnabled bool `json:"mcpEnabled"`
+	// ObfuscatorRelayProcess — принудительно userspace-релей для Phobos
+	// (выключатель kernel-релея awgm_relay, спека §4.8); false — ядро, если есть.
+	ObfuscatorRelayProcess bool `json:"obfuscatorRelayProcess,omitempty"`
+	// ObfuscatorKmodTripped — почему сторож выключил ядро (§4.9); пусто — не срабатывал.
+	ObfuscatorKmodTripped string `json:"obfuscatorKmodTripped,omitempty"`
+	// ObfuscatorKmodOopsHash — hash последней обработанной записи /proc/mtdoops/oops.
+	ObfuscatorKmodOopsHash string            `json:"obfuscatorKmodOopsHash,omitempty"`
+	Server                 ServerSettings    `json:"server"`
+	PingCheck              PingCheckSettings `json:"pingCheck"`
+	Logging                LoggingSettings   `json:"logging"`
+	DisableMemorySaving    bool              `json:"disableMemorySaving"` // false = auto, true = soft mode
+	Updates                UpdateSettings    `json:"updates"`
+	Download               DownloadSettings  `json:"download"`
+	DNSRoute               DNSRouteSettings  `json:"dnsRoute"`
+	GeoFile                GeoFileSettings   `json:"geoFile"`
+	ConnectivityCheckURL   string            `json:"connectivityCheckUrl"`
+	UsageLevel             string            `json:"usageLevel"`
+	ServerInterfaces       []string          `json:"serverInterfaces,omitempty"`
+	// ForeignInterfaces — имена ядра интерфейсов других программ, отмеченных
+	// пользователем как сторонние (issue #935): выход sing-box, а номер
+	// стороннего opkgtunN держит пул. Пусто — прежнее поведение.
+	ForeignInterfaces []string `json:"foreignInterfaces,omitempty"`
 	// ServerInterfaceMeta stores AWG Manager bookkeeping for built-in/marked
 	// servers (NAT static-WAN for internet-only teardown). map[serverID].
 	ServerInterfaceMeta map[string]ServerInterfaceMeta `json:"serverInterfaceMeta,omitempty"`
@@ -102,29 +108,6 @@ type Settings struct {
 	// preset (see DNSChainPresetState). Pointer so it's absent from JSON when
 	// never enabled; nil = no preset. Written ONLY via SetDNSChainPresetState.
 	DNSChainPreset *DNSChainPresetState `json:"dnsChainPreset,omitempty"`
-	// AmneziaPremiumMirrorURL — адрес зеркала Amnezia CP, с которого
-	// резолвер берёт рабочий origin портала. Настраивается, потому что
-	// зеркало переезжает: константа заперла бы мастер до следующего релиза.
-	// Пусто (как и непригодное значение) = DefaultAmneziaMirrorURL;
-	// действующий адрес даёт EffectiveAmneziaMirrorURL. В файле пустое
-	// значение остаётся пустым, и присланный дефолт схлопывается в него же
-	// (normalizeAmneziaMirrorURL в internal/api): прибитый литерал отменил
-	// бы ротацию зеркала.
-	AmneziaPremiumMirrorURL string `json:"amneziaPremiumMirrorUrl,omitempty"`
-	// AmneziaPremiumKeyCipher — ключ подписки Amnezia Premium, зашифрованный
-	// DeviceCipher. Пишется ТОЛЬКО ручками premium (никогда через
-	// /settings/update — см. nonPatchableSettings) и наружу не отдаётся ни
-	// одним ответом настроек: в белый список SettingsData (internal/api) оно
-	// не входит.
-	AmneziaPremiumKeyCipher string `json:"amneziaPremiumKeyCipher,omitempty"`
-	// AmneziaPremiumDeclaredCountry — страна, ИЗ которой пользователь
-	// подключается: портал требует её в каждой выдаче конфигурации и по ней
-	// собирает параметры (см. amneziacp.DeclaredCountryRussia). Не страна
-	// сервера. Хранится, чтобы мастер не спрашивал одно и то же на каждой
-	// выдаче; пусто = выбора ещё не было, и выдача без него не идёт.
-	// Пишется ручкой premium с тем же значением, с которым ушёл запрос в
-	// портал; через /settings/update поля нет (nonPatchableSettings).
-	AmneziaPremiumDeclaredCountry string `json:"amneziaPremiumDeclaredCountry,omitempty"`
 }
 
 // DNSChainPresetState is backend-managed state of the DNS-chain preset
@@ -191,7 +174,8 @@ type OpkgTunPolicyData struct {
 }
 
 // OpkgTunState — ЕДИНАЯ запись владения OpkgTun<N>. Пишется ТОЛЬКО
-// lifecycle'ом через SetOpkgTunState / SetOpkgTunNATSegments. Инварианты:
+// lifecycle'ом через SetOpkgTunState / SetOpkgTunNATSegments /
+// SetOpkgTunDescription. Инварианты:
 //   - Mode ∈ {OpkgTunModeFakeIP, OpkgTunModePolicyTun};
 //   - Provisioned=false при непустой записи — hold (штатно только у
 //     policy-tun: индекс удержан ради permit'а в политике);
@@ -205,6 +189,22 @@ type OpkgTunState struct {
 	Index       int                `json:"index"`
 	FakeIP      *OpkgTunFakeIPData `json:"fakeip,omitempty"`
 	PolicyTun   *OpkgTunPolicyData `json:"policyTun,omitempty"`
+	// Description — NDMS-описание, которое МЫ поставили на интерфейс (только
+	// policy-tun, SingboxRouterSettings.PolicyTunDescription). По нему
+	// признаётся владение, поэтому смена настройки без этой записи сделала бы
+	// собственный интерфейс «чужим». Пусто — штатное описание режима: так
+	// читаются и записи версий без настройки. Пишется SetOpkgTunState или
+	// узким SetOpkgTunDescription.
+	Description string `json:"description,omitempty"`
+	// PendingDescription — описание, которое переименование СОБИРАЕТСЯ
+	// поставить (или уже поставило, но ещё не подтвердило в Description).
+	// Журнал намерения по образцу persist-before-create: пишется ДО
+	// SetDescription в NDMS, снимается ПОСЛЕ успешной записи Description.
+	// Владение признаётся и по нему, поэтому интерфейс остаётся своим в любом
+	// окне переименования — даже если настройку сменят до того, как запись
+	// догонит NDMS. Хранится дословно (штатное описание — не пустым: пусто
+	// значит «переименования нет»).
+	PendingDescription string `json:"pendingDescription,omitempty"`
 }
 
 type DownloadSettings struct {
@@ -220,6 +220,12 @@ type SingboxRouterSettings struct {
 	// filter. "all" installs unmarked PREROUTING jumps so every LAN
 	// device that reaches the router netfilter path is filtered.
 	DeviceMode string `json:"deviceMode,omitempty"`
+	// InterceptFamily — какие семейства адресов перехватывает режим tproxy:
+	// "ipv4_only" (по умолчанию, историческое поведение), "both" или
+	// "ipv6_only". Пусто = "ipv4_only": установки, обновившиеся с версии без
+	// поля, не начинают перехватывать IPv6 сами. В tun-режимах не участвует —
+	// там семейства задаёт адресация tun-интерфейса.
+	InterceptFamily string `json:"interceptFamily,omitempty"`
 	// RoutingMode selects the sing-box routing path:
 	// "tproxy" (default) keeps the historical TPROXY/REDIRECT behavior;
 	// "fakeip-tun" routes via a fake-IP DNS pool + tun device;
@@ -253,9 +259,11 @@ type SingboxRouterSettings struct {
 	// exclusions in "PORT UDP|TCP" format (e.g. "51820 UDP, 1194 TCP").
 	// Parsed at iptables generation time. Empty = no extras.
 	BypassExtraPorts string `json:"bypassExtraPorts,omitempty"`
-	// BypassExtraSubnets — пользовательский список IPv4 IP/CIDR через
-	// запятую/пробел (напр. "203.0.113.0/24, 10.8.0.5"). Трафик к ним идёт
-	// целиком мимо sing-box (включая DNS/53). Голый IP трактуется как /32.
+	// BypassExtraSubnets — пользовательский список IP/CIDR через
+	// запятую/пробел (напр. "203.0.113.0/24, 10.8.0.5, 2001:db8::/32"). Трафик
+	// к ним идёт целиком мимо sing-box (включая DNS/53). Голый IP трактуется
+	// как /32, голый IPv6 — как /128. IPv6-записи действуют при перехвате IPv6
+	// (InterceptFamily).
 	// Парсится в момент генерации правил. Пусто = нет исключений.
 	BypassExtraSubnets string `json:"bypassExtraSubnets,omitempty"`
 	// BypassGeoIPTags — geoip-теги из настроенных .dat, чьи CIDR уходят в WAN
@@ -284,6 +292,11 @@ type SingboxRouterSettings struct {
 	FakeIPPool4 string `json:"fakeipPool4,omitempty"`
 	// FakeIPPool6 is the fakeip v6 pool CIDR (default "fc00::/18"); "" disables v6.
 	FakeIPPool6 string `json:"fakeipPool6,omitempty"`
+	// FakeIPTunAddr4 — адрес OpkgTun обоих tun-режимов, хост /30 (default
+	// "172.18.0.1/30"); второй хост /30 — DNS туннеля. Пересечение с сетями
+	// интерфейсов роутера — забота пользователя; меняется только при
+	// выключенном режиме (ErrTunAddrLocked).
+	FakeIPTunAddr4 string `json:"fakeipTunAddr4,omitempty"`
 	// FakeIPMTU is the tun MTU (default 1500).
 	FakeIPMTU int `json:"fakeipMtu,omitempty"`
 	// FakeIPRealServer is the true upstream resolver the engine-managed "real"
@@ -317,6 +330,12 @@ type SingboxRouterSettings struct {
 	// PolicyTunNATSegments — выбранные пользователем сегменты для source-preserve
 	// (редактируемый предпоказ в UI). Пусто при выключенной опции.
 	PolicyTunNATSegments []string `json:"policyTunNatSegments,omitempty"`
+	// PolicyTunDescription — NDMS-описание интерфейса policy-tun: под этим
+	// именем OpkgTun виден в веб-интерфейсе роутера и в политиках доступа.
+	// Пусто — штатное "awgm policy-tun". Применённое к интерфейсу описание
+	// хранит запись владения (OpkgTunState.Description), переименование живого
+	// интерфейса доводит reconcile.
+	PolicyTunDescription string `json:"policyTunDescription,omitempty"`
 	// CacheFileLocation — место хранения cache.db sing-box (issue #842):
 	// "flash" — /opt/etc/awg-manager/singbox/cache.db на флеше, "tmp" —
 	// /tmp/singbox-cache.db в RAM, чтобы записи кэша не изнашивали флеш; ""
@@ -439,6 +458,14 @@ type ServerPeerSecret struct {
 	// зашитый `1.1.1.1, 8.8.8.8`, и абонент резолвил мимо роутера (#933).
 	// Форма — список IP через запятую, ровно как у пира managed-сервера.
 	DNS string `json:"dns,omitempty"`
+	// ClientAllowedIPs — строка `AllowedIPs =` в .conf клиента (#713): CIDR
+	// через ", ", v4/v6. Пусто — peersubnet.DefaultClientAllowedIPs (весь трафик).
+	ClientAllowedIPs string `json:"clientAllowedIPs,omitempty"`
+	// RemoteSubnets — сети за клиентом (site-to-site), канонические IPv4 CIDR:
+	// у пира на роутере они в allow-ips, и на каждую стоит наш маршрут с меткой
+	// peersubnet.RouteComment. Запись — что пир ДОЛЖЕН иметь; при сохранении
+	// роутер сверяется с ней по своему фактическому состоянию (peersubnet.Reconcile).
+	RemoteSubnets []string `json:"remoteSubnets,omitempty"`
 
 	// Сигнатура принадлежит пиру (CONTEXT.md «Сигнатура AWG»): у сервера
 	// своей нет. Профиль пуст у сигнатур, набранных руками.
@@ -459,6 +486,14 @@ type ManagedPeer struct {
 	TunnelIP     string `json:"tunnelIP"`      // e.g. "10.0.0.2/32"
 	DNS          string `json:"dns,omitempty"` // per-peer DNS for .conf generation
 	Enabled      bool   `json:"enabled"`
+	// ClientAllowedIPs — строка `AllowedIPs =` в .conf клиента (#713): CIDR
+	// через ", ", v4/v6. Пусто — peersubnet.DefaultClientAllowedIPs (весь трафик).
+	ClientAllowedIPs string `json:"clientAllowedIPs,omitempty"`
+	// RemoteSubnets — сети за клиентом (site-to-site), канонические IPv4 CIDR:
+	// у пира на роутере они в allow-ips, и на каждую стоит наш маршрут с меткой
+	// peersubnet.RouteComment. Запись — что пир ДОЛЖЕН иметь; при сохранении
+	// роутер сверяется с ней по своему фактическому состоянию (peersubnet.Reconcile).
+	RemoteSubnets []string `json:"remoteSubnets,omitempty"`
 	// I1..I5 — сигнатура имитации, которую пир получает в своём .conf.
 	I1 string `json:"i1,omitempty"`
 	I2 string `json:"i2,omitempty"`
@@ -496,7 +531,6 @@ type PingCheckDefaults struct {
 	Method        string `json:"method"`        // "http" or "icmp"
 	Target        string `json:"target"`        // ICMP target, default "8.8.8.8"
 	Interval      int    `json:"interval"`      // check interval in seconds, default 45
-	DeadInterval  int    `json:"deadInterval"`  // dead tunnel check interval in seconds, default 120
 	FailThreshold int    `json:"failThreshold"` // failures before marking dead, default 3
 }
 
@@ -517,6 +551,15 @@ type UpdateSettings struct {
 	AutoInstallEnabled      bool   `json:"autoInstallEnabled"`      // default: false
 	AutoInstallIntervalDays int    `json:"autoInstallIntervalDays"` // default: 7, valid 1-30
 	AutoInstallTime         string `json:"autoInstallTime"`         // "HH:MM", default: "05:00"
+	// StatsEnabled — анонимная статистика установок: ID установки и флаги
+	// используемых механизмов уходят заголовками ТОЛЬКО в запросе проверки
+	// обновлений (см. internal/updater/stats.go). Default: true.
+	StatsEnabled bool `json:"statsEnabled"`
+	// SnapshotDisabled выключает снимок каталога данных перед установкой
+	// обновления (internal/backup/snapshot.go). Отрицание намеренно: нулевое
+	// значение — снимок включён, без миграции схемы, и клиент, приславший
+	// блок updates без этого поля, снимки не выключит.
+	SnapshotDisabled bool `json:"snapshotDisabled"`
 }
 
 // DNSRouteSettings contains DNS route auto-refresh configuration.
@@ -545,39 +588,42 @@ type ConnectivityCheckConfig struct {
 
 // AWGTunnel represents AmneziaWG tunnel metadata.
 type AWGTunnel struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Type               string `json:"type,omitempty"` // "awg"
-	Enabled            bool   `json:"enabled"`
-	Locked             bool   `json:"locked,omitempty"`             // Защита от изменений (#818): Stop/ToggleEnabled/ToggleDefaultRoute/Update/Delete/Replace отвечают 403
-	DefaultRoute       bool   `json:"defaultRoute"`                 // Create NDMS default route (ip route default OpkgTunX)
-	DefaultRouteSet    bool   `json:"defaultRouteSet,omitempty"`    // Migration sentinel: false = field never saved, default to true
-	ISPInterface       string `json:"ispInterface,omitempty"`       // Override ISP interface for endpoint route (empty = auto-detect)
-	ISPInterfaceLabel  string `json:"ispInterfaceLabel,omitempty"`  // Human-readable name for UI display
-	ResolvedEndpointIP string `json:"resolvedEndpointIP,omitempty"` // Persisted resolved endpoint IP for reliable cleanup
-	ActiveWAN          string `json:"activeWAN,omitempty"`          // Persisted resolved WAN for WAN event matching
-	StartedAt          string `json:"startedAt,omitempty"`          // RFC3339 timestamp of last successful start
-	Backend            string `json:"backend,omitempty"`            // "nativewg" | "kernel" | "wdtt-raw" | "" (legacy=kernel)
-	FreeTurnClientID   string `json:"freeTurnClientId,omitempty"`   // set when AWG tunnel is auto-created from freeturn:// import
-	WdttClientID       string `json:"wdttClientId,omitempty"`       // set when AWG tunnel is auto-created from wdtt/qwdtt import
-	// AmneziaCountry — код страны подписки Amnezia Premium, из которой
-	// получена ТЕКУЩАЯ конфигурация туннеля (нормализован: нижний регистр,
-	// без пробелов по краям). Пусто — конфигурация не из мастера.
-	//
-	// Владельцы поля ровно два: импорт и замена конфигурации. Поле обязано
-	// умирать вместе с конфигурацией, которую описывает: пользователь,
-	// заменивший .conf вручную, иначе видел бы в мастере метку «этой стране
-	// уже соответствует туннель» на туннеле, к подписке отношения не имеющем.
-	AmneziaCountry    string                   `json:"amneziaCountry,omitempty"`
-	RawKernelIface    string                   `json:"rawKernelIface,omitempty"` // wdtt-raw: kernel TUN (e.g. wdttraw0 / opkgtun17)
-	RawNdmsIface      string                   `json:"rawNdmsIface,omitempty"`   // wdtt-raw: NDMS OpkgTun name (e.g. OpkgTun17)
-	NWGIndex          int                      `json:"nwgIndex"`                 // Wireguard{N} index, nativewg only (0 is valid!)
-	CreatedAt         string                   `json:"createdAt"`
-	Interface         AWGInterface             `json:"interface"`
-	Peer              AWGPeer                  `json:"peer"`
-	PingCheck         *TunnelPingCheck         `json:"pingCheck,omitempty"`
-	ConnectivityCheck *ConnectivityCheckConfig `json:"connectivityCheck,omitempty"`
-	Obfuscator        *Obfuscator              `json:"obfuscator,omitempty"` // wg-obfuscator (Phobos/ClusterM); nil = обычный туннель
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// PrevName — имя до последнего переименования. Ставит AWGTunnelStore.Update
+	// сам, на смене Name. Описание записи OpkgTun может остаться прежним
+	// (отказ записи описания, ребут до system configuration save) — тогда по
+	// нему запись всё ещё наша, и старт её узнаёт и переписывает (F535).
+	PrevName           string                   `json:"prevName,omitempty"`
+	Type               string                   `json:"type,omitempty"` // "awg"
+	Enabled            bool                     `json:"enabled"`
+	Locked             bool                     `json:"locked,omitempty"`             // Защита от изменений (#818): Stop/ToggleEnabled/ToggleDefaultRoute/Update/Delete/Replace отвечают 403
+	DefaultRoute       bool                     `json:"defaultRoute"`                 // Create NDMS default route (ip route default OpkgTunX)
+	DefaultRouteSet    bool                     `json:"defaultRouteSet,omitempty"`    // Migration sentinel: false = field never saved, default to true
+	ISPInterface       string                   `json:"ispInterface,omitempty"`       // Override ISP interface for endpoint route (empty = auto-detect)
+	ISPInterfaceLabel  string                   `json:"ispInterfaceLabel,omitempty"`  // Human-readable name for UI display
+	ResolvedEndpointIP string                   `json:"resolvedEndpointIP,omitempty"` // Persisted resolved endpoint IP for reliable cleanup
+	ActiveWAN          string                   `json:"activeWAN,omitempty"`          // Persisted resolved WAN for WAN event matching
+	StartedAt          string                   `json:"startedAt,omitempty"`          // RFC3339 timestamp of last successful start
+	PolicyHolds        []PolicyHold             `json:"policyHolds,omitempty"`        // permit'ы политик, снятые мониторингом (F743); пишет только pingcheck
+	Backend            string                   `json:"backend,omitempty"`            // "nativewg" | "kernel" | "wdtt-raw" | "" (legacy=kernel)
+	FreeTurnClientID   string                   `json:"freeTurnClientId,omitempty"`   // set when AWG tunnel is auto-created from freeturn:// import
+	WdttClientID       string                   `json:"wdttClientId,omitempty"`       // set when AWG tunnel is auto-created from wdtt/qwdtt import
+	RawKernelIface     string                   `json:"rawKernelIface,omitempty"`     // wdtt-raw: kernel TUN (e.g. wdttraw0 / opkgtun17)
+	RawNdmsIface       string                   `json:"rawNdmsIface,omitempty"`       // wdtt-raw: NDMS OpkgTun name (e.g. OpkgTun17)
+	NWGIndex           int                      `json:"nwgIndex"`                     // Wireguard{N} index, nativewg only (0 is valid!)
+	CreatedAt          string                   `json:"createdAt"`
+	Interface          AWGInterface             `json:"interface"`
+	Peer               AWGPeer                  `json:"peer"`
+	PingCheck          *TunnelPingCheck         `json:"pingCheck,omitempty"`
+	ConnectivityCheck  *ConnectivityCheckConfig `json:"connectivityCheck,omitempty"`
+	Obfuscator         *Obfuscator              `json:"obfuscator,omitempty"` // wg-obfuscator (Phobos/ClusterM); nil = обычный туннель
+}
+
+// PolicyHold — снятый мониторингом permit: политика и позиция в её списке.
+type PolicyHold struct {
+	Policy string `json:"policy"`
+	Order  int    `json:"order"`
 }
 
 // TunnelPingCheck contains per-tunnel ping check configuration.
@@ -586,7 +632,6 @@ type TunnelPingCheck struct {
 	Method        string `json:"method"`         // "icmp", "connect", "tls", "uri"
 	Target        string `json:"target"`         // host to check
 	Interval      int    `json:"interval"`       // check interval in seconds
-	DeadInterval  int    `json:"deadInterval"`   // dead tunnel check interval (kernel only)
 	FailThreshold int    `json:"failThreshold"`  // max fails before dead
 	MinSuccess    int    `json:"minSuccess"`     // min successes to recover (nativewg, default 1)
 	Timeout       int    `json:"timeout"`        // check timeout seconds (nativewg, default 5)
@@ -605,30 +650,11 @@ func DefaultTunnelPingCheck() *TunnelPingCheck {
 		Method:        "icmp",
 		Target:        "8.8.8.8",
 		Interval:      45,
-		DeadInterval:  120,
 		FailThreshold: 3,
 		MinSuccess:    1,
 		Timeout:       5,
 		Restart:       true,
 	}
-}
-
-// DefaultTunnelPingCheckFor — та же запись с поправкой на происхождение
-// туннеля. Туннель подписки Amnezia Premium (непустой amneziaCountry) рождается
-// с методом "http" вместо "icmp": выходы коммерческих VPN режут ICMP, и на
-// стенде 2026-09-12 через живой премиум-туннель потери составили 60-100%
-// ДАЖЕ до 1.1.1.1, тогда как обычный TCP шёл 3 из 3. С методом "icmp" такой
-// туннель, если включить мониторинг, считался бы мёртвым постоянно, а при
-// Restart=true его ещё и перезапускало бы по кругу.
-//
-// Правило живёт здесь, а не в обработчике импорта, потому что путей импорта
-// два (web и MCP), и разойтись они не должны.
-func DefaultTunnelPingCheckFor(amneziaCountry string) *TunnelPingCheck {
-	pc := DefaultTunnelPingCheck()
-	if strings.TrimSpace(amneziaCountry) != "" {
-		pc.Method = "http"
-	}
-	return pc
 }
 
 // AWGObfuscation groups all AmneziaWG obfuscation parameters into a

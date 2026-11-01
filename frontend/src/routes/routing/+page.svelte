@@ -1,5 +1,6 @@
 <script lang="ts">
-    import { onMount, onDestroy } from 'svelte';
+    import { m } from '$lib/i18n';
+    import { onMount, onDestroy, tick } from 'svelte';
     import { get } from 'svelte/store';
     import { goto } from '$app/navigation';
     import { browser } from '$app/environment';
@@ -14,25 +15,28 @@
         hydrarouteStatusStore,
     } from '$lib/stores/routing';
     import { singboxRouter as singboxRouterStore } from '$lib/stores/singboxRouter';
+    import { zapretStatusIfExpert } from '$lib/stores/zapret';
     import { systemInfo } from '$lib/stores/system';
     import { api } from '$lib/api/client';
     import { notifications } from '$lib/stores/notifications';
     import { PageContainer, PageHeader } from '$lib/components/layout';
-    import { Search } from 'lucide-svelte';
-    import { Tabs, Button, Modal } from '$lib/components/ui';
+    import { Search, Star } from 'lucide-svelte';
+    import { Tabs, Button, IconButton, Modal } from '$lib/components/ui';
     import { RoutingSearch } from '$lib/components/routing';
     import DnsRoutesTab from './DnsRoutesTab.svelte';
     import IpRoutesTab from './IpRoutesTab.svelte';
     import AccessPoliciesTab from './AccessPoliciesTab.svelte';
     import ClientRoutesTab from './ClientRoutesTab.svelte';
     import { HrNeoTab } from '$lib/components/hrneo';
+    import { hrPosKey } from '$lib/components/hrneo/hrIds';
     import { SingboxRouterRedesignPage } from '$lib/components/sb-router';
+    import { ZapretTab } from '$lib/components/zapret';
     import FakeIPTab from '$lib/components/fakeip/FakeIPTab.svelte';
     import ModeSwitchHost from '$lib/components/routing/ModeSwitchHost.svelte';
     import { modeSwitch, modeSwitchBusy } from '$lib/stores/modeSwitch';
     import GeoDataTab from './GeoDataTab.svelte';
     import { isRoutingSubTabVisible, type RoutingSubTab, type UsageLevel } from '$lib/types/usageLevel';
-    import { usageLevel } from '$lib/stores/settings';
+    import { usageLevel, settings, settingsUnavailable } from '$lib/stores/settings';
 
     // Per-section polling stores — subscribe here so all 8 fetch while
     // the routing page is open. Unsubscribed on destroy to stop polling.
@@ -62,7 +66,38 @@
         unsubRouting?.();
     });
 
-    let activeTab = $state<'hrneo' | 'geodata' | 'dns' | 'ip' | 'policy' | 'clientvpn' | 'singbox' | 'fakeip'>('dns');
+    const ROUTING_TABS = ['hrneo', 'geodata', 'dns', 'ip', 'policy', 'clientvpn', 'singbox', 'fakeip', 'zapret'] as const;
+    type RoutingTab = (typeof ROUTING_TABS)[number];
+
+    // «Любимая» вкладка — открывается первой вместо NDMS. Per-browser
+    // удобство, поэтому localStorage, а не настройки роутера.
+    const FAVORITE_TAB_KEY = 'awgm.routing.favoriteTab';
+
+    function loadFavoriteTab(): RoutingTab | null {
+        try {
+            const v = localStorage.getItem(FAVORITE_TAB_KEY);
+            return ROUTING_TABS.includes(v as RoutingTab) ? (v as RoutingTab) : null;
+        } catch {
+            return null;
+        }
+    }
+
+    // Снимок на старте: решает стартовую вкладку и автовыбор FakeIP;
+    // клики по звезде в этом визите на них уже не влияют.
+    const savedFavoriteTab = loadFavoriteTab();
+    let favoriteTab = $state<RoutingTab | null>(savedFavoriteTab);
+
+    function toggleFavoriteTab(): void {
+        favoriteTab = favoriteTab === activeTab ? null : activeTab;
+        try {
+            if (favoriteTab) localStorage.setItem(FAVORITE_TAB_KEY, favoriteTab);
+            else localStorage.removeItem(FAVORITE_TAB_KEY);
+        } catch {
+            /* quota / private mode — выбор живёт до перезагрузки */
+        }
+    }
+
+    let activeTab = $state<RoutingTab>(savedFavoriteTab ?? 'dns');
 
     // ?policy=Policy1 — прямой переход из настроек sing-box в редактор
     // конкретной политики (#573).
@@ -72,6 +107,9 @@
     let hydrarouteInstalled = $derived($routing.hydrarouteStatus?.installed ?? false);
     let hasDnsEngine = $derived(isOS5 || hydrarouteInstalled);
     let singboxInstalled = $derived($systemInfo.data?.singbox?.installed ?? false);
+    // Zapret ставит пользователь, а не AWGM, поэтому вкладка появляется
+    // только когда движок реально найден на роутере.
+    let zapretInstalled = $derived($zapretStatusIfExpert?.data?.installed ?? false);
 
     let pendingTab = $state<string | null>(null);
 
@@ -94,19 +132,23 @@
     let editRuleCounter = $state(0);
     let searchOpen = $state(false);
 
-    function handleSearchRuleClick(id: string, type: 'dns' | 'ip') {
+    async function handleSearchRuleClick(id: string, type: 'dns' | 'ip') {
         if (type === 'dns') {
             // dnsRoutes mixes NDMS and hydraroute backends in one array;
             // route hydraroute hits to the HR Neo tab so the edit modal
             // actually opens (DnsRoutesTab filters those out).
-            const route = dnsRoutes.find(r => r.id === id);
+            // By position: an HR id's revision may be stale after a write.
+            const route = dnsRoutes.find(r => hrPosKey(r.id) === hrPosKey(id));
             activeTab = route?.backend === 'hydraroute' ? 'hrneo' : 'dns';
         } else {
             activeTab = 'ip';
         }
+        searchOpen = false;
+        // A freshly mounted tab captures editRuleCounter at mount; bump it only
+        // after the switched-to tab has mounted so its effect sees the change.
+        await tick();
         editRuleId = id;
         editRuleCounter++;
-        searchOpen = false;
     }
 
     // NDMS tab is OS5-only (see tabItems gate). On OS4, bounce off `dns`
@@ -135,18 +177,24 @@
     // (the same condition that renders the tab) so we never select a tab that
     // isn't there — fakeip-tun implies sing-box installed, but this keeps the
     // selection from racing ahead of systemInfo arriving.
-    const singboxInitializedStore = singboxRouterStore.initialized;
+    //
+    // Gated on settings (primed by reloadSettings() in onMount), not on
+    // `initialized`: that flag is set only by loadAll() of the sing-box tabs,
+    // so on F5 / direct entry the auto-select never fired (F641). Decided once,
+    // on the first settings snapshot — a later switch to fakeip-tun must not
+    // yank the user off the tab they are on.
     const singboxSettings = singboxRouterStore.settings;
     let fakeipAutoSelected = false;
     $effect(() => {
         if (!browser) return;
-        if (!$singboxInitializedStore) return;
+        if (!$singboxSettings) return;
         if (!singboxInstalled) return;
         if (fakeipAutoSelected) return;
-        if ($singboxSettings?.routingMode === 'fakeip-tun') {
-            fakeipAutoSelected = true;
+        fakeipAutoSelected = true;
+        if ($singboxSettings.routingMode === 'fakeip-tun') {
             const explicitTab = new URL(window.location.href).searchParams.get('tab');
-            if (!explicitTab) {
+            // Явно выбранная любимая вкладка важнее автовыбора.
+            if (!explicitTab && savedFavoriteTab === null) {
                 activeTab = 'fakeip';
             }
         }
@@ -173,12 +221,12 @@
             // UI responsive even if SSE happens to be lagging).
             invalidateAllRouting();
             if (res.missing.length === 0) {
-                notifications.success('Данные получены');
+                notifications.success(m.routing_page_refreshed());
             } else {
-                notifications.warning(`Не удалось загрузить: ${res.missing.join(', ')}`);
+                notifications.warning(m.routing_page_missing({ items: res.missing.join(', ') }));
             }
         } catch (e) {
-            notifications.error(`Ошибка обновления: ${(e as Error).message}`);
+            notifications.error(m.routing_page_refresh_error({ message: (e as Error).message }));
         } finally {
             refreshing = false;
         }
@@ -223,7 +271,6 @@
         badge?: number | string;
         badgeTone?: 'default' | 'success' | 'warning' | 'muted';
         separatorBefore?: boolean;
-        muted?: boolean;
         children?: TabChildItem[];
     };
 
@@ -233,6 +280,7 @@
         dns: 'dnsRoutes',
         ip: 'ipRoutes',
         hrneo: 'hrNeo',
+        zapret: 'zapret',
         geodata: 'geoData',
         singbox: 'singboxRouter',
     };
@@ -279,9 +327,9 @@
             // tab on isOS5 so OS4 routers don't see an unusable NDMS tab
             // (hydraroute users on OS4 use the HR Neo tab instead).
             isOS5 ? { id: 'dns', label: 'NDMS', badge: dnsActiveCount } : null,
-            { id: 'ip', label: 'IP-адреса', badge: ipActiveCount },
-            { id: 'clientvpn', label: 'VPN для устройств', badge: clientActiveCount },
-            { id: 'policy', label: 'Политики доступа', badge: policyCount },
+            { id: 'ip', label: m.routing_page_tab_ip(), badge: ipActiveCount },
+            { id: 'clientvpn', label: m.routing_page_tab_clientvpn(), badge: clientActiveCount },
+            { id: 'policy', label: m.routing_page_tab_policy(), badge: policyCount },
             // Sing-box modes as one dropdown chip (same pattern as tunnels page).
             singboxMenuChildren.length > 0
                 ? {
@@ -293,8 +341,17 @@
                 : null,
             // HR Neo is a separate routing engine (not sing-box) — divider before it.
             hydrarouteInstalled ? { id: 'hrneo', label: 'HR Neo', badge: hrRuleCount, separatorBefore: true } : null,
+            // Zapret — тоже отдельный движок, и ставит его пользователь, а не
+            // AWGM. Вкладка появляется только когда движок найден на роутере.
+            zapretInstalled
+                ? {
+                      id: 'zapret',
+                      label: 'Zapret',
+                      separatorBefore: true,
+                  }
+                : null,
             (hydrarouteInstalled || singboxInstalled)
-                ? { id: 'geodata', label: 'Гео-данные', badge: geoFileCount, separatorBefore: true }
+                ? { id: 'geodata', label: m.routing_page_tab_geodata(), badge: geoFileCount, separatorBefore: true }
                 : null,
         ] as (TabItem | null)[])
             .filter((t): t is TabItem => t !== null)
@@ -338,6 +395,30 @@
         ) {
             return;
         }
+        // Любимую не сбрасываем, пока не пришло то, от чего зависит её
+        // видимость: до загрузки настроек usageLevel = 'advanced' и
+        // expert-вкладки скрыты; FakeIP ниже expert виден только по
+        // routingMode из настроек sing-box. Ждём лишь эти вкладки и лишь
+        // пока настройки не отказали, чтобы упавшая загрузка не держала
+        // их вечно.
+        if (activeTab === savedFavoriteTab && !tabsInclude(items, activeTab)) {
+            const levelGated = activeTab === 'hrneo' || activeTab === 'geodata' || activeTab === 'singbox' || activeTab === 'fakeip';
+            if (levelGated && $settings === null && !$settingsUnavailable) return;
+            if (activeTab === 'fakeip' && $singboxSettings === null) return;
+        }
+
+        // Вкладка Zapret гейтится уровнем и zapret-status. Пока не пришли
+        // настройки или (у expert) статус, вкладки в списке ещё нет — иначе
+        // deep-link ?tab=zapret (например, из Настроек) откатился бы на
+        // первую вкладку до загрузки. Не загрузились настройки — не ждём.
+        const zapretPending = $zapretStatusIfExpert !== null && !$zapretStatusIfExpert.lastFetchedAt;
+        if (
+            activeTab === 'zapret' &&
+            !tabsInclude(items, activeTab) &&
+            (($settings === null && !$settingsUnavailable) || zapretPending)
+        ) {
+            return;
+        }
 
         if (!tabsInclude(items, activeTab)) {
             const first = items[0];
@@ -348,12 +429,12 @@
 </script>
 
 <svelte:head>
-    <title>Маршрутизация - AWG Manager</title>
+    <title>{m.nav_routing()} - AWG Manager</title>
 </svelte:head>
 
 <PageContainer width="full">
     <div class="routing-page">
-    <PageHeader title="Маршрутизация">
+    <PageHeader title={m.nav_routing()}>
         {#snippet actions()}
             <Button
                 variant="secondary"
@@ -361,7 +442,7 @@
                 onclick={() => (searchOpen = true)}
                 iconBefore={searchIcon}
             >
-                Поиск
+                {m.routing_page_search()}
             </Button>
             <!-- TODO Phase 1: warning variant for missing>0 -->
             <Button
@@ -372,11 +453,20 @@
                 loading={refreshing}
             >
                 {#if missing.length > 0}
-                    Загрузить недостающее ({missing.length})
+                    {m.routing_page_load_missing({ count: missing.length })}
                 {:else}
-                    Обновить
+                    {m.common_refresh()}
                 {/if}
             </Button>
+            <IconButton
+                size="md"
+                variant={favoriteTab === activeTab ? 'warm' : 'default'}
+                ariaLabel={favoriteTab === activeTab ? m.routing_page_favorite_unset() : m.routing_page_favorite_set()}
+                title={favoriteTab === activeTab ? m.routing_page_favorite_unset() : m.routing_page_favorite_set()}
+                onclick={toggleFavoriteTab}
+            >
+                <Star size={16} strokeWidth={2} fill={favoriteTab === activeTab ? 'currentColor' : 'none'} aria-hidden="true" />
+            </IconButton>
         {/snippet}
     </PageHeader>
 
@@ -385,7 +475,11 @@
         active={activeTab}
         onchange={(id) => requestTab(id)}
         urlParam="tab"
-        defaultTab="dns"
+        persistKey="routing-sections"
+        skipMemorySearchParams={['policy', 'rule', 'edit']}
+        memoryReady={$settings !== null && $systemInfo.lastFetchedAt > 0 && $hydrarouteStatusStore.lastFetchedAt > 0 && (!singboxInstalled || $singboxSettings !== null)}
+        restoreMemory={savedFavoriteTab === null}
+        defaultTab={favoriteTab ?? 'dns'}
     />
 
     {#if activeTab === 'hrneo'}
@@ -436,6 +530,8 @@
         <SingboxRouterRedesignPage />
     {:else if activeTab === 'fakeip'}
         <FakeIPTab />
+    {:else if activeTab === 'zapret'}
+        <ZapretTab />
     {/if}
     <ModeSwitchHost />
     </div>
@@ -443,21 +539,21 @@
 
 <Modal
     open={pendingTab !== null}
-    title="Несохранённые правки маршрутизации"
+    title={m.routing_page_unsaved_title()}
     size="sm"
     onclose={() => (pendingTab = null)}
 >
-    <p>Правки sing-box сохранены как черновик, но <strong>ещё не применены</strong>. Если уйти с вкладки — маршрутизация не изменится, пока вы не нажмёте «Применить».</p>
+    <p>{m.routing_page_unsaved_pre()} <strong>{m.routing_page_unsaved_strong()}</strong>. {m.routing_page_unsaved_post()}</p>
     {#snippet actions()}
-        <Button variant="ghost" size="md" onclick={() => (pendingTab = null)}>Остаться</Button>
-        <Button variant="primary" size="md" onclick={confirmLeave}>Уйти всё равно</Button>
+        <Button variant="ghost" size="md" onclick={() => (pendingTab = null)}>{m.routing_page_stay()}</Button>
+        <Button variant="primary" size="md" onclick={confirmLeave}>{m.routing_page_leave()}</Button>
     {/snippet}
 </Modal>
 
 <Modal
     open={searchOpen}
     onclose={() => (searchOpen = false)}
-    title="Поиск по правилам маршрутизации NDMS"
+    title={m.routing_page_search_title()}
     size="xl"
 >
     <RoutingSearch

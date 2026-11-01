@@ -253,8 +253,6 @@ func (a *routerSingboxTunnelAdapter) ListTunnelTags(ctx context.Context) ([]stri
 
 // subscriptionBindValidator bridges router bindable-interface validation
 // into the subscription service and sing-box tunnel endpoints (#709).
-// It validates against the unfiltered list of bindable interfaces so
-// interfaces with direct outbounds remain usable by subscriptions and tunnels.
 type subscriptionBindValidator struct {
 	adapter *routerWANInterfaceAdapter
 }
@@ -263,7 +261,7 @@ func (v subscriptionBindValidator) ValidateBindInterface(ctx context.Context, na
 	if v.adapter == nil {
 		return nil
 	}
-	ifaces, err := v.adapter.ListAllBindable(ctx)
+	ifaces, err := v.adapter.ListBindable(ctx)
 	if err != nil {
 		return err
 	}
@@ -272,7 +270,7 @@ func (v subscriptionBindValidator) ValidateBindInterface(ctx context.Context, na
 			return nil
 		}
 	}
-	return fmt.Errorf("bind_interface %q is not a selectable interface", name)
+	return fmt.Errorf("%w: %q", subscription.ErrBindNotSelectable, name)
 }
 
 // monitoringSingboxTunnelAdapter projects sing-box tunnels into the

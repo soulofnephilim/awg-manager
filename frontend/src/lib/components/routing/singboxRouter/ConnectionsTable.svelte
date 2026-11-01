@@ -1,5 +1,6 @@
 <!-- frontend/src/lib/components/routing/singboxRouter/ConnectionsTable.svelte -->
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { Connection } from '$lib/types/singboxConnections';
 	import { formatBytes } from '$lib/utils/format';
 
@@ -46,13 +47,13 @@
 
 	function relativeTime(start: string): string {
 		const ms = Date.now() - new Date(start).getTime();
-		if (ms < 1000) return 'сейчас';
+		if (ms < 1000) return m.routing_singbox_conn_now();
 		const s = Math.floor(ms / 1000);
 		if (s < 60) return `${s}s`;
-		const m = Math.floor(s / 60);
-		if (m < 60) return `${m}m ${s % 60}s`;
-		const h = Math.floor(m / 60);
-		return `${h}h ${m % 60}m`;
+		const min = Math.floor(s / 60);
+		if (min < 60) return `${min}m ${s % 60}s`;
+		const h = Math.floor(min / 60);
+		return `${h}h ${min % 60}m`;
 	}
 
 	function arrow(col: SortKey): string {
@@ -80,14 +81,14 @@
 		</colgroup>
 		<thead>
 			<tr>
-				<th>Прот</th>
-				<th class="sortable" onclick={() => onSortChange('source')}>Источник {arrow('source')}</th>
-				<th class="sortable" onclick={() => onSortChange('destination')}>Назначение {arrow('destination')}</th>
+				<th>{m.routing_singbox_conn_col_proto()}</th>
+				<th class="sortable" onclick={() => onSortChange('source')}>{m.routing_singbox_conn_col_source()} {arrow('source')}</th>
+				<th class="sortable" onclick={() => onSortChange('destination')}>{m.routing_singbox_conn_col_destination()} {arrow('destination')}</th>
 				<th class="sortable" onclick={() => onSortChange('outbound')}>Outbound {arrow('outbound')}</th>
 				<th class="col-rule">Rule</th>
 				<th class="sortable num" onclick={() => onSortChange('upload')}>↑ {arrow('upload')}</th>
 				<th class="sortable num" onclick={() => onSortChange('download')}>↓ {arrow('download')}</th>
-				<th class="sortable" onclick={() => onSortChange('start')}>Время {arrow('start')}</th>
+				<th class="sortable" onclick={() => onSortChange('start')}>{m.routing_singbox_conn_col_time()} {arrow('start')}</th>
 				<th></th>
 			</tr>
 		</thead>
@@ -121,13 +122,13 @@
 					<td class="mono num">{formatBytes(c.download)}</td>
 					<td class="mono small num">{relativeTime(c.start)}</td>
 					<td>
-						<button class="kill" type="button" onclick={() => onKill(c.id)} title="Закрыть соединение">×</button>
+						<button class="kill" type="button" onclick={() => onKill(c.id)} title={m.routing_singbox_conn_close_one()}>×</button>
 					</td>
 				</tr>
 			{/each}
 			{#if pageRows.length === 0}
 				<tr>
-					<td colspan="9" class="empty">Нет соединений по фильтру</td>
+					<td colspan="9" class="empty">{m.routing_singbox_conn_empty_filtered()}</td>
 				</tr>
 			{/if}
 		</tbody>
@@ -136,7 +137,7 @@
 	{#if totalPages > 1}
 		<div class="pager">
 			<button type="button" disabled={page === 0} onclick={() => onPageChange(page - 1)}>◀</button>
-			<span>Стр. {page + 1} / {totalPages}</span>
+			<span>{m.routing_singbox_conn_page({ page: page + 1, total: totalPages })}</span>
 			<button type="button" disabled={page >= totalPages - 1} onclick={() => onPageChange(page + 1)}>▶</button>
 		</div>
 	{/if}
@@ -187,22 +188,31 @@
 		font-weight: 600;
 		font-family: ui-monospace, monospace;
 	}
-	.proto-tcp { background: rgba(74, 158, 255, 0.15); color: #4a9eff; }
-	.proto-udp { background: rgba(218, 184, 86, 0.15); color: #dab856; }
+	/* Оттенок — в --conn-hue: светлая тема берёт его же, а не копию hex. */
+	.proto-tcp { --conn-hue: #4a9eff; background: rgba(74, 158, 255, 0.15); color: var(--conn-hue); }
+	.proto-udp { --conn-hue: #dab856; background: rgba(218, 184, 86, 0.15); color: var(--conn-hue); }
 	.badge {
+		--conn-hue: #da7756;
 		display: inline-block;
 		padding: 2px 6px;
 		border-radius: 3px;
 		background: rgba(218, 119, 86, 0.12);
-		color: #da7756;
+		color: var(--conn-hue);
 		font-size: 11px;
 		font-family: ui-monospace, monospace;
 	}
 	.badge.awg {
+		--conn-hue: #9c8aff;
 		background: rgba(156, 138, 255, 0.14);
-		color: #9c8aff;
 	}
 	.badge.muted { background: rgba(110, 110, 110, 0.15); color: var(--text-tertiary, #6e6e6e); }
+	/* Светлая тема: тот же оттенок, притемнённый к цвету текста, — на бледной
+	   подложке исходный не дотягивал до контраста 4.5:1 (WCAG AA). */
+	:global([data-theme='light']) .proto-tcp,
+	:global([data-theme='light']) .proto-udp,
+	:global([data-theme='light']) .badge:not(.muted) {
+		color: color-mix(in srgb, var(--conn-hue) 40%, var(--color-text-primary));
+	}
 	.kill {
 		all: unset;
 		cursor: pointer;

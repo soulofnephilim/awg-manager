@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { WireguardServerPeer } from '$lib/types';
 	import { Modal, Button } from '$lib/components/ui';
 	import { protocols, calcTotalChars, MAX_SIGNATURE_CHARS, type ProtocolKey, type SignaturePackets } from '$lib/utils/protocols';
@@ -8,7 +9,9 @@
 	import { servers } from '$lib/stores/servers';
 	import { FieldHint, FormToggle } from '$lib/components/ui';
 	import { routerDnsHint } from './routerDnsHint';
-	import { validateDNSList } from '$lib/utils/peerForm';
+	import { validateDNSList, validatePeerNetworks, parseRemoteSubnets, normalizeClientAllowedIPs, formatClientAllowedIPs } from '$lib/utils/peerForm';
+	import { systemPeerTunnelIP } from '$lib/utils/serverPeerOptions';
+	import PeerNetworksFields from './PeerNetworksFields.svelte';
 
 	interface Props {
 		open: boolean;
@@ -30,17 +33,13 @@
 	// Правило то же, что у managed-модалок: отказ у поля, а не английской
 	// фразой с бэкенда.
 	const dnsError = $derived(validateDNSList(dns));
+	let clientAllowedIPs = $state('');
+	let remoteSubnets = $state('');
+	const netError = $derived(validatePeerNetworks(clientAllowedIPs, remoteSubnets));
 	let saving = $state(false);
 	let wasOpen = $state(false);
 	let sigProfile = $state<ProtocolKey | ''>('');
 	let sigPackets = $state<SignaturePackets>({ i1: '', i2: '', i3: '', i4: '', i5: '' });
-
-	function peerTunnelIP(p: WireguardServerPeer): string {
-		const raw = p.allowedIPs?.find((ip) => ip.includes('/32')) || p.allowedIPs?.[0] || '';
-		if (!raw) return '';
-		if (raw.includes('/')) return raw;
-		return `${raw}/32`;
-	}
 
 	function peerProfile(): ProtocolKey | '' {
 		const p = peer.signatureProfile ?? '';
@@ -60,11 +59,13 @@
 	$effect(() => {
 		if (open && !wasOpen) {
 			description = peer.description;
-			tunnelIP = peerTunnelIP(peer);
+			tunnelIP = systemPeerTunnelIP(peer);
 			dns = peer.dns ?? '';
 			useRouterDNS = routerIP !== '' && dns === routerIP;
 			sigProfile = peerProfile();
 			sigPackets = peerPackets();
+			clientAllowedIPs = formatClientAllowedIPs(peer.clientAllowedIPs ?? '');
+			remoteSubnets = (peer.remoteSubnets ?? []).join('\n');
 		}
 		wasOpen = open;
 	});
@@ -86,36 +87,38 @@
 				description,
 				tunnelIP,
 				dns,
+				clientAllowedIPs: normalizeClientAllowedIPs(clientAllowedIPs),
+				remoteSubnets: parseRemoteSubnets(remoteSubnets),
 				signature: sigDirty ? { profile: sigProfile, ...sigPackets } : undefined,
 			});
 			servers.applyMutationResponse(fresh);
-			notifications.success('Клиент обновлён');
+			notifications.success(m.servers_peer_updated());
 			onclose();
 			onUpdated();
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка сохранения');
+			notifications.error(e instanceof Error ? e.message : m.system_tunnels_save_failed());
 		} finally {
 			saving = false;
 		}
 	}
 </script>
 
-<Modal {open} title="Редактировать клиента" size="sm" {onclose}>
+<Modal {open} title={m.servers_peer_edit_title()} size="sm" {onclose}>
 	<div class="form-fields">
 		<div class="form-group">
-			<label class="label" for="esp-desc">Имя / описание</label>
-			<input type="text" id="esp-desc" class="input" bind:value={description} />
+			<label class="field-label" for="esp-desc">{m.servers_peer_label_desc()}</label>
+			<input type="text" id="esp-desc" class="field-input" bind:value={description} />
 		</div>
 		<div class="form-group">
-			<label class="label" for="esp-ip">Tunnel IP (CIDR)</label>
-			<input type="text" id="esp-ip" class="input" bind:value={tunnelIP} />
+			<label class="field-label" for="esp-ip">Tunnel IP (CIDR)</label>
+			<input type="text" id="esp-ip" class="field-input" bind:value={tunnelIP} />
 		</div>
 		<div class="form-group">
-			<label class="label" for="esp-dns">DNS серверы</label>
+			<label class="field-label" for="esp-dns">{m.servers_peer_label_dns()}</label>
 			<input
 				type="text"
 				id="esp-dns"
-				class="input"
+				class="field-input"
 				bind:value={dns}
 				placeholder="192.168.1.1"
 				disabled={useRouterDNS}
@@ -123,7 +126,7 @@
 			{#if routerIP}
 				<div class="toggle-row">
 					<span class="toggle-label">
-						DNS роутера ({routerIP})<FieldHint text={routerDnsHint} ariaLabel="Подсказка: DNS роутера" />
+						{m.servers_peer_router_dns({ ip: routerIP })}<FieldHint text={routerDnsHint()} ariaLabel={m.servers_peer_router_dns_aria()} />
 					</span>
 					<FormToggle
 						bind:checked={useRouterDNS}
@@ -137,9 +140,16 @@
 			{#if dnsError}
 				<span class="hint-text is-error">{dnsError}</span>
 			{:else}
-				<span class="hint-text">Пусто — DNS роутера</span>
+				<span class="hint-text">{m.servers_peer_dns_empty_hint()}</span>
 			{/if}
 		</div>
+		<PeerNetworksFields
+			bind:clientAllowedIPs
+			bind:remoteSubnets
+			disabled={!peer.confAvailable}
+			idPrefix="esp"
+			loadPresets={() => api.getSystemServerPeerPresets(serverId, dns)}
+		/>
 		<!-- Сигнатуре негде жить без локального ключа клиента: пир заведён вне
 		     AWG Manager, и бэкенд такую правку отвергает (NO_PEER_SECRET). -->
 		{#if peer.confAvailable}
@@ -152,9 +162,9 @@
 	</div>
 
 	{#snippet actions()}
-		<Button variant="ghost" size="md" onclick={onclose}>Отмена</Button>
-		<Button variant="primary" size="md" onclick={handleSave} loading={saving} disabled={saving || sigOver || !!dnsError}>
-			Сохранить
+		<Button variant="ghost" size="md" onclick={onclose}>{m.common_cancel()}</Button>
+		<Button variant="primary" size="md" onclick={handleSave} loading={saving} disabled={saving || sigOver || !!dnsError || !!netError}>
+			{m.common_save()}
 		</Button>
 	{/snippet}
 </Modal>
@@ -170,21 +180,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.375rem;
-	}
-
-	.label {
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--text-secondary);
-	}
-
-	.input {
-		padding: 8px 12px;
-		font-size: 13px;
-		background: var(--bg-primary);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		color: var(--text-primary);
 	}
 
 	.toggle-row {
@@ -208,8 +203,4 @@
 		color: var(--color-error, #f87171);
 	}
 
-	.input:focus {
-		outline: none;
-		border-color: var(--accent);
-	}
 </style>

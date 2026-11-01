@@ -19,8 +19,9 @@ type Operator interface {
 	ColdStart(ctx context.Context, cfg tunnel.Config) error
 
 	// Stop brings down a tunnel: kills backend process + removes firewall rules.
-	// Used for: user Stop, PingCheck dead.
-	Stop(ctx context.Context, tunnelID string) error
+	// Used for: user Stop, PingCheck dead. name — имя туннеля из карточки
+	// (пусто, если её нет): по нему OS5 узнаёт свою запись OpkgTun (F517).
+	Stop(ctx context.Context, tunnelID, name string) error
 
 	// Delete completely removes a tunnel.
 	// Receives the full stored tunnel for reliable cleanup (persisted endpoint IP, etc.).
@@ -75,15 +76,23 @@ type Operator interface {
 	// prefix — длина префикса IPv4 (0 = не задана, оператор ставит /32).
 	SyncAddress(ctx context.Context, tunnelID string, address string, prefix int, ipv6 string) error
 
-	// UpdateDescription updates the tunnel description in RCI.
-	UpdateDescription(ctx context.Context, tunnelID, description string) error
+	// UpdateDescription updates the tunnel description in RCI — only on a
+	// record that is ours by the F517 rule, checked against prevName (the
+	// tunnel's name before the rename).
+	UpdateDescription(ctx context.Context, tunnelID, prevName, description string) error
+
+	// CaptureDescription sets the description without the ownership check:
+	// adopting an external tunnel takes its record deliberately. Adopt only.
+	CaptureDescription(ctx context.Context, tunnelID, description string) error
 
 	// GetDefaultGatewayInterface returns the current default gateway interface name.
 	// Used by resolveWAN for auto-mode tunnels.
 	GetDefaultGatewayInterface(ctx context.Context) (string, error)
 
 	// GetSystemName resolves a router interface ID (e.g., "PPPoE0") to its kernel
-	// interface name (e.g., "ppp0") via RCI. Returns the ID unchanged if resolution fails.
+	// interface name (e.g., "ppp0"). Без RCI (F570): на OS5 — память
+	// InterfaceStore (таблица ndms.KernelName, имена из хуков, резолвер вслед за
+	// списком), неизвестное — ""; на OS4 — ID без изменений.
 	GetSystemName(ctx context.Context, ndmsID string) string
 
 	// SetAppLogger sets the web UI logger for operator events.

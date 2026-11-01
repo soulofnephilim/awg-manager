@@ -1,20 +1,37 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { SystemProcessItem } from '$lib/api/client';
-	import { formatBytes } from '$lib/utils/format';
+	import { formatBytes, formatDuration } from '$lib/utils/format';
 	import { Square } from 'lucide-svelte';
-	import { getCpuClass } from './shared';
+	import { cpuBarWidth, getCpuClass } from './shared';
 
 	interface Props {
 		proc: SystemProcessItem;
+		cpuCount: number;
 		onkill: (proc: SystemProcessItem) => void;
 	}
 
-	let { proc, onkill }: Props = $props();
+	let { proc, cpuCount, onkill }: Props = $props();
 
-	const cpuLvl = $derived(getCpuClass(proc.cpuPercent));
+	const cpuLvl = $derived(getCpuClass(proc.cpuPercent, cpuCount));
+
+	const stateTitle = $derived.by(() => {
+		switch (proc.state) {
+			case 'R':
+				return m.system_processes_state_running();
+			case 'S':
+				return m.system_processes_state_sleeping();
+			case 'D':
+				return m.system_processes_state_disk_sleep();
+			case 'Z':
+				return m.system_processes_state_zombie();
+			default:
+				return m.system_processes_state_stopped();
+		}
+	});
 </script>
 
-<tr class="proc-row" class:is-self={proc.isSelf} class:is-high-cpu={proc.cpuPercent > 30}>
+<tr class="proc-row" class:is-self={proc.isSelf} class:is-high-cpu={cpuLvl === 'high'}>
 	<!-- PID -->
 	<td class="col-td-pid">
 		<code>{proc.pid}</code>
@@ -27,12 +44,7 @@
 
 	<!-- State -->
 	<td class="col-td-state">
-		<span class="state-badge state-{proc.state.toLowerCase()}" title={
-			proc.state === 'R' ? 'Выполняется (Running)' :
-			proc.state === 'S' ? 'Ожидание (Sleeping)' :
-			proc.state === 'D' ? 'Ожидание диска (Disk sleep)' :
-			proc.state === 'Z' ? 'Зомби (Zombie)' : 'Остановлен'
-		}>
+		<span class="state-badge state-{proc.state.toLowerCase()}" title={stateTitle}>
 			{proc.state}
 		</span>
 	</td>
@@ -52,21 +64,31 @@
 				<div class="mini-bar">
 					<div
 						class="mini-bar-fill bar-level-{cpuLvl}"
-						style="width: {Math.min(100, proc.cpuPercent)}%"
+						style="width: {cpuBarWidth(proc.cpuPercent, cpuCount)}%"
 					></div>
 				</div>
 			{/if}
 		</div>
 	</td>
 
+	<!-- CPU time -->
+	<td class="col-td-time">
+		{formatDuration(Math.round(proc.cpuTimeSec))}
+	</td>
+
 	<!-- Memory -->
 	<td class="col-td-mem">
 		<div class="mem-cell-wrap">
-			<span class="mem-rss">{formatBytes(proc.memoryRss)}</span>
+			<span class="mem-rss">{formatBytes(proc.memoryOwn)}</span>
 			{#if proc.memoryPercent > 0.1}
 				<span class="mem-pct">({proc.memoryPercent.toFixed(1)}%)</span>
 			{/if}
 		</div>
+		{#if proc.memoryFile > 0}
+			<div class="mem-file" title={m.system_processes_row_mem_file_title()}>
+				{m.system_processes_row_mem_file({ size: formatBytes(proc.memoryFile) })}
+			</div>
+		{/if}
 	</td>
 
 	<!-- Command / Process -->
@@ -77,7 +99,7 @@
 				<span class="badge-self">AWG Manager</span>
 			{/if}
 			{#if proc.isCritical}
-				<span class="badge-critical">Системный</span>
+				<span class="badge-critical">{m.system_processes_row_critical()}</span>
 			{/if}
 			<span class="proc-cmdline" title={proc.cmdline}>{proc.cmdline}</span>
 		</div>
@@ -89,7 +111,7 @@
 			type="button"
 			class="btn-kill"
 			class:btn-kill-self={proc.isSelf}
-			title={proc.isSelf ? 'Остановить сервис AWG Manager' : 'Завершить процесс'}
+			title={proc.isSelf ? m.system_processes_row_kill_self() : m.system_processes_row_kill()}
 			onclick={() => onkill(proc)}
 		>
 			<Square size={11} />
@@ -111,6 +133,7 @@
 	.col-td-state { width: 48px; text-align: center; }
 	.col-td-threads { width: 56px; text-align: center; }
 	.col-td-cpu { width: 76px; }
+	.col-td-time { width: 84px; white-space: nowrap; font-size: 0.75rem; color: var(--color-text-secondary); }
 	.col-td-mem { width: 110px; }
 	.col-td-cmd { width: auto; overflow: hidden; }
 	.col-td-act { width: 48px; text-align: center; }
@@ -209,6 +232,12 @@
 	.mem-pct {
 		font-size: 0.7rem;
 		color: var(--color-text-muted);
+	}
+
+	.mem-file {
+		font-size: 0.68rem;
+		color: var(--color-text-muted);
+		white-space: nowrap;
 	}
 
 	.cmd-wrap {

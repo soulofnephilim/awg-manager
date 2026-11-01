@@ -133,6 +133,9 @@ type StateInfo struct {
 	// PeerVia is the NDMS WAN name the peer routes through (e.g. "PPPoE0").
 	// Populated for NativeWG tunnels from RCI show interface peer "via" field.
 	PeerVia string `json:"peerVia,omitempty"`
+	// RelayBackend — где работает релей обфускатора: "kernel" (awgm_relay.ko)
+	// или "process"; пусто — туннель без обфускатора или релей не запущен.
+	RelayBackend string `json:"relayBackend,omitempty"`
 
 	// Diagnostics
 	Error   error  `json:"error"`             // Error encountered during state detection
@@ -144,6 +147,9 @@ type Config struct {
 	// Identity
 	ID   string // Tunnel ID (e.g., "awg0")
 	Name string // Human-readable name
+	// PrevName — имя до последнего переименования (storage.AWGTunnel.PrevName):
+	// описание записи OpkgTun, равное ему, тоже признак нашей записи (F535).
+	PrevName string
 
 	// Network configuration
 	Address string // IPv4 address WITHOUT mask (e.g., "10.0.0.1") — в этом виде

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +46,23 @@ func TestOperator_Reconcile_RestartsOnActiveWorkWithoutTunnels(t *testing.T) {
 	}
 	if *waitStarts != 1 {
 		t.Fatalf("startAndWait calls = %d, want 1 (dead process + active work must restart)", *waitStarts)
+	}
+}
+
+// F722: движок удалён, а слоты в settings.json остались включены — сторож
+// не должен пытаться стартовать отсутствующий бинарь.
+func TestOperator_Reconcile_SkipsWhenNotInstalled(t *testing.T) {
+	op := newTestOperator(t, nil)
+	op.activeWorkFn = func() bool { return true }
+	waitStarts, plainStarts := seedStartSeam(op)
+	if err := os.Remove(op.binary); err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if *waitStarts+*plainStarts != 0 {
+		t.Fatalf("starts = %d, want 0 (sing-box not installed)", *waitStarts+*plainStarts)
 	}
 }
 
@@ -586,5 +605,45 @@ func TestOperator_Control_ResetsRestartBackoff(t *testing.T) {
 	}
 	if until := op.restartBackoff.SuppressedUntil(time.Now()); !until.IsZero() {
 		t.Fatalf("после ручного Start пауза авто-рестарта обязана сняться, until=%v", until)
+	}
+}
+
+// F656: строка «sing-box started» подавлена уровнем журнала — готовность по
+// ответу Clash API: прежний СБОЙ снимается, свежий процесс отмечается в
+// backoff. Строка ожидается — Clash не опрашивается (её ловит stderr).
+func TestOperator_ConfirmReadyByClash(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	defer ts.Close()
+	setup := func(t *testing.T, expected bool) *Operator {
+		op := newTestOperator(t, nil)
+		if err := os.WriteFile(filepath.Join(op.configPath, "00-base.json"),
+			[]byte(`{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9099"}}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		op.clash = NewClashClient(strings.TrimPrefix(ts.URL, "http://"))
+		op.proc.StartedLineExpected = func() bool { return expected }
+		op.setLastError("прежний СБОЙ")
+		return op
+	}
+
+	op := setup(t, false)
+	op.confirmReadyByClash(true)
+	// Ждём обе отметки: горутина ставит их по очереди.
+	deadline := time.Now().Add(3 * time.Second)
+	for (op.LastError() != "" || op.restartBackoff.LastStart().IsZero()) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if op.LastError() != "" {
+		t.Fatal("СБОЙ не снят по ответу Clash API")
+	}
+	if op.restartBackoff.LastStart().IsZero() {
+		t.Fatal("свежий процесс не отмечен в backoff")
+	}
+
+	op = setup(t, true)
+	op.confirmReadyByClash(true)
+	time.Sleep(200 * time.Millisecond)
+	if op.LastError() == "" {
+		t.Fatal("при ожидаемой строке готовность решает stderr, а не Clash")
 	}
 }

@@ -7,29 +7,57 @@
 // repolling. Read paths (Get / GetDetails / List / ResolveSystemName
 // / ListWAN / ListAll) answer purely from the cached snapshot.
 //
+// Имя ядра (ResolveSystemName / SystemNames / ListWAN / ListAll) — тоже
+// память, RCI по требованию нет (F570). Источники: таблица ndms.KernelName
+// (Wireguard, OpkgTun, Proxy, PPPoE, Bridge), `system_name` из хуков
+// (OnSystemName) и ОДИН пакетный резолвер `show interface system-name`
+// сразу после каждого свежего списка — только для id из этого ответа, чьё
+// имя ещё не известно.
+//
 // Two write APIs feed the map:
 //
 //   - Hook-side (called from events.Dispatcher): OnCreated /
 //     OnDestroyed / OnLayerChanged / OnIPChanged. Pure in-memory
-//     mutators (OnCreated does ONE GET for the just-created interface
-//     to get its initial snapshot — 404 impossible since the hook
-//     fired AFTER NDMS finished creating). No probes for absent names.
+//     mutators, no HTTP. Хуки существования карту не меняют: ставят метку
+//     существования и «грязно», только если хук расходится с картой;
+//     после пачки хуков диспетчер зовёт ReconcileDirty — ОДИН полный
+//     список, если грязно. Layer/ip-хуки правят поля известного id,
+//     неизвестный игнорируют. No point reads by name from hooks: by the
+//     time the hook is applied the name may already be gone, and NDMS
+//     logs E `unable to find` for it (F546).
 //
 //   - Command-side (called from internal/ndms/command/* and a few
 //     admin handlers after a successful POST to NDMS): Invalidate(name)
-//     and InvalidateAll(). These are now PROACTIVE-REFRESH: they
-//     immediately re-fetch from NDMS and update the map. Callers use
-//     them after a successful write so write→read consistency is
-//     preserved without waiting for the eventual hook.
+//     ставит метку «грязно» без RCI — следующий Snapshot читает ОДИН
+//     свежий список (F546); InvalidateAll() читает список сразу.
+//
+// Snapshot — записи и сырой JSON записей полного списка с возрастом:
+// читатели состояния и счётчиков берут его вместо чтения по имени (F546).
+//
+// Список — истина для карты: применённый ответ кладёт все свои записи и
+// удаляет всё, чего в нём нет (applyListLocked). Чтений по имени (`show interface name=X`,
+// `/show/rc/interface/X`) в пакете нет (F546, TestByNameReads_Absent).
+//
+// Кредиты своих хуков (credits, hookcredits.go, П21) — счётчики по имени:
+// created выдаёт вход ConfirmCreated при доказанном создании, destroyed —
+// ExpectRemoval до POST `no interface`, грань conf — ExpectConf до POST `up`.
+// Гасит их ОДИН раз, в порядке прихода, точка входа spool
+// (api.HookSink.Handle, ClaimOwn*): свой хук помечается Event.Own, и ни
+// диспетчер, ни оркестратор вердикт не пересчитывают (П22). Свой хук
+// существования стор не трогает вовсе: ни метки, ни «грязно», ни списка.
+// Карту при нашем снятии чистит только RemovalToken; единственный путь
+// `no interface` — command.deleteInterface.
 package query
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,38 +65,9 @@ import (
 
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
+	"github.com/hoaxisr/awg-manager/internal/netdev"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 )
-
-// unwrapShowInterface strips the {"show":{"interface":{…}}} envelope that
-// the JSON-payload form of /show/interface returns. The GET path form
-// returned the inner object directly; the POST form (which we use for any
-// name that may contain a slash — Vlan, AccessPoint, numbered ports) wraps
-// it. Callers receive the inner object so their existing decoders work
-// unchanged.
-//
-// Returns nil for an empty body or an absent "interface" field — both map
-// to the same "NDMS-side absence" semantics the previous GET-form
-// already encoded with an empty body.
-func unwrapShowInterface(raw []byte) ([]byte, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return nil, nil
-	}
-	var w struct {
-		Show struct {
-			Interface json.RawMessage `json:"interface"`
-		} `json:"show"`
-	}
-	if err := json.Unmarshal(trimmed, &w); err != nil {
-		return nil, fmt.Errorf("decode show.interface envelope: %w", err)
-	}
-	inner := bytes.TrimSpace(w.Show.Interface)
-	if len(inner) == 0 {
-		return nil, nil
-	}
-	return inner, nil
-}
 
 // looksLikeKernelIfname reports whether s is a syntactically valid Linux
 // network interface name. Linux kernel names use a constrained set
@@ -77,7 +76,7 @@ func unwrapShowInterface(raw []byte) ([]byte, error) {
 // contain upper-case letters and are rejected — they are not kernel device
 // names and using them for SO_BINDTODEVICE / curl --interface fails with
 // ENODEV. Used as the first-line filter in wireToInterface and as part of
-// the trust-cache check in ResolveSystemName.
+// the trust checks in systemNameLocked / trustedSystemName.
 func looksLikeKernelIfname(s string) bool {
 	if s == "" || len(s) > 15 {
 		return false
@@ -115,6 +114,10 @@ var kernelIfaceExists = func(name string) bool {
 type InterfaceStore struct {
 	getter Getter
 	log    Logger
+	// gate — барьер подмены устройства (D-N1): список ждёт, пока под записью
+	// OpkgTunN меняют устройство. Один на процесс (Deps.SwapGate); без него —
+	// свой экземпляр (тесты).
+	gate *netdev.SwapGate
 
 	// bootMu serialises the bootstrap *operation* so concurrent boots
 	// coalesce to ONE HTTP. booted is atomic because InvalidateAll
@@ -127,9 +130,76 @@ type InterfaceStore struct {
 	mu        sync.RWMutex
 	byID      map[string]*ndms.Interface
 	startedAt map[string]time.Time
-	// sys is a derived view: NDMSName → kernel-system-name. Built
-	// from byID on every mutation. Read paths take this under s.mu
-	// (RLock) — no separate lock.
+	// sysNames — имена ядра из хуков (OnSystemName) и от резолвера вслед за
+	// списком (refreshList), по NDMS-id. Отдельно от
+	// byID, потому что InvalidateAll и OnCreated строят записи заново из
+	// ответа RCI, а `interface-name` там не имя ядра (5.02.A.11: NDMS-id
+	// или подпись, `Bridge0` → `Home`). Жило бы в записи — терялось бы при
+	// каждом сбросе, и следующий список снова спрашивал бы все ~20
+	// интерфейсов (F473). Снимается forgetLocked и списком без этого id.
+	sysNames map[string]string
+
+	// seq — единые часы меток существования и «грязно»; под mu.
+	seq uint64
+	// exist — метка существования по id: последний хук ifcreated/ifdestroyed,
+	// наш forgetLocked или вход ConfirmCreated. В решении не участвует — только
+	// говорит, что ответ списка, начатого раньше метки, надо перечитать
+	// (contradictsLocked), и держит страж воскрешения (applyListLocked).
+	// Метки не новее начала применённого списка снимаются при его применении.
+	exist map[string]existMark
+
+	// raw — запись полного списка как есть (пиры, ключи, счётчики), по id;
+	// правило то же, что у byID.
+	raw map[string]json.RawMessage
+	// listedAt — когда применён последний успешный список.
+	listedAt time.Time
+	// dirtyAt — seq метки Invalidate; 0 — не грязно. Снимает её только
+	// список, начатый не раньше метки.
+	dirtyAt uint64
+	// hookDirtyAt — seq метки «грязно», поставленной хуком существования
+	// (П6′); 0 — нет. Её, и только её, обслуживает ReconcileDirty (П7): метку
+	// нашей записи (Invalidate) снимает freshen следующего читателя. Снимает
+	// список, начатый не раньше метки.
+	hookDirtyAt uint64
+	// flight — список в полёте (последний начатый), к нему присоединяется
+	// Snapshot с maxAge > 0.
+	flight *listFlight
+	// flights — счётчик начатых списков.
+	flights uint64
+	// applied — последний применённый ответ как есть (только чтение; nil — ни
+	// одного): ответ, начатый раньше него (no меньше), карту не трогает.
+	// Confirm* решают по нему, если свой ответ вытеснен (decideLocked, П12).
+	applied *listAnswer
+
+	// confirming — имена, ждущие ConfirmCreated (П23, M6′): FreeIndex их не
+	// выбирает — записи в ответе списка ещё может не быть. Ставит вход
+	// ConfirmCreated, снимает его выход, всегда.
+	confirming map[string]struct{}
+	// credits — непогашенные кредиты своих хуков по имени (П21,
+	// hookcredits.go); записи со всеми нулями нет.
+	credits map[string]hookCredit
+	// confAt — seq нашей грани conf (ExpectConf) по id: список, начатый
+	// раньше, слой conf записи не перетирает (applyListLocked). Снимается
+	// применением списка, начатого не раньше, отказом POST и forgetLocked.
+	confAt map[string]uint64
+	// createdBackoff — паузы между списками ConfirmCreated.
+	createdBackoff []time.Duration
+	// now — часы возраста списка действия (подменяются тестом).
+	now func() time.Time
+}
+
+// confirmCreatedBackoff — паузы между списками ConfirmCreated: не больше
+// 4 полных списков (~15 тиков ndm каждый) и ~2,5 с на всё. Под нагрузкой
+// NDMS кладёт созданную запись в список до ~1 с после ответа на создание
+// (стенд 5.01.C.6, F584).
+var confirmCreatedBackoff = []time.Duration{300 * time.Millisecond, 700 * time.Millisecond, 1500 * time.Millisecond}
+
+// listFlight — один запрос полного списка. err и готовность читаются после done.
+type listFlight struct {
+	no    uint64 // порядковый номер начала: применяется только не старше применённого
+	start uint64
+	done  chan struct{}
+	err   error
 }
 
 // NewInterfaceStore constructs a new InterfaceStore. Bootstrap is
@@ -139,11 +209,28 @@ func NewInterfaceStore(g Getter, log Logger) *InterfaceStore {
 		log = NopLogger()
 	}
 	return &InterfaceStore{
-		getter:    g,
-		log:       log,
-		byID:      make(map[string]*ndms.Interface),
-		startedAt: make(map[string]time.Time),
+		getter:     g,
+		log:        log,
+		gate:       &netdev.SwapGate{},
+		byID:       make(map[string]*ndms.Interface),
+		startedAt:  make(map[string]time.Time),
+		sysNames:   make(map[string]string),
+		exist:      make(map[string]existMark),
+		raw:        make(map[string]json.RawMessage),
+		confirming: make(map[string]struct{}),
+		credits:    make(map[string]hookCredit),
+		confAt:     make(map[string]uint64),
+
+		createdBackoff: confirmCreatedBackoff,
+		now:            time.Now,
 	}
+}
+
+// SetCreatedBackoff — паузы ConfirmCreated (для тестов других пакетов).
+func (s *InterfaceStore) SetCreatedBackoff(d ...time.Duration) {
+	s.mu.Lock()
+	s.createdBackoff = d
+	s.mu.Unlock()
 }
 
 // NewInterfaceStoreWithTTL exists for backwards-compatible test wiring;
@@ -171,28 +258,229 @@ func (s *InterfaceStore) ensureBootstrap(ctx context.Context) error {
 		return nil
 	}
 
-	raw, err := s.fetchListMap(ctx)
-	if err != nil {
+	if err := s.refreshAll(ctx); err != nil {
 		return fmt.Errorf("interface bootstrap: %w", err)
 	}
-	now := time.Now()
-	s.mu.Lock()
-	s.byID = make(map[string]*ndms.Interface, len(raw))
-	s.startedAt = make(map[string]time.Time, len(raw))
-	for id, iface := range raw {
-		cp := iface
-		s.byID[id] = &cp
-		// Restore startedAt from NDMS Uptime field for already-running
-		// interfaces. This survives daemon restart: real connection
-		// time is preserved (NDMS knows how long ago the interface
-		// came up).
-		if cp.Uptime > 0 && cp.ConfLayer == "running" {
-			s.startedAt[id] = now.Add(-time.Duration(cp.Uptime) * time.Second)
+	return nil
+}
+
+// refreshAll читает полный список и кладёт его в карту (applyListLocked).
+func (s *InterfaceStore) refreshAll(ctx context.Context) error {
+	_, err := s.refreshList(ctx, nil)
+	return err
+}
+
+// refreshList — refreshAll, возвращающий сам ответ NDMS: подтверждение
+// (Confirm) решает по ответу, а не по карте.
+//
+// fl == nil — свой запрос без присоединения (семантика Confirm: «список начат
+// после моего вызова»); fl — полёт, уже зарегистрированный Snapshot. Любой
+// запрос регистрируется как полёт, чтобы Snapshot мог к нему присоединиться.
+// Кладёт список в карту, снимает метку «грязно», если список начат не раньше
+// неё, и завершает полёт — после резолвера имён, чтобы присоединившиеся
+// видели то же, что и начавший.
+func (s *InterfaceStore) refreshList(ctx context.Context, fl *listFlight) (*listAnswer, error) {
+	if fl == nil {
+		s.mu.Lock()
+		fl = s.beginFlightLocked()
+		s.mu.Unlock()
+	}
+	recs, raw, err := s.fetchListMap(ctx)
+	var todo []string
+	if err == nil {
+		s.mu.Lock()
+		// Ответы приходят не по порядку: начатый раньше уже применённого старее
+		// его — карту, метку и возраст не трогает (ответ вызывающему — свой).
+		var appliedNo uint64
+		if s.applied != nil {
+			appliedNo = s.applied.no
 		}
+		if fl.no >= appliedNo {
+			s.applied = &listAnswer{recs: recs, start: fl.start, no: fl.no}
+			s.applyListLocked(recs, raw, fl.start)
+			// Метки не новее начала применённого списка больше не читаются:
+			// решает самый новый применённый список (srcLocked, П12), он начат
+			// не раньше этого, а противоречие и страж воскрешения смотрят
+			// только на метки новее своего начала.
+			for id, m := range s.exist {
+				if m.seq <= fl.start {
+					delete(s.exist, id)
+				}
+			}
+			for id, seq := range s.confAt {
+				if seq <= fl.start {
+					delete(s.confAt, id)
+				}
+			}
+			if s.dirtyAt <= fl.start {
+				s.dirtyAt = 0
+			}
+			if s.hookDirtyAt <= fl.start {
+				s.hookDirtyAt = 0
+			}
+			s.listedAt = time.Now()
+			todo = s.unnamedLocked(recs, fl.start)
+		}
+		s.mu.Unlock()
+		s.booted.Store(true)
+		// Единственный вызов резолвера (F570): только id из ответа, который пришёл
+		// миллисекунды назад. По требованию имя не спрашивается никогда — к тому
+		// моменту запись могли снять, и NDMS пишет E «unable to find».
+		s.resolveSystemNames(ctx, todo)
+	}
+	s.mu.Lock()
+	fl.err = err
+	if s.flight == fl {
+		s.flight = nil
 	}
 	s.mu.Unlock()
-	s.booted.Store(true)
-	return nil
+	close(fl.done)
+	if err != nil {
+		return nil, err
+	}
+	return &listAnswer{recs: recs, start: fl.start, no: fl.no}, nil
+}
+
+// listAnswer — ответ полного списка: записи (только чтение), start — seq ДО
+// запроса, no — номер его полёта.
+type listAnswer struct {
+	recs      map[string]ndms.Interface
+	start, no uint64
+}
+
+// beginFlightLocked регистрирует новый полёт; start — seq ДО запроса: метки,
+// поставленные, пока список в полёте, получают seq > start.
+func (s *InterfaceStore) beginFlightLocked() *listFlight {
+	s.flights++
+	fl := &listFlight{no: s.flights, start: s.seq, done: make(chan struct{})}
+	s.flight = fl
+	return fl
+}
+
+// unnamedLocked — id свежего ответа, имени ядра которых не знает никто:
+// класс не из таблицы ndms.KernelName, ни хук, ни прежний резолвер его не
+// назвали, `interface-name` списка не годится. Порты коммутатора не
+// спрашиваются: у них нет своего устройства ядра (см. ListAll). Снятые
+// (метка gone новее начала списка start), пока список был в полёте, — тоже:
+// спросить их значит получить E (П6; по устаревшему хуку имя лишь
+// откладывается до следующего списка).
+func (s *InterfaceStore) unnamedLocked(raw map[string]ndms.Interface, start uint64) []string {
+	var todo []string
+	for id, rec := range raw {
+		if s.goneSinceLocked(id, start) || !s.unnamedIDLocked(id, rec.Type) {
+			continue
+		}
+		todo = append(todo, id)
+	}
+	sort.Strings(todo)
+	return todo
+}
+
+// unnamedIDLocked — имени ядра записи id не знает никто, хотя оно у неё есть:
+// не порт, класс не из таблицы ndms.KernelName, ни хук, ни резолвер не
+// ответили (пустой ответ резолвера — тоже ответ), `interface-name` не годится.
+func (s *InterfaceStore) unnamedIDLocked(id, typ string) bool {
+	if typ == "Port" {
+		return false
+	}
+	if _, ok := ndms.KernelName(id); ok {
+		return false
+	}
+	if _, ok := s.sysNames[id]; ok {
+		return false
+	}
+	iface, ok := s.byID[id]
+	return ok && !trustedSystemName(id, iface.SystemName)
+}
+
+// UnnamedIDs — записи NDMS, чьё имя ядра сейчас не известно (резолвер не
+// ответил: сбой транспорта, ответ не разобран). ListAll такие пропускает
+// молча; кому пропуск небезопасен (отметка стороннего интерфейса, F514),
+// отказывает по непустому ответу. RCI — никогда.
+func (s *InterfaceStore) UnnamedIDs(ctx context.Context) ([]string, error) {
+	if err := s.ensureBootstrap(ctx); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for id, iface := range s.byID {
+		if s.unnamedIDLocked(id, iface.Type) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// applyListLocked кладёт свежий список в карту (П1): каждая запись — целиком,
+// всё, чего в списке нет, удаляется. Исключения два. Страж воскрешения: id,
+// которого нет в карте и который снят меткой новее начала списка start, не
+// кладётся. Срабатывает по нашему `no interface` (forgetLocked, цель: свой
+// ifcreated метку не пишет, П22, так что gone от forgetLocked держится до
+// следующего чужого ifcreated) и по устаревшему ifdestroyed чужого X, которого
+// карта ещё не знает: тогда X не в карте до следующего ifcreated/списка;
+// команды решают по ответу, не по карте. Известный id страж не трогает: хук —
+// подсказка, карта — по списку. Слой conf записи с нашей гранью новее start
+// (confAt) остаётся нашим: список прочитан до команды.
+func (s *InterfaceStore) applyListLocked(raw map[string]ndms.Interface, wire map[string]json.RawMessage, start uint64) {
+	now := time.Now()
+	for id, rec := range raw {
+		old, known := s.byID[id]
+		if !known && s.goneSinceLocked(id, start) {
+			continue
+		}
+		cp := rec
+		if known && s.confAt[id] > start {
+			cp.ConfLayer = old.ConfLayer
+		}
+		s.byID[id] = &cp
+		s.raw[id] = wire[id]
+		// Часы аптайма ведёт демон; для уже поднятого интерфейса без них
+		// восстанавливаем старт из Uptime NDMS — переживает рестарт демона.
+		if cp.ConfLayer == "running" {
+			if t, ok := s.startedAt[id]; !ok || t.IsZero() {
+				if cp.Uptime > 0 {
+					s.startedAt[id] = now.Add(-time.Duration(cp.Uptime) * time.Second)
+				}
+			}
+		} else {
+			delete(s.startedAt, id)
+		}
+	}
+	for id := range s.byID {
+		if _, ok := raw[id]; ok {
+			continue
+		}
+		delete(s.byID, id)
+		delete(s.startedAt, id)
+		delete(s.raw, id)
+	}
+	// Имена — и тех id, что в карту так и не попали (имя пришло хуком);
+	// имя id с меткой новее списка ждёт следующего.
+	for id := range s.sysNames {
+		if _, ok := raw[id]; !ok && s.exist[id].seq <= start {
+			delete(s.sysNames, id)
+		}
+	}
+}
+
+// goneSinceLocked — id снят меткой существования новее start.
+func (s *InterfaceStore) goneSinceLocked(id string, start uint64) bool {
+	m, ok := s.exist[id]
+	return ok && m.gone && m.seq > start
+}
+
+// existMark — seq метки существования и её знак (gone — снят).
+type existMark struct {
+	seq  uint64
+	gone bool
+}
+
+// markExistLocked ставит метку существования id сейчас; «грязно» не ставит.
+func (s *InterfaceStore) markExistLocked(id string, gone bool) {
+	s.seq++
+	s.exist[id] = existMark{seq: s.seq, gone: gone}
 }
 
 // === Read paths ===
@@ -201,7 +489,7 @@ func (s *InterfaceStore) ensureBootstrap(ctx context.Context) error {
 // Never issues HTTP for absent names — the map is the authoritative
 // source of "what exists". Bootstrap (one HTTP) runs on first call.
 func (s *InterfaceStore) Get(ctx context.Context, name string) (*ndms.Interface, error) {
-	if err := s.ensureBootstrap(ctx); err != nil {
+	if err := s.freshenIfDirty(ctx); err != nil {
 		return nil, err
 	}
 	s.mu.RLock()
@@ -236,85 +524,12 @@ func (s *InterfaceStore) GetProxy(ctx context.Context, name string) (*ndms.Proxy
 	}, nil
 }
 
-// FetchSummary returns InterfaceDetails by issuing a fresh batch-POST
-// show.interface query on every call — no cache read. Used by
-// state.Manager for kernel-tunnel state determination because NDMS
-// `iflayerchanged link=running` hooks are not reliable for OpkgTun:
-// the cache that GetDetails consults can stay frozen with Link != "up"
-// after `ip link set up`, producing a permanent StateStarting for a
-// working tunnel. The direct query sees the layer truth NDMS reports
-// right now.
-//
-// Uptime is consulted from the same daemon-tracked startedAt map as
-// GetDetails (cache helper, not authoritative).
-func (s *InterfaceStore) FetchSummary(ctx context.Context, name string) (*ndms.InterfaceDetails, error) {
-	if name == "" {
-		return nil, nil
-	}
-	// Batch POST вместо прямого GET /summary: NDMS обрабатывает GET с
-	// фиксированной стоимостью ~115мс независимо от размера ответа, POST
-	// ~10x быстрее и коалесцируется батчером (замеры в спеке
-	// 2026-06-10-getstate-cache-rci-post-design.md). Свежесть сохранена:
-	// это по-прежнему прямой запрос к NDMS на каждый вызов, мимо кеша
-	// снапшота.
-	raw, err := s.getter.Post(ctx, transport.ShowInterface(name, nil))
-	if err != nil {
-		return nil, err
-	}
-	inner, err := unwrapShowInterface(raw)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		State     string `json:"state"`
-		Link      string `json:"link"`
-		ConfLayer string `json:"conf-layer"`
-		Summary   struct {
-			Layer struct {
-				Conf string `json:"conf"`
-				Link string `json:"link"`
-				Ctrl string `json:"ctrl"`
-			} `json:"layer"`
-		} `json:"summary"`
-	}
-	if len(inner) > 0 {
-		if err := json.Unmarshal(inner, &resp); err != nil {
-			return nil, err
-		}
-	}
-
-	d := &ndms.InterfaceDetails{
-		ConfLayer: resp.Summary.Layer.Conf,
-		Link:      layerLevelToUpDown(resp.Summary.Layer.Link),
-		State:     layerLevelToUpDown(resp.Summary.Layer.Ctrl),
-	}
-	if resp.Summary.Layer.Conf == "" {
-		// Полный объект без summary-подсекции (или status-error на
-		// отсутствующий интерфейс): берём верхнеуровневые поля.
-		d.ConfLayer = resp.ConfLayer
-		d.Link = resp.Link
-		d.State = resp.State
-	}
-	if d.ConfLayer == "" && d.Link == "" && d.State == "" {
-		// Ни данных, ни ошибки транспорта — интерфейса нет. nil details
-		// = showInterfaceFailed в state-матрице (паритет с прежним 404).
-		return nil, nil
-	}
-
-	s.mu.RLock()
-	if t, ok := s.startedAt[name]; ok && !t.IsZero() {
-		d.Uptime = int(time.Since(t).Seconds())
-	}
-	s.mu.RUnlock()
-	return d, nil
-}
-
 // GetDetails returns InterfaceDetails synthesised from the cached
 // snapshot. Returns (nil, nil) when the interface is absent. Uptime is
 // computed live from the daemon-tracked startedAt timestamp — survives
 // daemon restarts (bootstrap re-derives startedAt from NDMS Uptime).
 func (s *InterfaceStore) GetDetails(ctx context.Context, name string) (*ndms.InterfaceDetails, error) {
-	if err := s.ensureBootstrap(ctx); err != nil {
+	if err := s.freshenIfDirty(ctx); err != nil {
 		return nil, err
 	}
 	s.mu.RLock()
@@ -323,121 +538,344 @@ func (s *InterfaceStore) GetDetails(ctx context.Context, name string) (*ndms.Int
 	if !ok {
 		return nil, nil
 	}
+	return detailsOf(iface, s.startedAt[name]), nil
+}
+
+// detailsOf — InterfaceDetails записи; Uptime — от часов демона started.
+func detailsOf(iface *ndms.Interface, started time.Time) *ndms.InterfaceDetails {
 	d := &ndms.InterfaceDetails{
 		State:     iface.State,
 		Link:      iface.Link,
 		Connected: iface.Connected == "yes",
 		ConfLayer: iface.ConfLayer,
 	}
-	if t, ok := s.startedAt[name]; ok && !t.IsZero() {
-		d.Uptime = int(time.Since(t).Seconds())
+	if !started.IsZero() {
+		d.Uptime = int(time.Since(started).Seconds())
 	}
-	return d, nil
+	return d
 }
 
-// HasIPv6Global reports whether the named interface has a global IPv6
-// address. We don't carry the IPv6 addresses array in our cached
-// Interface struct, so this still falls through to a single
-// /show/interface/<name> probe — but ONLY when the interface exists
-// in the map. Absent names short-circuit to false without HTTP, which
-// is the entire reason this function exists in the first place (no
-// 404 spam in router syslog).
-func (s *InterfaceStore) HasIPv6Global(ctx context.Context, name string) bool {
-	if err := s.ensureBootstrap(ctx); err != nil {
-		return false
+// Snapshot — записи и сырой JSON записей из последнего полного списка плюс
+// правки хуков поверх записей. Неизменяем после выдачи.
+type Snapshot struct {
+	recs     map[string]ndms.Interface  // копии из byID (хуки применены)
+	raw      map[string]json.RawMessage // запись списка как есть (пиры, ключи, счётчики)
+	started  map[string]time.Time       // часы аптайма демона на момент снимка
+	ListedAt time.Time                  // когда пришёл список
+}
+
+// Record — копия записи name; false — записи в снимке нет.
+func (s *Snapshot) Record(name string) (ndms.Interface, bool) {
+	rec, ok := s.recs[name]
+	return rec, ok
+}
+
+// Records — копии всех записей снимка; порядок не определён.
+func (s *Snapshot) Records() []ndms.Interface {
+	out := make([]ndms.Interface, 0, len(s.recs))
+	for _, rec := range s.recs {
+		out = append(out, rec)
+	}
+	return out
+}
+
+// Raw — запись name из ответа списка как есть; false — её нет.
+func (s *Snapshot) Raw(name string) (json.RawMessage, bool) {
+	raw, ok := s.raw[name]
+	return raw, ok && len(raw) > 0
+}
+
+// Details — то же, что GetDetails, по записи снимка; nil — записи нет.
+func (s *Snapshot) Details(name string) *ndms.InterfaceDetails {
+	rec, ok := s.recs[name]
+	if !ok {
+		return nil
+	}
+	return detailsOf(&rec, s.started[name])
+}
+
+// SnapshotRecent — возраст, до которого читатели «для показа и состояния»
+// довольствуются прочитанным: равен stateCacheTTL сервиса туннелей (2 с).
+// SnapshotLive — только что прочитанный список (пробы оркестратора).
+const (
+	SnapshotRecent = 2 * time.Second
+	SnapshotLive   = 0
+)
+
+// SnapshotBackground — допуск возраста для фоновых поллеров в простое (R36):
+// шаг простоя поллеров 60 с (+ дрожание тикера), и два поллера со сдвигом
+// делят один список в минуту вместо своего на тик.
+const SnapshotBackground = 65 * time.Second
+
+type snapshotBackgroundKey struct{}
+
+// WithSnapshotBackground — ctx фонового тика, когда панель не открыта ни у
+// кого (решение владельца R36): чтения «не старше SnapshotRecent» под этим
+// ctx принимают память до SnapshotBackground. Метка «грязно» (наша запись)
+// по-прежнему даёт свежий список; SnapshotLive/Confirm допуском не
+// расширяются — решения о мутациях по нему не принимаются.
+func WithSnapshotBackground(ctx context.Context) context.Context {
+	return context.WithValue(ctx, snapshotBackgroundKey{}, true)
+}
+
+// Snapshot — снимок не старше maxAge. Правила:
+//  1. bootstrap, если карты ещё нет;
+//  2. не грязно и список моложе maxAge → память, 0 RCI;
+//  3. иначе — список; при maxAge > 0 вызывающий присоединяется к списку
+//     в полёте, если тот начат НЕ РАНЬШЕ последней метки Invalidate
+//     (ответ, начатый до нашей записи, не доказывает её результат);
+//     при maxAge == 0 — всегда свой список (как Confirm).
+//
+// Список не прочитан — ошибка; по имени не спрашиваем (решение 4, F546).
+// Снимок — не доказательство для мутаций: валюта мутаций — Confirmed.
+func (s *InterfaceStore) Snapshot(ctx context.Context, maxAge time.Duration) (*Snapshot, error) {
+	if err := s.freshen(ctx, maxAge); err != nil {
+		return nil, err
 	}
 	s.mu.RLock()
-	_, ok := s.byID[name]
+	defer s.mu.RUnlock()
+	return s.snapshotLocked(), nil
+}
+
+// freshen — правила Snapshot без копии карты: после успешного возврата
+// память не старше maxAge и не грязна (с точностью до записей после вызова).
+//
+// Присоединившийся к чужому полёту не наследует отмену чужого ctx: ведущий —
+// HTTP-запрос панели, вкладку закрыли, его ctx отменён; у присоединившегося
+// ctx жив — он читает свой список, а не отвечает «не прочитано».
+func (s *InterfaceStore) freshen(ctx context.Context, maxAge time.Duration) error {
+	if err := s.ensureBootstrap(ctx); err != nil {
+		return err
+	}
+	if maxAge > 0 && maxAge < SnapshotBackground && ctx.Value(snapshotBackgroundKey{}) != nil {
+		maxAge = SnapshotBackground
+	}
+	s.mu.Lock()
+	for maxAge > 0 {
+		if s.dirtyAt == 0 && time.Since(s.listedAt) < maxAge {
+			s.mu.Unlock()
+			return nil
+		}
+		fl := s.flight
+		if fl == nil || fl.start < s.dirtyAt {
+			break
+		}
+		s.mu.Unlock()
+		s.log.Debugf("interface snapshot: joined list in flight")
+		select {
+		case <-fl.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if fl.err == nil {
+			return nil
+		}
+		if !isCtxErr(fl.err) || ctx.Err() != nil {
+			return fl.err
+		}
+		// Ведущего отменили: заново под mu — свежий снимок или полёт, начатый
+		// другим присоединившимся; иначе полёт начинает этот (один на всех).
+		s.mu.Lock()
+	}
+	fl := s.beginFlightLocked()
+	s.mu.Unlock()
+	_, err := s.refreshList(ctx, fl)
+	return err
+}
+
+// isCtxErr — ошибка вызвана отменой или дедлайном ctx.
+func isCtxErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// freshenIfDirty — перед чтением памяти: после нашей записи (метка
+// Invalidate) — один свежий список (или присоединение к полёту), иначе поля,
+// которых хуки не несут (Description, Mask, MTU, SecurityLevel), и link
+// OpkgTun (#328) оставались бы прежними. Сбой списка — Warn и прежняя память,
+// как у прежнего Invalidate с точечным чтением.
+func (s *InterfaceStore) freshenIfDirty(ctx context.Context) error {
+	if err := s.ensureBootstrap(ctx); err != nil {
+		return err
+	}
+	s.mu.RLock()
+	dirty := s.dirtyAt != 0
 	s.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	raw, err := s.getter.Post(ctx, transport.ShowInterface(name, nil))
-	if err != nil {
-		return false
-	}
-	inner, err := unwrapShowInterface(raw)
-	if err != nil || len(inner) == 0 {
-		return false
-	}
-	var probe struct {
-		IPv6 struct {
-			Addresses []struct {
-				Global bool `json:"global"`
-			} `json:"addresses"`
-		} `json:"ipv6"`
-	}
-	if err := json.Unmarshal(inner, &probe); err != nil {
-		return false
-	}
-	for _, a := range probe.IPv6.Addresses {
-		if a.Global {
-			return true
+	if dirty {
+		if err := s.freshen(ctx, SnapshotRecent); err != nil {
+			s.log.Warnf("interface list after write: %v", err)
 		}
 	}
-	return false
+	return nil
+}
+
+// snapshotLocked копирует карту в неизменяемый снимок (под mu, чтение).
+func (s *InterfaceStore) snapshotLocked() *Snapshot {
+	snap := &Snapshot{
+		recs:     make(map[string]ndms.Interface, len(s.byID)),
+		raw:      make(map[string]json.RawMessage, len(s.raw)),
+		started:  make(map[string]time.Time, len(s.startedAt)),
+		ListedAt: s.listedAt,
+	}
+	for id, rec := range s.byID {
+		snap.recs[id] = *rec
+	}
+	for id, raw := range s.raw {
+		snap.raw[id] = raw
+	}
+	for id, t := range s.startedAt {
+		snap.started[id] = t
+	}
+	return snap
+}
+
+// DetailsRecent — Details(name) по памяти не старше SnapshotRecent;
+// (nil, nil) — записи нет (запроса по имени нет вовсе).
+func (s *InterfaceStore) DetailsRecent(ctx context.Context, name string) (*ndms.InterfaceDetails, error) {
+	return s.detailsAged(ctx, name, SnapshotRecent)
+}
+
+// DetailsLive — Details(name) из только что прочитанного списка.
+func (s *InterfaceStore) DetailsLive(ctx context.Context, name string) (*ndms.InterfaceDetails, error) {
+	return s.detailsAged(ctx, name, SnapshotLive)
+}
+
+// detailsAged — одна запись под RLock после freshen, без копии всей карты.
+func (s *InterfaceStore) detailsAged(ctx context.Context, name string, maxAge time.Duration) (*ndms.InterfaceDetails, error) {
+	if err := s.freshen(ctx, maxAge); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	iface, ok := s.byID[name]
+	if !ok {
+		return nil, nil
+	}
+	return detailsOf(iface, s.startedAt[name]), nil
 }
 
 // ResolveSystemName returns the kernel interface name (e.g. "nwg0")
-// for an NDMS id (e.g. "Wireguard0"). Reads from the cached snapshot
-// when possible — no HTTP on the hot path after first resolution.
+// for an NDMS id (e.g. "Wireguard0"). Чтение памяти, RCI — никогда (F570):
+// запись могли снять после последнего списка, ifdestroyed доезжает секундами
+// позже (F571), и вопрос по имени дал бы E «unable to find» в журнале ndm.
 //
-// NDMS list response (`/show/interface/`) populates the
-// `interface-name` field for each entry, but the value is unreliable:
-// for Wireguard system tunnels (and likely other types) NDMS echoes
-// the NDMS id back instead of the kernel name. Verified against
-// production: list-response says `interface-name: "Wireguard0"`,
-// per-name detail says the same, but `/show/interface/system-name?
-// name=Wireguard0` returns the kernel name `"nwg0"`. The resolver is
-// the only authoritative source.
+// NDMS list response (`/show/interface/`) populates the `interface-name`
+// field for each entry, but the value is unreliable: for Wireguard system
+// tunnels NDMS echoes the NDMS id back instead of the kernel name, on
+// 5.02.A.11 it can be a label (`Bridge0` → `Home`, F473). Поэтому источники
+// идут по порядку (systemNameLocked):
+//   - ndms.KernelName — класс, у которого имя ядра задано номером записи
+//     (Wireguard, OpkgTun, Proxy, PPPoE, Bridge); только для записи из кэша;
+//   - sysNames — имя из хука NDMS (`system_name`, OnSystemName) или от
+//     резолвера, который спрашивается один раз вслед за свежим списком
+//     (refreshList → resolveSystemNames);
+//   - `interface-name` списка, если ему можно верить (trustedSystemName).
 //
-// We treat the cached SystemName as garbage when ANY of these hold:
-//   - empty
-//   - equals the NDMS id (NDMS echoed our input back)
-//   - fails the syntactic kernel-name shape check (covers logical NDMS
-//     labels like "ISP" that NDMS occasionally writes into the
-//     `interface-name` field of physical ports)
-//   - passes the shape check but no such device exists in /sys/class/net
-//
-// Garbage triggers a one-shot resolver probe, memoised on the cached
-// entry. The resolver does not 404 on missing names (returns an empty
-// string), so no router-syslog noise is added.
+// Пусто — записи нет в кэше или её имени не знает никто.
 func (s *InterfaceStore) ResolveSystemName(ctx context.Context, ndmsName string) string {
-	if ndmsName == "" {
-		return ""
-	}
-	if err := s.ensureBootstrap(ctx); err != nil {
+	if ndmsName == "" || s.ensureBootstrap(ctx) != nil {
 		return ""
 	}
 	s.mu.RLock()
-	var sysName string
-	if iface, ok := s.byID[ndmsName]; ok {
-		sysName = iface.SystemName
-	}
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
+	return s.systemNameLocked(ndmsName)
+}
 
-	// Trustworthy cached value: non-empty, distinct from NDMS id, looks
-	// like a kernel name, AND exists in the running kernel. The last
-	// check defends against firmware quirks where the parser filter has
-	// already nominally accepted a value but the device is missing
-	// (hotplug races, label-typed values that happen to be lowercase).
-	if sysName != "" && sysName != ndmsName &&
-		looksLikeKernelIfname(sysName) &&
-		kernelIfaceExists(sysName) {
-		return sysName
+// systemNameLocked — имя ядра из памяти, см. ResolveSystemName.
+//
+// Для класса из таблицы живость устройства (/sys/class/net) не проверяется:
+// прежний резолвер отвечал именем записи и при опущенном устройстве (ppp0
+// лежащего PPPoE), и вызывающие (правило MASQUERADE на WAN, привязка
+// sing-box) на этом стоят. Имя хука/резолвера — тоже без проверки: оно
+// получено от NDMS для этого id.
+func (s *InterfaceStore) systemNameLocked(id string) string {
+	iface, known := s.byID[id]
+	if name, ok := ndms.KernelName(id); ok {
+		if !known {
+			return ""
+		}
+		return name
 	}
+	if name := s.sysNames[id]; name != id && looksLikeKernelIfname(name) {
+		return name
+	}
+	if known && trustedSystemName(id, iface.SystemName) {
+		return iface.SystemName
+	}
+	return ""
+}
 
-	// Fallback: dedicated NDMS resolver endpoint.
-	resolved := s.fetchSystemName(ctx, ndmsName)
-	if resolved == "" {
-		return ""
-	}
+// rememberSystemName запоминает ответ резолвера только для интерфейса, который
+// есть в сторе: ifdestroyed между запросом и ответом резолвера иначе оставил
+// бы имя удалённого интерфейса. Пустой ответ тоже запоминается — следующий
+// список этот id не переспрашивает.
+func (s *InterfaceStore) rememberSystemName(ndmsName, resolved string) {
 	s.mu.Lock()
 	if iface, ok := s.byID[ndmsName]; ok {
-		iface.SystemName = resolved
+		s.sysNames[ndmsName] = resolved
+		if resolved != "" {
+			iface.SystemName = resolved
+		}
 	}
 	s.mu.Unlock()
-	return resolved
+}
+
+// trustedSystemName: non-empty, distinct from NDMS id, looks like a kernel
+// name, AND exists in the running kernel. The last check defends against
+// firmware quirks where the parser filter has already nominally accepted a
+// value but the device is missing (hotplug races, label-typed values that
+// happen to be lowercase).
+func trustedSystemName(ndmsName, sysName string) bool {
+	return sysName != "" && sysName != ndmsName &&
+		looksLikeKernelIfname(sysName) &&
+		kernelIfaceExists(sysName)
+}
+
+// resolveSystemNames спрашивает имена ядра для todo ОДНИМ пакетным POST (по
+// одному — стенд: 22 запроса, ~0.6 с); один id — одиночной формой. Зовётся
+// только из refreshList (TestResolver_OnlyAfterList). Сбой транспорта —
+// ничего не запомнено, спросит следующий список.
+func (s *InterfaceStore) resolveSystemNames(ctx context.Context, todo []string) {
+	switch len(todo) {
+	case 0:
+		return
+	case 1:
+		if name, err := s.fetchSystemName(ctx, todo[0]); err == nil {
+			s.rememberSystemName(todo[0], name)
+		}
+		return
+	}
+	batch := make([]any, len(todo))
+	for i, id := range todo {
+		batch[i] = transport.ShowQuery([]string{"interface", "system-name"}, map[string]any{"name": id})
+	}
+	raw, err := s.getter.Post(ctx, batch)
+	if err != nil {
+		return
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil || len(items) != len(todo) {
+		return
+	}
+	for i, item := range items {
+		s.rememberSystemName(todo[i], parseSystemName(item))
+	}
+}
+
+// SystemNames — имена ядра для ids (id → имя; неизвестных в карте нет). То же,
+// что ResolveSystemName по каждому id, под одним замком; RCI — никогда.
+func (s *InterfaceStore) SystemNames(ctx context.Context, ids []string) map[string]string {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 || s.ensureBootstrap(ctx) != nil {
+		return out
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, id := range ids {
+		if name := s.systemNameLocked(id); name != "" {
+			out[id] = name
+		}
+	}
+	return out
 }
 
 // fetchSystemName resolves an NDMS interface id to its kernel name via
@@ -447,8 +885,7 @@ func (s *InterfaceStore) ResolveSystemName(ctx context.Context, ndmsName string)
 // slashes inside <X> as URL path separators, so names like
 // "WifiMaster0/WifiStation0" or "GigabitEthernet0/Vlan2" came back with
 // 'Core::Configurator: not found: "show/interface/system-name?name=..."'
-// in the router log. Same gotcha that fetchOne already solves by using
-// POST — see the comment block on that function. The POST form carries
+// in the router log. The POST form carries
 // the name inside the JSON body where the RCI parser handles it
 // regardless of contained slashes.
 //
@@ -458,15 +895,20 @@ func (s *InterfaceStore) ResolveSystemName(ctx context.Context, ndmsName string)
 //
 // Older firmware also produced bare "nwg0" or {"result":"nwg0"} for the
 // GET form — kept as fallbacks for safety.
-func (s *InterfaceStore) fetchSystemName(ctx context.Context, ndmsName string) string {
+func (s *InterfaceStore) fetchSystemName(ctx context.Context, ndmsName string) (string, error) {
 	payload := transport.ShowQuery(
 		[]string{"interface", "system-name"},
 		map[string]any{"name": ndmsName},
 	)
 	raw, err := s.getter.Post(ctx, payload)
 	if err != nil {
-		return ""
+		return "", err
 	}
+	return parseSystemName(raw), nil
+}
+
+// parseSystemName разбирает ответ резолвера (одиночный или элемент пакета).
+func parseSystemName(raw []byte) string {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return ""
@@ -523,7 +965,7 @@ func (s *InterfaceStore) fetchSystemName(ctx context.Context, ndmsName string) s
 // allocated; callers may mutate it freely. Order is unstable (map
 // iteration order); callers that need ordering must sort.
 func (s *InterfaceStore) List(ctx context.Context) ([]ndms.Interface, error) {
-	if err := s.ensureBootstrap(ctx); err != nil {
+	if err := s.freshenIfDirty(ctx); err != nil {
 		return nil, err
 	}
 	s.mu.RLock()
@@ -557,9 +999,8 @@ func (s *InterfaceStore) ListLANBridges(ctx context.Context) ([]LANBridge, error
 
 // ListWAN returns public-facing WAN interfaces filtered for ISP use.
 // Mirrors the legacy filter logic; reads everything from the cached
-// snapshot. Uses ResolveSystemName for kernel-name lookup so the
-// fallback resolver kicks in when `interface-name` from the list
-// response is unreliable (see ResolveSystemName for details).
+// snapshot. Kernel names come from ResolveSystemName — memory only, the
+// resolver ran right after the list (see ResolveSystemName for details).
 func (s *InterfaceStore) ListWAN(ctx context.Context) ([]wan.Interface, error) {
 	all, err := s.List(ctx)
 	if err != nil {
@@ -593,19 +1034,35 @@ func (s *InterfaceStore) ListWAN(ctx context.Context) ([]wan.Interface, error) {
 // Sorted by Name for deterministic UI rendering. Uses
 // ResolveSystemName for kernel-name lookup (see notes on ListWAN).
 //
+// Порты коммутатора (type Port) пропускаются: это не отдельное устройство
+// ядра — NDMS резолвит их в имя родителя (`GigabitEthernet1/0` → eth3, как
+// сам `GigabitEthernet1`), security-level у них нет.
+//
 // Deduplicates by kernel Name: if multiple NDMS entries resolve to the
 // same kernel ifname (e.g. a stale stub from a failed bootstrap fetch
-// coexists with the real entry), the Up=true entry wins; on a tie the
-// first seen is kept. Collisions are warn-logged with both NDMS IDs.
+// coexists with the real entry, or WifiMaster0 and its AccessPoint0 both
+// map to ra0), the winner is chosen by preferCandidate — the same one on
+// every call. До F475 ничья решалась порядком обхода map, и у `eth3`
+// security-level прыгал между public WAN и пустым портом — WAN случайно
+// пропадал из списков привязки sing-box (они берут только public).
 func (s *InterfaceStore) ListAll(ctx context.Context) ([]ndms.AllInterface, error) {
-	all, err := s.List(ctx)
+	listed, err := s.List(ctx)
 	if err != nil {
 		return nil, err
+	}
+	all := listed[:0]
+	for _, iface := range listed {
+		if iface.Type != "Port" {
+			all = append(all, iface)
+		}
 	}
 	seen := make(map[string]ndms.AllInterface, len(all))
 	winnerID := make(map[string]string, len(all))
 	for _, iface := range all {
 		kernelName := s.ResolveSystemName(ctx, iface.ID)
+		// Запасной путь оставлен намеренно: эхо метки (`Home`,
+		// `GigabitEthernet0`) wireToInterface уже вычистил, сюда доходит
+		// имя ядра отсутствующего сейчас устройства (выдернутый usb0).
 		if kernelName == "" {
 			kernelName = iface.SystemName
 		}
@@ -630,7 +1087,7 @@ func (s *InterfaceStore) ListAll(ctx context.Context) ([]ndms.AllInterface, erro
 		}
 		prevWinner := winnerID[kernelName]
 		kept, dropped := prevWinner, iface.ID
-		if candidate.Up && !existing.Up {
+		if preferCandidate(candidate, iface.ID, existing, prevWinner) {
 			seen[kernelName] = candidate
 			winnerID[kernelName] = iface.ID
 			kept, dropped = iface.ID, prevWinner
@@ -645,65 +1102,88 @@ func (s *InterfaceStore) ListAll(ctx context.Context) ([]ndms.AllInterface, erro
 	return out, nil
 }
 
-// === Hook-side write API (called from events.Dispatcher) ===
-
-// OnCreated handles ifcreated NDMS events. Issues ONE RCI POST for the
-// just-created interface to capture its initial snapshot.
-//
-// On fetch failure we do NOT overwrite an existing entry with a stub —
-// bootstrap already populated byID from /show/interface/ at startup, and
-// transient per-interface failures (e.g. an RCI quirk we haven't worked
-// around yet) must not erase that data. The previous behaviour clobbered
-// good bootstrap records and was the root cause of the v2.10.0 regression
-// where slashed-name interfaces vanished from the WAN dropdown — fetchOne
-// failed with 404, and the stub overwrote a perfectly valid bootstrap
-// record. The stub fallback is kept only for the truly-absent case
-// (no prior record) so OnLayerChanged / OnIPChanged events have
-// somewhere to land.
-func (s *InterfaceStore) OnCreated(ctx context.Context, id string) {
-	if err := s.ensureBootstrap(ctx); err != nil {
-		s.log.Warnf("OnCreated %s: bootstrap failed: %v", id, err)
-		return
+// preferCandidate — побеждает ли кандидат (id) текущего победителя (winID)
+// за одно имя ядра: поднятый, затем с security-level, затем меньший id.
+func preferCandidate(c ndms.AllInterface, id string, win ndms.AllInterface, winID string) bool {
+	if c.Up != win.Up {
+		return c.Up
 	}
-	iface, err := s.fetchOne(ctx, id)
-	if err != nil {
-		s.mu.Lock()
-		_, hadPrior := s.byID[id]
-		if !hadPrior {
-			s.byID[id] = &ndms.Interface{ID: id}
-		}
-		s.mu.Unlock()
-		if hadPrior {
-			s.log.Warnf("OnCreated %s: fetch failed, keeping bootstrap entry: %v", id, err)
-		} else {
-			s.log.Warnf("OnCreated %s: fetch failed, inserting stub: %v", id, err)
-		}
-		return
+	if (c.SecurityLevel != "") != (win.SecurityLevel != "") {
+		return c.SecurityLevel != ""
 	}
-	if iface == nil {
-		// NDMS replied empty — race? interface gone before fetch?
-		// Insert a stub only if we have nothing better.
-		s.mu.Lock()
-		if _, hadPrior := s.byID[id]; !hadPrior {
-			s.byID[id] = &ndms.Interface{ID: id}
-		}
-		s.mu.Unlock()
-		return
-	}
-	s.mu.Lock()
-	s.byID[id] = iface
-	if iface.Uptime > 0 && iface.ConfLayer == "running" {
-		s.startedAt[id] = time.Now().Add(-time.Duration(iface.Uptime) * time.Second)
-	}
-	s.mu.Unlock()
+	return id < winID
 }
 
-// OnDestroyed handles ifdestroyed NDMS events. Pure in-memory delete.
+// === Hook-side write API (called from events.Dispatcher) ===
+
+// OnCreated — чужой хук ifcreated (свой, Event.Own, диспетчер сюда не
+// передаёт, П22): метка существования; карта не меняется (хук — подсказка,
+// карту ведёт список). «Грязно» — только если хук расходится с картой (П6′):
+// id в карте нет. Тогда ReconcileDirty после пачки читает ОДИН список.
+// Точечное чтение здесь давало E «unable to find» на паре created→destroyed
+// одного id (F546).
+func (s *InterfaceStore) OnCreated(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markExistLocked(id, false)
+	if _, known := s.byID[id]; !known {
+		s.dirtyAt, s.hookDirtyAt = s.seq, s.seq
+	}
+}
+
+// OnDestroyed — чужой хук ifdestroyed (свой диспетчер сюда не передаёт, П22):
+// метка существования; карта не меняется — хук бывает устаревшим
+// (переиспользованное имя), снять запись вправе только список. «Грязно» —
+// только если id в карте (П6′): хук по уже забытому id ничего не стоит.
 func (s *InterfaceStore) OnDestroyed(id string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markExistLocked(id, true)
+	if _, known := s.byID[id]; known {
+		s.dirtyAt, s.hookDirtyAt = s.seq, s.seq
+	}
+}
+
+// forgetLocked — запись снята нашей командой: зовёт ТОЛЬКО RemovalToken после
+// своего успешного `no interface` (или «unable to find» на него), никогда хук.
+// Метка существования + удаление из карты, без «грязно»: список, начатый до
+// метки, запись не воскресит (страж в applyListLocked).
+func (s *InterfaceStore) forgetLocked(id string) {
+	s.markExistLocked(id, true)
 	delete(s.byID, id)
 	delete(s.startedAt, id)
-	s.mu.Unlock()
+	delete(s.sysNames, id)
+	delete(s.raw, id)
+	delete(s.confAt, id)
+}
+
+// OnSystemName — имя ядра из хука NDMS (`system_name` есть в хуках, стенд
+// 5.01.C.6: модель WAN строится по нему). Пишется всегда, даже для id, которого
+// карта ещё не знает: на создание layer-хуки приходят раньше ifcreated. Снимают
+// forgetLocked и список без этого id (applyListLocked). Эхо id или подпись не
+// кладутся: запись в sysNames снимает id с резолвера вслед за списком
+// (unnamedLocked), и мусор закрыл бы ему имя навсегда.
+func (s *InterfaceStore) OnSystemName(id, name string) {
+	if name == id || !looksLikeKernelIfname(name) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sysNames[id] = name
+}
+
+// ReconcileDirty — после пачки хуков: грязно от хука существования — один
+// список (или присоединение к полёту, начатому не раньше метки), иначе ничего.
+// Метку нашей записи (Invalidate) не обслуживает (П7): её снимает freshen
+// следующего читателя.
+func (s *InterfaceStore) ReconcileDirty(ctx context.Context) error {
+	s.mu.RLock()
+	dirty := s.hookDirtyAt != 0
+	s.mu.RUnlock()
+	if !dirty {
+		return nil
+	}
+	return s.freshen(ctx, SnapshotRecent)
 }
 
 // OnLayerChanged handles iflayerchanged NDMS events. Patches the
@@ -722,19 +1202,16 @@ func (s *InterfaceStore) OnDestroyed(id string) {
 //   - State field is the overall interface-up flag and tracks the
 //     ctrl layer the same way: running=up, anything else=down. ctrl
 //     also gates startedAt (the uptime clock).
+//   - IPv4 layer events store the level as-is into the IPv4 field (it
+//     is layer-state, not up/down). IPv6 events produce no updates.
 //
-// IPv4 / IPv6 layer events are accepted but currently produce no
-// field updates — the existing summary-layer fields aren't part of
-// any read path's hot loop yet. If they become hot, mirror the
-// running→up mapping.
+// Неизвестный id игнорируется: запись в карту кладёт только список (на
+// создание NDMS шлёт iflayerchanged ctrl ×2 раньше ifcreated — его и ждём).
 func (s *InterfaceStore) OnLayerChanged(id, layer, level string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	iface, ok := s.byID[id]
 	if !ok {
-		// Event for an interface we don't know — typically means we
-		// missed an ifcreated. Skip; bootstrap or a future command-
-		// side Invalidate will reconcile.
 		return
 	}
 	switch layer {
@@ -771,7 +1248,7 @@ func (s *InterfaceStore) OnIPChanged(id, address string) {
 	defer s.mu.Unlock()
 	iface, ok := s.byID[id]
 	if !ok {
-		return
+		return // как в OnLayerChanged
 	}
 	if address != "" {
 		iface.Address = address
@@ -790,141 +1267,462 @@ func layerLevelToUpDown(level string) string {
 
 // === Command-side write API (proactive refresh after a successful POST) ===
 
-// Invalidate is called by command-side code AFTER a successful NDMS
-// write to ensure the next read sees the new state without waiting
-// for the eventual hook. Issues ONE HTTP (/show/interface/<name>) and
-// patches the map. If the interface no longer exists in NDMS (200 +
-// empty body), it is removed from the map.
-//
-// 404 is not expected here — command callers invoke this only after
-// a successful POST, so the interface exists. If a 404 does arrive
-// (e.g. a different actor deleted the interface concurrently), the
-// HTTPError propagates as a logged warning and the map is left
-// untouched (next bootstrap or hook will reconcile).
+// Invalidate зовётся командами ПОСЛЕ успешной записи в NDMS: ставит метку
+// «грязно», RCI в момент вызова нет. Следующий Snapshot читает ОДИН свежий
+// список, начатый после метки, — так «следующее чтение видит результат моей
+// записи» без чтения по имени (F546). Get/List и прочие чтения памяти метку не
+// учитывают: они ведутся хуками. Имя — только для журнала.
 func (s *InterfaceStore) Invalidate(name string) {
 	if name == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.ensureBootstrap(ctx); err != nil {
-		s.log.Warnf("Invalidate %s: bootstrap failed: %v", name, err)
-		return
-	}
-	iface, err := s.fetchOne(ctx, name)
-	if err != nil {
-		s.log.Warnf("Invalidate %s: refresh failed: %v", name, err)
-		return
-	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if iface == nil {
-		// NDMS confirms absent — remove from map.
-		delete(s.byID, name)
-		delete(s.startedAt, name)
-		return
-	}
-	s.byID[name] = iface
-	if iface.Uptime > 0 && iface.ConfLayer == "running" {
-		if _, exists := s.startedAt[name]; !exists {
-			s.startedAt[name] = time.Now().Add(-time.Duration(iface.Uptime) * time.Second)
-		}
-	}
+	s.seq++
+	s.dirtyAt = s.seq
+	s.mu.Unlock()
+	s.log.Debugf("Invalidate %s: next snapshot reads the list", name)
 }
 
 // InvalidateAll re-fetches the entire interface list from NDMS and
-// rebuilds the map. Called by command-side code after operations that
-// affect multiple interfaces (e.g. Save, big admin changes).
+// applies it over the map (see applyListLocked). Called by command-side
+// code after operations that affect multiple interfaces (e.g. Save, big
+// admin changes).
 func (s *InterfaceStore) InvalidateAll() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	raw, err := s.fetchListMap(ctx)
-	if err != nil {
+	if err := s.refreshAll(ctx); err != nil {
 		s.log.Warnf("InvalidateAll: refresh failed: %v", err)
-		return
 	}
-	now := time.Now()
+}
+
+// Refresh — InvalidateAll с ответом: ошибка, если список не прочитан
+// (диспетчер повторяет обновление после переполнения очереди, F572).
+func (s *InterfaceStore) Refresh(ctx context.Context) error {
+	return s.refreshAll(ctx)
+}
+
+// Confirmed — «запись name была в свежем полном списке NDMS». Единственная
+// валюта мутаций по существующему интерфейсу: команда `interface X …` по
+// отсутствующему X СОЗДАЁТ X (стенд 5.01/5.02), а ссылка на него из другого
+// раздела пишет E в журнал ndm. Получить можно только здесь; в поля структур
+// не класть — доказательство действительно для одного потока действий.
+type Confirmed struct{ name string }
+
+// Name — NDMS-имя записи.
+func (c Confirmed) Name() string { return c.name }
+
+// String — имя: %v/%+v печатают запись как `Interface:X`.
+func (c Confirmed) String() string { return c.name }
+
+// Unlisted — запись, доказанно созданная NDMS (`created`), но не показанная
+// списком (ErrNotListed): её снос. Единственный вызывающий — notListedSite
+// (сканер TestUnlisted_OnlyInNotListedSite).
+func Unlisted(name string) Confirmed { return Confirmed{name: name} }
+
+type actionListKey struct{}
+
+// actionList — ответ полного списка, общий для подтверждений одного действия.
+type actionList struct {
+	mu  sync.Mutex
+	ans *listAnswer
+	at  time.Time // начало запроса ans
+}
+
+// actionListMaxAge — потолок возраста списка действия от НАЧАЛА его запроса
+// (допуск SnapshotRecent, R43): старше — следующее подтверждение читает новый.
+const actionListMaxAge = SnapshotRecent
+
+// WithActionList — ctx одного действия (событие оркестратора, правка туннеля,
+// замена конфига): Confirm и ConfirmEach с ним читают полный список один раз
+// на всё действие, а не на каждое подтверждение (F557). Доказательство то же —
+// запись в списке, прочитанном в этом действии, или в применённом новее
+// (decideLocked); метка существования новее списка действия противоречит ему —
+// повторный список становится списком действия (П4). Между действиями — заново: ctx действия
+// живёт, пока оно идёт. Уже несущий список ctx возвращается как есть —
+// вложенный вызов часть того же действия. ConfirmCreated и FreeIndex списком
+// действия не пользуются: им нужен список, начатый после их вызова.
+// Список живёт не дольше actionListMaxAge — поэтому утёкший за действие ctx
+// (детач, горутина) безвреден: старый список он не переиспользует.
+func WithActionList(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(actionListKey{}).(*actionList); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, actionListKey{}, &actionList{})
+}
+
+// confirmList — ответ списка для подтверждения: в ctx действия — последний
+// прочитанный в нём, пока он не старше actionListMaxAge (параллельные
+// подтверждения ждут один запрос), иначе свой. Ошибка не запоминается:
+// следующее подтверждение читает заново.
+func (s *InterfaceStore) confirmList(ctx context.Context) (*listAnswer, error) {
+	al, _ := ctx.Value(actionListKey{}).(*actionList)
+	if al == nil {
+		return s.refreshList(ctx, nil)
+	}
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	if al.ans == nil || s.now().Sub(al.at) > actionListMaxAge {
+		at := s.now()
+		ans, err := s.refreshList(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		al.ans, al.at = ans, at
+	}
+	return al.ans, nil
+}
+
+// rereadList — повторный список при противоречии (П4). В ctx действия он
+// становится списком действия вместе с моментом своего запроса: возраст
+// следующих подтверждений действия отсчитывается от него.
+func (s *InterfaceStore) rereadList(ctx context.Context) (*listAnswer, error) {
+	al, _ := ctx.Value(actionListKey{}).(*actionList)
+	if al == nil {
+		return s.refreshList(ctx, nil)
+	}
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	at := s.now()
+	ans, err := s.refreshList(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	al.ans, al.at = ans, at
+	return ans, nil
+}
+
+// Confirm читает ОДИН полный список (кладёт его в карту) и подтверждает name
+// по самому новому применённому списку (decideLocked). Метка существования
+// новее начала этого списка противоречит ответу — ещё один список, ответ по
+// нему (П4). Список не прочитан — ошибка: присутствие из кэша подтверждением
+// не считается (F546). Запись — копия из ответа. В ctx действия
+// (WithActionList) список один на действие.
+func (s *InterfaceStore) Confirm(ctx context.Context, name string) (Confirmed, *ndms.Interface, bool, error) {
+	if name == "" {
+		return Confirmed{}, nil, false, errors.New("confirm: пустое имя интерфейса")
+	}
+	ans, err := s.confirmList(ctx)
+	if err != nil {
+		return Confirmed{}, nil, false, fmt.Errorf("confirm %s: %w", name, err)
+	}
+	rec, ok, err := s.confirmOne(ctx, ans, name, s.rereadList)
+	if err != nil {
+		return Confirmed{}, nil, false, fmt.Errorf("confirm %s: %w", name, err)
+	}
+	if !ok {
+		return Confirmed{}, nil, false, nil
+	}
+	return Confirmed{name: name}, rec, true, nil
+}
+
+// confirmOne — решение по ans; противоречие — один повторный список reread и
+// решение по нему без оговорок (П4).
+func (s *InterfaceStore) confirmOne(ctx context.Context, ans *listAnswer, name string, reread func(context.Context) (*listAnswer, error)) (*ndms.Interface, bool, error) {
+	if !s.anyContradicts(ans, "confirm", []string{name}) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		rec, ok, _ := s.decideLocked(ans, name)
+		return rec, ok, nil
+	}
+	ans, err := reread(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok, _ := s.decideLocked(ans, name)
+	return rec, ok, nil
+}
+
+// anyContradicts — решение по ans хотя бы для одного из names противоречит
+// метке существования (contradictsLocked); первое такое — в Debug.
+func (s *InterfaceStore) anyContradicts(ans *listAnswer, op string, names []string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, n := range names {
+		_, in, start := s.decideLocked(ans, n)
+		if s.contradictsLocked(n, in, start) {
+			m := s.exist[n]
+			s.log.Debugf("%s %s: reread list#%d start=%d exist={%d,%v}", op, n, s.srcLocked(ans).no, start, m.seq, m.gone)
+			return true
+		}
+	}
+	return false
+}
+
+// ErrNotListed — NDMS доказанно создал запись (ответ «created», created у
+// ConfirmCreated), а в свежих списках её нет за всё ожидание (F584). Только в
+// этом случае вызывающий вправе снести имя (command.ConfirmCreated).
+var ErrNotListed = errors.New("NDMS создал запись, но её нет в списке")
+
+// ErrNotSeen — created не доказан (ответ без «created»: запись уже была —
+// managed restore с existingOK, OpkgTun) и записи нет в списках — сносить
+// нельзя: запись не наша, а снос отсутствующего — E в журнале ndm.
+var ErrNotSeen = errors.New("NDMS принял создание, но записи нет в списке")
+
+// ConfirmCreated — Confirm только что созданной записи name с ограниченным
+// ожиданием (F584): под нагрузкой NDMS отвечает на создание раньше, чем
+// кладёт запись в список. Только свои списки: первый — сразу, дальше — после
+// пауз createdBackoff. Метка существования новее начала списка противоречит
+// ему — один повторный список сразу, решение по нему (П4). Хуки ничего не
+// решают. Доказательство то же, что у Confirm: запись в свежем полном списке.
+// Список не прочитан — ошибка сразу (решение 4). За все попытки записи нет —
+// ErrNotListed, если создание доказано (created: ответ NDMS «created»), иначе
+// ErrNotSeen. Пока ждёт, имя занято для FreeIndex (confirming, П23). Свой
+// ifcreated стор не трогает (П22), поэтому при created и ошибке, кроме
+// ErrNotListed (запись в NDMS есть, в карте нет), карта помечается грязной —
+// её обслужит следующий читатель (П22в).
+func (s *InterfaceStore) ConfirmCreated(ctx context.Context, name string, created bool) (_ Confirmed, err error) {
+	if name == "" {
+		return Confirmed{}, errors.New("confirm: пустое имя интерфейса")
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Replace map atomically. Preserve startedAt for interfaces still
-	// present and running — uptime clock is daemon-tracked, not NDMS-
-	// tracked. Drop startedAt for interfaces gone or stopped.
-	nextByID := make(map[string]*ndms.Interface, len(raw))
-	nextStartedAt := make(map[string]time.Time, len(raw))
-	for id, iface := range raw {
-		cp := iface
-		nextByID[id] = &cp
-		if cp.ConfLayer == "running" {
-			if existing, ok := s.startedAt[id]; ok && !existing.IsZero() {
-				nextStartedAt[id] = existing
-			} else if cp.Uptime > 0 {
-				nextStartedAt[id] = now.Add(-time.Duration(cp.Uptime) * time.Second)
+	s.markExistLocked(name, false) // П4: NDMS ответил «создано»
+	if created {
+		s.grantLocked(name, hookCreated) // П21: наш ifcreated ещё придёт
+	}
+	s.confirming[name] = struct{}{}
+	backoff := s.createdBackoff
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.confirming, name)
+		s.mu.Unlock()
+		if err != nil && created && !errors.Is(err, ErrNotListed) {
+			s.Invalidate(name)
+		}
+	}()
+	for i := 0; ; i++ {
+		// Свой список, не список действия: запись новее него.
+		ans, err := s.refreshList(ctx, nil)
+		if err != nil {
+			return Confirmed{}, fmt.Errorf("confirm %s: %w", name, err)
+		}
+		_, ok, err := s.confirmOne(ctx, ans, name, func(ctx context.Context) (*listAnswer, error) {
+			return s.refreshList(ctx, nil)
+		})
+		if err != nil {
+			return Confirmed{}, fmt.Errorf("confirm %s: %w", name, err)
+		}
+		switch {
+		case ok:
+			return Confirmed{name: name}, nil
+		case i < len(backoff):
+		case created:
+			return Confirmed{}, fmt.Errorf("%w: %s (%d списков)", ErrNotListed, name, i+1)
+		default:
+			return Confirmed{}, fmt.Errorf("%w: %s (%d списков)", ErrNotSeen, name, i+1)
+		}
+		t := time.NewTimer(backoff[i])
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return Confirmed{}, fmt.Errorf("confirm %s: %w", name, ctx.Err())
+		}
+	}
+}
+
+// ConfirmEach — Confirm для нескольких имён по одному чтению списка (решение
+// по самому новому применённому, decideLocked). Противоречие хотя бы по
+// одному имени — один общий повторный список, решение по нему для всех. В
+// ответе только подтверждённые. В ctx действия (WithActionList) — по списку
+// действия.
+func (s *InterfaceStore) ConfirmEach(ctx context.Context, names []string) (map[string]Confirmed, error) {
+	ans, err := s.confirmList(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("confirm: %w", err)
+	}
+	if s.anyContradicts(ans, "confirm-each", names) {
+		if ans, err = s.rereadList(ctx); err != nil {
+			return nil, fmt.Errorf("confirm: %w", err)
+		}
+	}
+	out := make(map[string]Confirmed, len(names))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, n := range names {
+		if _, ok, _ := s.decideLocked(ans, n); ok {
+			out[n] = Confirmed{name: n}
+		}
+	}
+	return out, nil
+}
+
+// ConfirmAll — Confirm для каждой записи самого нового применённого списка
+// (decideLocked): кандидаты и доказательство из одного чтения (проверка
+// занятости сетей по всем серверам). Кандидаты — и id с меткой существования
+// новее начала списка: противоречие по любому — один повторный список,
+// подтверждено всё, что в нём.
+func (s *InterfaceStore) ConfirmAll(ctx context.Context) (map[string]Confirmed, error) {
+	ans, err := s.refreshList(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("confirm: %w", err)
+	}
+	s.mu.RLock()
+	src := s.srcLocked(ans)
+	names := make([]string, 0, len(src.recs))
+	for n := range src.recs {
+		names = append(names, n)
+	}
+	for n, m := range s.exist {
+		if _, in := src.recs[n]; !in && m.seq > src.start {
+			names = append(names, n)
+		}
+	}
+	s.mu.RUnlock()
+	if s.anyContradicts(ans, "confirm-all", names) {
+		if ans, err = s.refreshList(ctx, nil); err != nil {
+			return nil, fmt.Errorf("confirm: %w", err)
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src = s.srcLocked(ans)
+	out := make(map[string]Confirmed, len(src.recs))
+	for n := range src.recs {
+		out[n] = Confirmed{name: n}
+	}
+	return out, nil
+}
+
+// FreeIndex — наименьший N в [0, limit), для которого имени prefix+N нет ни в
+// СВОЁМ свежем полном списке, ни в карте, ни среди ждущих ConfirmCreated
+// (confirming), и N не в reserved (F574). Память одна не решает: под нагрузкой
+// ifcreated опаздывает, и чужой только что созданный WireguardN/ProxyN
+// был бы выбран нами. Метка ifcreated имя не занимает — её решает список. Метка существования имени
+// с prefix новее начала списка противоречит ему — один повторный список, выбор
+// заново по нему (П4). Список не прочитан — ошибка (решение 4). ok=false — все
+// N заняты. Запись, которую NDMS уже знает, но ещё не показал ни списком, ни
+// хуком, отсюда не видна: её ловит ответ на создание (command.PostCreate).
+func (s *InterfaceStore) FreeIndex(ctx context.Context, prefix string, limit int, reserved map[int]bool) (idx int, ok bool, err error) {
+	used := make(map[int]bool, len(reserved))
+	mark := func(name string) {
+		if rest, found := strings.CutPrefix(name, prefix); found {
+			if n, err := strconv.Atoi(rest); err == nil {
+				used[n] = true
 			}
 		}
 	}
-	s.byID = nextByID
-	s.startedAt = nextStartedAt
-	s.booted.Store(true)
+	// Память — до списка и после: ConfirmCreated, начавшийся во время
+	// списка, занимает имя, которого в ответе ещё нет.
+	memory := func() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for n := range s.byID {
+			mark(n)
+		}
+		for n := range s.confirming {
+			mark(n)
+		}
+	}
+	pick := func() (*listAnswer, error) {
+		clear(used)
+		for n := range reserved {
+			used[n] = true
+		}
+		memory()
+		ans, err := s.refreshList(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("list interfaces: %w", err)
+		}
+		for n := range ans.recs {
+			mark(n)
+		}
+		memory()
+		return ans, nil
+	}
+	ans, err := pick()
+	if err != nil {
+		return 0, false, err
+	}
+	s.mu.RLock()
+	var names []string
+	for n := range s.exist {
+		if strings.HasPrefix(n, prefix) {
+			names = append(names, n)
+		}
+	}
+	s.mu.RUnlock()
+	if s.anyContradicts(ans, "free-index", names) {
+		if _, err := pick(); err != nil {
+			return 0, false, err
+		}
+	}
+	for i := 0; i < limit; i++ {
+		if !used[i] {
+			return i, true, nil
+		}
+	}
+	return 0, false, nil
 }
+
+// srcLocked — самый новый из своего ответа ans и применённого (П12): после
+// успешного своего списка applied.no не меньше его номера, так что и тот и
+// другой начаты после вызова.
+func (s *InterfaceStore) srcLocked(ans *listAnswer) *listAnswer {
+	if s.applied != nil && s.applied.no > ans.no {
+		return s.applied
+	}
+	return ans
+}
+
+// decideLocked — есть ли name в самом новом применённом списке (srcLocked) —
+// в обе стороны: вытеснивший свой ответ список решает и присутствие (F575:
+// только что созданная запись), и отсутствие (H2: снятая мимо хука). Карта и
+// хуки не участвуют. rec — копия записи из ответа; start — начало решившего
+// списка, для contradictsLocked.
+func (s *InterfaceStore) decideLocked(ans *listAnswer, name string) (*ndms.Interface, bool, uint64) {
+	src := s.srcLocked(ans)
+	rec, ok := src.recs[name]
+	if !ok {
+		return nil, false, src.start
+	}
+	return &rec, true, src.start
+}
+
+// contradictsLocked — метка существования name новее начала решившего списка
+// (start) и говорит обратное его ответу inList: хук или наш снос пришёл, пока
+// список был в полёте (П4). Хук сам ничего не решает — только просит перечитать.
+func (s *InterfaceStore) contradictsLocked(name string, inList bool, start uint64) bool {
+	m, ok := s.exist[name]
+	return ok && m.seq > start && m.gone == inList
+}
+
+// ErrGone — записи нет, и по этому имени NDMS не спрашивают (F546): её нет в
+// снимке полного списка (WGServerStore.fetchItem/fetchConfig) или в дереве rc
+// (PeersRC/PeersRCEach, ASC). Вызывающему — интерфейса нет.
+var ErrGone = errors.New("ndms: interface gone")
 
 // === Internal helpers ===
 
-// fetchListMap GETs /show/interface/ and returns the raw map id →
-// Interface. Used by bootstrap and InvalidateAll.
-func (s *InterfaceStore) fetchListMap(ctx context.Context) (map[string]ndms.Interface, error) {
+// fetchListMap GETs /show/interface/ and returns id → Interface plus
+// id → запись ответа как есть. Used by bootstrap and InvalidateAll.
+func (s *InterfaceStore) fetchListMap(ctx context.Context) (map[string]ndms.Interface, map[string]json.RawMessage, error) {
 	var raw map[string]json.RawMessage
+	// Барьер D-N1: запись без устройства, прочитанная списком, — C 0767 у
+	// ndm. Пока бэкенд подменяет устройство (netdev.SwapGate.Hold), ждём.
+	release := s.gate.Read()
+	defer release()
 	if err := s.getter.Get(ctx, "/show/interface/", &raw); err != nil {
-		return nil, fmt.Errorf("fetch interface list: %w", err)
+		return nil, nil, fmt.Errorf("fetch interface list: %w", err)
 	}
 	out := make(map[string]ndms.Interface, len(raw))
+	wire := make(map[string]json.RawMessage, len(raw))
 	for id, data := range raw {
 		iface, err := parseInterface(id, data)
 		if err != nil {
 			s.log.Warnf("parse interface %s: %v", id, err)
 			continue
 		}
-		out[id] = iface
+		// Ключ — id записи, а не ключ ответа: порты коммутатора NDMS
+		// отдаёт под ключами "0".."4" с id `GigabitEthernet0/0`… (стенд
+		// 5.02.A.11). По ключу ответа их не находили ни Get, ни запоминание
+		// имени резолвера — порты спрашивались на каждом ListAll (F473).
+		out[iface.ID] = iface
+		wire[iface.ID] = data
 	}
-	return out, nil
-}
-
-// fetchOne POSTs {"show":{"interface":{"name":<name>}}} and parses the
-// response. Uses POST instead of the obvious GET /show/interface/<name>
-// because NDMS treats slashes in <name> as URL path separators —
-// GigabitEthernet0/Vlan2, WifiMaster0/AccessPoint0, and every numbered
-// switch-port (GigabitEthernet0/3, …) would otherwise return 404. The
-// JSON-payload form carries the name in the request body where the RCI
-// parser handles it correctly. See internal/ndms/transport/payload.go for
-// the rationale and helpers.
-//
-// Returns (nil, nil) for an empty/absent body (NDMS-side absence — used
-// to be a 404 in the GET form; now the POST may return an empty envelope
-// for the same case). HTTPError 404 (rare race condition on POST) is
-// returned as-is.
-func (s *InterfaceStore) fetchOne(ctx context.Context, name string) (*ndms.Interface, error) {
-	raw, err := s.getter.Post(ctx, transport.ShowInterface(name, nil))
-	if err != nil {
-		return nil, fmt.Errorf("fetch interface %s: %w", name, err)
-	}
-	inner, err := unwrapShowInterface(raw)
-	if err != nil {
-		return nil, fmt.Errorf("fetch interface %s: %w", name, err)
-	}
-	if len(inner) == 0 {
-		return nil, nil
-	}
-	var w ifaceWire
-	if err := json.Unmarshal(inner, &w); err != nil {
-		return nil, fmt.Errorf("parse interface %s: %w", name, err)
-	}
-	if w.ID == "" && w.InterfaceName == "" {
-		return nil, nil
-	}
-	if w.ID == "" {
-		w.ID = name
-	}
-	iface := wireToInterface(w)
-	return &iface, nil
+	return out, wire, nil
 }
 
 // === Wire format ===

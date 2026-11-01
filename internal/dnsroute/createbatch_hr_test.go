@@ -33,14 +33,16 @@ func TestCreateBatch_RoutesHydraRouteToHR(t *testing.T) {
 	}
 
 	// HR-правило реально создано в HR-файлах.
-	rules, _, err := hydra.ListRules()
+	rs, err := hydra.ListRuleSet()
 	if err != nil {
 		t.Fatal(err)
 	}
 	found := false
-	for _, r := range rules {
-		if r.Name == "hr-rule" {
-			found = true
+	if tg := rs.Target("nwg0"); tg != nil {
+		for _, g := range tg.Groups {
+			if g.Description == "hr-rule" {
+				found = true
+			}
 		}
 	}
 	if !found {
@@ -71,15 +73,47 @@ func TestCreateBatch_HydraRouteSubscriptions(t *testing.T) {
 		t.Fatalf("created = %d, want 1 (hr-mixed only)", len(created))
 	}
 
-	rules, _, _ := hydra.ListRules()
+	rs, _ := hydra.ListRuleSet()
 	names := map[string]bool{}
-	for _, r := range rules {
-		names[r.Name] = true
+	if tg := rs.Target("nwg0"); tg != nil {
+		for _, g := range tg.Groups {
+			names[g.Description] = true
+		}
 	}
 	if !names["hr-mixed"] {
 		t.Fatal("hr-mixed should be created from manual domains")
 	}
 	if names["hr-subonly"] {
 		t.Fatal("subscription-only HR entry should be skipped")
+	}
+}
+
+// F693: HR-правило из батча не создаётся, если NDMS-список того же батча
+// отвергнут — проверка всех списков идёт до любой записи.
+func TestCreateBatch_InvalidNDMSSkipsHRCreate(t *testing.T) {
+	resolver := &stubResolver{kernelByTunnel: map[string]string{"t1": "nwg0"}}
+	svc, hydra := newHRTestSvc(t, resolver)
+
+	_, err := svc.CreateBatch(context.Background(), []DomainList{
+		{Name: "hr-rule", Backend: "hydraroute", ManualDomains: []string{"2ip.ru"},
+			Routes: []RouteTarget{{TunnelID: "t1"}}},
+		{Name: "ndms-dup", Backend: "ndms", ManualDomains: []string{"a.com"},
+			Routes: routes("Wireguard1", "Wireguard1")},
+	})
+	if err == nil {
+		t.Fatal("ожидалась ошибка повтора интерфейса")
+	}
+
+	rs, err := hydra.ListRuleSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range rs.Targets {
+		if len(tg.Groups) != 0 {
+			t.Fatalf("HR-правило создано несмотря на ошибку батча: %+v", tg.Groups)
+		}
+	}
+	if n := len(svc.store.GetCached().Lists); n != 0 {
+		t.Errorf("в кэше списков: %d", n)
 	}
 }

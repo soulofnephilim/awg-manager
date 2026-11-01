@@ -15,6 +15,13 @@ export interface SingboxRouterSettings {
 	policyName: string;
 	deviceMode?: 'policy' | 'all';
 	/**
+	 * Какие семейства адресов перехватывает режим TPROXY. Отсутствует на старых
+	 * payload'ах → 'ipv4_only' (историческое поведение). 'both' и 'ipv6_only'
+	 * требуют пакета ip6tables на роутере — иначе бэкенд отвечает 400
+	 * IP6TABLES_MISSING. В tun-режимах не участвует.
+	 */
+	interceptFamily?: 'ipv4_only' | 'both' | 'ipv6_only';
+	/**
 	 * Active routing mode. Source of truth for the FakeIP page's engine-state
 	 * derivation. Served by GET /singbox/router/settings (omitempty; absent on
 	 * legacy payloads → treat as 'tproxy'). NOT on the status endpoint.
@@ -44,6 +51,9 @@ export interface SingboxRouterSettings {
 	fakeipStack?: TunStack;
 	fakeipPool4?: string;
 	fakeipPool6?: string;
+	// Адрес OpkgTun обоих tun-режимов, хост /30 (default "172.18.0.1/30").
+	// Меняется только при выключенном режиме (TUN_ADDR_LOCKED).
+	fakeipTunAddr4?: string;
 	fakeipMtu?: number;
 	// Upstream резолвера "real" (default "1.1.1.1"). Правится через адрес
 	// сервера «real» в DNS-панели fakeip (бэкенд перехватывает правку в это
@@ -63,6 +73,13 @@ export interface SingboxRouterSettings {
 	policyTunSourcePreserve?: boolean;
 	/** Сегменты, выбранные для source-preserve (см. GET .../policy-tun/nat-preview). */
 	policyTunNatSegments?: string[];
+	/**
+	 * Имя интерфейса policy-tun в веб-интерфейсе роутера и в политиках доступа
+	 * (NDMS-описание OpkgTun). Отсутствует/пусто — штатное «awgm policy-tun».
+	 * До 32 символов, префикс «awgm » зарезервирован — такое сохранение бэкенд
+	 * отвергает.
+	 */
+	policyTunDescription?: string;
 	/**
 	 * QoS/DSCP routing classes (issue #371). Traffic marked with class DSCP is
 	 * routed to the class outbound, trumping other route rules. Works in
@@ -128,12 +145,17 @@ export interface SingboxRouterWANInterface {
 	label: string;
 	up: boolean;
 	priority: number;
+	/** Интерфейс сторонней программы, не наш (issue #935). */
+	foreign?: boolean;
+	/** Сторонний интерфейс отмечен, но в системе сейчас отсутствует. */
+	absent?: boolean;
+	type?: string;
 }
 
 export interface SingboxRouterIssue {
 	severity: 'warning' | 'error';
 	// Открытый набор: бэкенд добавляет kind'ы (orphan-rule, orphan-outbound,
-	// orphan-rule-set, policy-missing, dns-domain-resolver, dns-detour-dial,
+	// orphan-rule-set, policy-missing, dns-domain-resolver,
 	// dns-duplicate-tag, ...) — закрытый union здесь молча превращал бы новые
 	// значения в «невозможные» для switch-narrowing.
 	kind: string;
@@ -176,6 +198,8 @@ export interface SingboxRouterStatus {
 	fakeipDns?: string;
 	/** Адрес tun-шлюза (хост /30, e.g. «172.18.0.1») в режиме fakeip-tun. */
 	fakeipTunAddr?: string;
+	/** Смена fakeipTunAddr4 сейчас отвергается: OpkgTun tun-режима поднят. */
+	tunAddrLocked?: boolean;
 	/** Эффективный путь cache.db: по cacheFileLocation, при пустой настройке — из 00-base.json. */
 	cacheDbPath?: string;
 	/**
@@ -403,7 +427,7 @@ export interface SingboxRouterRuleSet {
 }
 
 export interface SingboxRouterOutbound {
-	type: 'direct' | 'urltest' | 'selector' | 'loadbalance';
+	type: 'direct' | 'urltest' | 'selector' | 'loadbalance' | 'fallback';
 	tag: string;
 	bind_interface?: string;
 	outbounds?: string[];
@@ -412,6 +436,8 @@ export interface SingboxRouterOutbound {
 	tolerance?: number;
 	default?: string;
 	strategy?: string;
+	interrupt_exist_connections?: boolean;
+	idle_timeout?: string;
 	/**
 	 * Which orchestrator slot owns this outbound. "router" entries are
 	 * editable from the UI; "subscription" entries are managed by the
@@ -433,7 +459,7 @@ export interface SingboxProxyMember {
 
 export interface SingboxProxyGroup {
 	tag: string;
-	type: 'selector' | 'urltest' | 'loadbalance';
+	type: 'selector' | 'urltest' | 'loadbalance' | 'fallback';
 	now: string;
 	members: SingboxProxyMember[];
 }
@@ -542,6 +568,8 @@ export interface SingboxRouterDNSServer {
 	domain_strategy?: SingboxRouterDNSStrategy;
 	domain_resolver?: SingboxRouterDNSDomainResolver;
 	tls?: SingboxRouterDNSClientTLSOptions;
+	/** Адрес отправителя; бэкенд отвергает его вместе с detour. */
+	inet4_bind_address?: string;
 }
 
 export interface SingboxRouterDNSRule {

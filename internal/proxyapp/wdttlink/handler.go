@@ -65,6 +65,12 @@ type TunnelImporter interface {
 	// OpkgTun с тем же /32, поэтому импорт с конфликтом отказывается (#869).
 	AddressConflicts(address string) []string
 	Start(ctx context.Context, tunnelID string) error
+	// SyncDescription ставит описание записи туннеля в NDMS = name: F517
+	// признаёт запись kernel-туннеля своей только по равенству описания
+	// имени. prevName — имя до переименования: по нему служба проверяет, что
+	// запись наша, и чужую не трогает. Провал — Warn в журнале службы
+	// (после ребута F517 откажет).
+	SyncDescription(ctx context.Context, tunnelID, prevName, name, earlierName string)
 	// ForgetTraffic снимает историю трафика удалённого туннеля: id
 	// переиспользуется, и чужая история подмешалась бы к новому туннелю.
 	ForgetTraffic(tunnelID string)
@@ -387,6 +393,7 @@ func (h *Handler) EnsureWGTunnel(w http.ResponseWriter, r *http.Request, key str
 	port := ListenPortFromAddr(cfg.Listen)
 	patched := PatchWgConfEndpoint(wgRaw, port)
 	newPeerKey := ExtractPeerPublicKey(patched)
+	newPrivKey := ExtractInterfacePrivateKey(patched)
 	wantName := TunnelNameFromClient(rec.Name)
 	wantEndpoint := fmt.Sprintf("127.0.0.1:%d", port)
 	running := haveSnap && snap.PID > 0
@@ -412,14 +419,17 @@ func (h *Handler) EnsureWGTunnel(w http.ResponseWriter, r *http.Request, key str
 		response.InternalError(w, err.Error())
 		return
 	}
-	// Снос связанных туннелей с ЧУЖИМ ключом пира: сервер сменил пир или
-	// страну, и старая запись ведёт в никуда.
+	// Снос устаревших связанных туннелей: сервер сменил пир или страну (чужой
+	// ключ пира — и пустой сохранённый тоже, F141), либо абонента завели
+	// заново (другой свой ключ интерфейса, F139). Старая запись ведёт в никуда.
 	for _, tun := range tunnels {
 		if strings.TrimSpace(tun.WdttClientID) != rec.ID {
 			continue
 		}
 		storedKey := strings.TrimSpace(tun.Peer.PublicKey)
-		if newPeerKey != "" && storedKey != "" && newPeerKey != storedKey {
+		storedPriv := strings.TrimSpace(tun.Interface.PrivateKey)
+		if (newPeerKey != "" && newPeerKey != storedKey) ||
+			(newPrivKey != "" && storedPriv != "" && newPrivKey != storedPriv) {
 			if err := h.deps.Tunnels.Delete(r.Context(), tun.ID); err != nil {
 				if errors.Is(err, tunnel.ErrOperationInProgress) {
 					// Занятый замок ретраибелен, а 400 читается как «запрос
@@ -442,8 +452,15 @@ func (h *Handler) EnsureWGTunnel(w http.ResponseWriter, r *http.Request, key str
 		return
 	}
 
-	if match := MatchingAWGTunnel(tunnels, patched); match != nil {
-		changed := false
+	// Свой связанный туннель, переживший снос, — тот самый: без ключа пира в
+	// конфиге по ключу его не найти, и гард адреса отказал бы против него же
+	// (F141).
+	match := linkedTunnel(tunnels, rec.ID)
+	if match == nil {
+		match = MatchingAWGTunnel(tunnels, patched)
+	}
+	if match != nil {
+		changed, renamed, prevName, earlierName := false, false, "", ""
 		// Решение «менять или нет» принимается по свежей записи внутри
 		// мутатора: List выше — только выбор кандидата.
 		err := h.deps.Tunnels.Update(match.ID, func(stored *storage.AWGTunnel) error {
@@ -452,8 +469,9 @@ func (h *Handler) EnsureWGTunnel(w http.ResponseWriter, r *http.Request, key str
 				changed = true
 			}
 			if wantName != "" && stored.Name != wantName {
+				prevName, earlierName = stored.Name, stored.PrevName
 				stored.Name = wantName
-				changed = true
+				changed, renamed = true, true
 			}
 			if strings.TrimSpace(stored.Peer.Endpoint) != wantEndpoint {
 				stored.Peer.Endpoint = wantEndpoint
@@ -471,14 +489,24 @@ func (h *Handler) EnsureWGTunnel(w http.ResponseWriter, r *http.Request, key str
 		if changed {
 			mutated = true
 		}
+		if renamed {
+			// До Start: F517 сверяет описание записи с именем уже на старте.
+			h.deps.Tunnels.SyncDescription(r.Context(), match.ID, prevName, wantName, earlierName)
+		}
 		if running {
 			_ = h.deps.Tunnels.Start(r.Context(), match.ID)
 			mutated = true
 		}
+		// Имя — записанное: match снят до переименования, и UI показал бы
+		// прежнее до перечитывания (F521).
+		name := match.Name
+		if renamed {
+			name = wantName
+		}
 		response.Success(w, EnsureWGTunnelResponse{
 			Created:    false,
 			TunnelID:   match.ID,
-			TunnelName: match.Name,
+			TunnelName: name,
 			Message:    "AWG-туннель с таким WireGuard-конфигом уже существует",
 		})
 		return
@@ -493,11 +521,15 @@ func (h *Handler) EnsureWGTunnel(w http.ResponseWriter, r *http.Request, key str
 			// В сообщении — хост без префикса и первое предупреждение проверки
 			// (там имя туннеля и интерфейс).
 			ip, _, _ := strings.Cut(strings.TrimSpace(strings.SplitN(addr, ",", 2)[0]), "/")
-			response.ErrorWithStatus(w, http.StatusConflict,
-				fmt.Sprintf("Сервер выдал адрес %s, он уже занят: %s. Адрес назначает wdtt-server: "+
-					"обновите его на обоих роутерах до 1.4.0-5 и заведите заново абонента этого клиента на его сервере",
-					ip, conflicts[0]),
-				"WDTT_WG_ADDRESS_CONFLICT")
+			msg := fmt.Sprintf("Сервер выдал адрес %s, он уже занят: %s", ip, conflicts[0])
+			// Совет про wdtt-server — только когда адрес держит туннель
+			// другого wdtt-клиента: с обычным туннелем обновление сервера
+			// ничего не решит (F140).
+			if addressHeldByLinked(tunnels, addr) {
+				msg += ". Адрес назначает wdtt-server: обновите его на обоих роутерах до 1.4.0-5 " +
+					"и заведите заново абонента этого клиента на его сервере"
+			}
+			response.ErrorWithStatus(w, http.StatusConflict, msg, "WDTT_WG_ADDRESS_CONFLICT")
 			return
 		}
 	}
@@ -520,6 +552,44 @@ func (h *Handler) EnsureWGTunnel(w http.ResponseWriter, r *http.Request, key str
 }
 
 // ── общее ────────────────────────────────────────────────────────
+
+// linkedTunnel — туннель, связанный с wdtt-клиентом clientID.
+func linkedTunnel(tunnels []storage.AWGTunnel, clientID string) *storage.AWGTunnel {
+	for i := range tunnels {
+		if strings.TrimSpace(tunnels[i].WdttClientID) == clientID {
+			return &tunnels[i]
+		}
+	}
+	return nil
+}
+
+// addressHeldByLinked — занят ли один из адресов addr (строка `Address`
+// конфига, список через запятую) туннелем, связанным с wdtt-клиентом.
+func addressHeldByLinked(tunnels []storage.AWGTunnel, addr string) bool {
+	want := addressHosts(addr)
+	for _, t := range tunnels {
+		if strings.TrimSpace(t.WdttClientID) == "" {
+			continue
+		}
+		for h := range addressHosts(t.Interface.Address) {
+			if want[h] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func addressHosts(addr string) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range strings.Split(addr, ",") {
+		h, _, _ := strings.Cut(strings.TrimSpace(a), "/")
+		if h != "" {
+			out[h] = true
+		}
+	}
+	return out
+}
 
 func (h *Handler) record(w http.ResponseWriter, key string) (instancestore.Record, bool) {
 	if h.deps.Records == nil {

@@ -39,6 +39,8 @@ type SingboxRouterStatusData struct {
 	FakeIPIface            string `json:"fakeipIface,omitempty" example:"opkgtun0"`
 	FakeIPDns              string `json:"fakeipDns,omitempty" example:"172.18.0.2"`
 	FakeIPTunAddr          string `json:"fakeipTunAddr,omitempty" example:"172.18.0.1"`
+	// TunAddrLocked — fakeipTunAddr4 сейчас не меняется: OpkgTun tun-режима поднят.
+	TunAddrLocked bool `json:"tunAddrLocked,omitempty" example:"false"`
 	// CacheDBPath — эффективный путь cache.db: по cacheFileLocation, при пустой
 	// настройке — из 00-base.json (рукописный путь сохраняется).
 	CacheDBPath string `json:"cacheDbPath,omitempty" example:"/opt/etc/awg-manager/singbox/cache.db"`
@@ -76,6 +78,11 @@ type SingboxRouterSettingsData struct {
 	DeviceMode     string `json:"deviceMode,omitempty" example:"policy" enums:"policy,all"`
 	RoutingMode    string `json:"routingMode,omitempty" example:"tproxy" enums:"tproxy,fakeip-tun,policy-tun"`
 	SnifferEnabled bool   `json:"snifferEnabled" example:"true"`
+	// InterceptFamily selects which address families the tproxy mode intercepts.
+	// Default "ipv4_only" (historical behaviour). "both" and "ipv6_only" need the
+	// ip6tables package on the router (400 IP6TABLES_MISSING otherwise). An
+	// OMITTED field keeps the stored value. Ignored by the tun modes.
+	InterceptFamily string `json:"interceptFamily,omitempty" example:"ipv4_only" enums:"ipv4_only,both,ipv6_only"`
 	// WANAutoDetect / WANInterface form a two-field discriminator:
 	//   true  + ""    → sing-box auto_detect_interface
 	//   false + "ppp0"→ sing-box default_interface=ppp0
@@ -93,9 +100,11 @@ type SingboxRouterSettingsData struct {
 	// BypassExtraPorts is a user-defined comma-separated list of extra
 	// port exclusions in "PORT UDP|TCP" format (e.g. "51820 UDP, 1194 TCP").
 	BypassExtraPorts string `json:"bypassExtraPorts,omitempty" example:"51820 UDP"`
-	// BypassExtraSubnets is a user-defined comma/space-separated list of IPv4
+	// BypassExtraSubnets is a user-defined comma/space-separated list of
 	// IP/CIDR destinations whose traffic bypasses sing-box entirely (incl.
-	// DNS/53). Bare IP is treated as /32. E.g. "203.0.113.0/24, 10.8.0.5".
+	// DNS/53). Bare IPv4 is treated as /32, bare IPv6 as /128. IPv6 entries take
+	// effect when IPv6 is intercepted (interceptFamily). E.g.
+	// "203.0.113.0/24, 10.8.0.5, 2001:db8::/32".
 	BypassExtraSubnets string `json:"bypassExtraSubnets,omitempty" example:"203.0.113.0/24"`
 	// BypassGeoipTags lists geoip tags from the configured .dat files whose
 	// CIDRs bypass sing-box entirely via the AWGM-BYPASS ipset (same full
@@ -116,6 +125,9 @@ type SingboxRouterSettingsData struct {
 	// Explicit "" disables v6; an OMITTED field keeps the stored value
 	// (absent != empty — the handler substitutes the current setting).
 	FakeIPPool6 string `json:"fakeipPool6,omitempty" example:"fc00::/18"`
+	// FakeIPTunAddr4 is the OpkgTun address of both tun modes, a /30 host
+	// (default "172.18.0.1/30"). Changeable only while the mode is off.
+	FakeIPTunAddr4 string `json:"fakeipTunAddr4,omitempty" example:"172.18.0.1/30"`
 	// FakeIPMTU is the tun MTU (default 1500; valid range 576-9000).
 	FakeIPMTU int `json:"fakeipMtu,omitempty" example:"1500"`
 	// FakeIPRealServer is the upstream resolver the engine-managed "real" DNS
@@ -147,6 +159,11 @@ type SingboxRouterSettingsData struct {
 	// source-preserve (см. GET /singbox/router/policy-tun/nat-preview).
 	// Обнуляется бэкендом при policyTunSourcePreserve=false.
 	PolicyTunNATSegments []string `json:"policyTunNatSegments,omitempty" example:"Home"`
+	// PolicyTunDescription — имя интерфейса policy-tun в веб-интерфейсе роутера
+	// и в политиках доступа (NDMS-описание OpkgTun). Пусто — "awgm policy-tun".
+	// До 32 символов; префикс "awgm " зарезервирован. Живой интерфейс
+	// переименовывается на ближайшем reconcile, без пересоздания.
+	PolicyTunDescription string `json:"policyTunDescription,omitempty" example:"Awgmanager" maxLength:"32"`
 	// CacheFileLocation — место хранения cache.db sing-box: "flash" —
 	// /opt/etc/awg-manager/singbox/cache.db, "tmp" — /tmp/singbox-cache.db в RAM,
 	// записи кэша перестают изнашивать флеш, но кэш не переживает перезагрузку.
@@ -320,6 +337,12 @@ type SingboxRouterWANInterfaceDTO struct {
 	Label    string `json:"label" example:"Резервный канал"`
 	Up       bool   `json:"up" example:"true"`
 	Priority int    `json:"priority" example:"700000"`
+	Type     string `json:"type" example:"PPP"`
+
+	// Foreign — отмеченный сторонний интерфейс (issue #935); Absent — его
+	// сейчас нет в системе (интерфейс ядра без устройства).
+	Foreign bool `json:"foreign,omitempty" example:"false"`
+	Absent  bool `json:"absent,omitempty" example:"false"`
 }
 
 // SingboxRouterWANInterfacesListResponse is the envelope for

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,12 +68,21 @@ const (
 	// Install to clean up the rules on upgrade from any prior AWGM
 	// build that installed the mangle-MARK form.
 	DNSNoPolicyTag = "AWGM-DNS-NOPOLICY"
+	// SelfLoopTag помечает DROP в mangle INPUT для TCP на порты redirect-
+	// инбаундов, пришедшего БЕЗ NAT REDIRECT (F677). У такого соединения
+	// исходный адрес назначения — сам слушатель, маршрут уводит его в direct,
+	// а direct подключается к тому же порту: петля, которая за секунды
+	// выедает fd движка. Перехваченное соединение несёт в conntrack DNAT и
+	// правило не задевает; транзит до чужого порта 51272 идёт мимо INPUT.
+	SelfLoopTag = "AWGM-SELFLOOP"
 	// IPRulePriority is the fixed `ip rule` priority for our fwmark rule.
-	// Above NDMS policy rules (~100-200) and below system main/default
-	// (32766/32767). Hard-coded so Install is fully idempotent and so
-	// our rule never accidentally displaces the kernel's local-table
-	// rule at priority 0.
-	IPRulePriority = 30000
+	// Below 0 (local) and the NDMS policy rules (100-105, their fwmark is
+	// overwritten by --tproxy-mark), above everything NDMS adds with
+	// `from all lookup <table>`: IPsec site-to-site puts its remote subnets
+	// at 2000 (table 248), and a rule below it sent TPROXY'd DNS to such a
+	// subnet out the WAN instead of into sing-box (F678). Same value and
+	// reason as IPRule6Priority. Hard-coded so Install is fully idempotent.
+	IPRulePriority = 1100
 	// maxIPRuleDrainPasses caps the drain loop in Install/Uninstall.
 	// Defensive bound — `ip rule del` should return ENOENT quickly when
 	// nothing matches, but a buggy kernel returning success forever
@@ -97,19 +107,32 @@ func SetDataDir(dir string) {
 	netfilterNatRulesPath = filepath.Join(sub, "router-netfilter-nat.rules")
 	netfilterCtCleanPath = filepath.Join(sub, "awgm-ctclean.sh")
 	bypassSavePath = filepath.Join(sub, "bypass.ipset")
+	netfilter6RulesPath = filepath.Join(sub, "router-netfilter6.rules")
+	netfilter6MangleRulesPath = filepath.Join(sub, "router-netfilter6-mangle.rules")
+	netfilter6NatRulesPath = filepath.Join(sub, "router-netfilter6-nat.rules")
+	bypassSave6Path = filepath.Join(sub, "bypass6.ipset")
+	netfilter6BlackholePath = filepath.Join(sub, "router-blackhole6.rules")
+	netfilterCtClean6Path = filepath.Join(sub, "awgm-ctclean6.sh")
 }
 
 // DataDirPaths — текущие пути, производные от каталога данных. Существует для
 // проверки того, что SetDataDir не забыл ни одного: список файлов растёт, а
-// забытый путь молча уводит запись в боевой каталог.
+// забытый путь молча уводит запись в боевой каталог. Полноту самого списка
+// сторожит TestDataDirPaths_CoversEveryDataDirDecl — по объявлениям (F263).
 func DataDirPaths() map[string]string {
 	return map[string]string{
-		"netfilterRulesPath":       netfilterRulesPath,
-		"netfilterBlackholePath":   netfilterBlackholePath,
-		"netfilterMangleRulesPath": netfilterMangleRulesPath,
-		"netfilterNatRulesPath":    netfilterNatRulesPath,
-		"netfilterCtCleanPath":     netfilterCtCleanPath,
-		"bypassSavePath":           bypassSavePath,
+		"netfilterRulesPath":        netfilterRulesPath,
+		"netfilterBlackholePath":    netfilterBlackholePath,
+		"netfilterMangleRulesPath":  netfilterMangleRulesPath,
+		"netfilterNatRulesPath":     netfilterNatRulesPath,
+		"netfilterCtCleanPath":      netfilterCtCleanPath,
+		"bypassSavePath":            bypassSavePath,
+		"netfilter6RulesPath":       netfilter6RulesPath,
+		"netfilter6MangleRulesPath": netfilter6MangleRulesPath,
+		"netfilter6NatRulesPath":    netfilter6NatRulesPath,
+		"bypassSave6Path":           bypassSave6Path,
+		"netfilter6BlackholePath":   netfilter6BlackholePath,
+		"netfilterCtClean6Path":     netfilterCtClean6Path,
 	}
 }
 
@@ -132,6 +155,12 @@ func RestoreDataDirPaths(p map[string]string) {
 	netfilterNatRulesPath = p["netfilterNatRulesPath"]
 	netfilterCtCleanPath = p["netfilterCtCleanPath"]
 	bypassSavePath = p["bypassSavePath"]
+	netfilter6RulesPath = p["netfilter6RulesPath"]
+	netfilter6MangleRulesPath = p["netfilter6MangleRulesPath"]
+	netfilter6NatRulesPath = p["netfilter6NatRulesPath"]
+	bypassSave6Path = p["bypassSave6Path"]
+	netfilter6BlackholePath = p["netfilter6BlackholePath"]
+	netfilterCtClean6Path = p["netfilterCtClean6Path"]
 }
 
 // Mutable in tests via t.Cleanup so they can redirect into a tmp dir.
@@ -462,6 +491,17 @@ type RestoreInputSpec struct {
 	// tun, а не мимо него).
 	DSCPOnly bool
 
+	// V4Off — режим InterceptFamily == "ipv6_only": IPv4 не перехватывается.
+	// Цепочки и их PREROUTING-джампы при этом ОСТАЮТСЯ, но пустыми — трафик
+	// проходит их насквозь и уходит по таблице политики NDMS. Пустые цепочки
+	// вместо отсутствующих потому, что вся сверка режима tproxy (Probe, хук
+	// netfilter.d, Reconcile) наблюдает именно их: по ним она отличает
+	// «включено» от «выключено», и учить её третьему состоянию ради одного
+	// значения настройки было бы дороже и опаснее, чем пара пустых цепочек.
+	// DNS-RESCUE сохраняется (он про устройства вне политики), fail-closed
+	// blackhole не ставится — ронять нечего.
+	V4Off bool
+
 	// QoSClasses lists the active DSCP QoS classes (issue #371). Each entry
 	// yields one `-m dscp --dscp N` dispatch rule per chain (mangle UDP
 	// TPROXY --on-port TProxyPort, nat TCP REDIRECT --to-ports RedirectPort)
@@ -480,6 +520,8 @@ type QoSClassSpec struct {
 	DSCP         int
 	TProxyPort   int
 	RedirectPort int
+	// Bypass — класс «мимо sing-box»: `-j RETURN` вместо диспатча в порты.
+	Bypass bool
 }
 
 // equalInstalledSpec и equalBlackholeSpec сравнивают ЖЕЛАЕМЫЙ спек с
@@ -580,6 +622,28 @@ func emitPreroutingJump(b *strings.Builder, chain string, spec RestoreInputSpec)
 	}
 }
 
+// selfLoopPorts — TCP-порты всех redirect-инбаундов обоих семейств: основные и
+// диапазоны классов QoS. Набор один на iptables и ip6tables: v6-инбаунды слушают
+// двухстековый `::`, и по IPv4 петля через них заводится так же (стенд 18.10).
+// Правило без слушателя на порту ничего не стоит, поэтому без оглядки на режим.
+func selfLoopPorts() []string {
+	return []string{
+		strconv.Itoa(RedirectPort),
+		strconv.Itoa(Redirect6Port),
+		fmt.Sprintf("%d:%d", QoSRedirectPortBase, QoSRedirectPortBase+MaxQoSClasses-1),
+		fmt.Sprintf("%d:%d", QoS6RedirectPortBase, QoS6RedirectPortBase+MaxQoSClasses-1),
+	}
+}
+
+// emitSelfLoopDrop рендерит DROP соединений на порты redirect-инбаундов в обход
+// NAT REDIRECT (см. SelfLoopTag). Синтаксис общий для iptables и ip6tables.
+func emitSelfLoopDrop(b *strings.Builder) {
+	for _, p := range selfLoopPorts() {
+		fmt.Fprintf(b, "-A INPUT -p tcp --dport %s -m conntrack ! --ctstate DNAT -m comment --comment %q -j DROP\n",
+			p, SelfLoopTag)
+	}
+}
+
 // buildBlackholeRestoreInput renders the mangle-only *AWGM-BLACKHOLE* blob:
 // the SAME LAN/router/WAN RETURN exclusions as the interception chain, then a
 // terminal DROP, entered from PREROUTING by the identical policy selector
@@ -612,6 +676,13 @@ func buildBlackholeRestoreInput(spec RestoreInputSpec) string {
 	// the interception chain so the exclusion set cannot drift and the blackhole
 	// can never over-block router-local, LAN-to-LAN, or management traffic.
 	emitBypassReturns(&b, BlackholeChain, spec.WANIPs)
+	// Классы «мимо sing-box» в движок не ходят и при живом движке — мёртвый
+	// движок не повод их дропать.
+	for _, q := range spec.QoSClasses {
+		if q.Bypass {
+			fmt.Fprintf(&b, "-A %s -m dscp --dscp %d -j RETURN\n", BlackholeChain, q.DSCP)
+		}
+	}
 	// Everything else that belongs to the policy: drop it (fail-closed).
 	fmt.Fprintf(&b, "-A %s -j DROP\n", BlackholeChain)
 	// Same PREROUTING selector as the real interception jump (connmark policy
@@ -660,6 +731,14 @@ func buildMangleRestoreInput(spec RestoreInputSpec) string {
 	// set_chain_rules (`INTERCEPT_DNS_ENABLE=1` branch). No extras.
 	b.WriteString("*mangle\n")
 	fmt.Fprintf(&b, ":%s - [0:0]\n", ChainName)
+	emitSelfLoopDrop(&b)
+
+	// ipv6_only: цепочка пустая, остаётся только джамп (см. V4Off).
+	if spec.V4Off {
+		emitPreroutingJump(&b, ChainName, spec)
+		b.WriteString("COMMIT\n")
+		return b.String()
+	}
 
 	// Пользовательский bypass — целиком мимо sing-box, ДО перехвата DNS.
 	emitUserBypassReturns(&b, ChainName, spec.BypassCIDRs)
@@ -709,6 +788,10 @@ func buildMangleRestoreInput(spec RestoreInputSpec) string {
 	//   - BEFORE the catch-all: otherwise the unconditional TPROXY eats the
 	//     packet first and the class rule is dead.
 	for _, q := range spec.QoSClasses {
+		if q.Bypass {
+			fmt.Fprintf(&b, "-A %s -p udp -m dscp --dscp %d -j RETURN\n", ChainName, q.DSCP)
+			continue
+		}
 		fmt.Fprintf(&b, "-A %s -p udp -m dscp --dscp %d -j TPROXY --on-port %d --on-ip 127.0.0.1 --tproxy-mark 0x%x\n",
 			ChainName, q.DSCP, q.TProxyPort, Fwmark)
 	}
@@ -751,6 +834,15 @@ func buildNatRestoreInput(spec RestoreInputSpec) string {
 	// onto a class port), emitted with the class rules below.
 	b.WriteString("*nat\n")
 	fmt.Fprintf(&b, ":%s - [0:0]\n", RedirectChain)
+
+	// ipv6_only: пустая цепочка и джамп, плюс DNS-RESCUE — он про устройства
+	// ВНЕ политики и от перехвата самой политики не зависит (см. V4Off).
+	if spec.V4Off {
+		emitPreroutingJump(&b, RedirectChain, spec)
+		emitDNSRescue(&b, spec)
+		b.WriteString("COMMIT\n")
+		return b.String()
+	}
 
 	emitUserBypassReturns(&b, RedirectChain, spec.BypassCIDRs)
 	emitBypassSetReturn(&b, RedirectChain, spec)
@@ -796,6 +888,10 @@ func buildNatRestoreInput(spec RestoreInputSpec) string {
 		fmt.Fprintf(&b, "-A %s -p tcp --dport 53 -j REDIRECT --to-ports %d\n",
 			RedirectChain, RedirectPort)
 		for _, q := range spec.QoSClasses {
+			if q.Bypass {
+				fmt.Fprintf(&b, "-A %s -p tcp -m dscp --dscp %d -j RETURN\n", RedirectChain, q.DSCP)
+				continue
+			}
 			fmt.Fprintf(&b, "-A %s -p tcp -m dscp --dscp %d -j REDIRECT --to-ports %d\n",
 				RedirectChain, q.DSCP, q.RedirectPort)
 		}
@@ -829,17 +925,25 @@ func buildNatRestoreInput(spec RestoreInputSpec) string {
 	// All rules use -I PREROUTING 1 so they land in front of the NDMS
 	// jumps; their relative order amongst themselves doesn't matter
 	// (per-bridge, per-protocol independent matches).
-	if !spec.MatchAll {
-		for _, bm := range spec.LANBridges {
-			fmt.Fprintf(&b, "-I PREROUTING 1 -i %s -m mark --mark 0x0 -m pkttype --pkt-type unicast -p udp --dport 53 -m comment --comment %q -j REDIRECT --to-ports %d\n",
-				bm.Bridge, DNSRescueTag, bm.Port)
-			fmt.Fprintf(&b, "-I PREROUTING 1 -i %s -m mark --mark 0x0 -m pkttype --pkt-type unicast -p tcp --dport 53 -m comment --comment %q -j REDIRECT --to-ports %d\n",
-				bm.Bridge, DNSRescueTag, bm.Port)
-		}
-	}
+	emitDNSRescue(&b, spec)
 
 	b.WriteString("COMMIT\n")
 	return b.String()
+}
+
+// emitDNSRescue рендерит правила DNS-RESCUE (см. комментарий выше, в
+// buildNatRestoreInput). Вынесено, потому что нужно обеим ветвям — обычной и
+// V4Off.
+func emitDNSRescue(b *strings.Builder, spec RestoreInputSpec) {
+	if spec.MatchAll {
+		return
+	}
+	for _, bm := range spec.LANBridges {
+		fmt.Fprintf(b, "-I PREROUTING 1 -i %s -m mark --mark 0x0 -m pkttype --pkt-type unicast -p udp --dport 53 -m comment --comment %q -j REDIRECT --to-ports %d\n",
+			bm.Bridge, DNSRescueTag, bm.Port)
+		fmt.Fprintf(b, "-I PREROUTING 1 -i %s -m mark --mark 0x0 -m pkttype --pkt-type unicast -p tcp --dport 53 -m comment --comment %q -j REDIRECT --to-ports %d\n",
+			bm.Bridge, DNSRescueTag, bm.Port)
+	}
 }
 
 type restoreNoflushFn func(ctx context.Context, input string) error
@@ -865,6 +969,10 @@ type IPTables struct {
 	persistBlackhole        persistFn
 	cleanupBlackhole        func()
 	runCtClean              func(ctx context.Context)
+
+	// v6 — системная сторона v6-слоя (iptables6.go). Одним интерфейсом, а не
+	// россыпью полей: см. v6Backend.
+	v6 v6Backend
 }
 
 func NewIPTables() *IPTables {
@@ -900,6 +1008,8 @@ func NewIPTables() *IPTables {
 			// must never fail Install (interception is already up).
 			_, _ = sysexec.Run(ctx, netfilterCtCleanPath)
 		},
+
+		v6: systemV6{},
 	}
 }
 
@@ -966,14 +1076,14 @@ func (it *IPTables) Install(ctx context.Context, spec RestoreInputSpec) error {
 		}
 	}
 	if it.persistHook != nil {
-		if err := it.persistHook(!spec.DSCPOnly); err != nil {
+		if err := it.persistHook(!spec.DSCPOnly && !spec.V4Off); err != nil {
 			return fmt.Errorf("write netfilter hook: %w", err)
 		}
 	}
 	// policy-tun: blackhole в этом режиме не применяется — снести файл правил,
 	// оставшийся от прежнего режима, иначе хук прежней установки продолжил бы
 	// поднимать fail-closed DROP на каждой перезагрузке netfilter.
-	if spec.DSCPOnly && it.cleanupBlackhole != nil {
+	if (spec.DSCPOnly || spec.V4Off) && it.cleanupBlackhole != nil {
 		it.cleanupBlackhole()
 	}
 	if err := it.restoreNoflush(ctx, input); err != nil {
@@ -988,9 +1098,8 @@ func (it *IPTables) Install(ctx context.Context, spec RestoreInputSpec) error {
 	// local` rule (normally at prio 0), breaking router-local routing
 	// (sing-box outbounds to direct silently fail).
 	it.drainFwmarkRules(ctx)
-	// Use an explicit priority well above NDMS policy rules (100-200)
-	// and well below the system main/default tables (32766/32767), so
-	// our rule is identifiable and idempotent.
+	// Explicit priority (see IPRulePriority) keeps the rule identifiable
+	// and idempotent; the drain above also removes the pre-F678 rule at 30000.
 	if err := it.runIP(ctx, "rule", "add", "fwmark", fmt.Sprintf("0x%x", Fwmark),
 		"table", fmt.Sprintf("%d", RoutingTable),
 		"priority", fmt.Sprintf("%d", IPRulePriority)); err != nil {
@@ -1200,11 +1309,13 @@ scrub_jumps() {
     | sed 's/-A PREROUTING/-D PREROUTING/' \
     | while IFS= read -r line; do /opt/sbin/iptables -w -t "$1" $line 2>/dev/null; done
 }
-# scrub_tagged <table> <tag>: delete comment-tagged direct PREROUTING rules.
+# scrub_tagged <table> <tag> [chain]: delete comment-tagged direct rules
+# (chain defaults to PREROUTING).
 scrub_tagged() {
-  /opt/sbin/iptables -w -t "$1" -S PREROUTING 2>/dev/null \
+  c="${3:-PREROUTING}"
+  /opt/sbin/iptables -w -t "$1" -S "$c" 2>/dev/null \
     | grep -E -- "--comment \"?$2" \
-    | sed 's/-A PREROUTING/-D PREROUTING/' \
+    | sed "s/-A $c/-D $c/" \
     | while IFS= read -r line; do /opt/sbin/iptables -w -t "$1" $line 2>/dev/null; done
 }
 if pidof sing-box >/dev/null 2>&1; then
@@ -1235,6 +1346,8 @@ if pidof sing-box >/dev/null 2>&1; then
         scrub_tagged mangle %[8]s
         # Ingress-scope MARK/CONNMARK rules (comment-tagged).
         scrub_tagged mangle %[9]s
+        # Self-loop DROP in mangle INPUT (comment-tagged).
+        scrub_tagged mangle %[18]s INPUT
         /opt/sbin/iptables-restore --noflush < %[12]q
         /opt/sbin/ip rule add fwmark 0x%[3]x table %[4]d priority %[5]d 2>/dev/null || true
         /opt/sbin/ip route add local 0.0.0.0/0 dev lo table %[4]d 2>/dev/null || true
@@ -1253,6 +1366,7 @@ if pidof sing-box >/dev/null 2>&1; then
       scrub_tagged nat %[7]s
       scrub_tagged mangle %[8]s
       scrub_tagged mangle %[9]s
+      scrub_tagged mangle %[18]s INPUT
       /opt/sbin/iptables-restore --noflush < %[1]q
       /opt/sbin/ip rule add fwmark 0x%[3]x table %[4]d priority %[5]d 2>/dev/null || true
       /opt/sbin/ip route add local 0.0.0.0/0 dev lo table %[4]d 2>/dev/null || true
@@ -1265,7 +1379,7 @@ if pidof sing-box >/dev/null 2>&1; then
 else
 %[10]sfi
 exit 0
-`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain, DNSRescueTag, DNSNoPolicyTag, IngressTag, deadBranch, BlackholeChain, netfilterMangleRulesPath, netfilterNatRulesPath, netfilterCtCleanPath, bypassSavePath, bypassSetName, bypassset.SetMaxElem)
+`, netfilterRulesPath, ChainName, Fwmark, RoutingTable, IPRulePriority, RedirectChain, DNSRescueTag, DNSNoPolicyTag, IngressTag, deadBranch, BlackholeChain, netfilterMangleRulesPath, netfilterNatRulesPath, netfilterCtCleanPath, bypassSavePath, bypassSetName, bypassset.SetMaxElem, SelfLoopTag)
 }
 
 // ctCleanScript renders the poisoned-flow eviction script (issue #627). While
@@ -1427,6 +1541,8 @@ func (it *IPTables) removeSourceHooks(ctx context.Context) {
 	// tagged AWGM-INGRESS. Scrub before re-install so the list stays
 	// idempotent and removed interfaces don't leave dangling marks.
 	it.removeCommentTaggedRulesFromTable(ctx, "mangle", "PREROUTING", IngressTag)
+	// Self-loop DROP: direct mangle INPUT rules, same scrub-before-restore.
+	it.removeCommentTaggedRulesFromTable(ctx, "mangle", "INPUT", SelfLoopTag)
 }
 
 // removeCommentTaggedRulesFromTable scrubs every rule in `chain` whose
@@ -1439,7 +1555,12 @@ func (it *IPTables) removeCommentTaggedRulesFromTable(ctx context.Context, table
 	// Разбор идёт через ШОВ роли (runIPTablesOut), а не прямым sysexec: иначе
 	// снос невидим тесту, и его выпил остаётся зелёным. "-w" добавляет сам
 	// sysiptables.RunOutput.
-	out, err := it.runIPTablesOut(ctx, "-t", table, "-S", chain)
+	removeCommentTaggedRules(ctx, it.runIPTablesOut, it.runIPTables, table, chain, tag)
+}
+
+// removeCommentTaggedRules — общий для iptables и ip6tables снос по тегу.
+func removeCommentTaggedRules(ctx context.Context, runOut runOutFn, run runFn, table, chain, tag string) {
+	out, err := runOut(ctx, "-t", table, "-S", chain)
 	if err != nil {
 		return
 	}
@@ -1452,7 +1573,7 @@ func (it *IPTables) removeCommentTaggedRulesFromTable(ctx context.Context, table
 		}
 		delLine := "-D " + strings.TrimPrefix(line, "-A ")
 		args := append([]string{"-t", table}, strings.Fields(delLine)...)
-		_ = it.runIPTables(ctx, args...)
+		_ = run(ctx, args...)
 	}
 }
 

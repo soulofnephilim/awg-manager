@@ -553,6 +553,7 @@ func TestDisable_TearsDownBypassSetWithoutTagSnapshot(t *testing.T) {
 		}),
 		Policies: &fakeAccessPolicyProvider{mark: "0xffffaaa"},
 		IPTables: &IPTables{
+			v6:             nopV6{},
 			runIPTables:    func(context.Context, ...string) error { return nil },
 			runIPTablesOut: func(context.Context, ...string) (string, error) { return "", nil },
 			runIP:          func(context.Context, ...string) error { return nil },
@@ -565,7 +566,7 @@ func TestDisable_TearsDownBypassSetWithoutTagSnapshot(t *testing.T) {
 	svc.currentBypassGeoIPTags = nil
 	svc.teardownBypassSetFn = func(context.Context) { close(torn) }
 
-	if err := svc.Disable(context.Background()); err != nil {
+	if err := svc.disable(context.Background()); err != nil {
 		t.Fatalf("Disable: %v", err)
 	}
 	select {

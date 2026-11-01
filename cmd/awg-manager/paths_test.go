@@ -10,6 +10,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
 	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/firewall"
 )
 
 // F168: флаг `-data-dir` соблюдался наполовину — демон в песочнице всё равно
@@ -27,6 +28,7 @@ func TestApplyDataDir_RedirectsDerivedPaths(t *testing.T) {
 		"obfuscator.ConfDir": {obfuscator.ConfDir, filepath.Join(dir, "obfuscator")},
 		"kmod.ModulesDir":    {kmod.ModulesDir, filepath.Join(dir, "modules")},
 		"kmod.BundledDir":    {kmod.BundledDir(), filepath.Join(dir, "modules", "bundled")},
+		"obfuscator.ArmPath": {obfuscator.ArmPath, filepath.Join(dir, "modules", "awgm_relay.arming")},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %q, ждали %q", name, pair[0], pair[1])
@@ -53,6 +55,14 @@ func TestApplyDataDir_RedirectsRouterPaths(t *testing.T) {
 		"netfilterNatRulesPath":    filepath.Join(sub, "router-netfilter-nat.rules"),
 		"netfilterCtCleanPath":     filepath.Join(sub, "awgm-ctclean.sh"),
 		"bypassSavePath":           filepath.Join(sub, "bypass.ipset"),
+		// Правила перехвата IPv6 (iptables6.go). Их хук лежит рядом с v4-хуком
+		// и уходит вместе с ним — отдельного пути у него нет.
+		"netfilter6RulesPath":       filepath.Join(sub, "router-netfilter6.rules"),
+		"netfilter6MangleRulesPath": filepath.Join(sub, "router-netfilter6-mangle.rules"),
+		"netfilter6NatRulesPath":    filepath.Join(sub, "router-netfilter6-nat.rules"),
+		"bypassSave6Path":           filepath.Join(sub, "bypass6.ipset"),
+		"netfilter6BlackholePath":   filepath.Join(sub, "router-blackhole6.rules"),
+		"netfilterCtClean6Path":     filepath.Join(sub, "awgm-ctclean6.sh"),
 	}
 	got := router.DataDirPaths()
 	if len(got) != len(want) {
@@ -68,6 +78,27 @@ func TestApplyDataDir_RedirectsRouterPaths(t *testing.T) {
 	// на временный каталог.
 	if got := router.NetfilterHookPath(); !strings.HasPrefix(got, dir) {
 		t.Errorf("хук ndm остался боевым при небоевом каталоге данных: %q", got)
+	}
+	// F305: список и хук firewall туннелей — туда же.
+	if hook, list := firewall.Paths(); !strings.HasPrefix(hook, dir) || !strings.HasPrefix(list, dir) {
+		t.Errorf("firewall остался боевым: hook=%q list=%q", hook, list)
+	}
+}
+
+// F487: каталог sing-box (config.d, pid) тоже следует -data-dir — иначе
+// песочница пишет в боевой, а её --cleanup сносит боевой каталог целиком.
+// Боевой каталог данных оставляет умолчание оператора ("").
+func TestApplyDataDir_RedirectsSingboxDir(t *testing.T) {
+	restorePaths(t)
+
+	dir := t.TempDir()
+	applyDataDir(dir)
+	if want := filepath.Join(dir, "singbox"); singboxDataDir != want {
+		t.Errorf("singboxDataDir = %q, ждали %q", singboxDataDir, want)
+	}
+	applyDataDir(defaultDataDir)
+	if singboxDataDir != "" {
+		t.Errorf("боевой каталог данных сменил каталог sing-box: %q", singboxDataDir)
 	}
 }
 
@@ -88,9 +119,15 @@ func TestApplyDataDir_ProductionKeepsHook(t *testing.T) {
 func restorePaths(t *testing.T) {
 	t.Helper()
 	conf, obf, mod, hook := tunnel.ConfDir, obfuscator.ConfDir, kmod.ModulesDir, router.NetfilterHookPath()
+	arm := obfuscator.ArmPath
 	routerPaths := router.DataDirPaths()
+	sb := singboxDataDir
+	fwHook, fwList := firewall.Paths()
 	t.Cleanup(func() {
+		singboxDataDir = sb
+		firewall.SetPaths(fwHook, fwList)
 		tunnel.ConfDir, obfuscator.ConfDir, kmod.ModulesDir = conf, obf, mod
+		obfuscator.ArmPath = arm
 		router.SetNetfilterHookPath(hook)
 		router.RestoreDataDirPaths(routerPaths)
 	})

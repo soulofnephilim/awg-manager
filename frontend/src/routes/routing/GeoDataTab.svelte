@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { api } from '$lib/api/client';
 	import type { GeoFileEntry, GeoFileSettings, Settings } from '$lib/types';
 	import { HrNeoGeoDataView, HrNeoGeoRefreshSettings } from '$lib/components/hrneo';
@@ -29,18 +30,16 @@
 		saving = true;
 		try {
 			settings = await api.updateSettings({
-				...settings,
 				geoFile: {
-					...settings.geoFile,
 					autoRefreshEnabled: enabled,
-					refreshIntervalHours:
-						enabled && settings.geoFile.refreshIntervalHours === 0 ? 6 : settings.geoFile.refreshIntervalHours,
-					refreshMode: settings.geoFile.refreshMode || 'interval',
+					// Дефолты дописываем, только если их нет: остальное блока не трогаем.
+					...(enabled && settings.geoFile.refreshIntervalHours === 0 ? { refreshIntervalHours: 6 } : {}),
+					...(settings.geoFile.refreshMode ? {} : { refreshMode: 'interval' as const }),
 				},
 			});
-			notifications.success(enabled ? 'Автообновление гео-файлов включено' : 'Автообновление гео-файлов отключено');
+			notifications.success(enabled ? m.routing_geo_autorefresh_on() : m.routing_geo_autorefresh_off());
 		} catch {
-			notifications.error('Ошибка сохранения настроек');
+			notifications.error(m.routing_geo_save_error());
 		} finally {
 			saving = false;
 		}
@@ -50,10 +49,10 @@
 		if (!settings) return;
 		saving = true;
 		try {
-			settings = await api.updateSettings({ ...settings, geoFile: next });
-			notifications.success('Настройки автообновления сохранены');
+			settings = await api.updateSettings({ geoFile: next });
+			notifications.success(m.routing_geo_settings_saved());
 		} catch {
-			notifications.error('Ошибка сохранения настроек');
+			notifications.error(m.routing_geo_save_error());
 		} finally {
 			saving = false;
 		}
@@ -64,9 +63,9 @@
 		try {
 			await api.updateGeoFile('');
 			await loadGeoFiles();
-			notifications.success('Гео-файлы обновлены');
+			notifications.success(m.routing_geo_updated());
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка обновления');
+			notifications.error(e instanceof Error ? e.message : m.routing_geo_update_error());
 		} finally {
 			updatingAll = false;
 		}
@@ -83,7 +82,7 @@
 
 <div class="geo-actions">
 	<Button variant="secondary" size="sm" onclick={updateAllNow} loading={updatingAll}>
-		Запустить обновление сейчас
+		{m.routing_geo_update_now()}
 	</Button>
 </div>
 

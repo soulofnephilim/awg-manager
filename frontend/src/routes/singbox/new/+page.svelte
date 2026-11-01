@@ -1,36 +1,35 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { goto } from '$app/navigation';
 	import { PageContainer } from '$lib/components/layout';
 	import { SingboxGhostTerminal } from '$lib/components/singbox';
 	import { ArrowLeft } from 'lucide-svelte';
 	import { Button } from '$lib/components/ui';
+	import RichText from '$lib/components/ui/RichText.svelte';
 	import { notifications } from '$lib/stores/notifications';
-	import { pluralize, TUNNEL_WORDS } from '$lib/utils/pluralize';
 
 	function onComplete(imported: number): void {
-		const verb = imported === 1 ? 'Импортирован' : 'Импортировано';
-		notifications.success(`${verb} ${pluralize(imported, TUNNEL_WORDS)}`);
+		notifications.success(m.singbox_imported_tunnels({ count: imported }));
 		goto('/?tab=singbox');
 	}
 </script>
 
 <svelte:head>
-	<title>Новый Sing-box туннель</title>
+	<title>{m.singbox_new_title()}</title>
 </svelte:head>
 
 <PageContainer>
 	<div class="sticky-header">
 		<div class="header-left">
 			<Button variant="ghost" size="sm" onclick={() => goto('/?tab=singbox')} iconBefore={backIcon}>
-				Назад
+				{m.common_back()}
 			</Button>
-			<h1 class="page-title">Новый Sing-box туннель</h1>
+			<h1 class="page-title">{m.singbox_new_title()}</h1>
 		</div>
 	</div>
 
 	<p class="page-intro">
-		Вставьте одну или несколько ссылок <code>vless://</code>, <code>hysteria2://</code>,
-		<code>mieru://</code> или <code>mierus://</code> — каждая на своей строке.
+		<RichText text={m.singbox_new_intro()} />
 	</p>
 
 	<SingboxGhostTerminal oncomplete={onComplete} />
@@ -66,7 +65,7 @@
 		margin: 0 0 1rem 0;
 	}
 
-	.page-intro code {
+	.page-intro :global(code) {
 		font-family: var(--font-mono, monospace);
 		background: var(--bg-secondary);
 		padding: 1px 6px;

@@ -63,15 +63,24 @@ func Init(ctx context.Context, sysInfo *query.SystemInfoStore, timeout time.Dura
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
+	// Первым — ndmc (F742). Токен RCI транспорт шлёт только на 5.02+, а
+	// версию узнаёт отсюда же: первый `show/version` по RCI уходил без токена,
+	// и ndm на 5.2 писал W «obsoleted unauthenticated» на каждый старт
+	// процесса, а после снятия доступа без токена старт ждал бы весь бюджет.
+	// RCI остаётся запасным каналом — на буте ndm может ещё не слушать сокет.
+	if v, err := versionFromNdmc(ctx); err == nil {
+		sysInfo.Adopt(v, SourceNdmc)
+		return nil
+	}
+
 	if err := sysInfo.Init(ctx); err == nil {
 		return nil
 	}
 
 	for {
 		if !time.Now().Before(deadlineAt) {
-			// RCI молчит — спрашиваем ndm вторым каналом. Он ходит через
-			// unix-сокет, то есть не зависит ни от HTTP на :79, ни от того,
-			// чем этот :79 занят.
+			// RCI молчит — ещё раз спрашиваем ndmc: на буте ndm мог
+			// подняться, пока шёл бюджет.
 			if v, err := versionFromNdmc(ctx); err == nil {
 				sysInfo.Adopt(v, SourceNdmc)
 				return nil
@@ -189,6 +198,27 @@ func SupportsRCIToken() bool {
 		return false
 	}
 	return isAtLeast502(info.Release)
+}
+
+// KnownWithoutRCIToken — версия прошивки известна, разобрана и старше 5.02:
+// команд токенов на роутере заведомо нет. Неизвестная или неразборная
+// версия сюда не попадает — для отзыва это значит «пробовать» (F639).
+func KnownWithoutRCIToken() bool {
+	info := Get()
+	return info != nil && releaseBefore502(info.Release)
+}
+
+func releaseBefore502(release string) bool {
+	parts := strings.Split(release, ".")
+	if len(parts) < 3 {
+		return false
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return major < 5 || (major == 5 && minor < 2)
 }
 
 func isAtLeast502(release string) bool {

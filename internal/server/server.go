@@ -36,6 +36,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/external"
+	"github.com/hoaxisr/awg-manager/internal/zapret"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
@@ -103,6 +104,7 @@ type Server struct {
 	clientRouteService         clientroute.Service
 	catalog                    routing.Catalog
 	hydraService               *hydraroute.Service
+	zapretService              *zapret.Service
 	orch                       *orchestrator.Orchestrator
 	bus                        *events.Bus
 	exposureGuard              *api.ExposureGuard
@@ -131,7 +133,10 @@ type Server struct {
 	singboxSubMembersFn        func() []diagnostics.SingboxSubMember
 	orphanIfacesFn             func(ctx context.Context) ([]external.OrphanIface, error)
 	orphanExclusiveFn          func(ctx context.Context) ([]external.OrphanIface, error)
+	orphanNDMS                 api.OrphanIfaceNDMS
+	foreignIfaces              api.ForeignIfaceMarker
 	singboxConfigPreviewFn     func() (string, error)
+	obfuscatorRelayChanged     func()
 	dnsCheckService            *dnscheck.Service
 	authMiddleware             *auth.Middleware
 	mcpKeys                    *storage.McpKeyStore
@@ -148,6 +153,7 @@ type Server struct {
 	listenDoneOnce sync.Once
 
 	ndmsDispatcher api.HookDispatcher
+	hookSink       *api.HookSink
 	ndmsTransport  *ndmstransport.Client
 	ndmsSaveCoord  *ndmscommand.SaveCoordinator
 	metricsPoller  *ndmsmetrics.Poller
@@ -158,6 +164,7 @@ type Server struct {
 	bootStatusFn func() bool // returns true if boot still in progress
 
 	proxyRuntimeNudge api.ProxyRuntimeNudge
+	ipv4RunningHook   func(string)
 
 	// proxyRuntime — менеджер прокси-рантайма за узким срезом: тумблер
 	// намерения инстанса (карточка зеркальной записи wdtt-raw) и глушение
@@ -213,6 +220,7 @@ type Deps struct {
 	Orch                 *orchestrator.Orchestrator
 	Bus                  *events.Bus
 	HydraService         *hydraroute.Service
+	ZapretService        *zapret.Service
 	SingboxHandler       *api.SingboxHandler
 	SingboxOrch          *singboxorch.Orchestrator
 	ClashProxy           *api.ClashProxy
@@ -227,10 +235,20 @@ type Deps struct {
 	// OrphanIfacesExclusive — то же под семафором выбора, для перепроверки
 	// перед сносом (см. opkgtun.Pool.OrphansExclusive).
 	OrphanIfacesExclusive func(ctx context.Context) ([]external.OrphanIface, error)
+	// OrphanNDMS — снятие записи NDMS для той же ручки. Nil выключает ручку.
+	OrphanNDMS api.OrphanIfaceNDMS
+
+	// ForeignIfaces — отметка «Сторонний интерфейс» (issue #935). Nil
+	// выключает ручки /api/interfaces/foreign/* целиком.
+	ForeignIfaces api.ForeignIfaceMarker
 
 	// McpKeys holds the MCP API keys. Nil disables the /mcp endpoint and
 	// its key-management routes entirely (they are never registered).
 	McpKeys *storage.McpKeyStore
+
+	// ObfuscatorRelayChanged — смена выключателя ядро/процесс релея Phobos
+	// (спека §4.8); nil — смена вступит в силу со следующим Start туннеля.
+	ObfuscatorRelayChanged func()
 }
 
 // authLoggerAdapter narrows ScopedLogger to the AuthLogger interface
@@ -281,6 +299,7 @@ func New(cfg Config, deps Deps) *Server {
 		clientRouteService:     deps.ClientRouteSvc,
 		catalog:                deps.Catalog,
 		hydraService:           deps.HydraService,
+		zapretService:          deps.ZapretService,
 		orch:                   deps.Orch,
 		bus:                    deps.Bus,
 		singboxHandler:         deps.SingboxHandler,
@@ -291,7 +310,10 @@ func New(cfg Config, deps Deps) *Server {
 		singboxSubMembersFn:    deps.SingboxSubMembers,
 		orphanIfacesFn:         deps.OrphanIfaces,
 		orphanExclusiveFn:      deps.OrphanIfacesExclusive,
+		orphanNDMS:             deps.OrphanNDMS,
+		foreignIfaces:          deps.ForeignIfaces,
 		singboxConfigPreviewFn: deps.SingboxConfigPreview,
+		obfuscatorRelayChanged: deps.ObfuscatorRelayChanged,
 		authMiddleware:         auth.NewMiddleware(deps.Sessions, deps.Settings, &authLoggerAdapter{log: appLog}),
 		mcpKeys:                deps.McpKeys,
 		instanceID:             id,
@@ -299,10 +321,16 @@ func New(cfg Config, deps Deps) *Server {
 }
 
 // SetNDMSDispatcher wires the NDMS events.Dispatcher into the hook
-// handler so POST /api/hook/ndms invalidates Store caches. Main.go
+// handler so NDMS hooks from the spool invalidate Store caches. Main.go
 // calls this after constructing the new layer.
 func (s *Server) SetNDMSDispatcher(d api.HookDispatcher) {
 	s.ndmsDispatcher = d
+}
+
+// SetHookSink — приёмник spool хуков NDMS; готовый HookHandler ему
+// публикуется в конце registerRoutes.
+func (s *Server) SetHookSink(sink *api.HookSink) {
+	s.hookSink = sink
 }
 
 // SetNDMSTransport wires the new NDMS transport for consumers that need
@@ -511,6 +539,12 @@ func (s *Server) SetProxyRuntimeNudge(fn api.ProxyRuntimeNudge) {
 	s.proxyRuntimeNudge = fn
 }
 
+// SetIPv4RunningHook wires the callback for iflayerchanged layer=ipv4
+// level=running (F497: переприменение клиентских маршрутов system:-выхода).
+func (s *Server) SetIPv4RunningHook(fn func(string)) {
+	s.ipv4RunningHook = fn
+}
+
 // ProxyRuntime — то, что серверу нужно от менеджера прокси-рантайма:
 // тумблер намерения одного инстанса и пара «погасить/поднять» для бэкапа.
 // *manager.Manager удовлетворяет как есть.
@@ -698,6 +732,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	s.registerProxyRtRoutes(mux, h)
 	s.registerMcpRoutes(mux, h)
 	s.registerStaticRoutes(mux, h)
+	// Последней строкой: к этому месту HookHandler настроен всеми Set*
+	// (часть — в wireCrossHandlers), а Handle зовётся из
+	// горутины читателя spool — наполовину настроенный он видеть не должен.
+	if s.hookSink != nil {
+		s.hookSink.Publish(h.hookHandler)
+	}
 }
 
 // spaHandler serves static files with SPA fallback to index.html.

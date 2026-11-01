@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/awg3endpoint"
@@ -38,6 +39,21 @@ func newTestCoreIn(t *testing.T, dir string) singboxCore {
 		dataDir:  dataDir,
 		dir:      dir,
 	})
+}
+
+// F487: без явного dir ядро берёт каталог, розданный applyDataDir.
+func TestBuildSingboxCore_UsesDataDirSingbox(t *testing.T) {
+	restorePaths(t)
+	sb := filepath.Join(t.TempDir(), "singbox")
+	singboxDataDir = sb
+	core := newTestCoreIn(t, "")
+	if got := core.op.ConfigDir(); !strings.HasPrefix(got, sb) {
+		t.Fatalf("config.d = %q, ждали внутри %q", got, sb)
+	}
+	// F305: и бинарь — установка из песочницы не переписывает боевой.
+	if got := core.op.Binary(); !strings.HasPrefix(got, sb) {
+		t.Fatalf("бинарь = %q, ждали внутри %q", got, sb)
+	}
 }
 
 // Пин на проводку слотов внутри buildSingboxCore: Register + Bootstrap +
@@ -169,7 +185,7 @@ func TestBuildSingboxCore_DeviceProxyMigrationSetsMigratedFlag(t *testing.T) {
 	if !core.migrated {
 		t.Error("core.migrated = false: миграция device-proxy не попала в reload-триггер")
 	}
-	if _, err := os.Stat(filepath.Join(configD, "30-deviceproxy.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(configD, "12-deviceproxy.json")); err != nil {
 		t.Fatalf("миграция не отработала: %v", err)
 	}
 }

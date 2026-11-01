@@ -12,10 +12,14 @@ export interface FreeTurnClientConfig {
 	streams: number;
 	transport: 'tcp' | 'udp';
 	mode: 'udp' | 'tcp';
+	/** Upstream 4.0+: объединение сессий под одно TCP-соединение, только mode tcp. */
+	bond: boolean;
 	obfProfile: 'none' | 'rtpopus' | 'rtpopus2' | 'rtpopus3';
 	obfKey?: string;
 	/** Ключ обфускации задан на бэкенде — значение наружу не отдаётся (Н5). */
 	obfKeySet?: boolean;
+	/** -obf-timing в мс, 0 — выкл.; только с профилем обфускации. */
+	obfTimingMs: number;
 	streamsPerCred: number;
 	kcp?: FreeTurnKCP;
 	platform: 'desktop' | 'mobile';
@@ -24,6 +28,8 @@ export interface FreeTurnClientConfig {
 	clientId?: string;
 	sub?: string;
 	debug: boolean;
+	autoReconnect?: boolean;
+	autoReconnectInterval?: string;
 }
 
 export interface FreeTurnServerConfig {
@@ -127,8 +133,10 @@ export interface FreeTurnLinkPayload {
 	peer?: string;
 	transport?: string;
 	mode?: string;
+	bond?: boolean;
 	obf?: string;
 	key?: string;
+	timing?: number;
 	n?: number;
 	spc?: number;
 	cid?: string;
@@ -140,6 +148,8 @@ export interface FreeTurnLinkPayload {
 	mtu?: number;
 	wg?: string;
 	kcp?: FreeTurnKCP;
+	/** Upstream 4.0+: ссылка на звонок, идёт в -links. */
+	vk?: string;
 }
 
 export interface FreeTurnGenerateLinkRequest {
@@ -171,6 +181,8 @@ export interface FreeTurnAllowlistStatus {
 	enabled: boolean;
 	clientsFile?: string;
 	clients: FreeTurnAllowlistEntry[];
+	/** Файл выданных ссылок не прочитан: пустая ссылка значит «неизвестно» (F372). */
+	linksUnreadable?: boolean;
 }
 
 export interface FreeTurnAllowlistAddResult extends FreeTurnAllowlistStatus {

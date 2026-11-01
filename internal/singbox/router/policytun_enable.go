@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
@@ -12,7 +13,7 @@ import (
 // PUBLIC + `ip global` OpkgTun (so NDMS lists it as a policy exit) → addr/mtu/up
 // → write+start the router slot with a tun inbound → wait carrier → park the
 // NDMS default route on the tun → optional DSCP-only QoS netfilter. Called with
-// s.mu held by Enable.
+// s.mu held by enable.
 //
 // Structurally a sibling of enableFakeIPTun: same persist-before-create
 // invariant (the reap only sees orphans by persisted index), same LIFO rollback
@@ -76,8 +77,12 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 	// live ≠ наш: индекс мог занять посторонний интерфейс после смерти нашего.
 	// Доказанно чужой (успешный скан без нашего имени) → re-provision.
 	prev, _ := opkgTunOwned(settings, statePolicyTun)
+	// Своё описание — применённое и ожидаемое из записи, не желаемое из
+	// настроек (policytun_description.go): переименование на живом интерфейсе
+	// доводит reconcile, а не повторный провижининг.
+	ownDescs := policyTunOwnDescriptions(prev)
 	if prev != nil && prev.Provisioned && live[prev.Index] &&
-		!s.provenForeignOpkgTun(ctx, tunNDMSName(prev.Index), policyTunDescription) {
+		!s.provenForeignOpkgTun(ctx, tunNDMSName(prev.Index), ownDescs...) {
 		return nil
 	}
 
@@ -93,7 +98,8 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 	pin := noPin
 	if prevRecord != nil && prevRecord.Mode != storage.OpkgTunModePolicyTun {
 		removed, rerr := s.releaseForeignOpkgTun(ctx, prevRecord, "policy-tun-enable")
-		if rerr != nil {
+		// Скан упал — Warn уже дал teardownGate, второй не нужен.
+		if rerr != nil && !errors.Is(rerr, errOpkgTunOwnershipUnknown) {
 			s.appLog.Warn("policy-tun-enable", tunNDMSName(prevRecord.Index), "release foreign opkgtun: "+rerr.Error())
 		}
 		// live после сноса НЕ перечитывается: занятость собирает пул сам, а
@@ -111,7 +117,7 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 		// закрепил permit'ы в политике за конкретным именем. Занятый персистом
 		// номер тоже наш, если на нём висит НАШ интерфейс — выключение его
 		// больше не удаляет, а удерживает (holdOpkgTun).
-		pin = s.pinFor(ctx, prev, live, policyTunDescription)
+		pin = s.pinFor(ctx, prev, live, ownDescs...)
 	}
 
 	idx, res, err := s.reserveOpkgTun(ctx, storage.OpkgTunModePolicyTun, pin)
@@ -163,6 +169,24 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 	// доживает до диска само — финальный Settings.Update снимает копию кэша
 	// в момент коммита, а не работает по снимку, взятому здесь.
 	ptState := &storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Provisioned: true, Index: idx}
+	// Описание в записи до Create — то, что на интерфейсе СЕЙЧАС: при
+	// переиспользовании своего номера это прежнее применённое (Create ниже
+	// переименует интерфейс, и запись догонит его сразу после), на новом номере
+	// интерфейса ещё нет — пишем желаемое. Желаемое в записи раньше Create
+	// оставило бы крах между ними с интерфейсом под именем, которого владение
+	// не признаёт. Переименование при этом — намерение (PendingDescription,
+	// см. policytun_description.go): крах после Create не оставит интерфейс
+	// под именем, которого запись не называет. Незакрытое намерение прежней
+	// записи сохраняем — интерфейс может стоять под ним.
+	wantDesc := policyTunWantDescription(sr)
+	ptState.Description = storedPolicyTunDescription(wantDesc)
+	if prev != nil && prev.Index == idx {
+		ptState.Description = prev.Description
+		ptState.PendingDescription = prev.PendingDescription
+		if ptState.PendingDescription == "" && policyTunAppliedDescription(prev) != wantDesc {
+			ptState.PendingDescription = wantDesc
+		}
+	}
 	// ГОЧА (re-provision): записи NAT-сегментов ОБЯЗАНЫ пережить повторный
 	// провижининг (heal «интерфейс пропал» → reconcile → enableLocked). Они —
 	// единственный след того, каким сегмент был ДО нас; потеряв их,
@@ -214,6 +238,25 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 			}
 			restore = &base
 		}
+		// Прежний номер: provisionOpkgTun выше уже поставил интерфейсу
+		// желаемое описание, а prev называет прежнее. Удержанную запись (R45)
+		// откат ниже по стеку удерживает снова (M1), созданную — сносит, и
+		// если снос упал, она тоже жива. В обоих случаях интерфейс стоит под
+		// именем, которого запись не называет, — и следующее включение сочло
+		// бы его чужим (re-provision на другом номере, permit'ы потеряны).
+		// Поэтому в восстановленную запись ложится намерение: владение
+		// признаёт его, а reconcile сверит со сканом
+		// (healPolicyTunDescription) — дошло ли. Желаемое из настроек в набор
+		// владения не входит (policytun_description.go), так что без этой
+		// строки окно открыто.
+		if prevRecord != nil && prevRecord.Mode == storage.OpkgTunModePolicyTun && prevRecord.Index == idx &&
+			policyTunAppliedDescription(prevRecord) != wantDesc {
+			if restore == prevRecord {
+				cp := *prevRecord // копия: prevRecord мутировать нельзя
+				restore = &cp
+			}
+			restore.PendingDescription = wantDesc
+		}
 		if e := s.deps.Settings.SetOpkgTunState(restore); e != nil {
 			s.appLog.Warn("policy-tun-rollback", iface, "restore policy-tun persist: "+e.Error())
 		}
@@ -221,26 +264,45 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 
 	// PUBLIC security-level (unlike fakeip's private): NDMS only offers public
 	// interfaces as access-policy exits, and the policy IS the steering here.
-	if err = s.deps.OpkgTun.CreateOpkgTunWithSecurityLevel(ctx, ndmsName, policyTunDescription, "public"); err != nil {
+	// Удержанная запись (R45) признаётся своей по описаниям записи владения и
+	// переименовывается в желаемое; новая создаётся сразу под ним.
+	var reused bool
+	if reused, err = s.provisionOpkgTun(ctx, ndmsName, wantDesc, "public", ownDescs...); err != nil {
 		return fmt.Errorf("enable policy-tun: create opkgtun: %w", err)
+	}
+	// Интерфейс уже под желаемым описанием — запись догоняет. Best-effort:
+	// до этой записи желаемое уже стоит в записи (новый номер — применённым,
+	// переиспользованный — намерением), а расхождение записи с настройкой
+	// дописывает reconcile (healPolicyTunDescription). Откатывать из-за
+	// описания весь провижининг незачем — откат удаляет интерфейс вместе с
+	// permit'ами пользователя.
+	if d := storedPolicyTunDescription(wantDesc); ptState.Description != d || ptState.PendingDescription != "" {
+		ptState.Description = d
+		ptState.PendingDescription = ""
+		if e := s.deps.Settings.SetOpkgTunState(ptState); e != nil {
+			s.appLog.Warn("policy-tun-enable", iface, "persist description: "+e.Error())
+		}
 	}
 	// rbCtx: откат обязан доехать и когда Enable упал ИЗ-ЗА отмены ctx (клиент
 	// отвалился во время waitForSingbox) — иначе NDMS-вызовы отката no-op'ятся
 	// с context.Canceled и OpkgTun остаётся с настроенным адресом (nginx-loop,
 	// см. teardownOpkgTun).
 	//
-	// ОСОЗНАННАЯ ПОТЕРЯ: откат УДАЛЯЕТ интерфейс, даже если включение его не
-	// создавало, а переиспользовало удержанный. Номер не теряется (персист цел,
-	// следующее включение возьмёт его же), а вот permit пользователя теряется
-	// НАВЕРНЯКА: стенд 2026-08-18 (RCI `ip policy`) показал, что удаление
-	// интерфейса вырождает запись permit'а в заглушку-ошибку «unable to find
-	// OpkgTun<N>», а пересоздание ОДНОИМЁННОГО интерфейса убирает её совсем —
-	// разрешение не воскресает. Отсюда же ценность удержания: пока объект жив,
-	// permit валиден; мёртвый наш интерфейс держать незачем. Откат также
+	// Откат сносит запись, только если её создало ЭТО включение. Удержанную
+	// (reused, R45) он удерживает снова — holdOpkgTun, как выключение (M1,
+	// решение владельца 01.10): стенд 2026-08-18 (RCI `ip policy`) показал,
+	// что удаление интерфейса вырождает permit пользователя в заглушку
+	// «unable to find OpkgTun<N>», а пересоздание ОДНОИМЁННОГО интерфейса
+	// убирает её совсем — разрешение не воскресает. Без этого удержание
+	// защищало бы permit только до первого неудачного включения. Откат также
 	// не снимает уже поставленный нами permit: DenyInterface мог бы снять
 	// разрешение, которое пользователь дал интерфейсу сознательно.
 	rbCtx := context.WithoutCancel(ctx)
 	push(func() {
+		if reused {
+			_ = s.holdOpkgTun(rbCtx, ndmsName, "policy-tun-rollback")
+			return
+		}
 		_ = s.teardownOpkgTun(rbCtx, ndmsName, "policy-tun-rollback")
 	})
 
@@ -251,12 +313,6 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 		return fmt.Errorf("enable policy-tun: ip global: %w", err)
 	}
 
-	// NDMS-native разрешение трафика в tun: permit-all access-list + binding.
-	// Без него firewall NDMS (isolate-private и т.п.) режет форвард в tun.
-	if err = s.deps.OpkgTun.SetPermitAllACL(ctx, ndmsName); err != nil {
-		return fmt.Errorf("enable policy-tun: permit acl: %w", err)
-	}
-
 	if err = s.deps.OpkgTun.SetAddress(ctx, ndmsName, addr4, mask4); err != nil {
 		return fmt.Errorf("enable policy-tun: set address: %w", err)
 	}
@@ -264,12 +320,16 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 		if err = s.deps.OpkgTun.SetIPv6Address(ctx, ndmsName, addr6); err != nil {
 			return fmt.Errorf("enable policy-tun: set ipv6 address: %w", err)
 		}
-		// v6-разрешение — ПОСЛЕ адреса: у NDMS под v6 отдельное пространство
-		// списков, и v4-ACL выше его не покрывает. Без него дефолт клиентов
-		// припаркован на tun, а v6 в него режет firewall — уйти в обход некуда.
-		if err = s.deps.OpkgTun.SetPermitAllACLv6(ctx, ndmsName); err != nil {
-			return fmt.Errorf("enable policy-tun: permit acl v6: %w", err)
-		}
+	}
+	// NDMS-native разрешение трафика в tun: permit-all access-list + binding.
+	// Без него firewall NDMS (isolate-private и т.п.) режет форвард в tun.
+	// v6-разрешение — отдельное пространство списков (v4-ACL его не покрывает):
+	// без него дефолт клиентов припаркован на tun, а v6 в него режет firewall.
+	// Оба семейства — одним чтением running-config (F607) и ПОСЛЕ адресов: v6
+	// и раньше ставился после v6-адреса, порядок для него сохранён; v4 переехал
+	// за адрес — интерфейс ещё не поднят, трафика до ACL нет.
+	if err = s.deps.OpkgTun.SetPermitAllACLs(ctx, ndmsName, addr6 != ""); err != nil {
+		return fmt.Errorf("enable policy-tun: permit acl: %w", err)
 	}
 	if err = s.deps.OpkgTun.SetMTU(ctx, ndmsName, p.MTU); err != nil {
 		return fmt.Errorf("enable policy-tun: set mtu: %w", err)
@@ -295,10 +355,10 @@ func (s *ServiceImpl) enablePolicyTun(ctx context.Context, settings *storage.Set
 
 		ExternalConfiguration: s.tunExternalWant(),
 	})
-	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds)
+	cfg.Outbounds = stripAutoManagedDirect(cfg.Outbounds, s.foreignIfaces())
 	cfg.EnsureSystemRules(sr.SnifferEnabled)
 	cfg.EnsureUDPTimeoutRule(resolveUDPTimeout(sr.UDPTimeout))
-	qosClasses := activeQoSClasses(sr.QoSClasses)
+	qosClasses := routedQoSClasses(activeQoSClasses(sr.QoSClasses))
 	cfg.Inbounds, _ = ensureQoSInbounds(cfg.Inbounds, qosClasses, sr.UDPTimeout, sr.UDPNATMax)
 	cfg.EnsureRouteWAN(sr.WANAutoDetect, sr.WANInterface)
 

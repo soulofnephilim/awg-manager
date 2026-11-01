@@ -20,23 +20,25 @@ import (
 // Sufficient for handler tests that exercise read paths (Get, GetStream).
 type noopMutator struct{}
 
-func (noopMutator) AllocListenPort() (uint16, error)                    { return 11000, nil }
-func (noopMutator) AllocProxyIndex(context.Context) (int, error)        { return 1, nil }
-func (noopMutator) AddOutbound(string, []byte) error                    { return nil }
-func (noopMutator) UpdateOutbound(string, []byte) error                 { return nil }
-func (noopMutator) RemoveOutbound(string) error                         { return nil }
-func (noopMutator) AddInbound(string, []byte) error                     { return nil }
-func (noopMutator) RemoveInbound(string) error                          { return nil }
-func (noopMutator) AddRouteRule([]byte) error                           { return nil }
-func (noopMutator) RemoveRouteRule(string, string) error                { return nil }
-func (noopMutator) EnsureProxy(context.Context, int, int, string) error { return nil }
-func (noopMutator) RemoveProxy(context.Context, int) error              { return nil }
-func (noopMutator) Reload(context.Context) error                        { return nil }
-func (noopMutator) Rollback()                                           {}
-func (noopMutator) SelectClashProxy(string, string) error               { return nil }
-func (noopMutator) GetClashSelectorActive(string) (string, error)       { return "", nil }
-func (noopMutator) DeclaredOutboundTags() []string                      { return nil }
-func (noopMutator) SubscriptionOutbounds() []map[string]any             { return nil }
+func (noopMutator) AllocListenPort() (uint16, error)                            { return 11000, nil }
+func (noopMutator) AllocProxyIndex(context.Context) (int, error)                { return 1, nil }
+func (noopMutator) AddOutbound(string, []byte) error                            { return nil }
+func (noopMutator) UpdateOutbound(string, []byte) error                         { return nil }
+func (noopMutator) RemoveOutbound(string) error                                 { return nil }
+func (noopMutator) ReferencedAmong([]string) (map[string]bool, error)           { return nil, nil }
+func (noopMutator) AddInbound(string, []byte) error                             { return nil }
+func (noopMutator) RemoveInbound(string) error                                  { return nil }
+func (noopMutator) AddRouteRule([]byte) error                                   { return nil }
+func (noopMutator) RemoveRouteRule(string, string) error                        { return nil }
+func (noopMutator) EnsureProxy(context.Context, int, int, string, string) error { return nil }
+func (noopMutator) RemoveProxy(context.Context, int, string) error              { return nil }
+func (noopMutator) Reload(context.Context) error                                { return nil }
+func (noopMutator) Rollback()                                                   {}
+func (noopMutator) PersistSelectorDefault(string, string) error                 { return nil }
+func (noopMutator) SelectClashProxy(string, string) error                       { return nil }
+func (noopMutator) GetClashSelectorActive(string) (string, error)               { return "", nil }
+func (noopMutator) DeclaredOutboundTags() []string                              { return nil }
+func (noopMutator) SubscriptionOutbounds() []map[string]any                     { return nil }
 
 type fakePresenceProbe struct{ installed bool }
 
@@ -133,11 +135,7 @@ func TestSubscriptionHandler_Create_ExcludedKeys(t *testing.T) {
 
 	linkA := "vless://3a3b1c2e-9999-4321-aaaa-1234567890a1@a.example:443?security=tls&sni=a#A"
 	linkB := "vless://3a3b1c2e-9999-4321-aaaa-1234567890a2@b.example:443?security=tls&sni=b#B"
-	parsed := vlink.ParseBatch([]string{linkB})
-	if len(parsed.Outbounds) != 1 {
-		t.Fatalf("want 1 parsed outbound, got %d (errors=%v)", len(parsed.Outbounds), parsed.Errors)
-	}
-	keyB := subscription.IdentityHash(parsed.Outbounds[0])
+	keyB := exclusionKeyOf(t, linkB)
 
 	body, _ := json.Marshal(CreateSubscriptionRequest{
 		Label:        "x",
@@ -187,9 +185,9 @@ func TestSubscriptionHandler_ExcludeLifecycle(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	keyA := identityHashOf(t, linkA)
-	keyB := identityHashOf(t, linkB)
-	keyC := identityHashOf(t, linkC)
+	keyA := exclusionKeyOf(t, linkA)
+	keyB := exclusionKeyOf(t, linkB)
+	keyC := exclusionKeyOf(t, linkC)
 
 	store, err := subscription.NewStore(filepath.Join(t.TempDir(), "sub.json"))
 	if err != nil {
@@ -199,7 +197,7 @@ func TestSubscriptionHandler_ExcludeLifecycle(t *testing.T) {
 	h := NewSubscriptionHandler(svc, &fakePresenceProbe{installed: true})
 
 	// 1+2. Preview: real handler must fetch+parse the URL and return all 3
-	// members keyed by IdentityHash (8 hex chars).
+	// members keyed by the tag suffix (8 hex chars).
 	previewBody, _ := json.Marshal(PreviewURLRequest{URL: srv.URL})
 	prr := httptest.NewRecorder()
 	h.PreviewURL(prr, httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(string(previewBody))))
@@ -332,13 +330,16 @@ func TestSubscriptionHandler_ExcludeLifecycle(t *testing.T) {
 	}
 }
 
-func identityHashOf(t *testing.T, link string) string {
+func exclusionKeyOf(t *testing.T, link string) string {
 	t.Helper()
 	parsed := vlink.ParseBatch([]string{link})
 	if len(parsed.Outbounds) != 1 {
 		t.Fatalf("link %q: want 1 parsed outbound, got %d (errors=%v)", link, len(parsed.Outbounds), parsed.Errors)
 	}
-	return subscription.IdentityHash(parsed.Outbounds[0])
+	// Суффикс узкого тега совпадает с ключом превью, пока в фиде нет коллизий
+	// узкого ключа — у фидов этих тестов их нет.
+	tag := subscription.StableTag("x", parsed.Outbounds[0])
+	return tag[len(tag)-8:]
 }
 
 func memberDTOHasTag(ms []SubscriptionMemberDTO, tag string) bool {
@@ -638,6 +639,27 @@ func TestSubscriptionHandler_PreviewPath(t *testing.T) {
 	}
 }
 
+// F417/F418: опечатка в пути (файла нет, каталог) — ввод пользователя (400
+// FILE_UNREADABLE), а не «провайдер недоступен» (502); оба источника в одном
+// теле — отказ, как у Create, а не молчаливый выбор файла.
+func TestSubscriptionHandler_PreviewPath_InputErrors(t *testing.T) {
+	h, _, dir := fileSourceHandler(t)
+	for _, tc := range []struct {
+		name string
+		req  PreviewURLRequest
+		code string
+	}{
+		{"нет файла", PreviewURLRequest{Path: filepath.Join(dir, "missing.txt")}, "FILE_UNREADABLE"},
+		{"каталог", PreviewURLRequest{Path: dir}, "FILE_UNREADABLE"},
+		{"оба источника", PreviewURLRequest{Path: writeLinkFile(t, dir, "sub.txt"), URL: "https://provider.example/sub"}, "INVALID_INPUT"},
+	} {
+		rr := postJSON(t, h.PreviewURL, "/api/singbox/subscriptions/preview", tc.req)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), tc.code) {
+			t.Errorf("%s: status=%d body=%s, want 400 %s", tc.name, rr.Code, rr.Body.String(), tc.code)
+		}
+	}
+}
+
 // TestSubscriptionHandler_Create_TwoSources_400 фиксирует класс ошибки:
 // два источника в одном теле — ввод пользователя (400 INVALID_INPUT),
 // а не внутренний сбой (500 + Warn со свободным вводом в app-лог).
@@ -682,5 +704,56 @@ func TestSubscriptionHandler_Update_URLOnInline_400(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "INVALID_INPUT") {
 		t.Fatalf("body=%s want INVALID_INPUT", rec.Body.String())
+	}
+}
+
+func (noopMutator) CreateProxy(context.Context, int, int, string) (bool, error) {
+	return true, nil
+}
+
+// orphanMutator — noopMutator, у которого в слоте лежит ещё и сирота
+// подписки (оставлена из-за ссылки).
+type orphanMutator struct {
+	noopMutator
+	extra string
+}
+
+func (m *orphanMutator) DeclaredOutboundTags() []string { return []string{m.extra} }
+
+// routerRefsFor — роутер ссылается правилом #2 ровно на один тег.
+type routerRefsFor string
+
+func (r routerRefsFor) RulesReferencing(tag string) []int {
+	if tag == string(r) {
+		return []int{2}
+	}
+	return nil
+}
+func (routerRefsFor) OutboundReferenceLocations(string) []string { return nil }
+
+// Удаление подписки проверяет ссылки по всем её outbound'ам в слоте, включая
+// сироту, а не только по группе и членам (F761).
+func TestSubscriptionHandler_Delete_RefusesReferencedOrphan(t *testing.T) {
+	store, err := subscription.NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mut := &orphanMutator{}
+	h := NewSubscriptionHandler(subscription.NewService(store, mut), &fakePresenceProbe{installed: true})
+	body, _ := json.Marshal(CreateSubscriptionRequest{Label: "x", Enabled: true,
+		Inline: "vless://3a3b1c2e-9999-4321-aaaa-1234567890a1@a.example:443?security=tls&sni=a#A"})
+	rr := httptest.NewRecorder()
+	h.Create(rr, httptest.NewRequest(http.MethodPost, "/api/singbox/subscriptions/create", strings.NewReader(string(body))))
+	var created SubscriptionResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil || rr.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	mut.extra = created.Data.SelectorTag + "-deadbeef"
+	h.SetOutboundRefCheckers(nil, routerRefsFor(mut.extra))
+
+	rr = httptest.NewRecorder()
+	h.Delete(rr, httptest.NewRequest(http.MethodDelete, "/api/singbox/subscriptions/delete?id="+created.Data.ID, nil))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("сирота со ссылкой из правила: %d %s, want 409", rr.Code, rr.Body.String())
 	}
 }

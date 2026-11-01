@@ -1,5 +1,11 @@
 package dnsroute
 
+import (
+	"slices"
+
+	"github.com/hoaxisr/awg-manager/internal/ipfamily"
+)
+
 // MaxDomainsPerGroup is the maximum number of domains in a single NDMS object-group fqdn.
 const MaxDomainsPerGroup = 300
 const MaxSubnetsPerList = 20000
@@ -38,6 +44,71 @@ type DomainList struct {
 	// Only honored when HRRouteMode == "policy" and HRPolicyName is set
 	// (new-policy flow). Ignored otherwise. Not persisted back to clients.
 	HRPolicyInterfaces []string `json:"hrPolicyInterfaces,omitempty"`
+	// SkipIPv6 keeps IPv6 entries (CIDRs and bare addresses) out of the
+	// router: each one takes an include slot in the NDMS object-group like
+	// a domain, and on a router without IPv6 they only eat the limit. The
+	// list itself keeps them, so turning the flag off brings them back on
+	// the next reconcile without a refetch. NDMS lists only. A pointer, so
+	// a partial update that does not send it keeps the stored value.
+	SkipIPv6 *bool `json:"skipIPv6,omitempty"`
+	// GroupSlug — основа имени NDMS-группы списка ({slug}_p{N}). Назначается
+	// один раз при создании (или миграцией при Load), уникальна среди списков
+	// и не следует за переименованием: смена имени группы — снос и создание,
+	// а с ними строки dns-proxy route уходят в хвост (F694, класс #1023).
+	// Пришедшее извне значение игнорируется: Create назначает своё, Update
+	// переносит из существующей записи.
+	GroupSlug string `json:"groupSlug,omitempty"`
+}
+
+// clone — копия без общих с кэшем хранилища срезов и указателей: правка
+// результата Get не должна менять кэш мимо записи (F667).
+func (l DomainList) clone() DomainList {
+	l.Domains = slices.Clone(l.Domains)
+	l.Excludes = slices.Clone(l.Excludes)
+	l.ExcludeSubnets = slices.Clone(l.ExcludeSubnets)
+	l.Subnets = slices.Clone(l.Subnets)
+	l.ManualDomains = slices.Clone(l.ManualDomains)
+	l.Subscriptions = slices.Clone(l.Subscriptions)
+	l.Routes = slices.Clone(l.Routes)
+	l.HRPolicyInterfaces = slices.Clone(l.HRPolicyInterfaces)
+	l.ExcludesText = clonePtr(l.ExcludesText)
+	l.ManualText = clonePtr(l.ManualText)
+	l.SkipIPv6 = clonePtr(l.SkipIPv6)
+	if l.LastDedupeReport != nil {
+		r := *l.LastDedupeReport
+		r.Items = slices.Clone(r.Items)
+		l.LastDedupeReport = &r
+	}
+	return l
+}
+
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// SkipsIPv6 reports whether the list keeps its IPv6 entries off the router.
+func (l *DomainList) SkipsIPv6() bool { return l.SkipIPv6 != nil && *l.SkipIPv6 }
+
+// normalizeSkipIPv6 stores the flag only when it is on: an explicit false
+// becomes nil, so the stored list and the API answer the same "absent".
+func (l *DomainList) normalizeSkipIPv6() {
+	if !l.SkipsIPv6() {
+		l.SkipIPv6 = nil
+	}
+}
+
+// routedSubnets is the part of subnets the router gets, which is what the
+// MaxSubnetsPerList limit counts: an NDMS list that keeps IPv6 off the
+// router is not refused for its IPv6 networks.
+func (l *DomainList) routedSubnets(subnets []string) []string {
+	if !l.SkipsIPv6() || !isNDMS(l.Backend) {
+		return subnets
+	}
+	return ipfamily.WithoutIPv6(subnets)
 }
 
 // Subscription represents a remote domain list URL that is periodically fetched.
@@ -78,8 +149,8 @@ type DedupeItem struct {
 // StoreData is the top-level dns-routes.json structure.
 type StoreData struct {
 	Lists []DomainList `json:"lists"`
-	// HRRuleIcons keeps UI-only custom icons for HydraRoute Neo rules.
-	// HR rules themselves live in domain.conf/ip.list and have no icon field.
+	// HRRuleIcons keeps UI-only custom icons for HydraRoute Neo groups, keyed by hrIconKey(target, description).
+	// HR groups themselves live in domain.conf/ip.list and have no icon field.
 	HRRuleIcons map[string]string `json:"hrRuleIcons,omitempty"`
 }
 

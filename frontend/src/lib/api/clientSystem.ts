@@ -1,3 +1,4 @@
+import { m } from '$lib/i18n';
 import type {
 	AuthStatus,
 	BootStatus,
@@ -10,6 +11,7 @@ import type {
 	DnsProxyInfo,
 	DownloadOutbound,
 	DownloadRoute,
+	ForeignIfaceCandidate,
 	GeoFileEntry,
 	GeoTag,
 	HydraRouteConfig,
@@ -18,6 +20,7 @@ import type {
 	IPCheckService,
 	IPResult,
 	IpsetUsage,
+	LoginMethod,
 	LoginResult,
 	LogsResponse,
 	McpKey,
@@ -27,6 +30,7 @@ import type {
 	ServerListenChangeResult,
 	ServerListenState,
 	Settings,
+	SettingsPatch,
 	SignatureCaptureResult,
 	SignatureGenerateResult,
 	SpeedTestInfo,
@@ -34,6 +38,7 @@ import type {
 	SystemInfo,
 	TerminalStatus,
 	UpdateInfo,
+	UpdateSnapshotsData,
 	WANInterface,
 	WANStatus,
 	SystemFileRoot,
@@ -104,7 +109,7 @@ export class SystemClient extends TunnelsClient {
 			if (e instanceof MessageEvent) {
 				onError(e.data);
 			} else {
-				onError('Соединение потеряно');
+				onError(m.api_connection_lost());
 			}
 			es.close();
 		});
@@ -141,10 +146,11 @@ export class SystemClient extends TunnelsClient {
 		return this.request('/hydraroute/config');
 	}
 
-	async updateHydraRouteConfig(config: HydraRouteConfig): Promise<HydraRouteConfig> {
+	/** Пишет только присланные поля; policyOrder и списки geo-файлов не меняет. */
+	async updateHydraRouteConfig(changes: Partial<HydraRouteConfig>): Promise<HydraRouteConfig> {
 		return this.request('/hydraroute/config/update', {
 			method: 'PUT',
-			body: JSON.stringify(config),
+			body: JSON.stringify(changes),
 		});
 	}
 
@@ -205,6 +211,10 @@ export class SystemClient extends TunnelsClient {
 		return this.request('/hydraroute/oversized-tags');
 	}
 
+	async deleteHydraRouteOversizedTag(name: string): Promise<void> {
+		await this.request(`/hydraroute/oversized-tags/delete?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+	}
+
 	async importNativeHydraRouteRules(): Promise<{ imported: number }> {
 		return this.request('/hydraroute/import-native', { method: 'POST' });
 	}
@@ -213,6 +223,13 @@ export class SystemClient extends TunnelsClient {
 		return this.request('/hydraroute/policy-order', {
 			method: 'POST',
 			body: JSON.stringify({ order }),
+		});
+	}
+
+	async deleteHydraRouteTarget(target: string, revision: string): Promise<{ target: string }> {
+		return this.request('/hydraroute/targets/delete', {
+			method: 'POST',
+			body: JSON.stringify({ target, revision }),
 		});
 	}
 
@@ -282,23 +299,38 @@ export class SystemClient extends TunnelsClient {
 		return this.request('/settings/get');
 	}
 
-	async updateSettings(settings: Partial<Settings>): Promise<Settings> {
+	async updateSettings(patch: SettingsPatch): Promise<Settings> {
 		const updated = await this.request<Settings>('/settings/update', {
 			method: 'POST',
-			body: JSON.stringify(settings)
+			body: JSON.stringify(patch)
 		});
 		// Prism mock is stateless: it often returns schema examples instead of
 		// echoing persisted values. In mock-dev mode keep UI controls usable by
-		// merging the patch into current settings snapshot.
+		// merging the patch into current settings snapshot — by field at every
+		// level, as the backend does (pingCheck.defaults included).
 		if (this.isMockDevMode()) {
 			const current = await this.getSettings().catch(() => ({} as Settings));
-			return { ...current, ...settings };
+			const isObj = (x: unknown): x is Record<string, unknown> =>
+				!!x && typeof x === 'object' && !Array.isArray(x);
+			const merge = (base: unknown, p: unknown): unknown =>
+				isObj(base) && isObj(p)
+					? Object.fromEntries([...new Set([...Object.keys(base), ...Object.keys(p)])].map((k) =>
+						[k, k in p ? merge(base[k], p[k]) : base[k]]))
+					: p;
+			return merge(current, patch) as Settings;
 		}
 		return updated;
 	}
 
 	async regenerateApiKey(): Promise<Settings> {
 		return this.request('/settings/regenerate-api-key', { method: 'POST' });
+	}
+
+	// Выключатель ядро/процесс Phobos-релея — отдельной ручкой: общий
+	// /settings/update поле не пишет (устаревшее тело с другой вкладки
+	// снимало бы срабатывание сторожа).
+	async setObfuscatorRelay(process: boolean): Promise<Settings> {
+		return this.request('/settings/obfuscator-relay', { method: 'POST', body: JSON.stringify({ process }) });
 	}
 
 	// #endregion
@@ -328,13 +360,13 @@ export class SystemClient extends TunnelsClient {
 	// #region Auth — login, logout, status
 	// ─────────────────────────────────────────────
 
-	async login(login: string, password: string): Promise<LoginResult> {
+	async login(login: string, password: string, method: LoginMethod): Promise<LoginResult> {
 		const url = `${this.baseUrl}/auth/login`;
 		const response = await fetch(url, {
 			method: 'POST',
 			credentials: 'same-origin',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ login, password })
+			body: JSON.stringify({ login, password, method })
 		});
 
 		let data: (LoginResult & { error?: unknown; message?: string }) | null = null;
@@ -348,8 +380,8 @@ export class SystemClient extends TunnelsClient {
 			// 429 «слишком много попыток…»), не подменяя его generic-текстом.
 			const fallback =
 				response.status === 429
-					? 'Слишком много попыток входа. Попробуйте позже.'
-					: 'Ошибка авторизации';
+					? m.api_too_many_login_attempts()
+					: m.api_auth_error();
 			throw new Error(data?.message || fallback);
 		}
 		return data;
@@ -575,6 +607,21 @@ export class SystemClient extends TunnelsClient {
 		});
 	}
 
+	/** Кандидаты в сторонние интерфейсы (issue #935). */
+	async listForeignIfaceCandidates(): Promise<ForeignIfaceCandidate[]> {
+		return this.request<ForeignIfaceCandidate[]>('/interfaces/foreign/candidates');
+	}
+
+	/** Отметить интерфейс другой программы как сторонний. Граница — на сервере;
+	 * name в ответе — записанное (каноническое) имя. */
+	async markForeignIface(name: string): Promise<{ ok: boolean; name: string }> {
+		return this.request<{ ok: boolean; name: string }>('/interfaces/foreign/mark', { method: 'POST', body: JSON.stringify({ name }) });
+	}
+
+	async unmarkForeignIface(name: string): Promise<{ ok: boolean }> {
+		return this.request<{ ok: boolean }>('/interfaces/foreign/unmark', { method: 'POST', body: JSON.stringify({ name }) });
+	}
+
 	async downloadDiagnosticsReport(environment?: unknown): Promise<void> {
 		const response = await fetch('/api/diagnostics/result', { credentials: 'same-origin' });
 		if (!response.ok) throw new Error('Report not available');
@@ -647,21 +694,26 @@ export class SystemClient extends TunnelsClient {
 	}
 
 	async exportFullBackup(): Promise<Blob> {
-		const res = await fetch(`${this.baseUrl}/system/backup/export`, {
+		return this.downloadArchive('/system/backup/export', (status) => m.api_export_error({ status }));
+	}
+
+	/** GET архива .tar.gz: ошибка сервера — его текстом, иначе errorText(status). */
+	protected async downloadArchive(endpoint: string, errorText: (status: number) => string): Promise<Blob> {
+		const res = await fetch(`${this.baseUrl}${endpoint}`, {
 			credentials: 'same-origin',
 			signal: this.abortController.signal
 		});
 		if (res.status === 401) {
 			this.onUnauthorized?.();
-			throw new Error('Сессия истекла');
+			throw new Error(m.api_session_expired());
 		}
-		const contentType = res.headers.get('content-type') || '';
 		if (!res.ok) {
+			const contentType = res.headers.get('content-type') || '';
 			if (contentType.includes('application/json')) {
 				const body = (await res.json()) as { message?: string };
-				throw new Error(body.message || `Ошибка экспорта (${res.status})`);
+				throw new Error(body.message || errorText(res.status));
 			}
-			throw new Error(`Ошибка экспорта (${res.status})`);
+			throw new Error(errorText(res.status));
 		}
 		return res.blob();
 	}
@@ -677,17 +729,44 @@ export class SystemClient extends TunnelsClient {
 		});
 		if (res.status === 401) {
 			this.onUnauthorized?.();
-			throw new Error('Сессия истекла');
+			throw new Error(m.api_session_expired());
 		}
 		const contentType = res.headers.get('content-type') || '';
 		if (!contentType.includes('application/json')) {
-			throw new Error(`Неожиданный ответ сервера (${res.status})`);
+			throw new Error(m.api_unexpected_response({ status: res.status }));
 		}
 		const body = (await res.json()) as { success?: boolean; message?: string; data?: { message?: string } };
 		if (!res.ok || body.success === false) {
-			throw new Error(body.message || 'Не удалось восстановить резервную копию');
+			throw new Error(body.message || m.api_restore_failed());
 		}
 		return { message: body.data?.message || body.message || 'OK' };
+	}
+
+	/** Снимки настроек, снятые перед обновлениями, новые первыми. */
+	async listUpdateSnapshots(): Promise<UpdateSnapshotsData> {
+		return this.request<UpdateSnapshotsData>('/system/backup/snapshots');
+	}
+
+	async downloadUpdateSnapshot(id: string): Promise<Blob> {
+		return this.downloadArchive(
+			`/system/backup/snapshots/download?id=${encodeURIComponent(id)}`,
+			(status) => m.api_snapshot_download_error({ status })
+		);
+	}
+
+	/** Восстанавливает данные из снимка; после ответа демон перезапускается. */
+	async restoreUpdateSnapshot(id: string): Promise<{ message: string }> {
+		return this.request<{ message: string }>(
+			`/system/backup/snapshots/restore?id=${encodeURIComponent(id)}`,
+			{ method: 'POST' }
+		);
+	}
+
+	async deleteUpdateSnapshot(id: string): Promise<UpdateSnapshotsData> {
+		return this.request<UpdateSnapshotsData>(
+			`/system/backup/snapshots/delete?id=${encodeURIComponent(id)}`,
+			{ method: 'POST' }
+		);
 	}
 
 	// #endregion
@@ -886,11 +965,11 @@ export class SystemClient extends TunnelsClient {
 		});
 		if (res.status === 401) {
 			this.onUnauthorized?.();
-			throw new Error('Сессия истекла');
+			throw new Error(m.api_session_expired());
 		}
 		const body = (await res.json()) as { success?: boolean; data?: { path: string }; message?: string };
 		if (!res.ok || body.success === false) {
-			throw new Error(body.message || 'Не удалось загрузить файл');
+			throw new Error(body.message || m.api_upload_failed());
 		}
 		return body.data ?? { path: '' };
 	}

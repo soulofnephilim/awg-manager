@@ -91,11 +91,19 @@ func (s *ServiceImpl) disablePolicyTun(ctx context.Context, settings *storage.Se
 
 	// Имя адресует ИНДЕКС из записи владения, а не сам объект: наш интерфейс мог
 	// умереть, и номер занял посторонний OpkgTun. Тогда шаги (2) и (5) сняли бы
-	// ЕГО дефолт и адреса. Один скан на всё выключение; «недоступный скан ≠
-	// чужой» — без скана и на его ошибке разбираем как раньше.
-	foreign := s.provenForeignOpkgTun(ctx, ndmsName, policyTunDescription)
-	if foreign {
+	// ЕГО дефолт и адреса. Один скан на всё выключение, три исхода (F493/F518):
+	// наш или скана нет — удерживаем; доказанно чужой — не трогаем, запись
+	// снимаем (шаг 5); скан упал — не трогаем, запись ОСТАВЛЯЕМ: Provisioned при
+	// Enabled=false заставит reconcilePolicyTun звать Disable следующим тиком —
+	// тот же повтор, что при провале holdOpkgTun.
+	ownership := s.opkgTunOwnership(ctx, ndmsName, policyTunOwnDescriptions(st)...)
+	touch := ownership == ownershipOurs || ownership == ownershipNoScan
+	switch ownership {
+	case ownershipForeign:
 		s.appLog.Warn("policy-tun-disable", ndmsName, "на этом номере нет нашего OpkgTun — интерфейс не трогаем")
+		s.warnPermitIndexChange("policy-tun-disable", ndmsName)
+	case ownershipUnknown:
+		s.appLog.Warn("policy-tun-disable", ndmsName, "скан владения NDMS недоступен — интерфейс не трогаем, повтор следующим тиком")
 	}
 
 	// (1) Вернуть сегментам записанный NAT ПЕРВЫМ шагом: пока дефолт ещё на tun,
@@ -112,7 +120,7 @@ func (s *ServiceImpl) disablePolicyTun(ctx context.Context, settings *storage.Se
 
 	// (2) Снять дефолт с tun. v6 снимаем безусловно: персист не хранит,
 	// был ли настроен v6-адрес, а remove-форма NDMS (`no:true`) идемпотентна.
-	if !foreign && s.deps.DefaultRoute != nil {
+	if touch && s.deps.DefaultRoute != nil {
 		if err := s.deps.DefaultRoute.RemoveDefaultRoute(ctx, ndmsName); err != nil {
 			s.appLog.Warn("policy-tun-disable", iface, "remove default route: "+err.Error())
 		}
@@ -151,12 +159,19 @@ func (s *ServiceImpl) disablePolicyTun(ctx context.Context, settings *storage.Se
 		// перегенерирует слот 30 до ближайшего reload (issue #465).
 		s.notifyRoutingSlotsChanged()
 	}
+	// Отпустить tun до удержания (5): включение fakeip-tun забирает
+	// удержанную запись через releaseForeignOpkgTun → delete, а sing-box с
+	// невыгруженным tun-in держал бы устройство (F447, стенд 28.10).
+	s.releaseTunNow("policy-tun-disable", iface)
 
 	// Uninstall БЕЗУСЛОВНО: он идемпотентен и снимает остатки dscp-правил даже
 	// тогда, когда классы QoS только что удалили из настроек (тогда enable их
 	// уже не ставил, но живые цепочки с прошлого раза никуда не делись).
 	if s.deps.IPTables != nil {
 		s.deps.IPTables.Uninstall(ctx)
+		// И v6-слой прежнего tproxy-режима: в policy-tun его не ставят, но
+		// сироту после рестарта демона снять больше некому.
+		s.sweepV6(ctx)
 		// Снос ресурса живёт в том же выходе из режима, что и его создание, и
 		// одинаков во всех выходах. Набор AWGM-BYPASS создаёт tproxy-путь, но
 		// выйти из режима можно и здесь, а в policy-tun набор не нужен вовсе
@@ -215,17 +230,31 @@ func (s *ServiceImpl) disablePolicyTun(ctx context.Context, settings *storage.Se
 	// значило бы навсегда запретить себе аллокацию. Индекс не течёт: аллокатор
 	// live-sourced. Профиль потерь тот же, что у персист-реапа (там запись тоже
 	// снимается на пропуске чужого).
-	if foreign {
+	// Скан упал — ни удержания, ни снятия: запись остаётся Provisioned, и
+	// следующий тик повторит выключение с новым вердиктом (F518).
+	switch {
+	case ownership == ownershipForeign:
 		if err := s.deps.Settings.SetOpkgTunState(nil); err != nil {
 			s.appLog.Warn("policy-tun-disable", iface, "clear policy-tun persist: "+err.Error())
 		}
-	} else if err := s.holdOpkgTun(ctx, ndmsName, "policy-tun-disable"); err == nil {
-		held := &storage.OpkgTunState{Mode: storage.OpkgTunModePolicyTun, Index: st.Index}
-		if !natRestored {
-			held.PolicyTun = &storage.OpkgTunPolicyData{NATSegments: natSegmentsOf(st)}
-		}
-		if err := s.deps.Settings.SetOpkgTunState(held); err != nil {
-			s.appLog.Warn("policy-tun-disable", iface, "hold policy-tun persist: "+err.Error())
+	case ownership == ownershipUnknown:
+		// Запись не трогаем: Provisioned=true — сигнал повтора (см. вердикт).
+	default:
+		if err := s.holdOpkgTun(ctx, ndmsName, "policy-tun-disable"); err == nil {
+			// Описания переживают удержание: интерфейс остаётся под
+			// применённым (или ожидаемым) именем, и без них владение не
+			// признало бы его на следующем включении, если имя в настройках
+			// сменят до того.
+			held := &storage.OpkgTunState{
+				Mode: storage.OpkgTunModePolicyTun, Index: st.Index,
+				Description: st.Description, PendingDescription: st.PendingDescription,
+			}
+			if !natRestored {
+				held.PolicyTun = &storage.OpkgTunPolicyData{NATSegments: natSegmentsOf(st)}
+			}
+			if err := s.deps.Settings.SetOpkgTunState(held); err != nil {
+				s.appLog.Warn("policy-tun-disable", iface, "hold policy-tun persist: "+err.Error())
+			}
 		}
 	}
 

@@ -44,7 +44,7 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		if !provisioned && !slotActive {
 			return nil
 		}
-		return s.Disable(ctx)
+		return s.disable(ctx)
 	}
 
 	// Первотиковый свип чужого netfilter (зеркало policytun_reconcile.go и
@@ -64,6 +64,9 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 		s.mu.Unlock()
 		if force {
 			s.deps.IPTables.Uninstall(ctx)
+			// То же для v6-слоя прежнего tproxy-режима: его цепочки и хук в
+			// fakeip не сверяет никто.
+			s.sweepV6(ctx)
 			s.mu.Lock()
 			s.netfilterStateKnown = true
 			s.mu.Unlock()
@@ -146,9 +149,11 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 
 	// One-shot (до первого УСПЕХА) ассерт permit-ACL: покрывает апгрейд
 	// awg-manager поверх уже включённого fakeip (ACL появился в этой версии)
-	// и удаление списка до старта демона. Идемпотентно (дубль permit NDMS
-	// отклоняет без дублирования); флаг взводится только ПОСЛЕ успеха —
-	// провал (медленный RCI на буте) ретраится следующим тиком (ревью).
+	// и удаление списка до старта демона. Идемпотентно чтением: permit уходит
+	// только без нашего правила в свежем running-config (F607; цена ≈89 тиков
+	// ndm на чтение, по одному на семейство за процесс); флаг взводится только
+	// ПОСЛЕ успеха — провал (медленный RCI на буте) ретраится следующим тиком
+	// (ревью).
 	// Гейт probeErr == nil: живость интерфейса подтверждена — иначе permit
 	// создал бы список, bind упал бы, и осиротевший unreferenced-список
 	// (auto-delete не взведён) навсегда сохранился бы в конфиг. Флаг под
@@ -234,6 +239,31 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 	if s.deps.StaticRoutes != nil {
 		if cfg, cerr := s.loadFakeIPConfig(); cerr == nil {
 			cfg = s.ruleSetMaterializer().restoreConfig(cfg)
+			// Одно подтверждение tun на весь тик и только если маршрут нужен
+			// (steady state — ноль чтений списка, F546). Отказ — одна строка
+			// журнала на цикл, не на префикс.
+			routes := s.cidrRoutes(ctx, ndmsName)
+
+			// Маршруты tun — одним чтением /proc на тик, а не по чтению на каждый
+			// CIDR (у декомпилированного .srs их сотни). Ошибка чтения — все
+			// «нет», и Tier 1/2 переставят их: NDMS принимает повтор (fail-closed,
+			// как у проб пула).
+			onTun := map[netip.Prefix]bool{}
+			if live, lerr := fakeIPTunRoutes(iface); lerr == nil {
+				for _, p := range live {
+					onTun[p.Masked()] = true
+				}
+			}
+			absent := func(c string) bool {
+				pfx, perr := netip.ParsePrefix(c)
+				return perr == nil && !onTun[pfx.Masked()]
+			}
+			// Поставленный стоит: CIDR и в Tier 1, и в Tier 2 иначе ушёл бы дважды.
+			installed := func(c string) {
+				if pfx, perr := netip.ParsePrefix(c); perr == nil {
+					onTun[pfx.Masked()] = true
+				}
+			}
 
 			// Tier 1: re-assert specific CIDR routes (drift-heal, defense-in-depth).
 			// Routes are NDMS-native and durable across reload; this backstops manual
@@ -241,10 +271,16 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 			// POSTs in steady state.
 			dV4, dV6 := desiredTunCIDRs(cfg)
 			for _, c := range dV4 {
-				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoutePresent(iface, pfx.Masked()) {
-					if e := s.addCIDRRoute(ctx, ndmsName, c, false); e != nil {
+				if absent(c) {
+					rt, e := routes()
+					if e != nil {
+						s.appLog.Warn("fakeip-reconcile", iface, "cidr routes: "+e.Error())
+						break
+					}
+					if e := s.addCIDRRoute(ctx, rt, ndmsName, c, false); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "re-add cidr route "+c+": "+e.Error())
 					} else {
+						installed(c)
 						s.appLog.Info("fakeip-reconcile", iface, "cidr route "+c+" was absent, re-added (drift-heal)")
 					}
 				}
@@ -255,10 +291,16 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 			// config (one with v6 CIDRs but no v4) — the old v4-drift heuristic never
 			// gave such a config a heal signal.
 			for _, c := range dV6 {
-				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoute6Present(iface, pfx.Masked()) {
-					if e := s.addCIDRRoute(ctx, ndmsName, c, true); e != nil {
+				if absent(c) {
+					rt, e := routes()
+					if e != nil {
+						s.appLog.Warn("fakeip-reconcile", iface, "cidr routes: "+e.Error())
+						break
+					}
+					if e := s.addCIDRRoute(ctx, rt, ndmsName, c, true); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "re-add cidr route v6 "+c+": "+e.Error())
 					} else {
+						installed(c)
 						s.appLog.Info("fakeip-reconcile", iface, "cidr route v6 "+c+" was absent, re-added (drift-heal)")
 					}
 				}
@@ -267,8 +309,8 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 			// Tier 2: remote rule-set CIDRs (network + decompile) — only reachable in the
 			// periodic reconcile (the .srs may not be downloaded at edit time, so the
 			// edit-time Tier-1 diff cannot see them). Best-effort: add any remote CIDR not
-			// yet present. No removal here — Tier-1 diff-on-mutation owns removals; a remote
-			// set merely contributes additional desired routes.
+			// yet present. Снимает их тоже reconcile — ниже, по полному набору (F756):
+			// diff при правке маршрутов remote-наборов не видит.
 			// Потиковой сводки «remote cidrs: v4=N v6=M» здесь больше нет: она
 			// писалась на КАЖДОМ 30-секундном тике при живых наборах и держалась
 			// только на коалесценции журнала (F28). Логируем ФАКТ постановки
@@ -281,13 +323,19 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 			// бы из кольцевого журнала всю прочую диагностику. По той же причине
 			// не пишем «was absent, re-added»: для первичной установки это
 			// неправда, а отличить её от лечения дрейфа тут нечем.
-			rV4, rV6 := s.remoteTunCIDRs(ctx, cfg)
+			rV4, rV6, remoteComplete := s.remoteTunCIDRs(ctx, cfg)
 			added := 0
 			for _, c := range rV4 {
-				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoutePresent(iface, pfx.Masked()) {
-					if e := s.addCIDRRoute(ctx, ndmsName, c, false); e != nil {
+				if absent(c) {
+					rt, e := routes()
+					if e != nil {
+						s.appLog.Warn("fakeip-reconcile", iface, "remote cidr routes: "+e.Error())
+						break
+					}
+					if e := s.addCIDRRoute(ctx, rt, ndmsName, c, false); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "add remote cidr "+c+": "+e.Error())
 					} else {
+						installed(c)
 						added++
 					}
 				}
@@ -296,16 +344,52 @@ func (s *ServiceImpl) reconcileFakeIPTun(ctx context.Context, sr storage.Singbox
 			// per-CIDR, re-add only when absent. This closes the prior limitation that
 			// a remote set with v6 CIDRs but no v4 never self-healed its v6 routes.
 			for _, c := range rV6 {
-				if pfx, perr := netip.ParsePrefix(c); perr == nil && !fakeIPPoolRoute6Present(iface, pfx.Masked()) {
-					if e := s.addCIDRRoute(ctx, ndmsName, c, true); e != nil {
+				if absent(c) {
+					rt, e := routes()
+					if e != nil {
+						s.appLog.Warn("fakeip-reconcile", iface, "remote cidr routes: "+e.Error())
+						break
+					}
+					if e := s.addCIDRRoute(ctx, rt, ndmsName, c, true); e != nil {
 						s.appLog.Warn("fakeip-reconcile", iface, "add remote cidr v6 "+c+": "+e.Error())
 					} else {
+						installed(c)
 						added++
 					}
 				}
 			}
 			if added > 0 {
 				s.appLog.Info("fakeip-reconcile", iface, fmt.Sprintf("remote cidr routes installed: %d", added))
+			}
+
+			// Лишнее на tun — снять (F756). Только по полному набору (недокачанный
+			// remote-набор или непрочитанный локальный выглядели бы удалёнными), на
+			// подтверждённом интерфейсе (probeErr: до сих пор drift-heal на ошибке
+			// пробы лишь добавлял) и при известном пуле — 198.18.0.0/15 не private,
+			// excludedAddr его не бережёт. Что снимать — под fakeipCfgMu по свежему
+			// конфигу: правка, прошедшая, пока качались наборы, уже поставила свои
+			// маршруты. Снимаем после отпускания: тысячи RCI-снятий под замком
+			// держали бы правки слота минутами. Окно между ними узкое (правка,
+			// вернувшая именно снимаемый префикс), и следующий тик вернёт маршрут.
+			if remoteComplete && probeErr == nil && inet4Range != "" {
+				p := s.resolveFakeIPParams(sr)
+				var stale []netip.Prefix
+				s.fakeipCfgMu.Lock()
+				live, lerr := fakeIPTunRoutes(iface)
+				fresh, ferr := s.loadFakeIPConfig()
+				if lerr == nil && ferr == nil {
+					fresh = s.ruleSetMaterializer().restoreConfig(fresh)
+					if !restoreFailedAny(fresh) {
+						fV4, fV6 := desiredTunCIDRs(fresh)
+						stale = staleTunCIDRs(live, prefixSet(
+							[]string{inet4Range, inet6Range, p.TunAddr4, p.TunAddr6}, fV4, fV6, rV4, rV6))
+					}
+				}
+				s.fakeipCfgMu.Unlock()
+				if lerr != nil {
+					s.appLog.Warn("fakeip-reconcile", iface, "list tun routes: "+lerr.Error())
+				}
+				s.removeStaleTunCIDRRoutes(ctx, routes, iface, ndmsName, stale)
 			}
 		}
 	}

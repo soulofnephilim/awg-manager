@@ -1,5 +1,6 @@
 <!-- frontend/src/lib/components/pingcheck/MonitoringTab.svelte -->
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api/client';
 	import { pingCheckStatus, pingCheckLogs, loadPingLogs } from '$lib/stores/pingcheck';
@@ -46,7 +47,7 @@
 			const snap = await api.getTunnelsAll();
 			tunnelMeta = snap.tunnels ?? [];
 		} catch (e) {
-			notifications.error('Не удалось загрузить мониторинг');
+			notifications.error(m.pingcheck_tab_load_failed());
 		} finally {
 			loading = false;
 		}
@@ -63,9 +64,16 @@
 		return tunnelMeta.find((t) => t.id === id);
 	}
 
-	function configLine(cfg: AWGTunnel['pingCheck'] | undefined, method: string, failThreshold: number): string {
-		if (!cfg) return `${method.toUpperCase()} · порог ${failThreshold}`;
-		return `${(cfg.method || method).toUpperCase()} → ${cfg.target} · ${cfg.interval}с · порог ${cfg.failThreshold}`;
+	// checkTarget из статуса — то, что проверяется на деле: HTTP с IP-целью ходит
+	// на общий URL, а не на IP из настроек (F749).
+	function configLine(cfg: AWGTunnel['pingCheck'] | undefined, method: string, failThreshold: number, checkTarget?: string): string {
+		if (!cfg) return m.pingcheck_config_line_short({ method: method.toUpperCase(), threshold: failThreshold });
+		return m.pingcheck_config_line_full({
+			method: (cfg.method || method).toUpperCase(),
+			target: checkTarget || cfg.target,
+			interval: cfg.interval,
+			threshold: cfg.failThreshold,
+		});
 	}
 
 	// Карточки: pingcheck-туннели (из статуса) + туннели без pingcheck (из меты).
@@ -85,7 +93,8 @@
 				isWatchdog,
 				// Активный мониторинг ИЛИ есть сохранённый конфиг → «настроен».
 				configured: isWatchdog || !!cfg,
-				configLine: configLine(cfg, s.method, s.failThreshold),
+				configLine: configLine(cfg, s.method, s.failThreshold, s.checkTarget),
+				policyHolds: s.policyHolds ?? [],
 				stats: computeCardStats(logsByTunnel.get(s.tunnelId) ?? [], s),
 				latencyNote: s.latencyNote,
 			};
@@ -127,9 +136,9 @@
 	async function checkNow() {
 		try {
 			await api.triggerPingCheck();
-			notifications.success('Проверка запущена');
+			notifications.success(m.pingcheck_check_started());
 		} catch {
-			notifications.error('Не удалось запустить проверку');
+			notifications.error(m.pingcheck_check_start_failed());
 		}
 	}
 	async function enablePingcheck(id: string, name: string, backend: 'kernel' | 'nativewg') {
@@ -137,7 +146,7 @@
 			const t = await api.getTunnel(id);
 			const pc = t.pingCheck;
 			if (!pc) {
-				notifications.error('Нет сохранённых настроек мониторинга');
+				notifications.error(m.pingcheck_no_saved_settings());
 				return;
 			}
 			if (backend === 'nativewg') {
@@ -156,11 +165,11 @@
 				pc.enabled = true;
 				await api.updateTunnel(id, t);
 			}
-			notifications.success(`Watchdog включён: ${name}`);
+			notifications.success(m.pingcheck_watchdog_enabled({ name }));
 			pingCheckStatus.refetch();
 			loadPingLogs();
 		} catch {
-			notifications.error('Не удалось включить watchdog');
+			notifications.error(m.pingcheck_watchdog_enable_failed());
 		}
 	}
 	async function disablePingcheck(id: string, name: string, backend: 'kernel' | 'nativewg') {
@@ -172,11 +181,11 @@
 				if (t.pingCheck) t.pingCheck.enabled = false;
 				await api.updateTunnel(id, t);
 			}
-			notifications.success(`Watchdog выключен: ${name}`);
+			notifications.success(m.pingcheck_watchdog_disabled({ name }));
 			pingCheckStatus.refetch();
 			loadPingLogs();
 		} catch {
-			notifications.error('Не удалось выключить watchdog');
+			notifications.error(m.pingcheck_watchdog_disable_failed());
 		}
 	}
 </script>
@@ -188,7 +197,7 @@
 		{/each}
 	</div>
 {:else if cards.length === 0}
-	<EmptyState title="Нет туннелей" description="Создайте туннель, чтобы видеть мониторинг." />
+	<EmptyState title={m.pingcheck_no_tunnels_title()} description={m.pingcheck_no_tunnels_description()} />
 {:else}
 	<div class="wd-grid">
 		{#each cards as c (c.id)}
@@ -203,6 +212,7 @@
 					configLine={c.configLine}
 					stats={c.stats}
 					latencyNote={c.latencyNote}
+					policyHolds={c.policyHolds}
 					onConfigure={() => openConfig(c.id, c.name, c.backend)}
 					onCheckNow={checkNow}
 					onDisable={() => disablePingcheck(c.id, c.name, c.backend)}

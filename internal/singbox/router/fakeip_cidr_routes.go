@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 )
@@ -36,7 +37,7 @@ func loopSafeProxyRule(r Rule) bool {
 		len(r.DomainSuffix) == 0 && len(r.Domain) == 0 && len(r.SourceIPCIDR) == 0 &&
 		len(r.SourceMACAddress) == 0 &&
 		len(r.Port) == 0 && r.Protocol == "" && r.IPIsPrivate == nil &&
-		len(r.Inbound) == 0 && r.Network == "" && r.UDPTimeout == "" &&
+		len(r.Inbound) == 0 && len(r.AuthUser) == 0 && r.Network == "" && r.UDPTimeout == "" &&
 		r.AwgmManaged == ""
 }
 
@@ -285,9 +286,9 @@ func desiredTunCIDRs(cfg *RouterConfig) (v4 []string, v6 []string) {
 // addCIDRRoute installs one specific dst route to the tun. v4 routes carry the
 // CIDR comment (recognizable in NDMS config); the v6 form differs — see
 // StaticRouteSpec.V6.
-func (s *ServiceImpl) addCIDRRoute(ctx context.Context, ndmsName, cidr string, v6 bool) error {
+func (s *ServiceImpl) addCIDRRoute(ctx context.Context, rt BoundStaticRoutes, ndmsName, cidr string, v6 bool) error {
 	if v6 {
-		return s.deps.StaticRoutes.AddStaticRoute(ctx, StaticRouteSpec{
+		return rt.AddStaticRoute(ctx, StaticRouteSpec{
 			V6: true, Network: cidr, Interface: ndmsName,
 		})
 	}
@@ -295,15 +296,15 @@ func (s *ServiceImpl) addCIDRRoute(ctx context.Context, ndmsName, cidr string, v
 	if err != nil {
 		return err
 	}
-	return s.deps.StaticRoutes.AddStaticRoute(ctx, StaticRouteSpec{
+	return rt.AddStaticRoute(ctx, StaticRouteSpec{
 		Network: net4, Mask: mask4, Interface: ndmsName, Comment: fakeIPCIDRRouteComment,
 	})
 }
 
 // removeCIDRRoute deletes one specific dst route from the tun.
-func (s *ServiceImpl) removeCIDRRoute(ctx context.Context, ndmsName, cidr string, v6 bool) error {
+func (s *ServiceImpl) removeCIDRRoute(ctx context.Context, rt BoundStaticRoutes, ndmsName, cidr string, v6 bool) error {
 	if v6 {
-		return s.deps.StaticRoutes.RemoveStaticRoute(ctx, StaticRouteSpec{
+		return rt.RemoveStaticRoute(ctx, StaticRouteSpec{
 			V6: true, Network: cidr, Interface: ndmsName,
 		})
 	}
@@ -311,9 +312,33 @@ func (s *ServiceImpl) removeCIDRRoute(ctx context.Context, ndmsName, cidr string
 	if err != nil {
 		return err
 	}
-	return s.deps.StaticRoutes.RemoveStaticRoute(ctx, StaticRouteSpec{
+	return rt.RemoveStaticRoute(ctx, StaticRouteSpec{
 		Network: net4, Mask: mask4, Interface: ndmsName,
 	})
+}
+
+// cidrRoutes — ленивое подтверждение tun для серии CIDR-маршрутов одного
+// потока: список NDMS читается при первом вызове (и только если маршрут
+// действительно нужен), дальше — тот же ответ. Отказ (ошибка списка или
+// ErrIfaceAbsent) тоже запоминается: цикл пишет его один раз и выходит.
+// Живёт в пределах функции-потока; в поля не класть.
+func (s *ServiceImpl) cidrRoutes(ctx context.Context, ndmsName string) func() (BoundStaticRoutes, error) {
+	var (
+		rt   BoundStaticRoutes
+		err  error
+		done bool
+	)
+	return func() (BoundStaticRoutes, error) {
+		if !done {
+			done = true
+			var ok bool
+			rt, ok, err = s.deps.StaticRoutes.ForInterface(ctx, ndmsName)
+			if err == nil && !ok {
+				rt, err = nil, fmt.Errorf("интерфейса %s %w", ndmsName, ErrIfaceAbsent)
+			}
+		}
+		return rt, err
+	}
 }
 
 // syncTunCIDRRoutes converges the tun's specific CIDR routes from the previous
@@ -327,11 +352,12 @@ func (s *ServiceImpl) syncTunCIDRRoutes(ctx context.Context, ndmsName string, be
 	}
 	prevV4, prevV6 := desiredTunCIDRs(before)
 	nextV4, nextV6 := desiredTunCIDRs(after)
-	s.applyCIDRRouteDiff(ctx, ndmsName, prevV4, nextV4, false)
-	s.applyCIDRRouteDiff(ctx, ndmsName, prevV6, nextV6, true)
+	routes := s.cidrRoutes(ctx, ndmsName)
+	s.applyCIDRRouteDiff(ctx, routes, ndmsName, prevV4, nextV4, false)
+	s.applyCIDRRouteDiff(ctx, routes, ndmsName, prevV6, nextV6, true)
 }
 
-func (s *ServiceImpl) applyCIDRRouteDiff(ctx context.Context, ndmsName string, prev, next []string, v6 bool) {
+func (s *ServiceImpl) applyCIDRRouteDiff(ctx context.Context, routes func() (BoundStaticRoutes, error), ndmsName string, prev, next []string, v6 bool) {
 	prevSet := make(map[string]bool, len(prev))
 	for _, c := range prev {
 		prevSet[c] = true
@@ -346,7 +372,12 @@ func (s *ServiceImpl) applyCIDRRouteDiff(ctx context.Context, ndmsName string, p
 		if prevSet[c] {
 			continue
 		}
-		if err := s.addCIDRRoute(ctx, ndmsName, c, v6); err != nil {
+		rt, err := routes()
+		if err != nil {
+			s.appLog.Warn("fakeip-cidr", ndmsName, "add cidr routes: "+err.Error())
+			break
+		}
+		if err := s.addCIDRRoute(ctx, rt, ndmsName, c, v6); err != nil {
 			s.appLog.Warn("fakeip-cidr", ndmsName, "add cidr route "+c+": "+err.Error())
 			continue
 		}
@@ -356,7 +387,15 @@ func (s *ServiceImpl) applyCIDRRouteDiff(ctx context.Context, ndmsName string, p
 		if nextSet[c] {
 			continue
 		}
-		if err := s.removeCIDRRoute(ctx, ndmsName, c, v6); err != nil {
+		rt, err := routes()
+		if errors.Is(err, ErrIfaceAbsent) {
+			break // интерфейса нет — снимать нечего
+		}
+		if err != nil {
+			s.appLog.Warn("fakeip-cidr", ndmsName, "remove cidr routes: "+err.Error())
+			break
+		}
+		if err := s.removeCIDRRoute(ctx, rt, ndmsName, c, v6); err != nil {
 			s.appLog.Warn("fakeip-cidr", ndmsName, "remove cidr route "+c+": "+err.Error())
 			continue
 		}
@@ -366,4 +405,78 @@ func (s *ServiceImpl) applyCIDRRouteDiff(ctx context.Context, ndmsName string, p
 		s.appLog.Info("fakeip-cidr", ndmsName,
 			fmt.Sprintf("cidr routes synced: +%d -%d (v6=%v, desired=%d)", adds, removes, v6, len(next)))
 	}
+}
+
+// staleTunCIDRs — маршруты tun, которых нет в keep (#1133, F756). Маршруты
+// remote-наборов ставит только reconcile, а diff при правке их не видит (в
+// конфиге у набора пустой Rules): удалённое правило, outbound, сменённый на
+// direct, или сократившийся у источника список оставляли маршрут навсегда, и
+// трафик по нему петлял direct → tun. keep обязан быть ПОЛНЫМ — пул, адреса
+// tun, Tier 1 и Tier 2 при скачанных наборах, — иначе сбой сети снял бы
+// рабочие маршруты. Маршрут по умолчанию и excludedAddr (link-local,
+// private…) не трогаем.
+func staleTunCIDRs(live []netip.Prefix, keep map[netip.Prefix]bool) []netip.Prefix {
+	var out []netip.Prefix
+	for _, p := range live {
+		if p.Bits() == 0 || excludedAddr(p.Addr()) || keep[p.Masked()] {
+			continue
+		}
+		out = append(out, p.Masked())
+	}
+	return out
+}
+
+// removeStaleTunCIDRRoutes снимает stale. Владение интерфейсом — тем же гейтом,
+// что у сноса OpkgTun (teardownGate): «не знаем» ≠ «наш», и маршруты чужого
+// интерфейса на нашем номере не трогаются; скан — только если снимать есть что.
+// Неснимаемый маршрут (не статический в NDMS) повторяется на каждом тике —
+// памяти об отказах нет.
+func (s *ServiceImpl) removeStaleTunCIDRRoutes(ctx context.Context, routes func() (BoundStaticRoutes, error), iface, ndmsName string, stale []netip.Prefix) {
+	if len(stale) == 0 {
+		return
+	}
+	if ok, _ := s.teardownGate(ctx, ndmsName, "fakeip-reconcile", fakeIPTunDescription); !ok {
+		return
+	}
+	removed := 0
+	for _, p := range stale {
+		rt, e := routes()
+		if e != nil {
+			if !errors.Is(e, ErrIfaceAbsent) {
+				s.appLog.Warn("fakeip-reconcile", iface, "stale cidr routes: "+e.Error())
+			}
+			break
+		}
+		if e := s.removeCIDRRoute(ctx, rt, ndmsName, p.String(), p.Addr().Is6()); e != nil {
+			s.appLog.Warn("fakeip-reconcile", iface, "remove stale cidr route "+p.String()+": "+e.Error())
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		s.appLog.Info("fakeip-reconcile", iface, fmt.Sprintf("stale cidr routes removed: %d", removed))
+	}
+}
+
+// restoreFailedAny — хоть один управляемый локальный набор не восстановлен.
+func restoreFailedAny(cfg *RouterConfig) bool {
+	for _, rs := range cfg.Route.RuleSet {
+		if rs.restoreFailed {
+			return true
+		}
+	}
+	return false
+}
+
+// prefixSet — разобранные префиксы (маскированные) из строк CIDR.
+func prefixSet(lists ...[]string) map[netip.Prefix]bool {
+	out := map[netip.Prefix]bool{}
+	for _, l := range lists {
+		for _, c := range l {
+			if p, err := netip.ParsePrefix(c); err == nil {
+				out[p.Masked()] = true
+			}
+		}
+	}
+	return out
 }

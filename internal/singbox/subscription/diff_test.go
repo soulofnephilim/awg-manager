@@ -127,17 +127,17 @@ func TestExtendedKey_DistinguishesSNIAndShortID(t *testing.T) {
 	diffSNI := mkReality("h", 443, "io.ozone.ru", "01ab")
 	diffSID := mkReality("h", 443, "eh1.vk.ru", "02cd")
 
-	if extendedKey(base) != extendedKey(sameSNIsameSID) {
-		t.Error("identical (SNI,short_id) must yield identical extendedKey")
+	if keysOf(base).ext != keysOf(sameSNIsameSID).ext {
+		t.Error("identical (SNI,short_id) must yield identical ext key")
 	}
-	if extendedKey(base) == extendedKey(diffSNI) {
-		t.Error("different SNI must yield different extendedKey")
+	if keysOf(base).ext == keysOf(diffSNI).ext {
+		t.Error("different SNI must yield different ext key")
 	}
-	if extendedKey(base) == extendedKey(diffSID) {
-		t.Error("different short_id must yield different extendedKey")
+	if keysOf(base).ext == keysOf(diffSID).ext {
+		t.Error("different short_id must yield different ext key")
 	}
-	if identityKey(base) != identityKey(diffSNI) {
-		t.Error("narrow identityKey must ignore SNI")
+	if keysOf(base).narrow != keysOf(diffSNI).narrow {
+		t.Error("narrow key must ignore SNI")
 	}
 }
 
@@ -179,13 +179,13 @@ func TestApplyDiff_NoCollisionUsesNarrowTag(t *testing.T) {
 	}
 }
 
-func TestIdentityHash_SubIDIndependent(t *testing.T) {
+func TestStableTag_SuffixSubIDIndependent(t *testing.T) {
 	p := vlink.ParsedOutbound{Protocol: "vless", Server: "a.example", Port: 443, Outbound: []byte(`{"uuid":"u1"}`)}
-	h := IdentityHash(p)
+	h := suffixOf(keysOf(p).narrow)
 	if len(h) != 8 {
 		t.Fatalf("want 8 hex chars, got %q", h)
 	}
-	// Полный тег для разных subID должен совпадать суффиксом = IdentityHash.
+	// Полный тег для разных subID должен совпадать суффиксом — ключом исключения.
 	t1 := StableTag("aaaaaaaa1111", p)
 	t2 := StableTag("bbbbbbbb2222", p)
 	if t1[len(t1)-8:] != h || t2[len(t2)-8:] != h {
@@ -278,7 +278,7 @@ func TestApplyDiff_TrueDuplicatesKeepNarrowTag(t *testing.T) {
 	if len(got.New) != 1 {
 		t.Fatalf("len(New) = %d, want 1", len(got.New))
 	}
-	if want := stableTagFromKey("sub", identityKey(p)); got.New[0].Tag != want {
+	if want := stableTagFromKey("sub", keysOf(p).narrow); got.New[0].Tag != want {
 		t.Errorf("tag = %q, want narrow-key tag %q", got.New[0].Tag, want)
 	}
 }
@@ -292,7 +292,56 @@ func TestApplyDiff_RealityOnlyKeepsExtendedTag(t *testing.T) {
 	if len(got.New) != 2 {
 		t.Fatalf("len(New) = %d, want 2", len(got.New))
 	}
-	if want := stableTagFromKey("sub", extendedKey(a)); got.New[0].Tag != want {
+	if want := stableTagFromKey("sub", keysOf(a).ext); got.New[0].Tag != want {
 		t.Errorf("tag = %q, want extended-key tag %q (masking alone must not widen further)", got.New[0].Tag, want)
+	}
+}
+
+// mkParsedRealm — hysteria2 за реле: Server/Port — адрес реле, общий у всех
+// узлов за ним, различие только в realm_id (F366).
+func mkParsedRealm(realmID string) vlink.ParsedOutbound {
+	ob := map[string]any{
+		"type": "hysteria2", "password": "p",
+		"realm": map[string]any{"server_url": "https://relay.example.com:443", "token": "t", "realm_id": realmID},
+	}
+	raw, _ := json.Marshal(ob)
+	return vlink.ParsedOutbound{
+		Tag: "tmp", Protocol: "hysteria2", Server: "relay.example.com", Port: 443, Outbound: raw,
+	}
+}
+
+// F366: два узла за одним реле под одним паролем — разные узлы, а не дубликат;
+// одиночный realm-узел держит узкий ключ, как и прежде.
+func TestApplyDiff_RealmIDDistinguishesMembers(t *testing.T) {
+	got := ApplyDiff("sub", nil, []vlink.ParsedOutbound{mkParsedRealm("a"), mkParsedRealm("b")})
+	if got.SkippedDuplicate != 0 || len(got.New) != 2 || got.New[0].Tag == got.New[1].Tag {
+		t.Fatalf("SkippedDuplicate=%d New=%d — узлы за реле склеились", got.SkippedDuplicate, len(got.New))
+	}
+	single := mkParsedRealm("a")
+	one := ApplyDiff("sub", nil, []vlink.ParsedOutbound{single})
+	if want := stableTagFromKey("sub", keysOf(single).narrow); len(one.New) != 1 || one.New[0].Tag != want {
+		t.Errorf("одиночный realm-узел сменил тег")
+	}
+}
+
+// F660: узлы за одним реле hysteria2 — разные серверы для переассоциации
+// сирот и переноса исключений; запись без RealmID (до появления поля)
+// сравнивается грубо, как с TransportKey. RealmID берётся из блока realm.
+func TestSameServer_RealmID(t *testing.T) {
+	a := toMemberInfo("a", mkParsedRealm("a"))
+	b := toMemberInfo("b", mkParsedRealm("b"))
+	if a.RealmID != "a" {
+		t.Fatalf("RealmID не извлечён: %+v", a)
+	}
+	if sameServer(a, b) {
+		t.Error("узлы с разным realm_id признаны одним сервером")
+	}
+	if !sameServer(a, toMemberInfo("a2", mkParsedRealm("a"))) {
+		t.Error("тот же узел не признан")
+	}
+	legacy := a
+	legacy.RealmID = ""
+	if !sameServer(legacy, b) {
+		t.Error("запись без RealmID обязана сравниваться грубо")
 	}
 }

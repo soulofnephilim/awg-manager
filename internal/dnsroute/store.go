@@ -3,12 +3,14 @@ package dnsroute
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
+	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -57,9 +59,12 @@ func (s *Store) Load() (*StoreData, error) {
 	dropped := dropLegacyHRRows(&data)
 	forkMigrated := migrateRuleSetSubscriptionURLs(&data)
 	discordMigrated := migrateDiscordDNSSubnet(&data)
+	errorsScrubbed := scrubSubscriptionErrors(&data)
+	slugsAssigned := migrateGroupSlugs(&data)
+	geoDropped := migrateNDMSGeoTags(&data)
 
 	s.data = &data
-	if dropped > 0 || forkMigrated || discordMigrated {
+	if dropped > 0 || forkMigrated || discordMigrated || errorsScrubbed || slugsAssigned || geoDropped {
 		// Persist the cleanup so the file itself is cleaned, not just the
 		// in-memory cache. Best-effort: on write error the cache is already
 		// clean and the next Save() rewrites disk — failing startup over
@@ -69,6 +74,24 @@ func (s *Store) Load() (*StoreData, error) {
 		_ = s.writeLocked(&data)
 	}
 	return s.data, nil
+}
+
+// scrubSubscriptionErrors reduces every address in a stored fetch error to
+// scheme and host. Text saved before the refresh path did so quoted the
+// list's address whole, token in the path or query included, and REST
+// served it until the next successful fetch.
+func scrubSubscriptionErrors(data *StoreData) bool {
+	changed := false
+	for i := range data.Lists {
+		for j := range data.Lists[i].Subscriptions {
+			sub := &data.Lists[i].Subscriptions[j]
+			if scrubbed := logging.RedactURLs(sub.LastError); scrubbed != sub.LastError {
+				sub.LastError = scrubbed
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // migrateRuleSetSubscriptionURLs rewrites snapshotted vernette subscription
@@ -245,6 +268,47 @@ func migrateRawEditorText(data *StoreData) {
 	}
 }
 
+// migrateNDMSGeoTags снимает geo-теги (geosite:/geoip:, любой регистр) со
+// всех хранимых списков — после dropLegacyHRRows это только NDMS-списки.
+// NDMS тегов не принимает (стенд KN-1810 5.02.B.1, 20.10: error 101582220
+// «invalid FQDN or IP address», E в журнале ndm), запись их уже отвергает
+// (F700); здесь — списки, записанные раньше. Строки снимаются и из сырого
+// текста редактора, иначе следующий Update вернул бы их через
+// applyManualText. Комментарии и прочие строки не трогаются. Идемпотентна.
+func migrateNDMSGeoTags(data *StoreData) bool {
+	changed := false
+	drop := func(entries *[]string) {
+		if n := len(*entries); n > 0 {
+			*entries = slices.DeleteFunc(*entries, hasGeoPrefix)
+			changed = changed || len(*entries) != n
+		}
+	}
+	dropLines := func(text *string) {
+		if text == nil {
+			return
+		}
+		lines := strings.Split(*text, "\n")
+		kept := slices.DeleteFunc(slices.Clone(lines), func(l string) bool {
+			return hasGeoPrefix(strings.TrimSuffix(l, "\r"))
+		})
+		if len(kept) != len(lines) {
+			*text = strings.Join(kept, "\n")
+			changed = true
+		}
+	}
+	for i := range data.Lists {
+		l := &data.Lists[i]
+		drop(&l.ManualDomains)
+		drop(&l.Domains)
+		drop(&l.Subnets)
+		drop(&l.Excludes)
+		drop(&l.ExcludeSubnets)
+		dropLines(l.ManualText)
+		dropLines(l.ExcludesText)
+	}
+	return changed
+}
+
 // writeLocked marshals and atomically writes data, updating the cache.
 // Caller MUST already hold s.mu.
 func (s *Store) writeLocked(data *StoreData) error {
@@ -294,6 +358,43 @@ func (s *Store) GetCached() *StoreData {
 	return s.data
 }
 
+// Draft возвращает копию кэша для правки: мутатор меняет её и отдаёт в
+// Save, а кэш заменяется только успешной записью (writeLocked). Правка
+// живого кэша при отказе записи оставалась в нём, и её довозили до роутера
+// следующая сверка и до диска следующий успешный Save (F695). Nil, если
+// store не загружен.
+//
+// Глубина — ровно то, что пути правки пакета пишут на месте:
+//   - Lists — свой массив: присваивание Lists[i] и полей элемента
+//     (Update, SetEnabled, OnTunnelDelete, refreshSubscriptions), сдвиг
+//     append(Lists[:i], Lists[i+1:]...) в Delete, append в Create/CreateBatch;
+//   - Subscriptions каждого списка — refreshSubscriptions пишет поля
+//     Subscriptions[j] через указатель;
+//   - Routes каждого списка — Update без присланных маршрутов берёт срез
+//     записи, и resolveRouteInterfaces пишет в него Interface на месте;
+//   - HRRuleIcons — запись и delete в map (setHRIcon).
+//
+// Остальные срезы и указатели элемента (Domains, Excludes, ManualText, …)
+// общие с кэшем: пути правки их только читают или заменяют присваиванием
+// поля. Путь, пишущий внутрь такого среза на месте, обязан углубить копию.
+// Полная копия (DomainList.clone) не нужна: списки доменов бывают в тысячи
+// строк, а роутеры — MIPS с малой памятью.
+func (s *Store) Draft() *StoreData {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.data == nil {
+		return nil
+	}
+	d := *s.data
+	d.Lists = slices.Clone(d.Lists)
+	for i := range d.Lists {
+		d.Lists[i].Subscriptions = slices.Clone(d.Lists[i].Subscriptions)
+		d.Lists[i].Routes = slices.Clone(d.Lists[i].Routes)
+	}
+	d.HRRuleIcons = maps.Clone(d.HRRuleIcons)
+	return &d
+}
+
 // defaultStoreData returns empty store data with initialized collections.
 func defaultStoreData() *StoreData {
 	return &StoreData{
@@ -320,4 +421,51 @@ func normalizeLists(lists []DomainList) {
 			lists[i].Routes = []RouteTarget{}
 		}
 	}
+}
+
+// migrateGroupSlugs назначает GroupSlug спискам, записанным до F694.
+// Уже заданные слаги заняты. Два прохода по спискам без слага, в порядке
+// хранилища:
+//  1. список с содержимым получает нынешнюю основу GroupSlug(ID, Name), если
+//     она ещё свободна, — его группа на роутере не меняется. Пустой список
+//     пропускается: группы у него нет (buildTargetState), и основу он не
+//     отнимает у списка, который группой владеет;
+//  2. оставшиеся — uniqueGroupSlug с суффиксом. Суффиксы раздаются после
+//     того, как все основы зарезервированы, иначе суффикс коллидирующего
+//     списка мог бы занять нынешнее имя более позднего («youtube» + «_2» =
+//     основа «youtube 2») и увести его группу в хвост (класс #1023).
+//
+// Возвращает true, если что-то изменено (caller персистит). Идемпотентно.
+func migrateGroupSlugs(data *StoreData) bool {
+	if data == nil {
+		return false
+	}
+	taken := make(map[string]bool, len(data.Lists))
+	for _, l := range data.Lists {
+		if l.GroupSlug != "" {
+			taken[l.GroupSlug] = true
+		}
+	}
+	changed := false
+	for i := range data.Lists {
+		l := &data.Lists[i]
+		if l.GroupSlug != "" || len(l.Domains)+len(l.Subnets) == 0 {
+			continue
+		}
+		if base := GroupSlug(l.ID, l.Name); !taken[base] {
+			l.GroupSlug = base
+			taken[base] = true
+			changed = true
+		}
+	}
+	for i := range data.Lists {
+		l := &data.Lists[i]
+		if l.GroupSlug != "" {
+			continue
+		}
+		l.GroupSlug = uniqueGroupSlug(l.ID, l.Name, taken)
+		taken[l.GroupSlug] = true
+		changed = true
+	}
+	return changed
 }

@@ -46,6 +46,8 @@ export interface DnsRoute {
 	/** Raw manual editor text. Preserves comments and blank lines; active entries are derived from it. */
 	manualText?: string;
 	subscriptions?: DnsRouteSubscription[];
+	/** NDMS only: keep IPv6 entries (networks and bare addresses) off the router. The list keeps them. */
+	skipIPv6?: boolean;
 	routes: DnsRouteTarget[];
 	enabled: boolean;
 	createdAt: string;
@@ -75,15 +77,21 @@ export interface StaticRouteList {
 	updatedAt: string;
 	/** Optional URL for a custom icon (e.g. Qure CDN PNG or user-supplied URL). */
 	iconUrl?: string;
+	/** Включён, но записи туннеля ещё нет: маршруты встанут при его старте. */
+	pending?: boolean;
 }
 
 export interface RoutingTunnel {
 	id: string;
 	name: string;
-	iface?: string; // kernel interface name ("nwg0", "opkgtun10", "ppp0"); used to match HR file targets
+	iface?: string; // kernel interface name ("nwg0", "opkgtun10", "ppp0"); у system-записей — NDMS-id (см. hrTargetTunnel)
 	type: 'managed' | 'system' | 'wan';
 	status: string;
 	available: boolean;
+	/** Предупреждение каталога, напр. «нет адреса в NDMS» (issue #935). */
+	warning?: string;
+	/** Системный WireGuard-сервер (managed, помеченный или встроенный), F503. */
+	server?: boolean;
 }
 
 export interface ResolveResult {
@@ -106,6 +114,8 @@ export interface AccessPolicy {
 	deviceCount: number;
 	/** true for Policy0..PolicyN; false for HydraRoute Neo and other custom NDMS profiles */
 	isStandard?: boolean;
+	/** Интерфейсы, снятые мониторингом до восстановления связи (F752). */
+	held?: string[];
 }
 
 export interface AccessPolicyInterface {

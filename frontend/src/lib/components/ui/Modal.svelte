@@ -14,6 +14,7 @@
 </script>
 
 <script lang="ts">
+    import { m } from '$lib/i18n';
     import type { Snippet } from 'svelte';
     import ConfirmModal from './ConfirmModal.svelte';
 
@@ -185,7 +186,7 @@
                 <button
                     class="modal-close"
                     onclick={attemptClose}
-                    aria-label="Close modal"
+                    aria-label={m.common_close()}
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -213,10 +214,10 @@
     {#if hasUnsavedChanges}
         <ConfirmModal
             open={confirmOpen}
-            title="Закрыть без сохранения?"
-            message="Все правки будут потеряны."
-            confirmLabel="Закрыть"
-            cancelLabel="Остаться"
+            title={m.ui_modal_discard_title()}
+            message={m.ui_modal_discard_message()}
+            confirmLabel={m.common_close()}
+            cancelLabel={m.routing_page_stay()}
             variant="danger"
             onConfirm={() => { confirmOpen = false; onclose(); }}
             onClose={() => { confirmOpen = false; }}

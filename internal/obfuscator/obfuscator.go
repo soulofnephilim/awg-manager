@@ -23,6 +23,12 @@ const (
 	DetailsNotRunning = "обфускатор не запущен"
 )
 
+// Бэкенд релея для StateInfo.RelayBackend: модуль ядра awgm_relay.ko или процесс.
+const (
+	BackendKernel  = "kernel"
+	BackendProcess = "process"
+)
+
 var (
 	ConfDir = "/opt/etc/awg-manager/obfuscator"
 	RunDir  = "/var/run/awg-manager/obfuscator"
@@ -63,8 +69,14 @@ func Validate(o *storage.Obfuscator) error {
 		(net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()) {
 		return errors.New("target должен указывать на сервер, а не на loopback")
 	}
-	if strings.TrimSpace(o.Key) == "" {
-		return errors.New("key обязателен")
+	// Эффективный ключ — то, что релей реально прочитает из INI (EffectiveKey):
+	// "#secret" или "=abc" процесс отвергает уже после старта
+	// («Invalid configuration line»), модуль получил бы пустой ключ (F483).
+	switch k := EffectiveKey(o.Key); {
+	case k == "":
+		return errors.New("key обязателен (после '#' и '=' ключ пуст)")
+	case len(k) > 255:
+		return errors.New("key длиннее 255 байт")
 	}
 	if !allowed[o.Masking] {
 		return fmt.Errorf("masking %q недоступен для %s", o.Masking, o.Flavor)

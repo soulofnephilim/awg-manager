@@ -1,17 +1,19 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
+
 	interface Props {
 		value: string;
 		onInput: (value: string) => void;
 		placeholder?: string;
 	}
 
-	let { value, onInput, placeholder = 'Поиск...' }: Props = $props();
+	let { value, onInput, placeholder }: Props = $props();
 </script>
 
 <input
 	class="tunnel-search"
 	type="text"
-	{placeholder}
+	placeholder={placeholder ?? m.tunnels_search_placeholder()}
 	{value}
 	oninput={(e) => onInput((e.currentTarget as HTMLInputElement).value)}
 />
@@ -28,7 +30,9 @@
 		border-radius: var(--radius-sm);
 		background: var(--bg-primary);
 		color: var(--text-primary);
-		font-size: 0.6875rem;
+		/* 0.875rem — размер, который поле имело под глобальным сбросом до F506;
+		   0.6875rem при корневых 14px давал 9.6px. */
+		font-size: 0.875rem;
 	}
 
 	.tunnel-search::placeholder {

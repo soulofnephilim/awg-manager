@@ -134,11 +134,6 @@ func (o *OperatorOS4Impl) Start(ctx context.Context, cfg tunnel.Config) error {
 		o.logWarn("start", cfg.ID, "Failed to set MTU: "+exec.FormatError(result, err).Error())
 	}
 
-	// Set txqueuelen
-	if result, err := o.ipRun(ctx, "/opt/sbin/ip", "link", "set", "dev", ifaceName, "txqueuelen", "1000"); err != nil {
-		o.logWarn("start", cfg.ID, "Failed to set txqueuelen: "+exec.FormatError(result, err).Error())
-	}
-
 	o.logInfo("start", cfg.ID, "Interface up with MTU")
 
 	// === Phase 5: Add firewall rules ===
@@ -151,7 +146,7 @@ func (o *OperatorOS4Impl) Start(ctx context.Context, cfg tunnel.Config) error {
 
 	// Apply DNS servers via NDMS (RCI works on OS4 too)
 	if len(cfg.DNS) > 0 {
-		if err := o.commands.Interfaces.SetDNS(ctx, ifaceName, cfg.DNS); err != nil {
+		if err := o.dnsByKernelName(ctx, ifaceName, cfg.DNS, true); err != nil {
 			o.logWarn("start", cfg.ID, "Failed to set DNS: "+err.Error())
 		} else {
 			o.appliedDNSMu.Lock()
@@ -164,8 +159,20 @@ func (o *OperatorOS4Impl) Start(ctx context.Context, cfg tunnel.Config) error {
 	return nil
 }
 
+// dnsByKernelName ставит (set) или снимает DNS-серверы интерфейса по имени
+// ЯДРА (awgm<N>) — сознательное исключение из правила «команды по интерфейсу
+// только по query.Confirmed» (F546, R17): на OS4 это не запись из списка NDMS,
+// подтверждать её списком нельзя — DNS перестал бы применяться. Поведение
+// прежнее.
+func (o *OperatorOS4Impl) dnsByKernelName(ctx context.Context, ifaceName string, servers []string, set bool) error {
+	if set {
+		return o.commands.Interfaces.SetDNSByKernelName(ctx, ifaceName, servers)
+	}
+	return o.commands.Interfaces.ClearDNSByKernelName(ctx, ifaceName, servers)
+}
+
 // Stop stops a tunnel on OS 4.x.
-func (o *OperatorOS4Impl) Stop(ctx context.Context, tunnelID string) error {
+func (o *OperatorOS4Impl) Stop(ctx context.Context, tunnelID, _ string) error {
 	ifaceName := tunnelID
 
 	// Remove firewall rules
@@ -185,7 +192,7 @@ func (o *OperatorOS4Impl) Stop(ctx context.Context, tunnelID string) error {
 	delete(o.appliedDNS, tunnelID)
 	o.appliedDNSMu.Unlock()
 	if len(dnsServers) > 0 {
-		_ = o.commands.Interfaces.ClearDNS(ctx, ifaceName, dnsServers)
+		_ = o.dnsByKernelName(ctx, ifaceName, dnsServers, false)
 	}
 
 	o.logInfo("stop", tunnelID, "Tunnel stopped")
@@ -205,7 +212,7 @@ func (o *OperatorOS4Impl) RemoveDefaultRoute(ctx context.Context, tunnelID strin
 // Delete completely removes a tunnel.
 func (o *OperatorOS4Impl) Delete(ctx context.Context, stored *storage.AWGTunnel) error {
 	// On OS4, stop and delete are the same
-	return o.Stop(ctx, stored.ID)
+	return o.Stop(ctx, stored.ID, stored.Name)
 }
 
 // Suspend on OS4 is a no-op — OS4 has no NDMS layer.
@@ -248,7 +255,7 @@ func (o *OperatorOS4Impl) Reconcile(ctx context.Context, cfg tunnel.Config) erro
 
 	// Re-apply DNS servers
 	if len(cfg.DNS) > 0 {
-		if err := o.commands.Interfaces.SetDNS(ctx, ifaceName, cfg.DNS); err != nil {
+		if err := o.dnsByKernelName(ctx, ifaceName, cfg.DNS, true); err != nil {
 			o.logWarn("reconcile", cfg.ID, "Failed to re-apply DNS: "+err.Error())
 		} else {
 			o.appliedDNSMu.Lock()
@@ -326,7 +333,11 @@ func (o *OperatorOS4Impl) SyncAddress(ctx context.Context, tunnelID string, addr
 }
 
 // UpdateDescription is a no-op on OS4 (no NDMS interface descriptions).
-func (o *OperatorOS4Impl) UpdateDescription(ctx context.Context, tunnelID, description string) error {
+func (o *OperatorOS4Impl) UpdateDescription(ctx context.Context, tunnelID, prevName, description string) error {
+	return nil
+}
+
+func (o *OperatorOS4Impl) CaptureDescription(ctx context.Context, tunnelID, description string) error {
 	return nil
 }
 
@@ -342,10 +353,12 @@ func (o *OperatorOS4Impl) configureIPv6(ctx context.Context, iface, address stri
 	return exec.FormatError(result, err)
 }
 
-// deleteInterface force-deletes a network interface.
+// deleteInterface force-deletes a network interface. Снос — бэкендом (под
+// барьером netdev.SwapGate): записи OpkgTun на OS4 нет и C 0767 невозможен,
+// но правило одно — ни одного del мимо Swapper (N1, R61).
 func (o *OperatorOS4Impl) deleteInterface(ctx context.Context, iface string) {
 	o.ipRun(ctx, "/opt/sbin/ip", "link", "set", "down", "dev", iface)
-	o.ipRun(ctx, "/opt/sbin/ip", "link", "del", iface)
+	_ = o.backend.StopIfPresent(ctx, iface)
 }
 
 // waitForInterfaceRemoval waits for interface to be removed.

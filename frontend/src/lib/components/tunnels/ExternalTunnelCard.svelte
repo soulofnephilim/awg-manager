@@ -2,7 +2,8 @@
 	import { ShieldCheck, Trash2, TriangleAlert } from 'lucide-svelte';
 	import type { ExternalTunnel } from '$lib/types';
 	import { formatBytes } from '$lib/utils/format';
-	import { Button } from '$lib/components/ui';
+	import { Badge, Button } from '$lib/components/ui';
+	import { m } from '$lib/i18n';
 	import TunnelTitleRow from '$lib/components/tunnels/TunnelTitleRow.svelte';
 
 	interface Props {
@@ -10,32 +11,35 @@
 		view?: 'cards' | 'compact' | 'list';
 		onadopt?: (interfaceName: string) => void;
 		ondelete?: (interfaceName: string) => void;
+		onunmark?: (interfaceName: string) => void;
 	}
 
-	let { tunnel, view = 'cards', onadopt, ondelete }: Props = $props();
+	let { tunnel, view = 'cards', onadopt, ondelete, onunmark }: Props = $props();
 
 	let isListCard = $derived(view === 'list');
 	let statusDot = $derived(
 		tunnel.lastHandshake
-			? { variant: 'success' as const, pulse: false, label: 'Подключён' }
-			: { variant: 'muted' as const, pulse: false, label: 'Неактивен' },
+			? { variant: 'success' as const, pulse: false, label: m.tunnels_external_connected() }
+			: { variant: 'muted' as const, pulse: false, label: m.tunnels_status_inactive() },
 	);
 
 	// Принять можно только то, поверх чего работает туннель. Без него принимать
-	// нечего: интерфейс есть, конфигурации нет.
-	let canAdopt = $derived(tunnel.isAWG);
+	// нечего: интерфейс есть, конфигурации нет. Отмеченный «сторонним» сервер
+	// не примет (ErrAdoptForeign).
+	let canAdopt = $derived(tunnel.isAWG && !tunnel.foreign);
 	// Удалять предлагаем только то, что сервер примет: за номером может стоять
-	// владелец, которого список туннелей не видит.
-	let canDelete = $derived(tunnel.removable === true);
+	// владелец, которого список туннелей не видит. Отмеченный «сторонним»
+	// принадлежит другой программе — его не удаляем, даже если сервер позволил бы.
+	let canDelete = $derived(tunnel.removable === true && !tunnel.foreign);
 	// Подпись о составе: «только устройство» — интерфейс, поднятый мимо NDMS.
 	let kindLabel = $derived(
 		tunnel.isAWG
-			? 'WG туннель'
+			? m.tunnels_external_kind_wg()
 			: tunnel.ndmsRecord && !tunnel.kernelDevice
-				? 'только запись NDMS'
+				? m.tunnels_external_kind_ndms_only()
 				: !tunnel.ndmsRecord && tunnel.kernelDevice
-					? 'только устройство'
-					: 'интерфейс',
+					? m.tunnels_external_kind_device_only()
+					: m.tunnels_external_kind_interface(),
 	);
 
 	function handleAdopt(): void {
@@ -44,6 +48,10 @@
 
 	function handleDelete(): void {
 		ondelete?.(tunnel.interfaceName);
+	}
+
+	function handleUnmark(): void {
+		onunmark?.(tunnel.interfaceName);
 	}
 </script>
 
@@ -64,15 +72,16 @@
 				/>
 				<div class="meta-tags-dense">
 					<span class="iface-chip-dense">{kindLabel}</span>
+					{#if tunnel.foreign}<Badge variant="accent" size="sm">{m.tunnels_external_foreign()}</Badge>{/if}
 					{#if tunnel.description}
-						<span class="iface-chip-dense descr-chip">«{tunnel.description}»</span>
+						<span class="iface-chip-dense descr-chip">{m.tunnels_external_description_quoted({ description: tunnel.description })}</span>
 					{/if}
-					<span class="version-badge badge-external">Внешний</span>
+					<span class="version-badge badge-external">{m.tunnels_external_badge()}</span>
 				</div>
 				{#if tunnel.conflictsWith}
 					<div class="conflict-note">
 						<TriangleAlert size={14} aria-hidden="true" />
-						Адрес совпадает с туннелем «{tunnel.conflictsWith}»
+						{m.tunnels_external_conflict({ name: tunnel.conflictsWith })}
 					</div>
 				{/if}
 			</div>
@@ -83,7 +92,17 @@
 					{#snippet iconBefore()}
 						<ShieldCheck size={16} aria-hidden="true" />
 					{/snippet}
-					Взять под управление
+					{m.tunnels_external_adopt()}
+				</Button>
+			{/if}
+			{#if tunnel.foreign}
+				<Button
+					variant="ghost"
+					size="sm"
+					title={m.tunnels_external_unmark_title({ name: tunnel.interfaceName })}
+					onclick={handleUnmark}
+				>
+					{m.tunnels_external_unmark()}
 				</Button>
 			{/if}
 			{#if canDelete}
@@ -91,7 +110,7 @@
 					{#snippet iconBefore()}
 						<Trash2 size={16} aria-hidden="true" />
 					{/snippet}
-					Удалить
+					{m.common_delete()}
 				</Button>
 			{/if}
 		</div>
@@ -101,22 +120,23 @@
 				<h3 class="tunnel-name">{tunnel.interfaceName}</h3>
 				<div class="flex items-center gap-2 flex-wrap">
 					<span class="iface-name">{kindLabel}</span>
+					{#if tunnel.foreign}<Badge variant="accent" size="sm">{m.tunnels_external_foreign()}</Badge>{/if}
 					{#if tunnel.description}
-						<span class="iface-name descr-chip">«{tunnel.description}»</span>
+						<span class="iface-name descr-chip">{m.tunnels_external_description_quoted({ description: tunnel.description })}</span>
 					{/if}
-					<span class="version-badge badge-external">Внешний</span>
+					<span class="version-badge badge-external">{m.tunnels_external_badge()}</span>
 				</div>
 			</div>
 			<div class="shrink-0">
 				{#if tunnel.lastHandshake}
 					<span class="status-badge status-active">
 						<span class="led-dot"></span>
-						Подключён
+						{m.tunnels_external_connected()}
 					</span>
 				{:else}
 					<span class="status-badge status-inactive">
 						<span class="led-dot"></span>
-						Неактивен
+						{m.tunnels_status_inactive()}
 					</span>
 				{/if}
 			</div>
@@ -125,14 +145,14 @@
 		{#if tunnel.conflictsWith}
 			<div class="conflict-note">
 				<TriangleAlert size={14} aria-hidden="true" />
-				Адрес {tunnel.addresses?.[0] ?? ''} совпадает с туннелем «{tunnel.conflictsWith}»
+				{m.tunnels_external_conflict_addr({ address: tunnel.addresses?.[0] ?? '', name: tunnel.conflictsWith })}
 			</div>
 		{/if}
 
 		<div class="details">
 			{#if tunnel.addresses?.length}
 				<div class="flex flex-col gap-0.5 min-w-0">
-					<span class="detail-label">Адрес</span>
+					<span class="detail-label">{m.tunnels_external_address()}</span>
 					<span class="detail-value">{tunnel.addresses.join(', ')}</span>
 				</div>
 			{/if}
@@ -166,7 +186,17 @@
 					{#snippet iconBefore()}
 						<ShieldCheck size={16} aria-hidden="true" />
 					{/snippet}
-					Взять под управление
+					{m.tunnels_external_adopt()}
+				</Button>
+			{/if}
+			{#if tunnel.foreign}
+				<Button
+					variant="ghost"
+					size="sm"
+					title={m.tunnels_external_unmark_title({ name: tunnel.interfaceName })}
+					onclick={handleUnmark}
+				>
+					{m.tunnels_external_unmark()}
 				</Button>
 			{/if}
 			{#if canDelete}
@@ -174,7 +204,7 @@
 					{#snippet iconBefore()}
 						<Trash2 size={16} aria-hidden="true" />
 					{/snippet}
-					Удалить
+					{m.common_delete()}
 				</Button>
 			{/if}
 		</div>
@@ -345,6 +375,9 @@
 		display: flex;
 		gap: 8px;
 		flex-wrap: wrap;
+		/* Card stretched by its grid row: keep the buttons at the bottom edge,
+		   in line with the neighbours, instead of floating mid-card. */
+		margin-top: auto;
 		padding-top: 12px;
 		border-top: 1px solid var(--border);
 	}

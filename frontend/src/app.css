@@ -77,6 +77,19 @@
   unicode-range: U+0400-04FF, U+0500-052F;
 }
 
+/* ─── Флаги стран: Windows рисует их буквами («NL»). Подмножество Twemoji Mozilla
+   (country-flag-emoji-polyfill), CC-BY 4.0 © Twitter, Inc. and other contributors.
+   unicode-range: файл качается только при флаге на странице ─── */
+@font-face {
+  font-family: 'Twemoji Country Flags';
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/TwemojiCountryFlags.woff2') format('woff2');
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067,
+    U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+}
+
 /* ─── Design tokens (Tailwind v4 @theme — single source of truth) ─── */
 @theme {
   /* Colors — semantic */
@@ -109,8 +122,8 @@
   --color-border-hover: #565f89;
 
   /* Typography */
-  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: 'IBM Plex Mono', 'SF Mono', SFMono-Regular, ui-monospace, monospace;
+  --font-sans: 'Twemoji Country Flags', 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Twemoji Country Flags', 'IBM Plex Mono', 'SF Mono', SFMono-Regular, ui-monospace, monospace;
 
   /* Radii — bumped 8/4 → 12/6 per design */
   --radius: 12px;
@@ -382,7 +395,11 @@ a:hover {
  * their native rendering — applying width:100% / padding / bg here
  * stretched checkboxes to fill the parent flex row and broke layouts
  * that mix a checkbox with text content (e.g. import preview rows). */
-input:not([type="checkbox"]):not([type="radio"]), textarea, select {
+/* :where — нулевой вес (F506): сброс прежде весил (0,2,1) и перебивал любой
+ * класс поля (.field-input, scoped .input), а textarea/select — нет. Правило
+ * фокуса ниже — с прежним весом: класс с рамкой без своего :focus иначе
+ * терял подсветку, а outline: none отсюда оставался — фокус пропадал. */
+:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select) {
 	width: 100%;
 	padding: 0.5rem 0.75rem;
 	background: var(--bg-secondary);
@@ -600,7 +617,7 @@ label {
 	border: 1px solid var(--border);
 	box-shadow: var(--shadow);
 	min-width: 280px;
-	max-width: 400px;
+	max-width: min(400px, calc(100vw - 2rem));
 	animation: slideIn 0.2s ease;
 	font: inherit;
 	color: inherit;
@@ -620,6 +637,8 @@ label {
 	padding: 0;
 	font: inherit;
 	white-space: pre-line;
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
 
 .toast-action {
@@ -920,6 +939,22 @@ input.api-key-input {
 .settings-highlight-target + .setting-row {
 	border-top: 1px solid var(--border);
 }
+
+/* Подсветка блока настроек при переходе по ссылке (страница и карточки). */
+.settings-highlight-target.highlighted {
+	animation: settings-target-glow 2.8s ease-out forwards;
+}
+
+@keyframes settings-target-glow {
+	0%   { box-shadow: none; }
+	12%  { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 55%, transparent), 0 0 18px 2px color-mix(in srgb, var(--color-accent) 22%, transparent); }
+	30%  { box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 20%, transparent); }
+	48%  { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 40%, transparent), 0 0 14px 2px color-mix(in srgb, var(--color-accent) 15%, transparent); }
+	65%  { box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 15%, transparent); }
+	82%  { box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 22%, transparent), 0 0 8px 1px color-mix(in srgb, var(--color-accent) 10%, transparent); }
+	100% { box-shadow: none; }
+}
+
 
 .setting-description {
 	overflow-wrap: break-word;
@@ -1532,10 +1567,10 @@ input.api-key-input {
 	box-sizing: border-box;
 }
 
+/* Только прямые потомки трека: строки sing-box-таблиц — <tr> внутри
+   <table>, сюда не попадают (F377). */
 .awg-list-table-track > :is(
 	.awg-list-row,
-	.sbx-sub-list-row,
-	.sbx-tunnel-list-row,
 	.sbx-member-list-row
 ) {
 	min-width: max(100%, max-content);

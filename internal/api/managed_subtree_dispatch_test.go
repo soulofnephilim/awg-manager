@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
+	"github.com/hoaxisr/awg-manager/internal/peersubnet"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -44,7 +46,7 @@ func (s *recManagedSvc) journal() []string {
 
 func (s *recManagedSvc) Create(context.Context, managed.CreateServerRequest) (*storage.ManagedServer, error) {
 	s.record("Create")
-	return &storage.ManagedServer{}, s.err
+	return &storage.ManagedServer{InterfaceName: "Wireguard3"}, s.err
 }
 
 func (s *recManagedSvc) List() []storage.ManagedServer { return nil }
@@ -87,6 +89,11 @@ func (s *recManagedSvc) SetLANSegments(_ context.Context, id string, segments []
 
 func (s *recManagedSvc) ListLANSegments(context.Context) ([]managed.LANSegmentDTO, error) {
 	return nil, nil
+}
+
+func (s *recManagedSvc) PeerPresets(_ context.Context, id, dns string) (peersubnet.Presets, error) {
+	s.record("PeerPresets:" + id + ":" + dns)
+	return peersubnet.Presets{}, s.err
 }
 
 func (s *recManagedSvc) SetPolicy(_ context.Context, id, policy string) error {
@@ -239,6 +246,10 @@ func TestManagedSubtree_ServiceFailureStopsPipeline(t *testing.T) {
 			[]string{"SetEnabled:Wireguard3:true"}, "SET_ENABLED_FAILED"},
 		{"delete", http.MethodDelete, "/api/managed-servers/Wireguard3", "",
 			[]string{"Delete:Wireguard3"}, "DELETE_FAILED"},
+		{"asc", http.MethodPut, "/api/managed-servers/Wireguard3/asc", `{}`,
+			[]string{"SetASCParams:Wireguard3"}, "SET_ASC_FAILED"},
+		{"create", http.MethodPost, "/api/managed-servers/", `{}`,
+			[]string{"Create"}, "CREATE_FAILED"},
 	}
 
 	for _, tc := range cases {
@@ -261,6 +272,81 @@ func TestManagedSubtree_ServiceFailureStopsPipeline(t *testing.T) {
 				t.Fatalf("code=%v, ожидался %q (тело=%s)", body["code"], tc.code, rr.Body.String())
 			}
 		})
+	}
+}
+
+// R44: ASC записан, сверка не прочиталась — не успех, но состояние роутера
+// изменилось: кэш сброшен и инвалидация опубликована, код ASC_UNVERIFIED.
+func TestManagedASC_UnverifiedPublishes(t *testing.T) {
+	svc := &recManagedSvc{err: fmt.Errorf("%w: rc read timeout", managed.ErrASCUnverified)}
+	h, p := newManagedSubtreeHarness(t, svc)
+
+	rr := perform(h.Subtree, http.MethodPut, "/api/managed-servers/Wireguard3/asc", `{}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("код=%d, ожидался 400 (тело=%s)", rr.Code, rr.Body.String())
+	}
+	want := []string{"SetASCParams:Wireguard3", "InvalidateCache:Wireguard3"}
+	if got := svc.journal(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("журнал службы = %v, ожидался %v", got, want)
+	}
+	if pub := p.invalidated(); !reflect.DeepEqual(pub, []string{"servers/managed-mutation"}) {
+		t.Fatalf("публикации = %v, ожидалась одна инвалидация servers", pub)
+	}
+	body := decodeJSONBody(t, rr)
+	if body["code"] != "ASC_UNVERIFIED" {
+		t.Fatalf("code=%v, ожидался ASC_UNVERIFIED (тело=%s)", body["code"], rr.Body.String())
+	}
+	if msg, _ := body["message"].(string); !strings.Contains(msg, "принял запись ASC") {
+		t.Fatalf("сообщение не говорит, что запись принята: %q", msg)
+	}
+}
+
+// F601: запись принята, сверка не сошлась — отказ SET_ASC_FAILED, но часть
+// могла примениться: кэш сброшен и инвалидация опубликована. Прочие отказы
+// (до записи) — без публикации.
+func TestManagedASC_NotAppliedPublishes(t *testing.T) {
+	svc := &recManagedSvc{err: fmt.Errorf("%w: want=a got=b", managed.ErrASCNotApplied)}
+	h, p := newManagedSubtreeHarness(t, svc)
+	rr := perform(h.Subtree, http.MethodPut, "/api/managed-servers/Wireguard3/asc", `{}`)
+	if body := decodeJSONBody(t, rr); body["code"] != "SET_ASC_FAILED" {
+		t.Fatalf("code=%v (тело=%s)", body["code"], rr.Body.String())
+	}
+	if pub := p.invalidated(); !reflect.DeepEqual(pub, []string{"servers/managed-mutation"}) {
+		t.Fatalf("публикации = %v, ожидалась одна инвалидация servers", pub)
+	}
+
+	svc2 := &recManagedSvc{err: errors.New("validation")}
+	h2, p2 := newManagedSubtreeHarness(t, svc2)
+	perform(h2.Subtree, http.MethodPut, "/api/managed-servers/Wireguard3/asc", `{}`)
+	if pub := p2.invalidated(); len(pub) != 0 {
+		t.Fatalf("отказ до записи опубликован: %v", pub)
+	}
+}
+
+// L4: Create записал ASC, но сверка не прочиталась — сервер создан и
+// сохранён, поэтому публикация есть, но ответ не успех: ASC_UNVERIFIED с
+// сообщением, что сервер создан.
+func TestManagedCreate_ASCUnverifiedPublishes(t *testing.T) {
+	svc := &recManagedSvc{err: fmt.Errorf("сервер Wireguard3 создан, но ASC не сверен: %w", managed.ErrASCUnverified)}
+	h, p := newManagedSubtreeHarness(t, svc)
+
+	rr := perform(h.Subtree, http.MethodPost, "/api/managed-servers/", `{}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("код=%d, ожидался 400 (тело=%s)", rr.Code, rr.Body.String())
+	}
+	want := []string{"Create", "InvalidateCache:Wireguard3"}
+	if got := svc.journal(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("журнал службы = %v, ожидался %v", got, want)
+	}
+	if pub := p.invalidated(); !reflect.DeepEqual(pub, []string{"servers/managed-mutation"}) {
+		t.Fatalf("публикации = %v, ожидалась одна инвалидация servers", pub)
+	}
+	body := decodeJSONBody(t, rr)
+	if body["code"] != "ASC_UNVERIFIED" {
+		t.Fatalf("code=%v, ожидался ASC_UNVERIFIED (тело=%s)", body["code"], rr.Body.String())
+	}
+	if msg, _ := body["message"].(string); !strings.Contains(msg, "создан") || !strings.Contains(msg, "принял запись ASC") {
+		t.Fatalf("сообщение не говорит, что сервер создан и ASC принят: %q", msg)
 	}
 }
 

@@ -1,16 +1,17 @@
 package nwg
 
 // Релейная половина endpoint-стража: режим guardRelay следит не за
-// peer.endpoint, а за target'ом обфускатора. Релей резолвит его имя ровно один
-// раз при старте (resolve_host_wait в wg-obfuscator), поэтому смена A-записи
-// доходит до него только перезапуском процесса, а host-route до прежнего
-// адреса приходится переставлять.
+// peer.endpoint, а за target'ом обфускатора. Релей получает адрес, резолвнутый
+// нами при старте (F482), поэтому смена A-записи доходит до него только
+// перезапуском с новым адресом, а host-route до прежнего адреса приходится
+// переставлять.
 
 import (
 	"context"
 	"fmt"
 	"net"
 
+	"github.com/hoaxisr/awg-manager/internal/obfuscator"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -22,7 +23,7 @@ func (o *OperatorNativeWG) guardRegisterRelay(stored *storage.AWGTunnel, ip stri
 		o.guardUnregister(stored.ID)
 		return
 	}
-	host, port, err := net.SplitHostPort(stored.Obfuscator.Target)
+	host, port, err := obfuscator.TargetHostPort(stored.Obfuscator)
 	if err != nil || net.ParseIP(host) != nil {
 		o.guardUnregister(stored.ID)
 		return
@@ -82,11 +83,10 @@ func (o *OperatorNativeWG) restartRelayForNewTarget(ctx context.Context, id stri
 	if splitErr != nil {
 		return
 	}
-	// Stop обязателен: Runner.Start идемпотентен по СОДЕРЖИМОМУ INI, а там
-	// имя, которое не менялось — без остановки он решит, что всё уже сделано,
-	// и релей продолжит слать на прежний адрес.
+	// Stop — форсированный рестарт: сменился адрес сервера, живой релей
+	// обязан переподключиться.
 	_ = o.obf.Stop(id)
-	if err := o.obf.Start(ctx, id, stored.Obfuscator); err != nil {
+	if err := o.obf.Start(ctx, id, stored.Obfuscator, freshIP); err != nil {
 		// Маршрут не трогаем: иначе каждая неудача стоила бы RCI-команды и
 		// записи конфигурации роутера, а проход повторяется каждые 20 секунд.
 		o.appLog.Warn("endpoint-guard", e.name, "перезапуск релея не удался: "+err.Error())

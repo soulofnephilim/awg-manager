@@ -16,7 +16,7 @@
 		DefaultRouteBadge,
 		TunnelCardSkeleton,
 	} from '$lib/components/tunnels';
-	import { Button, TunnelListActions } from '$lib/components/ui';
+	import { TunnelListActions } from '$lib/components/ui';
 	import { PageContainer, PageHeader, EmptyState, WelcomeBanner } from '$lib/components/layout';
 	import { tunnelsSkeletonCount, clampSkeletonCount } from '$lib/stores/skeletonCounts';
 	import {
@@ -32,11 +32,11 @@
 	} from '$lib/components/ui';
 	import { singboxDelayHistory, singboxStatus, singboxTraffic, singboxTunnels } from '$lib/stores/singbox';
 	import { awg3Tunnels } from '$lib/stores/awg3';
+	import { zapretStatusIfExpert } from '$lib/stores/zapret';
+	import { runZapretControl, ZapretServiceCard } from '$lib/components/zapret';
 	import { Awg3TunnelsSection, Awg3ImportModal } from '$lib/components/awg3';
-	import { AmneziaPremiumWizard } from '$lib/components/amneziapremium';
-	import type { PremiumWizardResult } from '$lib/components/amneziapremium';
-	import { feedTraffic, getTrafficRates, getTrafficSparklineSeries, subscribeTraffic } from '$lib/stores/traffic';
-	import { usageLevel } from '$lib/stores/settings';
+	import { getTrafficRates, getTrafficSparklineSeries, subscribeTraffic } from '$lib/stores/traffic';
+	import { usageLevel, settings } from '$lib/stores/settings';
 	import { isSectionVisible, isTunnelDashboardAvailable } from '$lib/types/usageLevel';
 	import { subscriptionsStore } from '$lib/stores/subscriptions';
 	import SubscriptionsTabSection from '$lib/components/subscriptions/SubscriptionsTabSection.svelte';
@@ -66,7 +66,7 @@
 		systemStatusVariant,
 	} from '$lib/components/tunnels/tunnelPageSelectors';
 	import type { AwgTabContext } from '$lib/components/tunnels/awgTabContext';
-	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem } from '$lib/types';
+	import type { ExternalTunnel, Subscription, SubscriptionMember, SystemTunnel, TunnelListItem, ZapretControlAction } from '$lib/types';
 	import { formatBitRate, formatBytes, formatDuration, formatRelativeTime, secondsSince } from '$lib/utils/format';
 	import { showOutboundReferencedError } from '$lib/utils/outboundReferenced';
 	import {
@@ -78,7 +78,7 @@
 		awgToggleTint,
 	} from '$lib/utils/awgPingStatus';
 	import { awgManagedStatusDot } from '$lib/utils/statusDot';
-	import { resolveSubscriptionMemberTag } from '$lib/utils/subscriptionMember';
+	import { resolveSubscriptionMemberTag, subscriptionName } from '$lib/utils/subscriptionMember';
 	import { nativewgUnavailableHint } from '$lib/utils/backendAvailability';
 	import {
 		SINGBOX_LAYOUT_STORAGE_KEY,
@@ -89,8 +89,9 @@
 		type TunnelRenderMode,
 	} from '$lib/constants/singboxLayout';
 	import { isMockDevMode as getIsMockDevMode } from '$lib/env';
-	import { Eye, EyeOff, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert, Crown } from 'lucide-svelte';
-	import { formatRunningSub, pluralForm, SUBSCRIPTION_WORDS, TUNNEL_WORDS } from '$lib/utils/pluralize';
+	import { Eye, EyeOff, Server, Upload, LayoutGrid, Link, Globe, TriangleAlert } from 'lucide-svelte';
+	import { m } from '$lib/i18n';
+	import { isAutoSelectMode } from '$lib/utils/subscriptionMode';
 	import TunnelSectionHeader from '$lib/components/tunnels/TunnelSectionHeader.svelte';
 	import {
 		tunnelDashboardLayout,
@@ -164,25 +165,6 @@
 		tunnelSnap.status === 'idle' ||
 		tunnelSnap.status === 'loading',
 	);
-
-	// System tunnels don't emit tunnel:traffic stream events (no awg-manager
-	// peer entry tracks them) — feed the traffic store from the polled
-	// snapshot so the per-system-tunnel rate chart stays alive. Runs on
-	// every snapshot refresh (~5s).
-	$effect(() => {
-		// Skip system tunnels that are ALSO tracked as managed — they receive
-		// tunnel:traffic stream events via +layout. Double-feeding doubles
-		// the rate sample and produces a spurious chart spike.
-		for (const st of systemList) {
-			const isManaged = awgList.some((m) =>
-				(m.ndmsName && m.ndmsName === st.id) || (m.interfaceName && m.interfaceName === st.id)
-			);
-			if (isManaged) continue;
-			if (st.status === 'up' && st.peer) {
-				feedTraffic(st.id, st.peer.rxBytes, st.peer.txBytes);
-			}
-		}
-	});
 
 	const goArch = $derived(sysInfo?.goArch ?? '');
 	let singboxStatusState = $derived($singboxStatus);
@@ -302,9 +284,9 @@
 			// markServerInterface returns fresh ServersSnapshot; the tunnels
 			// list also changes (the system card disappears) — invalidate.
 			tunnels.invalidate();
-			notifications.success(`Туннель ${id} перенесён в серверы.`);
+			notifications.success(m.tunnels_moved_to_servers({ name: id }));
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка переноса в серверы');
+			notifications.error(e instanceof Error ? e.message : m.tunnels_move_to_servers_failed());
 		}
 	}
 
@@ -341,13 +323,13 @@
 		try {
 			if (isOn) {
 				await tunnels.stop(id);
-				notifications.success('Туннель остановлен');
+				notifications.success(m.tunnels_stopped_toast());
 			} else {
 				await tunnels.start(id);
-				notifications.success('Туннель запущен');
+				notifications.success(m.tunnels_started_toast());
 			}
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка');
+			notifications.error(e instanceof Error ? e.message : m.common_error());
 		} finally {
 			const { [id]: _, ...rest } = toggleLoading;
 			toggleLoading = rest;
@@ -371,9 +353,9 @@
 	async function setLock(id: string, locked: boolean) {
 		try {
 			await api.setTunnelLock(id, locked);
-			notifications.success(locked ? 'Защита включена' : 'Защита снята');
+			notifications.success(locked ? m.tunnels_lock_on_toast() : m.tunnels_lock_off_toast());
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Не удалось изменить защиту');
+			notifications.error(e instanceof Error ? e.message : m.tunnels_lock_failed());
 		}
 	}
 
@@ -383,9 +365,9 @@
 		try {
 			const result = await tunnels.remove(id);
 			if (result.success && result.verified) {
-				notifications.success('Туннель удалён');
+				notifications.success(m.tunnels_deleted_toast());
 			} else {
-				notifications.error('Не удалось верифицировать удаление');
+				notifications.error(m.tunnels_delete_unverified());
 			}
 		} catch (e) {
 			if (e instanceof Error && e.message === 'tunnel_referenced') {
@@ -395,7 +377,7 @@
 				referencedDetails = refErr.details;
 				referencedTunnelName = awgList.find((t) => t.id === id)?.name ?? id;
 			} else {
-				notifications.error(e instanceof Error ? e.message : 'Не удалось удалить туннель');
+				notifications.error(e instanceof Error ? e.message : m.tunnels_delete_failed());
 			}
 		} finally {
 			const { [id]: _, ...rest } = deleteLoading;
@@ -482,10 +464,10 @@
 			await subscriptionsStore.refetch();
 		} catch (e) {
 			const name = pendingSubscriptionLabel || id;
-			if (showOutboundReferencedError(e, name, 'Подписка')) {
+			if (showOutboundReferencedError(e, name, m.tunnels_entity_subscription())) {
 				pendingSubscriptionDelete = null;
 			} else {
-				notifications.error(e instanceof Error ? e.message : 'Не удалось удалить подписку');
+				notifications.error(e instanceof Error ? e.message : m.tunnels_subscription_delete_failed());
 			}
 		} finally {
 			deletingSubscription = false;
@@ -495,7 +477,7 @@
 		const id = pendingSubscriptionDelete;
 		if (!id) return '';
 		const s = subscriptionsList.find((x) => x.id === id);
-		return s ? s.label || s.url : id;
+		return s ? subscriptionName(s) : id;
 	});
 
 	// Указатель «сейчас активен» меняет сам sing-box, и не чаще своего
@@ -510,7 +492,7 @@
 
 	$effect(() => {
 		const urltestSubs = ($subscriptionsStore.data ?? []).filter(
-			(s) => s.enabled && s.mode === 'urltest',
+			(s) => s.enabled && isAutoSelectMode(s.mode),
 		);
 		if (urltestSubs.length === 0) {
 			liveActives = {};
@@ -550,14 +532,14 @@
 			.filter((s) => s.enabled && (s.members?.length ?? 0) > 0)
 			.map((s) => {
 				const tag = resolveSubscriptionMemberTag(s, liveActives[s.id] || null);
-				let m = s.members?.find((mm) => mm.tag === tag);
-				if (!m && isMockDevMode && s.members?.length) {
+				let member = s.members?.find((mm) => mm.tag === tag);
+				if (!member && isMockDevMode && s.members?.length) {
 					const first = s.members[0];
-					m = tag
+					member = tag
 						? { ...first, tag, label: first.label || tag }
 						: first;
 				}
-				return m ? { subscription: s, activeMember: m } : null;
+				return member ? { subscription: s, activeMember: member } : null;
 			})
 			.filter((x): x is { subscription: Subscription; activeMember: SubscriptionMember } => x !== null),
 	);
@@ -583,6 +565,23 @@
 	});
 
 	// Tabs
+	// Zapret — карточка сервиса на странице туннелей.
+	let zapretBusy = $state(false);
+
+	async function controlZapret(action: ZapretControlAction) {
+		zapretBusy = true;
+		try {
+			await runZapretControl(action, $zapretStatusIfExpert?.data?.base ?? '');
+		} finally {
+			zapretBusy = false;
+		}
+	}
+
+	/** Детальная настройка стратегий и списков — на вкладке Zapret в Маршрутизации. */
+	function openZapretSettings() {
+		void goto('/routing?tab=zapret');
+	}
+
 	let activeTab = $state<TunnelTab>('awg');
 	let awgViewMode = $state<AwgTunnelViewMode>('compact');
 	let awgViewModeReady = false;
@@ -718,10 +717,10 @@
 	const singboxMenuChildren = $derived(
 		[
 			showSingboxTunnelTabs
-				? { id: 'singbox', label: 'Туннели', badge: singboxTunnelsList.length }
+				? { id: 'singbox', label: m.tunnels_tab_tunnels(), badge: singboxTunnelsList.length }
 				: null,
 			showSingboxTunnelTabs
-				? { id: 'subscriptions', label: 'Подписки', badge: subscriptionsList.length }
+				? { id: 'subscriptions', label: m.tunnels_tab_subscriptions(), badge: subscriptionsList.length }
 				: null,
 			awg3Visible ? { id: 'awg3', label: 'WG endpoints', badge: awg3List.length } : null,
 		].filter((c): c is { id: string; label: string; badge: number } => c !== null),
@@ -1028,18 +1027,28 @@
 		};
 	}
 
+	async function handleForeignUnmark(interfaceName: string): Promise<void> {
+		try {
+			await api.unmarkForeignIface(interfaceName);
+			notifications.success(m.tunnels_unmark_done({ name: interfaceName }));
+			await tunnels.refetch();
+		} catch (e) {
+			notifications.error(m.tunnels_unmark_failed({ name: interfaceName, error: e instanceof Error ? e.message : String(e) }));
+		}
+	}
+
 	async function confirmExternalDeleteNow(): Promise<void> {
 		const target = confirmExternalDelete;
 		if (!target) return;
 		confirmExternalDeleteBusy = true;
 		try {
 			await api.deleteOrphanIface(target.interfaceName);
-			notifications.success(`Интерфейс ${target.interfaceName} удалён`);
+			notifications.success(m.tunnels_iface_deleted({ name: target.interfaceName }));
 			confirmExternalDelete = null;
 			await tunnels.refetch();
 		} catch (e) {
 			notifications.error(
-				`Не удалось удалить ${target.interfaceName}: ${e instanceof Error ? e.message : e}`,
+				m.tunnels_iface_delete_failed({ name: target.interfaceName, error: e instanceof Error ? e.message : String(e) }),
 			);
 		} finally {
 			confirmExternalDeleteBusy = false;
@@ -1054,10 +1063,10 @@
 			if (adopted.warnings?.length) {
 				adopted.warnings.forEach(w => notifications.warning(w));
 			}
-			notifications.success('Туннель успешно импортирован');
+			notifications.success(m.tunnel_edit_imported());
 			adoptDialogOpen = false;
 		} catch (e) {
-			adoptError = e instanceof Error ? e.message : 'Не удалось импортировать туннель';
+			adoptError = e instanceof Error ? e.message : m.tunnels_adopt_failed();
 		} finally {
 			adoptLoading = false;
 		}
@@ -1076,7 +1085,7 @@
 			const { downloadBlob } = await import('$lib/utils/download');
 			downloadBlob(blob, 'awg-tunnels.zip');
 		} catch (e) {
-			notifications.error('Не удалось экспортировать конфиги');
+			notifications.error(m.tunnels_export_failed());
 		} finally {
 			exporting = false;
 		}
@@ -1135,10 +1144,10 @@
 				if (tunnel.warnings?.length) {
 					tunnel.warnings.forEach(w => notifications.warning(w));
 				}
-				notifications.success('Туннель импортирован');
+				notifications.success(m.tunnels_imported());
 				goto(`/tunnels/${tunnel.id}`);
 			} catch (err) {
-				notifications.error(err instanceof Error ? err.message : 'Ошибка импорта');
+				notifications.error(err instanceof Error ? err.message : m.tunnel_edit_import_error());
 			} finally {
 				importing = false;
 			}
@@ -1146,40 +1155,11 @@
 		reader.readAsText(file);
 	}
 
-	let premiumWizardOpen = $state(false);
-
-	/**
-	 * Конфигурация, выданная мастером Amnezia Premium, заводится обычным
-	 * импортом — своей ручки создания у мастера нет. Страна уезжает вместе с
-	 * конфигурацией: по ней список стран потом показывает «туннель awg-nl».
-	 */
-	async function importPremiumConfig(result: PremiumWizardResult) {
-		importing = true;
-		try {
-			const tunnel = await tunnels.importConfig({
-				content: result.config,
-				name: result.suggestedName,
-				backend: result.backend,
-				amneziaCountry: result.countryCode
-			});
-			if (tunnel.warnings?.length) {
-				tunnel.warnings.forEach(w => notifications.warning(w));
-			}
-			notifications.success('Туннель импортирован');
-			goto(`/tunnels/${tunnel.id}`);
-		} catch (err) {
-			notifications.error(err instanceof Error ? err.message : 'Ошибка импорта');
-		} finally {
-			importing = false;
-		}
-	}
-
 	// Terminal status line
 	let statusLine = $derived.by(() => {
 		if (!sysInfo) return '';
 		const count = awgList.length;
-		const word = count === 0 ? 'туннелей' : count === 1 ? 'туннель' : count < 5 ? 'туннеля' : 'туннелей';
-		return `${sysInfo.version}  ·  ${sysInfo.goArch}  ·  ${count} ${word}`;
+		return `${sysInfo.version}  ·  ${sysInfo.goArch}  ·  ${count} ${m.tunnels_unit_tunnels({ count })}`;
 	});
 
 	let visibleSystemList = $derived(
@@ -1558,15 +1538,15 @@
 	);
 
 	// Бейдж вида для компактных рядов переупорядочивания и ghost-токена.
-	const DASHBOARD_KIND_LABELS: Record<TunnelDashboardFlatItem['kind'], string> = {
+	const DASHBOARD_KIND_LABELS: Record<TunnelDashboardFlatItem['kind'], string> = $derived({
 		'awg-managed': 'AWG',
 		'awg-system': 'system',
 		'awg-external': 'external',
 		awg3: 'AWG3',
 		singbox: 'sing-box',
-		'sub-active': 'подписка',
-		'sub-stopped': 'подписка',
-	};
+		'sub-active': m.tunnels_kind_subscription(),
+		'sub-stopped': m.tunnels_kind_subscription(),
+	});
 
 	// D6 (issue #353): комбинированная сводка дашборда по трём видам туннелей.
 	// Sing-box и подписки учитываются только когда их данные допущены в дашборд.
@@ -1582,7 +1562,7 @@
 		const totalActive = awgSummaryActive + (sb?.running ?? 0) + (subs?.activeCount ?? 0);
 		const kinds = [`AWG ${awgSummaryActive}/${awgSummaryTotal}`];
 		if (sb) kinds.push(`Sing-box ${sb.running}/${sb.count}`);
-		if (subs) kinds.push(`Подписки ${subs.activeCount}/${subs.count}`);
+		if (subs) kinds.push(m.tunnels_summary_subscriptions({ active: subs.activeCount, total: subs.count }));
 		if (awg3Count > 0) kinds.push(`AWG3 ${awg3Count}`);
 		const rx = awgSummaryRx + (sb?.down ?? 0) + (subs?.down ?? 0);
 		const tx = awgSummaryTx + (sb?.up ?? 0) + (subs?.up ?? 0);
@@ -1595,24 +1575,24 @@
 		return [
 			{
 				value: `${totalActive}/${totalAll}`,
-				label: 'Туннели',
+				label: m.tunnels_summary_tunnels(),
 				sub: kinds.join(' · '),
 			},
 			{
 				value: awgSummaryPeak.rate > 0 ? formatBitRate(awgSummaryPeak.rate) : '—',
-				label: 'Пиковая скорость',
+				label: m.tunnels_summary_peak(),
 				// Метрика считается только по AWG-туннелям внутри кросс-видовой
 				// сводки — область видимости заявлена явно.
 				sub: awgSummaryPeak.rate > 0 ? `AWG · ${awgSummaryPeak.name}` : '—',
 			},
 			{
 				value: formatBytes(rx + tx),
-				label: 'Трафик всего',
+				label: m.tunnels_summary_total_traffic(),
 				sub: `↓ ${formatBytes(rx)} · ↑ ${formatBytes(tx)}`,
 			},
 			{
 				value: leader.bytes > 0 ? leader.name : '—',
-				label: 'Лидер трафика',
+				label: m.tunnels_summary_leader(),
 				sub: leader.bytes > 0 ? formatBytes(leader.bytes) : '—',
 			},
 		];
@@ -1666,7 +1646,7 @@
 		set selectedBackend(v) { selectedBackend = v; },
 		get fileInput() { return fileInput; },
 		set fileInput(v) { fileInput = v; },
-		endpointHost, endpointPort, endpointVisible, toggleEndpointVisible, externalStatusLabel, externalStatusVariant, systemStatusLabel, systemStatusVariant, isManagedTunnelOn, managedRouteMeta, showManagedPing, latestRate, sparklineSeries, handleAdoptClick, handleExternalDelete, handleAwgSortChange, handleDragLeave, handleDragOver, handleDrop, handleFileSelect, openAwgDiagnostics, openConnectivitySettings, openDetail, requestDelete, handleLockClick, markAsServer, handleToggleOnOff, checkPing, handleExportAll,
+		endpointHost, endpointPort, endpointVisible, toggleEndpointVisible, externalStatusLabel, externalStatusVariant, systemStatusLabel, systemStatusVariant, isManagedTunnelOn, managedRouteMeta, showManagedPing, latestRate, sparklineSeries, handleAdoptClick, handleExternalDelete, handleForeignUnmark, handleAwgSortChange, handleDragLeave, handleDragOver, handleDrop, handleFileSelect, openAwgDiagnostics, openConnectivitySettings, openDetail, requestDelete, handleLockClick, markAsServer, handleToggleOnOff, checkPing, handleExportAll,
 	};
 
 	// Live-контекст flat-дашборда (см. dashboardFlatContext.ts).
@@ -1704,7 +1684,7 @@
 		set dashboardTagFilter(v) { dashboardTagFilter = v; },
 		get flatGridEl() { return flatGridEl; },
 		set flatGridEl(v) { flatGridEl = v; },
-		handleAdoptClick, handleExternalDelete, handleExportAll, handleGripKeydown, handleGripPointerDown, handleToggleOnOff, markAsServer, openAwg3Import, openAwgDiagnostics, openDetail, openSingboxDetail, openWizard, requestDelete, handleLockClick, requestSubscriptionDelete,
+		handleAdoptClick, handleExternalDelete, handleForeignUnmark, handleExportAll, handleGripKeydown, handleGripPointerDown, handleToggleOnOff, markAsServer, openAwg3Import, openAwgDiagnostics, openDetail, openSingboxDetail, openWizard, requestDelete, handleLockClick, requestSubscriptionDelete,
 	};
 
 	// Live-контекст модалок страницы (см. tunnelPageModalsContext.ts).
@@ -1754,18 +1734,11 @@
 </script>
 
 <svelte:head>
-	<title>Туннели - AWG Manager</title>
+	<title>{m.tunnels_page_title()}</title>
 </svelte:head>
 
 <PageContainer width="full">
-	<PageHeader title="Туннели">
-		{#snippet actions()}
-			<Button variant="secondary" size="sm" onclick={() => (premiumWizardOpen = true)}>
-				{#snippet iconBefore()}<Crown size={14} aria-hidden="true" />{/snippet}
-				Amnezia Premium
-			</Button>
-		{/snippet}
-	</PageHeader>
+	<PageHeader title={m.tunnels_page_heading()} />
 	<WelcomeBanner />
 	{#if loading}
 		<div aria-hidden="true">
@@ -1798,8 +1771,8 @@
 		</div>
 	{:else if tunnelSnap.status === 'error' && !tunnelSnap.data}
 		<EmptyState
-			title="Ошибка загрузки"
-			description={tunnelSnap.error ?? 'Не удалось получить список туннелей'}
+			title={m.tunnels_load_error_title()}
+			description={tunnelSnap.error ?? m.tunnels_load_error_desc()}
 		/>
 	{:else}
 		{#if dashboardOn}
@@ -1810,7 +1783,22 @@
 				active={activeTab}
 				onchange={(id) => (activeTab = id as TunnelTab)}
 				urlParam="tab"
+				persistKey="dashboard-tunnels"
+				memoryReady={$settings !== null && $systemInfoStore.lastFetchedAt > 0}
 				defaultTab="awg"
+			/>
+		{/if}
+
+		<!-- Zapret — сторонний движок обхода DPI. Карточка стоит здесь, а не
+		     в «Маршрутизации» одна: она нужна рядом с туннелями, потому что
+		     отвечает на тот же вопрос — «чем сейчас обрабатывается мой
+		     трафик». Подробная настройка стратегий живёт на /routing?tab=zapret. -->
+		{#if $zapretStatusIfExpert?.data?.installed}
+			<ZapretServiceCard
+				status={$zapretStatusIfExpert.data}
+				busy={zapretBusy}
+				oncontrol={controlZapret}
+				onopen={openZapretSettings}
 			/>
 		{/if}
 
@@ -1818,7 +1806,7 @@
 			<TunnelSectionHeader
 				title="Amnezia WireGuard"
 				count={awgFilteredRowsCount}
-				countLabel={pluralForm(awgFilteredRowsCount, TUNNEL_WORDS)}
+				countLabel={m.tunnels_unit_tunnels({ count: awgFilteredRowsCount })}
 			/>
 		{/if}
 		{#if showAwgBlock}
@@ -1827,9 +1815,9 @@
 
 		{#if dashboardTypeSections && dashboardSingboxTunnels.length > 0}
 			<TunnelSectionHeader
-				title="Sing-box туннели"
+				title={m.tunnels_section_singbox()}
 				count={dashboardSingboxTunnels.length}
-				countLabel={pluralForm(dashboardSingboxTunnels.length, TUNNEL_WORDS)}
+				countLabel={m.tunnels_unit_tunnels({ count: dashboardSingboxTunnels.length })}
 			/>
 		{/if}
 		{#if showSingboxBlock}
@@ -1857,9 +1845,9 @@
 
 		{#if dashboardTypeSections && dashboardSubscriptionsCount > 0}
 			<TunnelSectionHeader
-				title="Sing-box подписки"
+				title={m.tunnels_section_subscriptions()}
 				count={dashboardSubscriptionsCount}
-				countLabel={pluralForm(dashboardSubscriptionsCount, SUBSCRIPTION_WORDS)}
+				countLabel={m.tunnels_unit_subscriptions({ count: dashboardSubscriptionsCount })}
 			/>
 		{/if}
 		{#if showSubscriptionsBlock}
@@ -1895,9 +1883,9 @@
 
 		{#if dashboardTypeSections && dashboardAwg3Tunnels.length > 0}
 			<TunnelSectionHeader
-				title="AWG3 туннели"
+				title={m.tunnels_section_awg3()}
 				count={dashboardAwg3Tunnels.length}
-				countLabel={pluralForm(dashboardAwg3Tunnels.length, TUNNEL_WORDS)}
+				countLabel={m.tunnels_unit_tunnels({ count: dashboardAwg3Tunnels.length })}
 			/>
 		{/if}
 		{#if showAwg3Block}
@@ -1933,16 +1921,6 @@
 
 <TunnelPageModals ctx={pageModalsCtx} />
 
-<!-- Карта «страна → туннель» и доступность бэкендов берутся из уже
-     загруженного страницей: своих запросов мастер на это не делает. -->
-<AmneziaPremiumWizard
-	open={premiumWizardOpen}
-	countryTunnels={awgList}
-	backendAvailability={sysInfo?.backendAvailability}
-	onclose={() => (premiumWizardOpen = false)}
-	onconfig={(result) => void importPremiumConfig(result)}
-/>
-
 {#if awg3Visible}
 	<!-- Импорт AWG3: из меню «Создать», empty-state и вкладки WG endpoints. -->
 	<Awg3ImportModal
@@ -1958,16 +1936,16 @@
 			<div class="unsupported-icon">
 				<TriangleAlert size={48} strokeWidth={1.5} aria-hidden="true" />
 			</div>
-			<h2 class="unsupported-title">Модуль ядра недоступен</h2>
+			<h2 class="unsupported-title">{m.tunnels_unsupported_title()}</h2>
 			<p class="unsupported-text">
-				Модель роутера <strong>{sysInfo?.kernelModuleModel || '(неизвестна)'}</strong> не имеет скомпилированный модуль ядра в настоящий момент.
+				{m.tunnels_unsupported_model_lead()} <strong>{sysInfo?.kernelModuleModel || m.tunnels_unsupported_model_unknown()}</strong> {m.tunnels_unsupported_model_tail()}
 			</p>
 			<div class="unsupported-actions">
 				<a href="https://t.me/awgmanager" target="_blank" rel="noopener" class="unsupported-link unsupported-link-primary">
-					Написать в @awgmanager
+					{m.tunnels_unsupported_contact()}
 				</a>
 				<a href="https://gitlab.com/AmneziaVPN/amneziawg/amneziawg-linux-kernel-module" target="_blank" rel="noopener" class="unsupported-link">
-					Установить вручную
+					{m.tunnels_unsupported_manual()}
 				</a>
 			</div>
 		</div>

@@ -69,7 +69,7 @@ func (o *Operator) GetStatus(ctx context.Context) Status {
 	}
 	if o.inst != nil {
 		s.InstallState = string(o.inst.EvaluateInstallState(s.CurrentVersion))
-		s.RequiredBytes = o.inst.RequiredSize() + installer.SafetyMargin
+		s.RequiredBytes = o.inst.RequiredDiskBytes()
 		if free, ok := o.inst.FreeBytes(); ok {
 			s.FreeBytes = free
 		}
@@ -246,10 +246,16 @@ func (o *Operator) featuresForVersion(v string) []string {
 // сайдкаров игнорируется: теги теперь из installer.RequiredTags.
 type metaSidecar struct {
 	Version string `json:"version"`
+	// Size — размер бинаря на момент записи: upx/upx -d на месте и cp -p
+	// сохраняют mtime, и подменённый бинарь другой версии иначе отдал бы
+	// старую версию из сайдкара (F137). 0 — сайдкар без поля (старый или
+	// положенный руками), сверяется только по mtime.
+	Size int64 `json:"size,omitempty"`
 }
 
 // readFreshSidecar returns the sidecar contents iff the file exists,
-// its mtime is ≥ the binary's mtime, and the JSON parses. Any failure
+// its mtime is ≥ the binary's mtime, the JSON parses and its size (when
+// recorded) matches the binary. Any failure
 // returns ok=false — caller falls through to the next source in
 // resolveVersionLocked.
 func readFreshSidecar(binary string) (metaSidecar, bool) {
@@ -273,7 +279,7 @@ func readFreshSidecar(binary string) (metaSidecar, bool) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return metaSidecar{}, false
 	}
-	if m.Version == "" {
+	if m.Version == "" || (m.Size != 0 && m.Size != biFi.Size()) {
 		return metaSidecar{}, false
 	}
 	return m, true
@@ -284,7 +290,11 @@ func readFreshSidecar(binary string) (metaSidecar, bool) {
 // Best-effort: read-only filesystem / permission errors are returned
 // for logging but never abort the caller's flow.
 func writeSidecar(binary, version string) error {
-	data, err := json.Marshal(metaSidecar{Version: version})
+	m := metaSidecar{Version: version}
+	if fi, err := os.Stat(binary); err == nil {
+		m.Size = fi.Size()
+	}
+	data, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
@@ -321,11 +331,14 @@ func (o *Operator) Install(ctx context.Context) error {
 	if o.inst == nil {
 		return fmt.Errorf("installer not wired")
 	}
-	if o.inst.EvaluateInstallState("") == installer.InstallStateMissingNoSpace {
+	o.inst.DiscardStaleTmp()
+	if o.inst.EvaluateInstallState("").NoSpace() {
+		// Текст ошибки пустой: кадр только закрывает прогресс, а локализованную
+		// причину UI берёт из кода NO_SPACE в ответе.
 		if o.installProgress != nil {
-			o.installProgress("install", "error", 0, 0, "недостаточно места на диске")
+			o.installProgress("install", "error", 0, 0, "")
 		}
-		return nil // намеренно не error: фронт показывает баннер из GetStatus
+		return ErrNoSpace
 	}
 	report := func(phase string, downloaded, total int64, errMsg string) {
 		if o.installProgress != nil {
@@ -337,7 +350,7 @@ func (o *Operator) Install(ctx context.Context) error {
 	}
 	tmp, err := o.inst.Download(ctx, bytesProgress)
 	if err != nil {
-		report("error", 0, 0, err.Error())
+		report("error", 0, 0, progressErrText(err))
 		return fmt.Errorf("download sing-box: %w", err)
 	}
 	report("activate", 0, 0, "")
@@ -346,8 +359,27 @@ func (o *Operator) Install(ctx context.Context) error {
 		return fmt.Errorf("activate sing-box: %w", err)
 	}
 	o.recordPinnedVersion()
+	// Uninstall снял ProxyN подписок, а сами подписки пережили его в
+	// settings.json: возвращаем их прокси (F723). Движок уже на месте, поэтому
+	// отказ NDMS установку не валит — подписка поднимет прокси при следующей
+	// правке или переключении режима NDMS Proxy.
+	if o.subProxySync != nil {
+		if err := o.subProxySync(ctx); err != nil {
+			o.log.Warn("install: subscription proxies not restored", "err", err)
+		}
+	}
 	report("done", 0, 0, "")
 	return nil
+}
+
+// progressErrText — текст ошибки для кадра прогресса. Для ErrNoSpace пустой:
+// причину UI локализует по коду NO_SPACE из ответа, русский текст бэкенда
+// в кадре обошёл бы перевод.
+func progressErrText(err error) string {
+	if errors.Is(err, ErrNoSpace) {
+		return ""
+	}
+	return err.Error()
 }
 
 // Uninstall снимает установленный движок: останавливает процесс и удаляет
@@ -368,6 +400,10 @@ func (o *Operator) Uninstall(ctx context.Context) error {
 		return ErrInstallInProgress
 	}
 	defer o.installBusy.Store(false)
+
+	if err := o.removeEngineProxies(ctx); err != nil {
+		return err
+	}
 
 	// Стоп до удаления файлов: работающий процесс держал бы конфиг и pid, а
 	// снесённый под ним бинарь оставил бы демона-сироту без возможности
@@ -395,6 +431,61 @@ func (o *Operator) Uninstall(ctx context.Context) error {
 	return nil
 }
 
+// ownedEngineProxies — NDMS ProxyN движка: туннелей из 10-tunnels.json и
+// подписок со сводными группами (description = тег / Label). Отказ чтения
+// туннелей возвращается вместе с прокси подписок — уборка пакета снимает хотя
+// бы их (F724).
+func (o *Operator) ownedEngineProxies() ([]ProxyMark, error) {
+	var owned []ProxyMark
+	cfg, err := o.loadConfig()
+	if err != nil && !os.IsNotExist(err) {
+		err = fmt.Errorf("read tunnels: %w", err)
+	} else {
+		err = nil
+	}
+	if cfg != nil {
+		for _, t := range cfg.Tunnels() {
+			owned = append(owned, ProxyMark{Name: t.ProxyInterface, Desc: t.Tag})
+		}
+	}
+	for _, sp := range o.subscriptionProxies() {
+		owned = append(owned, ProxyMark{Name: proxyName(sp.Index), Desc: sp.Label})
+	}
+	return owned, err
+}
+
+// removeEngineProxies снимает NDMS ProxyN туннелей из 10-tunnels.json и
+// подписок: без движка все они — прокси на мёртвый порт. Туннели к тому же
+// исчезают вместе с каталогом, и их прокси остались бы сиротами, неудаляемыми
+// из панели (F723); прокси подписок возвращает Install. Снимается только своё
+// (description = тег / Label), как в RemoveTunnel. Метку отложенного сноса
+// здесь не ставим: файл меток лежит в том же каталоге и сносится вместе с ним,
+// — поэтому отказ NDMS прерывает удаление до того, как что-то стёрто, и его
+// можно повторить.
+func (o *Operator) removeEngineProxies(ctx context.Context) error {
+	o.migrationMu.Lock()
+	defer o.migrationMu.Unlock()
+	owned, err := o.ownedEngineProxies()
+	if err != nil {
+		return err
+	}
+	for _, m := range owned {
+		idx, err := parseProxyIdx(m.Name)
+		if err != nil || idx < 0 {
+			continue
+		}
+		err = o.proxyMgr.RemoveProxy(ctx, idx, m.Desc)
+		if errors.Is(err, ErrProxyForeign) {
+			o.log.Warn("uninstall: proxy skipped, not ours", "name", m.Name, "err", err)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("remove %s (%s): %w", m.Name, m.Desc, err)
+		}
+	}
+	return nil
+}
+
 // Update replaces an installed managed binary with the version this
 // awg-manager build is pinned to. Stops sing-box, swaps the binary, restarts.
 // No-op when current binary matches both the required version and SHA256.
@@ -406,6 +497,7 @@ func (o *Operator) Update(ctx context.Context) error {
 	if o.inst == nil {
 		return fmt.Errorf("installer not wired")
 	}
+	o.inst.DiscardStaleTmp()
 	// MatchesPinnedBytes сам требует версию pinned, когда SHA не совпал
 	// (UPX-копия); при совпавшем SHA версия не важна — байты уже наши.
 	cur, _ := o.detectVersionAndFeaturesCached(ctx)
@@ -414,11 +506,11 @@ func (o *Operator) Update(ctx context.Context) error {
 	}
 	// "" — UPX-копия pinned-версии уже отсечена проверкой выше,
 	// версия на решение гейта больше не влияет.
-	if o.inst.EvaluateInstallState("") == installer.InstallStateOutdatedNoSpace {
+	if o.inst.EvaluateInstallState("").NoSpace() {
 		if o.installProgress != nil {
-			o.installProgress("update", "error", 0, 0, "недостаточно места для обновления")
+			o.installProgress("update", "error", 0, 0, "")
 		}
-		return nil
+		return ErrNoSpace
 	}
 	report := func(phase string, downloaded, total int64, errMsg string) {
 		if o.installProgress != nil {
@@ -430,7 +522,7 @@ func (o *Operator) Update(ctx context.Context) error {
 	}
 	tmp, err := o.inst.Download(ctx, bytesProgress)
 	if err != nil {
-		report("error", 0, 0, err.Error())
+		report("error", 0, 0, progressErrText(err))
 		return fmt.Errorf("download sing-box: %w", err)
 	}
 	wasRunning, _ := o.proc.IsRunning()

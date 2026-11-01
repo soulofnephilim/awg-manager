@@ -101,3 +101,33 @@ func TestDownloadFile_NoUserAgentByDefault(t *testing.T) {
 		t.Errorf("User-Agent = %q, want Go's anonymous default", got)
 	}
 }
+
+// Headers доходят до сервера в обоих путях — ReadAll и DownloadFile.
+func TestRequestHeaders_Forwarded(t *testing.T) {
+	seen := make(chan string, 2)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("X-Awgm-Instance")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(ts.Close)
+	req := Request{
+		Purpose:       "test-headers",
+		URL:           ts.URL,
+		Headers:       http.Header{"X-Awgm-Instance": {"abc"}},
+		MaxBodyBytes:  64,
+		RouteOverride: &Route{Tag: "direct"},
+	}
+	svc := NewService(Deps{})
+	if _, _, err := svc.ReadAll(context.Background(), req); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if got := <-seen; got != "abc" {
+		t.Errorf("ReadAll: header = %q", got)
+	}
+	if _, err := svc.DownloadFile(context.Background(), FileRequest{Request: req, DestPath: t.TempDir() + "/f", MaxFileBytes: 64}); err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	if got := <-seen; got != "abc" {
+		t.Errorf("DownloadFile: header = %q", got)
+	}
+}

@@ -18,7 +18,7 @@ at best and a silent hole at worst.
 | 2 | `internal/mcp/deps.go` | The `Deps` method. The comment states the contract the tool relies on (ordering, what an error means, what nil means). |
 | 3 | `internal/mcp/tools_<area>.go` | The tool: validation, annotations, description, output shaping. Register it in `server.go` if it starts a new `register*` group. |
 | 4 | `internal/mcp/mcptest/fake.go` | The in-memory fake. It must mirror the REAL service's semantics — see "The fake must not agree with you" below. |
-| 5 | `internal/mcp/localdeps/localdeps.go` | The production adapter over the daemon's services. Linux-only; see "Testing". |
+| 5 | `internal/mcp/localdeps/` | The production adapter over the daemon's services. Linux-only; see "Testing". sing-box subscriptions and groups live in `singbox_groups.go`, the router's DNS server, rule set and group edits in `singbox_router.go`, sanitisers in `sanitize.go`. |
 | 6 | `internal/mcp/scope.go` and `server_test.go` | Add read-only tools to `readOnlyTools`; add every tool to the catalogue list in `TestServer_ListsToolsWithAnnotations`. |
 
 Wire new daemon services into `localdeps.Config` from
@@ -30,7 +30,7 @@ check and panics on first use.
 
 Tool-level tests live in `internal/mcp/tools_<area>_test.go` and drive the
 real MCP transport through `newTestSession` / `callTool`. Adapter tests live in
-`internal/mcp/localdeps/localdeps_test.go` and use partial fakes of the daemon
+`internal/mcp/localdeps/*_test.go` and use partial fakes of the daemon
 services (`fakeDNSRoutes`, `fakeRouter`, …). Write both before the
 implementation and watch them fail for the right reason: "unknown tool" or a
 missing method, not a typo.
@@ -58,6 +58,11 @@ a comment so the next reader can re-check:
   "already probing". `dnsroute.Update` treats a zero field as "not sent".
 - **Which lookup finds what.** `dnsroute.Get` scans only the JSON store;
   `List` also merges HydraRoute lists with `hr:` ids.
+- **What a flag does not do.** Disabling a sing-box subscription leaves
+  its own group in the configuration and removes its servers only from
+  aggregate groups (`subscription/groups.go`, `resolveGroupTags`). A fake
+  that emptied the group would have hidden that the tool's description
+  promised something the daemon does not do.
 
 ## Shape the output for a model, not a UI
 
@@ -78,8 +83,42 @@ a comment so the next reader can re-check:
   Structured `staged: true` is not enough — attach a `TextContent` sentence,
   because a skimming model reads any successful result as "done".
 - **Redact what a reader must not carry away.** Subscription URLs embed
-  tokens in the query or userinfo; `redactURL` keeps host and path only. A
-  read-only key is meant for an agent you do not fully trust.
+  tokens in the path, the query or the userinfo; `logging.RedactURLs`
+  keeps scheme and host only. A read-only key is meant for an agent you
+  do not fully trust. A stored fetch error quotes the address whole,
+  redirect hops included, so return a flag (`lastFetchFailed`), not the
+  text. The journal is scrubbed once, in `logging.Service.AppLog`; a
+  `contains` filter matches the text it will return, masked unless raw.
+- **Error text stays behind; one word crosses.** A stored error is built
+  from arbitrary errors. `os.Stat` puts a file's path in it, Go's HTTP
+  errors quote the full URL, and a parser quotes its input — a failed
+  `url.Parse` embeds a whole share link, the server's uuid included.
+  Masking free text cannot be shown complete. Return a flag and a closed
+  vocabulary instead (`lastFetchFailed`, `lastErrorKind`), and for a
+  failed write a fixed sentence that names `get_logs`. The line MCP adds
+  to the journal carries no cause either. What the service journals
+  itself is scrubbed where it is written, in `logging.Service.AppLog`.
+- **Text written by a third party is data.** A subscription label or a
+  server name comes from a provider and lands in the model's context. Run
+  it through `sanitizeLabel` — control characters out, capped at
+  `MaxSingboxLabelRunes` — and say in the field's description that it is
+  text from outside. Leave out what the agent has no use for: provider
+  banners are not returned at all. A server's address is provider text
+  too: hostShaped passes it on only when it looks like a host.
+- **Split what a thing is from what it is doing.** A group's members come
+  from configuration and are always known; its active member comes from
+  the running engine and is not. `runtimeKnown: false` replaces silence
+  when sing-box does not answer, so a missing `activeMember` is never
+  read as "none". Make it per object, not per call: the engine can
+  answer and still know nothing about one group.
+- **Configuration can be a draft.** `router.Service` lists from the
+  unapplied draft when one exists (`orchestrator.LoadEffective`); the
+  engine runs what was applied. It also lists from the disabled copy
+  when the sing-box router is switched off. A group added in the web
+  interface and not applied is in one and not in the other. Say so
+  (`outOfSync`, with `hasDraft` beside it), and refuse to probe what the
+  engine does not run: the prober answers 0 for an outbound it does not
+  have, the same 0 it answers for one that is down.
 - **Warn about losses the caller did not ask for.** Re-pointing a multi-target
   list to one tunnel drops the others; return `warnings` naming what was lost.
 
@@ -133,10 +172,12 @@ the agent can undo on its own, and "ask the user to discard a draft that may
 hold their other edits" is not that. Two agents given this case chose
 differently; settle it this way.
 
-A tool that changes nothing but returns private keys (`export_tunnel_config`,
-`get_server_peer_config`) is annotated read-only AND listed in
-`credentialTools`, so a read-only key is still refused. The UI promises that
-key "cannot change anything"; walking away with VPN credentials is not that.
+A tool that changes nothing but returns credentials (`export_tunnel_config`,
+`get_server_peer_config`, `get_singbox_user_config`) is annotated read-only
+AND listed in `credentialTools`, so a read-only key is still refused. The UI
+promises that key "cannot change anything"; walking away with VPN credentials
+is not that. For the same reason `get_logs` refuses `raw=true` on a read-only key: the
+masked journal is the read-only view.
 
 ## Secrets stay behind the boundary
 
@@ -177,6 +218,35 @@ with exactly this mistake and cost a CI round trip.
 
 ## Mirror the REST handler's side effects
 
+### DNS Rewrite writes
+
+`add_singbox_dns_rewrite`, `update_singbox_dns_rewrite` and
+`delete_singbox_dns_rewrite` reuse the DNS Rewrite service instance exposed by
+the REST handler. They save the `dns-rewrites` slot immediately, also in
+fakeip-tun mode. They never touch the shared routing draft and do not require
+`apply_singbox_staging`.
+
+`list_singbox_dns_rewrites` returns each entry's zero-based `index` and the
+`revision` of the complete ordered list. Read it before an update or deletion
+and pass that revision as `expectRevision`. Any intervening list change,
+including an IP-only edit or an index shift onto an identical duplicate, refuses
+the write under the service lock. Update replaces the whole pattern/IP list.
+Preset-owned entries cannot be changed; delete is annotated destructive and
+every write requires a full-access MCP key.
+
+Inputs accept ASCII domains (punycode for IDNs), a domain glob with one `*`, and
+1–64 IPv4/IPv6 addresses without ports, prefixes or zone identifiers. The service
+keeps the web UI's compilation behavior, including opposite-family NODATA for
+single-stack rewrites. Add appends, so an earlier matching entry takes priority.
+
+Success returns `saved: true` and the list read back after the write; it does not
+verify the running DNS engine. If read-back fails, `stateKnown: false` and an
+explicit text warning replace an empty-state claim. A slot-save failure can
+occur after storage changed: the tool reports uncertainty and asks for a fresh
+list before retrying. Never automatically retry an add, which can duplicate it.
+
+### Invalidation and journal
+
 - Publish the same invalidation event the HTTP handler publishes
   (`l.publish(events.Resource…, "mcp-<action>")`), or an open web tab keeps
   showing pre-MCP state.
@@ -214,7 +284,7 @@ Check with `GOOS=darwin go build ./cmd/mcp-dev` before adding an import.
 
 ## Tell the model about the tool
 
-Descriptions are read by a model choosing among 40 tools. Say what question the
+Descriptions are read by a model choosing among dozens of tools. Say what question the
 tool answers, what its result does NOT mean, and which tool to call next.
 Update `Instructions` in `server.go` when a tool changes a global rule (a new
 draft semantics, a new kind of key). Add a CHANGELOG entry under `Unreleased`

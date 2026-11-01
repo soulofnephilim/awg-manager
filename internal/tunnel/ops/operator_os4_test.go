@@ -25,10 +25,10 @@ func TestNewOperatorOS4_IPRunDefaultsToExec(t *testing.T) {
 }
 
 // TestOperatorOS4_Create_NoOp verifies Create is a no-op on OS4.
-// Порядок Start на OS4: адрес → wg.SetConf → up → mtu → txqueuelen.
+// Порядок Start на OS4: адрес → wg.SetConf → up → mtu.
 // Команды зафиксированы литералами, а не рендером: `/32` в адресе — прод-факт
-// (configureIP игнорирует cfg.AddressPrefix, здесь он намеренно 26), а up, mtu
-// и txqueuelen на OS4 — три отдельные команды, а не одна.
+// (configureIP игнорирует cfg.AddressPrefix, здесь он намеренно 26), а up и
+// mtu на OS4 — две отдельные команды, а не одна.
 func TestOperatorOS4_Start_VerifySequence(t *testing.T) {
 	backendMock := &MockBackend{}
 	wgClient := &MockWGClient{}
@@ -55,7 +55,6 @@ func TestOperatorOS4_Start_VerifySequence(t *testing.T) {
 		"/opt/sbin/ip address add dev awgm5 10.9.7.2/32",
 		"/opt/sbin/ip link set up dev awgm5",
 		"/opt/sbin/ip link set dev awgm5 mtu 1342",
-		"/opt/sbin/ip link set dev awgm5 txqueuelen 1000",
 	}
 	if strings.Join(rec.Calls, "\n") != strings.Join(want, "\n") {
 		t.Errorf("ip-команды Start:\nполучено:\n%s\nожидалось:\n%s",
@@ -100,7 +99,9 @@ func TestOperatorOS4_Start_BackendFails(t *testing.T) {
 }
 
 // Отказ wg.SetConf обязан откатить всё, что Start успел сделать: остановить
-// процесс и снести интерфейс. `link del` — БЕЗ `dev` (deleteInterface).
+// процесс и снести интерфейс. Снос — бэкендом (StopIfPresent, под барьером
+// netdev.SwapGate, R61), не голым `ip link del`.
+// Мутация: deleteInterface без StopIfPresent → устройство не снесено, красный.
 func TestOperatorOS4_Start_WGFails_Rollback(t *testing.T) {
 	backendMock := &MockBackend{}
 	wgClient := &MockWGClient{setConfError: errors.New("setconf: boom")}
@@ -128,10 +129,12 @@ func TestOperatorOS4_Start_WGFails_Rollback(t *testing.T) {
 	if len(backendMock.StopCalls) != 1 || backendMock.StopCalls[0] != "awgm5" {
 		t.Errorf("Backend.Stop = %v, want [awgm5]", backendMock.StopCalls)
 	}
+	if len(backendMock.StopIfPresentCalls) != 1 || backendMock.StopIfPresentCalls[0] != "awgm5" {
+		t.Errorf("снос интерфейса при откате: StopIfPresent = %v, want [awgm5]", backendMock.StopIfPresentCalls)
+	}
 	want := []string{
 		"/opt/sbin/ip address add dev awgm5 10.9.7.2/32",
 		"/opt/sbin/ip link set down dev awgm5",
-		"/opt/sbin/ip link del awgm5",
 	}
 	if strings.Join(rec.Calls, "\n") != strings.Join(want, "\n") {
 		t.Errorf("ip-команды отката:\nполучено:\n%s\nожидалось:\n%s",
@@ -152,7 +155,7 @@ func TestOperatorOS4_Stop_Success(t *testing.T) {
 	ip := &scriptedIPRun{linkShowErr: errors.New("device \"awg0\" does not exist")}
 	op.ipRun = ip.run
 
-	err := op.Stop(context.Background(), "awg0")
+	err := op.Stop(context.Background(), "awg0", "")
 
 	if err != nil {
 		t.Fatalf("Stop() error = %v", err)
@@ -252,7 +255,7 @@ func TestOperatorOS4_UsesDirectTunnelID(t *testing.T) {
 
 	// ip is mocked, so Start succeeds fully; WG and Firewall calls do
 	// happen here, but this test only checks the Stop behavior below.
-	_ = op.Stop(context.Background(), "awg1")
+	_ = op.Stop(context.Background(), "awg1", "")
 
 	if len(backendMock.StopCalls) == 0 {
 		t.Fatal("Backend.Stop not called")

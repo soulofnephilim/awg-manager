@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/sys/exec"
 	"github.com/hoaxisr/awg-manager/internal/sys/httpclient"
+	"github.com/hoaxisr/awg-manager/internal/sys/iproute2"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
 	"github.com/hoaxisr/awg-manager/internal/tunnel"
@@ -50,6 +52,7 @@ func (r *Runner) runTestsWithEvents(ctx context.Context, report *Report) []TestR
 		run(r.testWANConnectivity(ctx))
 		run(r.testNDMSHealth(ctx))
 		run(r.testKernelModule(ctx, report))
+		run(testIPRoute2(ctx))
 		run(r.testClockSkew(ctx))
 		run(r.testDirectConnectivity(ctx))
 		run(r.testSingboxRuntime(ctx))
@@ -162,17 +165,13 @@ func (r *Runner) testNDMSHealth(ctx context.Context) TestResult {
 		return res
 	}
 
-	// У версии теперь два источника, и наполненный store больше НЕ означает,
-	// что отвечал RCI: запасной канал ndmc ходит через unix-сокет и наполнит
-	// его ровно тогда, когда HTTP-морда молчит. Без этой ветки проверка «NDMS
-	// отвечает» давала бы Pass именно в тот момент, когда она обязана
-	// предупреждать.
-	// Источник называем поимённо. Раньше здесь стояло «получено через ndmc»
-	// для ЛЮБОГО запасного канала, и с появлением файлового (components.xml)
-	// эта строка начала врать пользователю прямо в диагностике.
-	if src := r.deps.NDMSQueries.SystemInfo.Source(); src != "rci" {
+	// Версию даёт ndmc (основной канал, F742) или RCI — оба означают, что ndm
+	// ответил. Файл /etc/components.xml наполняет store, когда молчали обе
+	// службы: без этой ветки проверка «NDMS отвечает» давала бы Pass именно
+	// тогда, когда обязана предупреждать.
+	if src := r.deps.NDMSQueries.SystemInfo.Source(); src != ndmsinfo.SourceNdmc && src != ndmsinfo.SourceRCI {
 		res.Status = StatusWarn
-		res.Detail = "RCI (HTTP :79) не ответил при старте — версия получена каналом " + src + ": " + v.Title
+		res.Detail = "ndm не ответил при старте ни через ndmc, ни через RCI — версия получена каналом " + src + ": " + v.Title
 		return res
 	}
 
@@ -239,6 +238,15 @@ func (r *Runner) testKernelModule(ctx context.Context, report *Report) TestResul
 		res.Status = StatusFail
 	}
 	res.Detail = strings.Join(details, "; ")
+	return res
+}
+
+func testIPRoute2(ctx context.Context) TestResult {
+	res := TestResult{Name: "iproute2", Description: "iproute2 (ip-full)", Status: StatusPass, Detail: iproute2.Path}
+	if err := iproute2.Check(ctx); err != nil {
+		res.Status = StatusFail
+		res.Detail = err.Error()
+	}
 	return res
 }
 
@@ -711,6 +719,14 @@ func (r *Runner) testEndpointRouteCheck(t TunnelInfo) TestResult {
 		return res
 	}
 
+	// До немаршрутизируемого endpoint (loopback релея и т.п.) оператор
+	// хост-маршрут намеренно не ставит (operator_os5_routing.go, F587).
+	if ip := extractEndpointIP(t.Connection.RawOutput); netutil.SkipHostRoute(ip) {
+		res.Status = StatusSkip
+		res.Detail = "Endpoint " + ip + " не маршрутизируется — host route не нужен"
+		return res
+	}
+
 	if !osdetect.Is5() {
 		res.Status = StatusSkip
 		res.Detail = "OS4: маршрутизация не управляется оператором"
@@ -1138,6 +1154,11 @@ func (r *Runner) testRestartCycle(ctx context.Context, t TunnelInfo) TestResult 
 	if err := r.deps.TunnelService.Stop(ctx, t.ID); err != nil {
 		res.Status = StatusError
 		res.Detail = "Stop failed: " + err.Error()
+		// Занятый замок — Stop ничего не сделал, и чужую операцию (например,
+		// пользовательский Stop) перебивать нельзя.
+		if !errors.Is(err, tunnel.ErrOperationInProgress) {
+			res.Detail += r.restoreAfterCycle(ctx, t.ID)
+		}
 		return res
 	}
 	stopDuration := time.Since(stopStart)
@@ -1149,7 +1170,8 @@ func (r *Runner) testRestartCycle(ctx context.Context, t TunnelInfo) TestResult 
 	startStart := time.Now()
 	if err := r.deps.TunnelService.Start(ctx, t.ID); err != nil {
 		res.Status = StatusFail
-		res.Detail = fmt.Sprintf("Stop OK (%s), Start failed: %s", stopDuration.Round(time.Second), err.Error())
+		res.Detail = fmt.Sprintf("Stop OK (%s), Start failed: %s", stopDuration.Round(time.Second), err.Error()) +
+			r.restoreAfterCycle(ctx, t.ID)
 		return res
 	}
 	startDuration := time.Since(startStart)
@@ -1184,6 +1206,24 @@ waitLoop:
 			stopDuration.Round(time.Second), startDuration.Round(time.Second))
 	}
 	return res
+}
+
+// restoreAfterCycle возвращает туннель, который тест застал запущенным и
+// включённым, в исходное состояние после отказа Stop или Start: упавшая
+// остановка уже сняла маршруты и записала Enabled=false, и без этого
+// диагностика оставляла бы туннель выключенным — после ребута он бы не
+// поднялся (F657, по образцу F649). Контекст без отмены: закрытая вкладка не
+// должна оставить туннель лежать. Не поднялся и Restart — хотя бы автозапуск.
+func (r *Runner) restoreAfterCycle(ctx context.Context, tunnelID string) string {
+	ctx = context.WithoutCancel(ctx)
+	err := r.deps.TunnelService.Restart(ctx, tunnelID)
+	if err == nil {
+		return "; туннель перезапущен"
+	}
+	if eerr := r.deps.TunnelService.SetEnabled(ctx, tunnelID, true); eerr != nil {
+		return "; восстановить не удалось: " + err.Error() + "; автозапуск: " + eerr.Error()
+	}
+	return "; перезапуск не удался (" + err.Error() + "), автозапуск оставлен включённым"
 }
 
 func (r *Runner) testProxyHealth(t TunnelInfo) TestResult {

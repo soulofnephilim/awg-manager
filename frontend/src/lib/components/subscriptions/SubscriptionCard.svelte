@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { subscriptionModeLabel } from '$lib/utils/subscriptionMode';
+	import { m } from '$lib/i18n';
 	import type { Subscription } from '$lib/types';
 	import type { SingboxLayoutMode } from '$lib/constants/singboxLayout';
 	import { goto } from '$app/navigation';
@@ -16,7 +18,7 @@
 	} from '$lib/components/tunnels';
 	import { singboxDelayFromHistory } from '$lib/utils/singboxDelay';
 	import { singboxDelayStatusDot } from '$lib/utils/statusDot';
-	import { resolveSubscriptionMemberTag } from '$lib/utils/subscriptionMember';
+	import { resolveSubscriptionMemberTag, subscriptionName } from '$lib/utils/subscriptionMember';
 	import { isCardNestedInteraction } from '$lib/utils/cardClick';
 	import TunnelDiagnosticsModal from '$lib/components/testing/TunnelDiagnosticsModal.svelte';
 
@@ -125,9 +127,8 @@
 	let selectorTag = $derived(subscription.selectorTag ?? '');
 	const proxyIface = $derived(subscription.proxyIndex >= 0 ? `Proxy${subscription.proxyIndex}` : '');
 	let kernelIface = $derived(subscription.proxyIndex >= 0 ? `t2s${subscription.proxyIndex}` : '');
-	const isURLTest = $derived(subscription.mode === 'urltest');
 	const resolvedMember = $derived(
-		subscription.members?.find((m) => m.tag === resolvedMemberTag) ?? null,
+		subscription.members?.find((member) => member.tag === resolvedMemberTag) ?? null,
 	);
 	const listActiveServerName = $derived(
 		resolvedMember?.label?.trim() || resolvedMember?.tag?.trim() || '',
@@ -135,7 +136,7 @@
 	let showEndpoint = $state(false);
 	let diagnosticsUnavailableReason = $derived(
 		!selectorTag || !kernelIface
-			? 'Для подписки не удалось определить интерфейс тестирования.'
+			? m.subscriptions_test_no_iface()
 			: undefined,
 	);
 
@@ -143,13 +144,13 @@
 		subscription.lastError ? 'error' : subscription.lastFetched ? 'ok' : 'pending',
 	);
 	const feedStatusLabel = $derived(
-		!subscription.enabled ? 'Выключена' : subscription.lastError ? 'Ошибка' : 'OK',
+		!subscription.enabled ? m.subscriptions_card_feed_off() : subscription.lastError ? m.common_error() : 'OK',
 	);
-	const modeLabel = $derived(subscription.mode === 'urltest' ? 'URLTest' : 'Selector');
+	const modeLabel = $derived(subscriptionModeLabel(subscription.mode));
 	const isInlineGroup = $derived(
 		subscription.isInline || (!subscription.isFile && !subscription.url?.trim()),
 	);
-	const sourceKindLabel = $derived(isInlineGroup ? 'группа' : 'подписка');
+	const sourceKindLabel = $derived(isInlineGroup ? m.subscriptions_card_kind_group() : m.subscriptions_card_kind_subscription());
 	const lastFetchedHuman = $derived(
 		subscription.lastFetched ? formatRelative(subscription.lastFetched) : '—',
 	);
@@ -158,9 +159,9 @@
 		const d = new Date(iso);
 		const diff = Date.now() - d.getTime();
 		const hours = Math.floor(diff / 3_600_000);
-		if (hours < 1) return 'только что';
-		if (hours < 24) return `${hours}ч назад`;
-		return `${Math.floor(hours / 24)}д назад`;
+		if (hours < 1) return m.format_just_now();
+		if (hours < 24) return m.subscriptions_card_hours_ago({ hours });
+		return m.subscriptions_card_days_ago({ days: Math.floor(hours / 24) });
 	}
 </script>
 
@@ -173,6 +174,7 @@
 		class:off={!subscription.enabled}
 		onclick={(e) => open(e)}
 		onkeydown={(e) => {
+			if (isCardNestedInteraction(e)) return;
 			if (e.key === 'Enter' || e.key === ' ') {
 				e.preventDefault();
 				open(e);
@@ -201,13 +203,13 @@
 			<td class="tunnel-list-cell tunnel-list-cell--name lc lc-name">
 				<div class="tunnel-list-name-stack">
 					<TunnelTitleRow
-						title={subscription.label || subscription.url}
+						title={subscriptionName(subscription)}
 						dotVariant={statusDot.variant}
 						dotPulse={statusDot.pulse}
 						staticTitle
 					/>
 					<TunnelMetaText>
-						<span>{subscription.memberTags.length} серверов</span>
+						<span>{m.subscriptions_card_servers_count({ count: subscription.memberTags.length })}</span>
 						<span class="meta-dot" aria-hidden="true">·</span>
 						<span>{lastFetchedHuman}</span>
 					</TunnelMetaText>
@@ -226,7 +228,7 @@
 			</td>
 			<td class="tunnel-list-cell tunnel-list-cell--endpoint lc lc-endpoint">
 				{#if !subscription.enabled}
-					<span class="off-label">выкл</span>
+					<span class="off-label">{m.subscriptions_groups_off()}</span>
 				{:else if resolvedMember}
 					<div class="lc-endpoint-stack">
 						{#if listActiveServerName}
@@ -252,7 +254,7 @@
 						rxData={trafficSparkSeries.rx}
 						txData={trafficSparkSeries.tx}
 						onclick={() => ondetail?.(resolvedMemberTag)}
-						title="Открыть детальный график"
+						title={m.singbox_card_chart_detail()}
 					/>
 				{:else}
 					<span class="delay-dash">—</span>
@@ -266,7 +268,7 @@
 						{history}
 						state={delayState}
 						layout="list"
-						title="Delay за последние проверки"
+						title={m.subscriptions_card_delay_history()}
 					/>
 				{:else}
 					<span class="delay-dash">—</span>
@@ -275,12 +277,12 @@
 			<td class="tunnel-list-cell tunnel-list-cell--actions lc lc-actions col-actions">
 				<TunnelListActions
 					onEdit={openSettings}
-					editLabel="Изменить"
-					editTitle="Настройки подписки «{subscription.label || subscription.url}»"
+					editLabel={m.common_edit()}
+					editTitle={m.subscriptions_card_edit_title({ name: subscriptionName(subscription) })}
 					onTest={() => (diagnosticsOpen = true)}
-					testTitle="Открыть диагностику подписки «{subscription.label || subscription.url}»"
+					testTitle={m.subscriptions_card_test_title({ name: subscriptionName(subscription) })}
 					onDelete={ondelete ? () => ondelete(subscription.id) : undefined}
-					deleteTitle="Удалить подписку «{subscription.label || subscription.url}»"
+					deleteTitle={m.subscriptions_card_delete_title({ name: subscriptionName(subscription) })}
 				/>
 			</td>
 	</tr>
@@ -290,6 +292,7 @@
 		tabindex: 0,
 		onclick: (e: MouseEvent) => open(e),
 		onkeydown: (e: KeyboardEvent) => {
+			if (isCardNestedInteraction(e)) return;
 			if (e.key === 'Enter' || e.key === ' ') {
 				e.preventDefault();
 				open(e);
@@ -307,7 +310,7 @@
 	<div class="inactive-header-dense">
 		<div class="inactive-header-main">
 			<div class="inactive-title-row">
-				<h3 class="inactive-title">{subscription.label || subscription.url}</h3>
+				<h3 class="inactive-title">{subscriptionName(subscription)}</h3>
 				<Badge variant="accent" size="sm">{sourceKindLabel}</Badge>
 			</div>
 			<div class="inactive-meta-dense mono">
@@ -318,7 +321,7 @@
 					<span>{subscription.inboundTag}</span>
 				{/if}
 				<span class="meta-dot" aria-hidden="true">·</span><span>:{subscription.listenPort}</span>
-				<span class="meta-dot" aria-hidden="true">·</span><span>{subscription.memberTags.length} серв.</span>
+				<span class="meta-dot" aria-hidden="true">·</span><span>{m.subscriptions_servers_short({ count: subscription.memberTags.length })}</span>
 			</div>
 		</div>
 		{#if subscription.enabled && !subscription.lastError && resolvedMemberTag}
@@ -346,7 +349,7 @@
 	<div class="inactive-meta-dense secondary mono">
 		<span>{modeLabel}</span>
 		<span class="meta-dot" aria-hidden="true">·</span>
-		<span>обновлено {lastFetchedHuman}</span>
+		<span>{m.subscriptions_card_updated({ time: lastFetchedHuman })}</span>
 		{#if subscription.activeMember}
 			<span class="meta-dot" aria-hidden="true">·</span>
 			<span>{subscription.activeMember}</span>
@@ -361,12 +364,12 @@
 		<TunnelListActions
 			variant="labeled"
 			onEdit={openSettings}
-			editLabel="Изменить"
-			editTitle="Настройки подписки «{subscription.label || subscription.url}»"
+			editLabel={m.common_edit()}
+			editTitle={m.subscriptions_card_edit_title({ name: subscriptionName(subscription) })}
 			onTest={() => (diagnosticsOpen = true)}
-			testTitle="Открыть диагностику подписки «{subscription.label || subscription.url}»"
+			testTitle={m.subscriptions_card_test_title({ name: subscriptionName(subscription) })}
 			onDelete={ondelete ? () => ondelete(subscription.id) : undefined}
-			deleteTitle="Удалить подписку «{subscription.label || subscription.url}»"
+			deleteTitle={m.subscriptions_card_delete_title({ name: subscriptionName(subscription) })}
 		/>
 	</div>
 	{/if}
@@ -380,6 +383,7 @@
 	tabindex="0"
 	onclick={(e) => open(e)}
 	onkeydown={(e) => {
+		if (isCardNestedInteraction(e)) return;
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
 			open(e);
@@ -388,7 +392,7 @@
 >
 	<div class="inactive-header">
 		<div class="inactive-header-main">
-			<h3 class="inactive-title">{subscription.label || subscription.url}</h3>
+			<h3 class="inactive-title">{subscriptionName(subscription)}</h3>
 			<div class="inactive-meta-line">
 				{#if proxyIface}
 					<span class="inactive-iface mono">{proxyIface}{#if kernelIface} · {kernelIface}{/if}</span>
@@ -419,26 +423,26 @@
 
 	<div class="inactive-details">
 		<div class="detail-row">
-			<span class="detail-label">Серверов</span>
+			<span class="detail-label">{m.subscriptions_card_detail_servers()}</span>
 			<span class="detail-value">{subscription.memberTags.length}</span>
 		</div>
 		<div class="detail-row">
-			<span class="detail-label">Активный</span>
+			<span class="detail-label">{m.subscriptions_card_detail_active()}</span>
 			<span class="detail-value mono">{subscription.activeMember || '—'}</span>
 		</div>
 		<div class="detail-row">
-			<span class="detail-label">Обновлено</span>
+			<span class="detail-label">{m.subscriptions_card_detail_updated()}</span>
 			<span class="detail-value">{lastFetchedHuman}</span>
 		</div>
 		{#if subscription.refreshHours > 0}
 			<div class="detail-row">
-				<span class="detail-label">Авто-обновление</span>
-				<span class="detail-value">каждые {subscription.refreshHours} ч</span>
+				<span class="detail-label">{m.subscriptions_card_detail_auto_refresh()}</span>
+				<span class="detail-value">{m.subscriptions_card_detail_every_hours({ hours: subscription.refreshHours })}</span>
 			</div>
 		{/if}
 		{#if subscription.lastError}
 			<div class="detail-row detail-row-err">
-				<span class="detail-label">Ошибка</span>
+				<span class="detail-label">{m.common_error()}</span>
 				<span class="detail-value mono" title={subscription.lastError}>{subscription.lastError}</span>
 			</div>
 		{/if}
@@ -448,12 +452,12 @@
 		<TunnelListActions
 			variant="labeled"
 			onEdit={openSettings}
-			editLabel="Изменить"
-			editTitle="Настройки подписки «{subscription.label || subscription.url}»"
+			editLabel={m.common_edit()}
+			editTitle={m.subscriptions_card_edit_title({ name: subscriptionName(subscription) })}
 			onTest={() => (diagnosticsOpen = true)}
-			testTitle="Открыть диагностику подписки «{subscription.label || subscription.url}»"
+			testTitle={m.subscriptions_card_test_title({ name: subscriptionName(subscription) })}
 			onDelete={ondelete ? () => ondelete(subscription.id) : undefined}
-			deleteTitle="Удалить подписку «{subscription.label || subscription.url}»"
+			deleteTitle={m.subscriptions_card_delete_title({ name: subscriptionName(subscription) })}
 		/>
 	</div>
 </div>
@@ -464,7 +468,7 @@
 	kind="subscription"
 	targetId={selectorTag}
 	displayName={subscription.label || selectorTag || subscription.id}
-	subjectLabel="подписку"
+	subject="subscription"
 	iface={kernelIface}
 	loading={false}
 	unavailableReason={diagnosticsUnavailableReason}

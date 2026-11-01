@@ -45,18 +45,17 @@ export function sanitizeDnsServerForApi(
 	if (detour && !shouldOmitDnsServerDetour(server.tag, detour)) {
 		out.detour = detour;
 	}
+	// С detour sing-box адрес отправителя игнорирует, а бэкенд такую пару
+	// отвергает: адрес уходит только у сервера, который ходит напрямую.
+	const bind = server.inet4_bind_address?.trim();
+	if (bind && !out.detour && server.tag.trim() !== DNS_DIRECT_SERVER_TAG) {
+		out.inet4_bind_address = bind;
+	}
 	return out;
 }
 
 export function isDnsServerEmptyDetour(detour?: string | null): boolean {
 	return normalizeDnsServerDetour(detour) === undefined;
-}
-
-/** Non-empty detour stored on dns-direct — invalid until user saves. */
-export function getDnsDirectLegacyDetour(server: Pick<SingboxRouterDNSServer, 'tag' | 'detour'>): string | null {
-	if (server.tag?.trim() !== DNS_DIRECT_SERVER_TAG) return null;
-	const raw = server.detour?.trim();
-	return raw || null;
 }
 
 /** Whether detour should be omitted when serializing a DNS server. */

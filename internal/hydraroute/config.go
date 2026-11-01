@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -280,6 +281,14 @@ func patchSingleScalarKey(lowerKey string, value string) error {
 	if targetKey == "" {
 		return fmt.Errorf("hydraroute: unknown config key %q", lowerKey)
 	}
+	return patchKeyLine(targetKey, value)
+}
+
+// patchKeyLine заменяет первую строку ключа targetKey (без учёта регистра,
+// с сохранением написания ключа) на value, остальные строки этого ключа
+// выбрасывает, при отсутствии ключа дописывает его в конец. Прочие строки
+// не трогает.
+func patchKeyLine(targetKey string, value string) error {
 	if err := os.MkdirAll(hrDir, 0o755); err != nil {
 		return fmt.Errorf("hydraroute: create hrneo dir: %w", err)
 	}
@@ -638,4 +647,11 @@ func cutConfLine(raw string) (key, val string, ok bool) {
 		return "", "", false
 	}
 	return strings.TrimSpace(key), strings.TrimSpace(val), true
+}
+
+// SetConfPathForTest points hrneo.conf at path; returns a restore function.
+func SetConfPathForTest(path string) (restore func()) {
+	orig, origDir := hrConfPath, hrDir
+	hrConfPath, hrDir = path, filepath.Dir(path)
+	return func() { hrConfPath, hrDir = orig, origDir }
 }

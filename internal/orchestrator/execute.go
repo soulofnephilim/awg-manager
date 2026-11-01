@@ -450,7 +450,11 @@ func (o *Orchestrator) executeReconcileNativeWG(ctx context.Context, action Acti
 
 // executeStopKernel stops a kernel tunnel.
 func (o *Orchestrator) executeStopKernel(ctx context.Context, action Action) error {
-	if err := o.kernelOp.Stop(ctx, action.Tunnel); err != nil {
+	var name string
+	if stored, err := o.store.Get(action.Tunnel); err == nil {
+		name = stored.Name
+	}
+	if err := o.kernelOp.Stop(ctx, action.Tunnel, name); err != nil {
 		return err
 	}
 
@@ -642,6 +646,44 @@ func (o *Orchestrator) executeRestoreEndpointTracking(ctx context.Context) error
 	return nil
 }
 
+// forgetTunnelRoutes — хвост удаления туннеля: правила, ссылавшиеся на него,
+// уходят из хранилищ только теперь, когда туннель и его запись удалены
+// (F609). Отказ — Warn: туннель уже удалён, повторять нечего.
+func (o *Orchestrator) forgetTunnelRoutes(ctx context.Context, tunnelID string) {
+	if o.dnsRoute != nil {
+		if err := o.dnsRoute.ForgetTunnel(ctx, tunnelID); err != nil {
+			o.appLog.Warn("delete", tunnelID, "forget dns route targets: "+err.Error())
+		}
+	}
+	if o.staticRoute != nil {
+		if err := o.staticRoute.ForgetTunnel(ctx, tunnelID); err != nil {
+			o.appLog.Warn("delete", tunnelID, "forget static route lists: "+err.Error())
+		}
+	}
+	if o.clientRoute != nil {
+		if err := o.clientRoute.ForgetTunnel(ctx, tunnelID); err != nil {
+			o.appLog.Warn("delete", tunnelID, "forget client routes: "+err.Error())
+		}
+	}
+}
+
+// restoreRoutesAfterRefusedDelete — удаление интерфейса отказало (список не
+// прочитан), а строки DNS- и статических маршрутов туннеля в NDMS уже сняты
+// (OnTunnelDelete). Правила в хранилище целы — сверка ставит строки обратно.
+// Клиентские правила вернёт следующий старт туннеля (F609). Best-effort.
+func (o *Orchestrator) restoreRoutesAfterRefusedDelete(ctx context.Context, tunnelID string) {
+	if o.dnsRoute != nil {
+		if err := o.dnsRoute.Reconcile(ctx); err != nil {
+			o.appLog.Warn("delete", tunnelID, "restore dns routes after refused delete: "+err.Error())
+		}
+	}
+	if o.staticRoute != nil {
+		if err := o.staticRoute.Reconcile(ctx); err != nil {
+			o.appLog.Warn("delete", tunnelID, "restore static routes after refused delete: "+err.Error())
+		}
+	}
+}
+
 // executeDeleteKernel fully removes a kernel tunnel.
 func (o *Orchestrator) executeDeleteKernel(ctx context.Context, action Action) error {
 	stored, err := o.store.Get(action.Tunnel)
@@ -650,6 +692,7 @@ func (o *Orchestrator) executeDeleteKernel(ctx context.Context, action Action) e
 	}
 
 	if err := o.kernelOp.Delete(ctx, stored); err != nil {
+		o.restoreRoutesAfterRefusedDelete(ctx, action.Tunnel)
 		return err
 	}
 
@@ -659,6 +702,7 @@ func (o *Orchestrator) executeDeleteKernel(ctx context.Context, action Action) e
 		return fmt.Errorf("delete from storage: %w", err)
 	}
 
+	o.forgetTunnelRoutes(ctx, action.Tunnel)
 	o.appLog.Info("delete", action.Tunnel, "kernel tunnel deleted")
 	return nil
 }
@@ -675,6 +719,7 @@ func (o *Orchestrator) executeDeleteNativeWG(ctx context.Context, action Action)
 	}
 
 	if err := o.nwgOp.Delete(ctx, stored); err != nil {
+		o.restoreRoutesAfterRefusedDelete(ctx, action.Tunnel)
 		return err
 	}
 
@@ -684,6 +729,7 @@ func (o *Orchestrator) executeDeleteNativeWG(ctx context.Context, action Action)
 		return fmt.Errorf("delete from storage: %w", err)
 	}
 
+	o.forgetTunnelRoutes(ctx, action.Tunnel)
 	o.appLog.Info("delete", action.Tunnel, "NativeWG tunnel deleted")
 	return nil
 }

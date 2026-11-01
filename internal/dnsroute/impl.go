@@ -2,7 +2,9 @@ package dnsroute
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -16,9 +18,12 @@ import (
 // InterfaceResolver resolves tunnel IDs to router interface names.
 // ResolveInterface returns the NDMS name (for RCI commands).
 // GetKernelIfaceName returns the kernel-level interface name (for HR Neo).
+// SystemTunnelsByIface maps an HR Neo target (kernel name, or the NDMS id
+// left by older files) back to its "system:<NDMS id>" tunnel ID.
 type InterfaceResolver interface {
 	ResolveInterface(ctx context.Context, tunnelID string) (string, error)
 	GetKernelIfaceName(ctx context.Context, tunnelID string) (string, error)
+	SystemTunnelsByIface(ctx context.Context) map[string]string
 }
 
 // ServiceImpl implements the Service interface.
@@ -173,7 +178,7 @@ func (s *ServiceImpl) Create(ctx context.Context, list DomainList) (*DomainList,
 		return s.createHydraRoute(ctx, list)
 	}
 
-	data := s.store.GetCached()
+	data := s.store.Draft()
 	if data == nil {
 		return nil, fmt.Errorf("store not loaded")
 	}
@@ -184,6 +189,9 @@ func (s *ServiceImpl) Create(ctx context.Context, list DomainList) (*DomainList,
 
 	applyManualText(&list)
 	applyExcludesText(&list)
+	if err := rejectGeoTags(&list); err != nil {
+		return nil, err
+	}
 
 	if len(list.ManualDomains) == 0 && len(list.Subscriptions) == 0 {
 		return nil, fmt.Errorf("at least one domain or subscription is required")
@@ -192,11 +200,13 @@ func (s *ServiceImpl) Create(ctx context.Context, list DomainList) (*DomainList,
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	list.ID = nextListID(data.Lists)
+	assignGroupSlug(&list, data.Lists)
 	list.Enabled = true
 	list.CreatedAt = now
 	list.UpdatedAt = now
+	list.normalizeSkipIPv6()
 	list.Domains, list.Subnets = splitDomainsAndSubnets(deduplicateDomains(list.ManualDomains))
-	if err := validateSubnetsLimit(len(list.Subnets)); err != nil {
+	if err := validateSubnetsLimit(len(list.routedSubnets(list.Subnets))); err != nil {
 		return nil, err
 	}
 
@@ -208,8 +218,28 @@ func (s *ServiceImpl) Create(ctx context.Context, list DomainList) (*DomainList,
 	if err := s.resolveRouteInterfaces(ctx, list.Routes); err != nil {
 		return nil, fmt.Errorf("resolve routes: %w", err)
 	}
+	if err := checkRouteInterfacesUnique(list.Routes); err != nil {
+		return nil, err
+	}
 
-	s.dedup(&list)
+	// Подписки проверяются загрузкой ДО записи, и загруженное сразу идёт в
+	// список: отвергнутый список не попадает на диск, а каждая подписка
+	// скачивается один раз (F696).
+	if len(list.Subscriptions) > 0 {
+		fetched, err := s.validateSubscriptions(ctx, &list, list.Subscriptions)
+		if err != nil {
+			return nil, err
+		}
+		results := make([]subscriptionFetch, len(fetched))
+		for i, domains := range fetched {
+			results[i] = subscriptionFetch{domains: domains}
+		}
+		if err := applySubscriptionFetches(&list, results, now); err != nil {
+			return nil, err
+		}
+	}
+
+	s.dedup(data, &list)
 
 	data.Lists = append(data.Lists, list)
 
@@ -219,28 +249,16 @@ func (s *ServiceImpl) Create(ctx context.Context, list DomainList) (*DomainList,
 
 	s.appLog.Info("create", list.ID, "list created: "+list.Name)
 
-	// Validate subscriptions by fetching them. If any URL fails (wrong
-	// Content-Type, unreachable, etc.), reject the entire Create.
-	if len(list.Subscriptions) > 0 {
-		if err := s.validateSubscriptions(ctx, list.Subscriptions); err != nil {
-			// Remove the just-appended list from data.
-			data.Lists = data.Lists[:len(data.Lists)-1]
-			_ = s.store.Save(data)
-			return nil, err
-		}
-		if err := s.refreshSubscriptions(ctx, list.ID); err != nil {
-			s.logError("create", list.ID, "Refresh subscriptions failed", err.Error())
-		}
-	} else {
-		if err := s.reconcileAll(ctx); err != nil {
-			s.logError("create", list.ID, "Reconcile failed", err.Error())
-		}
+	if err := s.reconcileAll(ctx); err != nil {
+		s.logError("create", list.ID, "Reconcile failed", err.Error())
 	}
 
-	// Re-read the list after refresh (Domains may have been updated).
-	for i := range data.Lists {
-		if data.Lists[i].ID == list.ID {
-			return &data.Lists[i], nil
+	// Копия из кэша: ответ кодируется вне opMu (F667).
+	cur := s.store.GetCached()
+	for i := range cur.Lists {
+		if cur.Lists[i].ID == list.ID {
+			l := cur.Lists[i].clone()
+			return &l, nil
 		}
 	}
 	return &list, nil
@@ -258,7 +276,10 @@ func (s *ServiceImpl) Get(ctx context.Context, id string) (*DomainList, error) {
 
 	for i := range data.Lists {
 		if data.Lists[i].ID == id {
-			return &data.Lists[i], nil
+			// Копия, а не указатель в кэш: правка результата меняла бы
+			// кэш без записи на диск и вне opMu (F667).
+			l := data.Lists[i].clone()
+			return &l, nil
 		}
 	}
 	return nil, fmt.Errorf("dns route list %q not found", id)
@@ -296,12 +317,46 @@ func (s *ServiceImpl) List(ctx context.Context) ([]DomainList, error) {
 func (s *ServiceImpl) Update(ctx context.Context, list DomainList) (*DomainList, error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	return s.updateLocked(ctx, list)
+}
 
+// UpdateWith — Update, правку для которого строит edit по списку,
+// прочитанному под тем же замком, что и запись. Правка, посчитанная от
+// прочитанного раньше (подписки, цели), иначе ложится на устаревший
+// снимок: изменение из веб-интерфейса между чтением и записью терялось бы.
+// edit получает хранимый список и не должен менять его срезы — это кэш
+// хранилища; вернуть он должен разреженную правку, как для Update.
+// Списки HydraRoute сюда не идут: их источник — файлы HR, а не хранилище.
+func (s *ServiceImpl) UpdateWith(ctx context.Context, id string, edit func(DomainList) (DomainList, error)) (*DomainList, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	data := s.store.Draft()
+	if data == nil {
+		return nil, fmt.Errorf("store not loaded")
+	}
+	i := slices.IndexFunc(data.Lists, func(l DomainList) bool { return l.ID == id })
+	if isHRID(id) || (i >= 0 && isHydraRoute(data.Lists[i].Backend)) {
+		return nil, fmt.Errorf("dns route list %q is a HydraRoute list: UpdateWith edits stored lists only", id)
+	}
+	if i < 0 {
+		return nil, fmt.Errorf("dns route list %q not found", id)
+	}
+	patch, err := edit(data.Lists[i])
+	if err != nil {
+		return nil, err
+	}
+	patch.ID = id
+	return s.updateLocked(ctx, patch)
+}
+
+// updateLocked is Update under s.opMu.
+func (s *ServiceImpl) updateLocked(ctx context.Context, list DomainList) (*DomainList, error) {
 	if isHRID(list.ID) || isHydraRoute(list.Backend) {
 		return s.updateHydraRoute(ctx, list.ID, list)
 	}
 
-	data := s.store.GetCached()
+	data := s.store.Draft()
 	if data == nil {
 		return nil, fmt.Errorf("store not loaded")
 	}
@@ -325,6 +380,7 @@ func (s *ServiceImpl) Update(ctx context.Context, list DomainList) (*DomainList,
 	// Preserve fields not sent by the frontend update payload.
 	list.CreatedAt = existing.CreatedAt
 	list.ID = existing.ID
+	list.GroupSlug = existing.GroupSlug
 	list.Enabled = existing.Enabled
 	list.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
@@ -368,6 +424,10 @@ func (s *ServiceImpl) Update(ctx context.Context, list DomainList) (*DomainList,
 	if list.HRPolicyName == "" {
 		list.HRPolicyName = existing.HRPolicyName
 	}
+	if list.SkipIPv6 == nil {
+		list.SkipIPv6 = existing.SkipIPv6
+	}
+	list.normalizeSkipIPv6()
 	if list.ManualText == nil {
 		list.ManualText = existing.ManualText
 	} else {
@@ -386,32 +446,101 @@ func (s *ServiceImpl) Update(ctx context.Context, list DomainList) (*DomainList,
 		}
 	}
 
-	// Validate any new subscription URLs before saving.
-	newSubs := findNewSubscriptions(existing.Subscriptions, list.Subscriptions)
+	if err := rejectGeoTags(&list); err != nil {
+		return nil, err
+	}
+
+	// Validate any new subscription URLs before saving. Скачанное проверкой
+	// сразу идёт в список — без второй загрузки и без ожидания обновления.
+	// Повтор адреса в запросе качается один раз.
+	var newSubs []Subscription
+	for _, sub := range findNewSubscriptions(existing.Subscriptions, list.Subscriptions) {
+		if !slices.ContainsFunc(newSubs, func(n Subscription) bool { return n.URL == sub.URL }) {
+			newSubs = append(newSubs, sub)
+		}
+	}
+	fetchedByURL := make(map[string]subscriptionFetch, len(list.Subscriptions))
 	if len(newSubs) > 0 {
-		if err := s.validateSubscriptions(ctx, newSubs); err != nil {
+		fetched, err := s.validateSubscriptions(ctx, &list, newSubs)
+		if err != nil {
+			return nil, err
+		}
+		for i, sub := range newSubs {
+			fetchedByURL[sub.URL] = subscriptionFetch{domains: fetched[i]}
+		}
+	}
+
+	if len(findNewSubscriptions(list.Subscriptions, existing.Subscriptions)) > 0 {
+		// Снята хоть одна подписка: её строки в Domains/Subnets не отделить
+		// от строк остальных, и перенос держал бы их до обновления (а с
+		// ними и место в лимите). Список пересобирается из ручных и свежей
+		// загрузки всех текущих подписок; отказ стоящей не фатален — как
+		// при обновлении.
+		results := make([]subscriptionFetch, len(list.Subscriptions))
+		for i, sub := range list.Subscriptions {
+			res, ok := fetchedByURL[sub.URL]
+			if !ok {
+				domains, err := s.fetchSubscription(ctx, sub.URL)
+				if err != nil {
+					// The journal line is scrubbed by logging.Service.AppLog.
+					s.appLog.Warn("subscription-fetch", list.ID, fmt.Sprintf("url=%s err=%s", sub.URL, err.Error()))
+				}
+				res = subscriptionFetch{domains: domains, err: err}
+				fetchedByURL[sub.URL] = res
+			}
+			results[i] = res
+		}
+		if err := applySubscriptionFetches(&list, results, list.UpdatedAt); err != nil {
+			return nil, err
+		}
+	} else {
+		var newDomains []string
+		for _, sub := range newSubs {
+			newDomains = append(newDomains, fetchedByURL[sub.URL].domains...)
+		}
+		for i := range list.Subscriptions {
+			if res, ok := fetchedByURL[list.Subscriptions[i].URL]; ok {
+				recordSubscriptionFetch(&list.Subscriptions[i], res, list.UpdatedAt)
+			}
+		}
+
+		// Merge domains: manual domains + existing subscription domains + new
+		// subscriptions' domains, then classify into DNS-style domains vs CIDR
+		// subnets so HR Neo writes them into the correct file (domain.conf vs ip.list).
+		manual := deduplicateDomains(list.ManualDomains)
+		// Содержимое стоящих подписок — Domains и Subnets за вычетом ручных
+		// строк: подсети подписок лежат в Subnets и иначе терялись (F697).
+		// Concat, а не append: Domains общий с кэшем (Draft), append мог бы
+		// писать в его массив.
+		subDomains := subscriptionDomains(slices.Concat(existing.Domains, existing.Subnets), existing.ManualDomains)
+		merged := append(append(manual, subDomains...), newDomains...)
+		list.Domains, list.Subnets = splitDomainsAndSubnets(deduplicateDomains(merged))
+		if err := validateSubnetsLimit(len(list.routedSubnets(list.Subnets))); err != nil {
 			return nil, err
 		}
 	}
 
-	// Merge domains: manual domains + existing subscription domains, then
-	// classify into DNS-style domains vs CIDR subnets so HR Neo writes them
-	// into the correct file (domain.conf vs ip.list).
-	manual := deduplicateDomains(list.ManualDomains)
-	subDomains := subscriptionDomains(existing.Domains, existing.ManualDomains)
-	list.Domains, list.Subnets = splitDomainsAndSubnets(deduplicateDomains(append(manual, subDomains...)))
-	if err := validateSubnetsLimit(len(list.Subnets)); err != nil {
-		return nil, err
+	// Подсети исключений лежат в ExcludeSubnets, а не в Excludes: делить
+	// одни Excludes значило бы терять подсети всякий раз, когда их прислали
+	// отдельно или не прислали вовсе, а текста исключений нет (список
+	// создан через API или MCP). Только Excludes без ExcludeSubnets —
+	// это полный новый список вызывающего, подсети в нём и есть все (текст
+	// исключений applyExcludesText уже разложил в одни Excludes).
+	excludes := slices.Concat(list.Excludes, list.ExcludeSubnets)
+	if excludesProvided && !excludeSubnetsProvided {
+		excludes = list.Excludes
 	}
-
-	list.Excludes, list.ExcludeSubnets = splitDomainsAndSubnets(deduplicateDomains(list.Excludes))
+	list.Excludes, list.ExcludeSubnets = splitDomainsAndSubnets(deduplicateDomains(excludes))
 
 	// Resolve tunnel IDs to NDMS interface names for RCI commands.
 	if err := s.resolveRouteInterfaces(ctx, list.Routes); err != nil {
 		return nil, fmt.Errorf("resolve routes: %w", err)
 	}
+	if err := checkRouteInterfacesUnique(list.Routes); err != nil {
+		return nil, err
+	}
 
-	s.dedup(&list)
+	s.dedup(data, &list)
 
 	data.Lists[idx] = list
 
@@ -425,7 +554,9 @@ func (s *ServiceImpl) Update(ctx context.Context, list DomainList) (*DomainList,
 		s.logError("update", list.ID, "Reconcile failed", err.Error())
 	}
 
-	return &list, nil
+	// Срезы list общие с кэшем (подписки, домены): ответ — копия (F667).
+	out := list.clone()
+	return &out, nil
 }
 
 // Delete removes a domain list by ID, persists changes, and reconciles.
@@ -437,22 +568,15 @@ func (s *ServiceImpl) Delete(ctx context.Context, id string) error {
 		if !s.hrReady() {
 			return fmt.Errorf("HydraRoute Neo is not installed")
 		}
-		name := nameFromHRID(id)
-		if err := s.hydra.DeleteRule(name); err != nil {
+		ref, err := refFromHRID(id)
+		if err != nil {
 			return err
 		}
-		if data := s.store.GetCached(); data != nil && data.HRRuleIcons != nil {
-			if _, ok := data.HRRuleIcons[name]; ok {
-				delete(data.HRRuleIcons, name)
-				if err := s.store.Save(data); err != nil {
-					return fmt.Errorf("save after HR icon delete: %w", err)
-				}
-			}
-		}
-		return nil
+		// Иконку убирает reconcileHRIcons в следующем List.
+		return s.hydra.DeleteGroups([]hydraroute.GroupRef{ref})
 	}
 
-	data := s.store.GetCached()
+	data := s.store.Draft()
 	if data == nil {
 		return fmt.Errorf("store not loaded")
 	}
@@ -490,13 +614,41 @@ func (s *ServiceImpl) DeleteBatch(ctx context.Context, ids []string) (int, error
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 
-	data := s.store.GetCached()
-	if data == nil {
-		return 0, fmt.Errorf("store not loaded")
+	// HR-группы удаляются одной записью: их позиции разрешаются по одному
+	// снимку, поштучное удаление сдвинуло бы позиции следующих.
+	// Смешанный пакет HR+NDMS не атомарен: HR-группы пишутся первыми, сбой
+	// дальше их не вернёт. Фронт смешанных пакетов не шлёт.
+	var hrRefs []hydraroute.GroupRef
+	rest := ids[:0:0]
+	for _, id := range ids {
+		if !isHRID(id) {
+			rest = append(rest, id)
+			continue
+		}
+		ref, err := refFromHRID(id)
+		if err != nil {
+			return 0, err
+		}
+		hrRefs = append(hrRefs, ref)
+	}
+	hrDeleted := 0
+	if len(hrRefs) > 0 {
+		if !s.hrReady() {
+			return 0, fmt.Errorf("HydraRoute Neo is not installed")
+		}
+		if err := s.hydra.DeleteGroups(hrRefs); err != nil {
+			return 0, err
+		}
+		hrDeleted = len(hrRefs)
 	}
 
-	toDelete := make(map[string]bool, len(ids))
-	for _, id := range ids {
+	data := s.store.Draft()
+	if data == nil {
+		return hrDeleted, fmt.Errorf("store not loaded")
+	}
+
+	toDelete := make(map[string]bool, len(rest))
+	for _, id := range rest {
 		toDelete[id] = true
 	}
 
@@ -512,20 +664,20 @@ func (s *ServiceImpl) DeleteBatch(ctx context.Context, ids []string) (int, error
 	}
 
 	if deleted == 0 {
-		return 0, nil
+		return hrDeleted, nil
 	}
 
 	data.Lists = kept
 
 	if err := s.store.Save(data); err != nil {
-		return 0, fmt.Errorf("save after delete batch: %w", err)
+		return hrDeleted, fmt.Errorf("save after delete batch: %w", err)
 	}
 
 	if err := s.reconcileAll(ctx); err != nil {
 		s.logError("delete-batch", "", "Reconcile failed", err.Error())
 	}
 
-	return deleted, nil
+	return deleted + hrDeleted, nil
 }
 
 // CreateBatch adds multiple domain lists, persists once, and reconciles once.
@@ -534,7 +686,7 @@ func (s *ServiceImpl) CreateBatch(ctx context.Context, lists []DomainList) ([]*D
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 
-	data := s.store.GetCached()
+	data := s.store.Draft()
 	if data == nil {
 		return nil, fmt.Errorf("store not loaded")
 	}
@@ -544,21 +696,46 @@ func (s *ServiceImpl) CreateBatch(ctx context.Context, lists []DomainList) ([]*D
 	var hrCreated []*DomainList
 	hasSubs := false
 
+	// Первый проход — без побочных эффектов: нормализация, пропуски и
+	// проверки маршрутов всех списков. Ошибка любого списка отвергает батч
+	// целиком до записи HR-файлов и правки кэша (F693): иначе ранние списки
+	// оставались в живом кэше и доезжали до роутера со следующим Save.
+	prepared := make([]DomainList, 0, len(lists))
 	for _, list := range lists {
-		if strings.TrimSpace(list.Name) == "" {
-			continue
-		}
-
 		applyManualText(&list)
 		applyExcludesText(&list)
-
-		if len(list.ManualDomains) == 0 && len(list.Subscriptions) == 0 {
-			continue
-		}
 
 		// HydraRoute-backed entries go through the real HR creation path
 		// (HR files = SoT); they must NOT land in data.Lists. HR has no
 		// subscriptions — create from ManualDomains and log-ignore any.
+		// The name is optional for HR groups (HRweb model).
+		if isHydraRoute(list.Backend) {
+			if len(list.ManualDomains) == 0 {
+				continue
+			}
+			prepared = append(prepared, list)
+			continue
+		}
+		if strings.TrimSpace(list.Name) == "" {
+			continue
+		}
+		if len(list.ManualDomains) == 0 && len(list.Subscriptions) == 0 {
+			continue
+		}
+		if err := rejectGeoTags(&list); err != nil {
+			return nil, fmt.Errorf("%q: %w", list.Name, err)
+		}
+
+		if err := s.resolveRouteInterfaces(ctx, list.Routes); err != nil {
+			return nil, fmt.Errorf("resolve routes for %q: %w", list.Name, err)
+		}
+		if err := checkRouteInterfacesUnique(list.Routes); err != nil {
+			return nil, fmt.Errorf("%q: %w", list.Name, err)
+		}
+		prepared = append(prepared, list)
+	}
+
+	for _, list := range prepared {
 		if isHydraRoute(list.Backend) {
 			if len(list.Subscriptions) > 0 {
 				s.logInfo("create-batch", list.Name, "HR rule: subscriptions unsupported, ignored")
@@ -573,16 +750,13 @@ func (s *ServiceImpl) CreateBatch(ctx context.Context, lists []DomainList) ([]*D
 		}
 
 		list.ID = nextListID(data.Lists)
+		assignGroupSlug(&list, data.Lists)
 		list.Enabled = true
 		list.CreatedAt = now
 		list.UpdatedAt = now
 		list.Domains = deduplicateDomains(list.ManualDomains)
 
-		if err := s.resolveRouteInterfaces(ctx, list.Routes); err != nil {
-			return nil, fmt.Errorf("resolve routes for %q: %w", list.Name, err)
-		}
-
-		s.dedup(&list)
+		s.dedup(data, &list)
 		data.Lists = append(data.Lists, list)
 		createdIDs = append(createdIDs, list.ID)
 		s.appLog.Info("create", list.ID, "list created: "+list.Name)
@@ -620,15 +794,17 @@ func (s *ServiceImpl) CreateBatch(ctx context.Context, lists []DomainList) ([]*D
 		}
 	}
 
-	// Collect created lists from data (may have been updated by refreshSubscriptions).
+	// Collect created lists from the cache (may have been updated by
+	// refreshSubscriptions, which saves its own draft — F695).
+	cur := s.store.GetCached()
 	result := make([]*DomainList, 0, len(createdIDs))
 	idSet := make(map[string]bool, len(createdIDs))
 	for _, id := range createdIDs {
 		idSet[id] = true
 	}
-	for i := range data.Lists {
-		if idSet[data.Lists[i].ID] {
-			result = append(result, &data.Lists[i])
+	for i := range cur.Lists {
+		if idSet[cur.Lists[i].ID] {
+			result = append(result, &cur.Lists[i])
 		}
 	}
 
@@ -645,18 +821,18 @@ func (s *ServiceImpl) SetEnabled(ctx context.Context, id string, enabled bool) e
 		if !s.hrReady() {
 			return fmt.Errorf("HydraRoute Neo is not installed")
 		}
-		name := nameFromHRID(id)
-		if name == "" {
-			return fmt.Errorf("invalid HR rule id %q", id)
-		}
-		if err := s.hydra.SetRuleEnabled(name, enabled); err != nil {
+		ref, err := refFromHRID(id)
+		if err != nil {
 			return err
 		}
-		s.logInfo("set-enabled", id, fmt.Sprintf("enabled=%v name=%q backend=hydraroute", enabled, name))
+		if err := s.hydra.SetGroupEnabled(ref, enabled); err != nil {
+			return err
+		}
+		s.logInfo("set-enabled", id, fmt.Sprintf("enabled=%v backend=hydraroute", enabled))
 		return nil
 	}
 
-	data := s.store.GetCached()
+	data := s.store.Draft()
 	if data == nil {
 		return fmt.Errorf("store not loaded")
 	}
@@ -690,27 +866,46 @@ func (s *ServiceImpl) SetEnabled(ctx context.Context, id string, enabled bool) e
 	return nil
 }
 
+// redactedError prints a message with addresses reduced to scheme and
+// host while keeping the cause reachable for errors.Is and errors.As.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e redactedError) Error() string { return e.msg }
+func (e redactedError) Unwrap() error { return e.err }
+
 // validateSubscriptions fetches each subscription URL and verifies it returns
 // text/plain with at least one parseable domain. Returns the first error encountered.
-func (s *ServiceImpl) validateSubscriptions(ctx context.Context, subs []Subscription) error {
+// На успехе отдаёт загруженные домены — по подписке, в порядке subs.
+func (s *ServiceImpl) validateSubscriptions(ctx context.Context, list *DomainList, subs []Subscription) ([][]string, error) {
 	seenSubnets := make(map[string]struct{})
+	fetched := make([][]string, 0, len(subs))
 	for _, sub := range subs {
 		domains, err := s.fetchSubscription(ctx, sub.URL)
+		// The error goes back to REST and to the MCP tools that create a
+		// list: the address and the fetch error keep scheme and host only,
+		// since both can carry a token (a redirect hop's too).
 		if err != nil {
-			return fmt.Errorf("подписка %q: %w", sub.URL, err)
+			return nil, redactedError{
+				msg: fmt.Sprintf("подписка %s: %s", logging.RedactURLs(sub.URL), logging.RedactURLs(err.Error())),
+				err: err,
+			}
 		}
 		if len(domains) == 0 {
-			return fmt.Errorf("подписка %q: список пуст — URL не содержит доменов", sub.URL)
+			return nil, fmt.Errorf("подписка %s: список пуст — URL не содержит доменов", logging.RedactURLs(sub.URL))
 		}
 		_, subnets := splitDomainsAndSubnets(domains)
-		for _, subnet := range subnets {
+		for _, subnet := range list.routedSubnets(subnets) {
 			seenSubnets[subnet] = struct{}{}
 		}
 		if err := validateSubnetsLimit(len(seenSubnets)); err != nil {
-			return err
+			return nil, err
 		}
+		fetched = append(fetched, domains)
 	}
-	return nil
+	return fetched, nil
 }
 
 // RefreshSubscriptions fetches all subscriptions for a single list and merges domains.
@@ -721,7 +916,7 @@ func (s *ServiceImpl) RefreshSubscriptions(ctx context.Context, id string) error
 }
 
 func (s *ServiceImpl) refreshSubscriptions(ctx context.Context, id string) error {
-	data := s.store.GetCached()
+	data := s.store.Draft()
 	if data == nil {
 		return fmt.Errorf("store not loaded")
 	}
@@ -741,31 +936,21 @@ func (s *ServiceImpl) refreshSubscriptions(ctx context.Context, id string) error
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Fetch each subscription
-	var allSubDomains [][]string
-	for i := range list.Subscriptions {
-		sub := &list.Subscriptions[i]
+	results := make([]subscriptionFetch, len(list.Subscriptions))
+	for i, sub := range list.Subscriptions {
 		domains, err := s.fetchSubscription(ctx, sub.URL)
-		sub.LastFetched = now
 		if err != nil {
-			sub.LastError = err.Error()
-			sub.LastCount = 0
+			// The journal line is scrubbed by logging.Service.AppLog.
 			s.appLog.Warn("subscription-fetch", id, fmt.Sprintf("url=%s err=%s", sub.URL, err.Error()))
 			// Keep going — one failed subscription shouldn't block others
-			continue
 		}
-		sub.LastError = ""
-		sub.LastCount = len(domains)
-		allSubDomains = append(allSubDomains, domains)
+		results[i] = subscriptionFetch{domains: domains, err: err}
 	}
 
-	// Merge manual + subscription domains, then classify CIDRs → Subnets.
-	merged := mergeDomains(list.ManualDomains, allSubDomains)
-	domains, subnets := splitDomainsAndSubnets(merged)
-	if err := validateSubnetsLimit(len(subnets)); err != nil {
+	if err := applySubscriptionFetches(list, results, now); err != nil {
 		return err
 	}
-	list.Domains, list.Subnets = domains, subnets
-	s.dedup(list)
+	s.dedup(data, list)
 	list.UpdatedAt = now
 
 	if err := s.store.Save(data); err != nil {
@@ -775,6 +960,52 @@ func (s *ServiceImpl) refreshSubscriptions(ctx context.Context, id string) error
 	s.appLog.Info("subscription-refresh", id, fmt.Sprintf("totalDomains=%d", len(list.Domains)))
 
 	return s.reconcileAll(ctx)
+}
+
+// subscriptionFetch — итог загрузки одной подписки.
+type subscriptionFetch struct {
+	domains []string
+	err     error
+}
+
+// applySubscriptionFetches переносит итоги загрузки (results[i] — для
+// list.Subscriptions[i]) в список: состояние каждой подписки, затем
+// Domains/Subnets из ручных доменов и загруженного. Неудачная загрузка
+// не фатальна — подписка просто не даёт доменов. Ошибка — только лимит
+// подсетей; тогда Domains/Subnets не тронуты.
+func applySubscriptionFetches(list *DomainList, results []subscriptionFetch, now string) error {
+	var allSubDomains [][]string
+	for i := range list.Subscriptions {
+		recordSubscriptionFetch(&list.Subscriptions[i], results[i], now)
+		if results[i].err == nil {
+			allSubDomains = append(allSubDomains, results[i].domains)
+		}
+	}
+
+	// Merge manual + subscription domains, then classify CIDRs → Subnets.
+	merged := mergeDomains(list.ManualDomains, allSubDomains)
+	domains, subnets := splitDomainsAndSubnets(merged)
+	if err := validateSubnetsLimit(len(list.routedSubnets(subnets))); err != nil {
+		return err
+	}
+	list.Domains, list.Subnets = domains, subnets
+	return nil
+}
+
+// recordSubscriptionFetch пишет в подписку итог её загрузки.
+func recordSubscriptionFetch(sub *Subscription, res subscriptionFetch, now string) {
+	sub.LastFetched = now
+	if res.err != nil {
+		// net/http quotes the address whole, a redirect hop's too, and
+		// a list's address can carry a token in its path or query. The
+		// stored text is what REST, the web interface and MCP read, so
+		// it keeps only scheme and host.
+		sub.LastError = logging.RedactURLs(res.err.Error())
+		sub.LastCount = 0
+		return
+	}
+	sub.LastError = ""
+	sub.LastCount = len(res.domains)
 }
 
 func validateSubnetsLimit(count int) error {
@@ -811,47 +1042,131 @@ func (s *ServiceImpl) OnTunnelStart(ctx context.Context) error {
 	return s.reconcileAll(ctx)
 }
 
-// OnTunnelDelete removes route targets referencing the deleted tunnel and reconciles.
-// Also clears any failover state for the deleted tunnel.
+// OnTunnelDelete снимает в NDMS строки удаляемого туннеля; хранилище и
+// failover-состояние не трогает — это ForgetTunnel после удаления (F609).
+//
+// Без сверки и без чтения sc-вида (Н10b): строки удаляемого туннеля известны
+// из своего хранилища — снимаются одним пакетом по (группа, интерфейс) до
+// сноса интерфейса, чужие маршруты не меняются. Сверка здесь читала бы
+// `/show/sc/dns-proxy/route` и сохраняла конфигурацию перед чтением (F568) —
+// под замком туннеля, на каждое удаление пачки. Туннель в failover — сверка,
+// в ForgetTunnel: его строки failover уже снял, а MarkRecovered меняет чужие.
+// Вид sc после сноса устарел до сохранения — его ведёт эпоха DNSRoutes
+// (FlushPendingSave первой следующей сверки).
 func (s *ServiceImpl) OnTunnelDelete(ctx context.Context, tunnelID string) error {
-	// Clean up failover state first (uses its own mutex, before opMu lock).
-	// Skip if not in failedSet to avoid redundant reconcile.
+	// Только снятие строк в NDMS, пока интерфейс жив. Цели туннеля в
+	// хранилище убирает ForgetTunnel — после успешного удаления туннеля:
+	// отказ удаления (список интерфейсов не прочитан) иначе оставлял бы
+	// живой туннель без правил (F609).
+	//
+	// Туннель в failover: его строк нет — их держит fallback; пересчёт после
+	// снятия целей — в ForgetTunnel.
 	if s.failover != nil && s.failover.IsFailed(tunnelID) {
+		return nil
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	data := s.store.Draft()
+	if data == nil {
+		return nil
+	}
+
+	var refs []command.DNSRouteRef
+	for i := range data.Lists {
+		list := &data.Lists[i]
+		for _, rt := range list.Routes {
+			if rt.TunnelID == tunnelID {
+				refs = append(refs, tunnelRouteRefs(list, rt.Interface)...)
+			}
+		}
+	}
+
+	// Строку ставит только сверка и только на подтверждённый интерфейс
+	// (buildTargetState, F548): у цели без интерфейса строки нет, и `no` по
+	// ней — E в журнале ndm (L5 финального ревью F595; туннель-цель, ни разу
+	// не стартовавший). Подтверждение — одним списком; в ctx действия
+	// оркестратора (WithActionList) это тот же список, что у Delete
+	// оператора следом, — без лишнего чтения. Список не прочитан — команды
+	// не шлём (решение 4): строки, если есть, снимет следующая сверка.
+	if len(refs) > 0 {
+		names := make([]string, 0, len(refs))
+		for _, r := range refs {
+			names = append(names, r.Interface)
+		}
+		confirmed, err := s.queries.Interfaces.ConfirmEach(ctx, names)
+		if err != nil {
+			return fmt.Errorf("confirm dns-proxy route targets of tunnel %s: %w", tunnelID, err)
+		}
+		present := refs[:0]
+		for _, r := range refs {
+			if _, ok := confirmed[r.Interface]; ok {
+				present = append(present, r)
+			}
+		}
+		refs = present
+	}
+	if err := s.commands.DNSRoutes.DeleteRoutes(ctx, refs); err != nil && !errors.Is(err, query.ErrNotSupportedOnOS4) {
+		return fmt.Errorf("delete dns-proxy routes of tunnel %s: %w", tunnelID, err)
+	}
+	return nil
+}
+
+// ForgetTunnel убирает удалённый туннель из целей правил — только после
+// успешного удаления туннеля (F609). Туннель был в failover — пересчёт, чтобы
+// fallback-строки встали по оставшимся целям.
+func (s *ServiceImpl) ForgetTunnel(ctx context.Context, tunnelID string) error {
+	failed := s.failover != nil && s.failover.IsFailed(tunnelID)
+	if failed {
 		_ = s.failover.MarkRecovered(tunnelID)
 	}
 
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 
-	data := s.store.GetCached()
+	data := s.store.Draft()
 	if data == nil {
 		return nil
 	}
-
 	changed := false
 	for i := range data.Lists {
-		var kept []RouteTarget
-		for _, rt := range data.Lists[i].Routes {
+		list := &data.Lists[i]
+		kept := []RouteTarget{}
+		for _, rt := range list.Routes {
 			if rt.TunnelID == tunnelID {
 				changed = true
 				continue
 			}
 			kept = append(kept, rt)
 		}
-		if kept == nil {
-			kept = []RouteTarget{}
-		}
-		data.Lists[i].Routes = kept
+		list.Routes = kept
 	}
-
 	if changed {
 		if err := s.store.Save(data); err != nil {
 			return fmt.Errorf("save after tunnel delete cleanup: %w", err)
 		}
 		s.appLog.Info("cleanup-targets", tunnelID, "removed from dns route targets")
 	}
+	if failed {
+		return s.reconcileAll(ctx)
+	}
+	return nil
+}
 
-	return s.reconcileAll(ctx)
+// tunnelRouteRefs — строки dns-proxy route, которые сверка ставит списку
+// list на интерфейс iface (buildTargetState): по одной на группу-кусок.
+func tunnelRouteRefs(list *DomainList, iface string) []command.DNSRouteRef {
+	if !isNDMS(list.Backend) || len(list.Domains)+len(list.Subnets) == 0 {
+		return nil
+	}
+	items, excludes := routedEntries(list)
+	n := len(chunkWithReserve(items, MaxDomainsPerGroup, len(excludes)))
+	refs := make([]command.DNSRouteRef, 0, n)
+	for i := 1; i <= n; i++ {
+		refs = append(refs, command.DNSRouteRef{Group: buildGroupName(ListGroupSlug(list), i), Interface: iface})
+	}
+	return refs
 }
 
 // CleanupAll removes all DNS route objects (AWG_*) from NDMS.
@@ -889,14 +1204,29 @@ func (s *ServiceImpl) resolveRouteInterfaces(ctx context.Context, routes []Route
 	return nil
 }
 
+// checkRouteInterfacesUnique отвергает маршруты, где интерфейс указан дважды.
+// NDMS держит одну строку dns-proxy route на пару (группа, интерфейс): повторная
+// запись лишь обновляет её, и цель сверки никогда не сошлась бы с роутером (F691).
+// Идентичность — разрешённый RouteTarget.Interface, поэтому вызывать после
+// resolveRouteInterfaces.
+func checkRouteInterfacesUnique(routes []RouteTarget) error {
+	seen := make(map[string]bool, len(routes))
+	for _, rt := range routes {
+		if seen[rt.Interface] {
+			return fmt.Errorf("интерфейс %s указан в маршрутах дважды", rt.Interface)
+		}
+		seen[rt.Interface] = true
+	}
+	return nil
+}
+
 // dedup runs domain and subnet deduplication for the given list against all other lists.
 // It modifies list.Domains and list.Subnets in place and sets list.LastDedupeReport.
-func (s *ServiceImpl) dedup(list *DomainList) {
-	data := s.store.GetCached()
-	if data == nil {
-		return
-	}
-
+//
+// data — черновик, в который ляжет list (Store.Draft): индекс строится по
+// нему, а не по кэшу, — списки, уже добавленные тем же CreateBatch, в кэш
+// до записи не попадают, но дубли с ними отсекаются, как прежде.
+func (s *ServiceImpl) dedup(data *StoreData, list *DomainList) {
 	// Build index from all lists except the current one.
 	idx := BuildIndex(data.Lists, list.ID)
 	names := listNameMap(data.Lists)
@@ -978,6 +1308,28 @@ func deduplicateDomains(domains []string) []string {
 // must be preserved for HR Neo's byte-for-byte tag match.
 func isGeoTag(s string) bool {
 	return strings.HasPrefix(s, "geosite:") || strings.HasPrefix(s, "geoip:")
+}
+
+// hasGeoPrefix — geosite:/geoip: в любом регистре. NDMS не принимает
+// geo-теги в object-group fqdn вообще (стенд KN-1810 5.02.B.1, 20.10:
+// status error 101582220 «invalid FQDN or IP address», E в журнале ndm), их
+// понимает только HydraRoute (F700).
+func hasGeoPrefix(s string) bool {
+	l := strings.ToLower(strings.TrimSpace(s))
+	return strings.HasPrefix(l, "geosite:") || strings.HasPrefix(l, "geoip:")
+}
+
+// rejectGeoTags отвергает NDMS-список с geo-тегом в ручных строках или
+// исключениях (после применения ManualText/ExcludesText).
+func rejectGeoTags(list *DomainList) error {
+	for _, entries := range [][]string{list.ManualDomains, list.Excludes, list.ExcludeSubnets} {
+		for _, e := range entries {
+			if hasGeoPrefix(e) {
+				return fmt.Errorf("geo-тег %s не поддерживается NDMS-маршрутизацией", strings.TrimSpace(e))
+			}
+		}
+	}
+	return nil
 }
 
 // subscriptionDomains returns the domains that came from subscriptions (present in

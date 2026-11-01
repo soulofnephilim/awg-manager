@@ -1,3 +1,4 @@
+import { m } from '$lib/i18n';
 import type { DropdownOption } from '$lib/components/ui';
 import type { ServersSnapshot } from '$lib/stores/servers';
 
@@ -50,7 +51,7 @@ export function buildServerPeerDropdownOptions(
   }
 
   for (const s of snap.servers ?? []) {
-    const group = `Системный WG · ${s.description || s.interfaceName}`;
+    const group = m.server_peer_system_group({ name: s.description || s.interfaceName });
     for (const p of s.peers ?? []) {
       if (p.confAvailable !== true) continue;
       opts.push({
@@ -86,7 +87,7 @@ export function buildRunningServerPeerDropdownOptions(
 
 	for (const s of snap.servers ?? []) {
 		if (s.status !== 'up') continue;
-		const group = `Системный WG · ${s.description || s.interfaceName}`;
+		const group = m.server_peer_system_group({ name: s.description || s.interfaceName });
 		for (const p of s.peers ?? []) {
 			const keeneticOnly = p.confAvailable !== true;
 			opts.push({
@@ -109,7 +110,7 @@ export function resolveServerListenPort(
 ): number | null {
 	if (!snap) return null;
 	if (kind === 'managed') {
-		const s = snap.managed?.find((m) => m.interfaceName === serverId);
+		const s = snap.managed?.find((mg) => mg.interfaceName === serverId);
 		return s?.listenPort ?? null;
 	}
 	const s = snap.servers?.find((srv) => srv.id === serverId);
@@ -126,6 +127,18 @@ export interface ConnectServer {
 }
 
 export const hostIP = (raw: string) => raw.replace(/\/\d+$/, '');
+
+/**
+ * Tunnel IP системного пира (CIDR): из записи (`tunnelIP`) у своих; эвристика
+ * «первый /32 в allowedIPs» — только у чужих. С сетями за клиентом (#713) в
+ * allowedIPs больше одного кандидата, угадывать нельзя.
+ */
+export function systemPeerTunnelIP(p: { tunnelIP?: string; allowedIPs?: string[] }): string {
+	if (p.tunnelIP) return p.tunnelIP;
+	const raw = p.allowedIPs?.find((ip) => ip.includes('/32')) || p.allowedIPs?.[0] || '';
+	if (!raw) return '';
+	return raw.includes('/') ? raw : `${raw}/32`;
+}
 
 export function findServerByListenPort(
 	snap: ServersSnapshot | null,
@@ -151,7 +164,8 @@ export function findServerByListenPort(
 		kind: 'system',
 		serverId: s.id,
 		address: hostIP(s.address),
-		peerIPs: (s.peers ?? []).flatMap((p) => (p.allowedIPs ?? []).map(hostIP)),
+		// Сети за клиентом (#713) тоже лежат в allowedIPs — занят только туннельный адрес.
+		peerIPs: (s.peers ?? []).map((p) => hostIP(systemPeerTunnelIP(p))).filter(Boolean),
 	};
 }
 
@@ -170,7 +184,7 @@ export function buildRunningServerDropdownOptions(snap: ServersSnapshot | null):
 		if (s.status !== 'up') continue;
 		opts.push({
 			value: encodeServerPeerValue('system', s.id, ''),
-			label: `Системный WG · ${s.description || s.interfaceName}`,
+			label: m.server_peer_system_group({ name: s.description || s.interfaceName }),
 		});
 	}
 	return opts;

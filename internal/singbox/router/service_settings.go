@@ -2,8 +2,11 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
+	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,7 +36,43 @@ func (s *ServiceImpl) GetSettings(ctx context.Context) (storage.SingboxRouterSet
 	return NormalizeSingboxRouterSettings(settings.SingboxRouter)
 }
 
+var errSettingsChanged = errors.New("sing-box router settings changed concurrently; retry the update")
+
+// UpdateSettingsWith builds a partial edit from the current settings. edit
+// must be pure and must replace slices/maps rather than mutate shared elements.
+// Validation may call other services, so it cannot run under the store lock.
+// A compare-and-swap in updateSettings detects intervening writes; rebuild and
+// validate against the new snapshot before retrying. Bound retries so a busy
+// writer cannot keep an MCP request alive indefinitely.
+func (s *ServiceImpl) UpdateSettingsWith(ctx context.Context, edit func(*storage.SingboxRouterSettings) error) error {
+	for range 3 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		settings, err := s.deps.Settings.Get()
+		if err != nil {
+			return err
+		}
+		before := settings.SingboxRouter
+		sr, err := NormalizeSingboxRouterSettings(before)
+		if err != nil {
+			return err
+		}
+		if err := edit(&sr); err != nil {
+			return err
+		}
+		if err := s.updateSettings(ctx, sr, &before); !errors.Is(err, errSettingsChanged) {
+			return err
+		}
+	}
+	return errSettingsChanged
+}
+
 func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRouterSettings) error {
+	return s.updateSettings(ctx, sr, nil)
+}
+
+func (s *ServiceImpl) updateSettings(ctx context.Context, sr storage.SingboxRouterSettings, before *storage.SingboxRouterSettings) error {
 	normalized, err := NormalizeSingboxRouterSettings(sr)
 	if err != nil {
 		return err
@@ -48,14 +87,58 @@ func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRout
 	if err := s.validateBypassGeoIPTags(normalized); err != nil {
 		return err
 	}
+	// Перехват IPv6 требует ip6tables — в Entware это отдельный пакет. Отказ
+	// здесь, а не молчаливое «включено, но не работает» в журнале. Только на
+	// переходе к IPv6: если он уже включён, а пакет потом удалили, прочие
+	// правки настроек должны оставаться проходимыми.
+	if familyHasV6(normalized.InterceptFamily) {
+		cur, err := s.deps.Settings.Get()
+		if err != nil {
+			return err
+		}
+		if !familyHasV6(cur.SingboxRouter.InterceptFamily) && !ip6tablesAvailable() {
+			return ErrIP6TablesMissing
+		}
+	}
+	// IPv6-подсети в исключениях принимаются, только пока v6-слой работает:
+	// иначе запись сохранилась бы и молча ничего не делала. Проверка здесь, а
+	// не в чистом Normalize: тот зовётся и на чтении, а режим этим PUT не
+	// меняется — судить надо по сохранённому.
+	if len(normalized.BypassExtraSubnets) > 0 {
+		cur, err := s.deps.Settings.Get()
+		if err != nil {
+			return err
+		}
+		next := normalized
+		next.RoutingMode = cur.SingboxRouter.RoutingMode
+		if err := checkV6SubnetsAccepted(next, cur.SingboxRouter); err != nil {
+			return err
+		}
+	}
 	// Персист-окно под transitionMu: см. ErrTransitionInProgress. Reconcile
 	// ниже остаётся ВНЕ окна — он сам берёт transitionMu через TryLock и под
 	// нашим локом молча съел бы тик (мьютекс нерекурсивный).
+	// Сбой переноса настроек в слот не отменяет уже сохранённое и не
+	// пропускает остальные шаги — его возвращаем в конце.
+	var reapplyErr error
 	settings, err := func() (*storage.Settings, error) {
 		if !s.transitionMu.TryLock() {
 			return nil, ErrTransitionInProgress
 		}
 		defer s.transitionMu.Unlock()
+		if before != nil {
+			current, err := s.deps.Settings.Get()
+			if err != nil {
+				return nil, err
+			}
+			// Full settings saves hold transitionMu too. Reject their newer
+			// snapshot before applying a stale cache path: that side effect
+			// can remove cache.db and cannot be undone by the retry's rollback.
+			// Narrow writers can still run, so keep the final CAS below.
+			if !reflect.DeepEqual(current.SingboxRouter, *before) {
+				return nil, errSettingsChanged
+			}
+		}
 		// Проба бинаря — ДО лока стора: на промахе кэша она синхронно щупает
 		// кандидатов, и держать на этом лок стора нельзя. Щупаем ровно там,
 		// где щупал прежний код: только если переход «пусто → непусто»
@@ -89,11 +172,26 @@ func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRout
 			}
 		}
 		if err := s.deps.Settings.Update(func(cur *storage.Settings) error {
+			// Check inside the same store lock as the write, including changes
+			// made by narrow mutators that do not take transitionMu.
+			if before != nil && !reflect.DeepEqual(cur.SingboxRouter, *before) {
+				return errSettingsChanged
+			}
 			// Переход «пусто → непусто» требует живого ipset-бинаря. Только на
 			// переходе: при уже выбранных тегах и сломанном ipset прочие правки
 			// настроек остаются проходимыми.
 			if len(normalized.BypassGeoIPTags) > 0 && len(cur.SingboxRouter.BypassGeoIPTags) == 0 && !ipsetOK {
 				return bypassset.ErrIPSetNotAvailable
+			}
+			// Адрес живого tun не перевыпускается: старый остался бы на
+			// интерфейсе, а drift-heal дописал бы новый рядом. В записи на
+			// диске пусто = дефолт (поле моложе записи).
+			curTun := cur.SingboxRouter.FakeIPTunAddr4
+			if curTun == "" {
+				curTun = DefaultFakeIPTunParams().TunAddr4
+			}
+			if normalized.FakeIPTunAddr4 != curTun && tunAddrLocked(cur) {
+				return ErrTunAddrLocked
 			}
 			// Port-slot stability: the UI contract carries no slot field, so incoming
 			// classes are re-associated with their persisted slots by DSCP before the
@@ -126,7 +224,12 @@ func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRout
 			}
 			return nil, err
 		}
-		return s.deps.Settings.Get()
+		saved, err := s.deps.Settings.Get()
+		if err != nil {
+			return nil, err
+		}
+		reapplyErr = s.reapplyRouterSettings(ctx, saved.SingboxRouter)
+		return saved, nil
 	}()
 	if err != nil {
 		return err
@@ -146,7 +249,34 @@ func (s *ServiceImpl) UpdateSettings(ctx context.Context, sr storage.SingboxRout
 	// снятие пресета молча не доехало бы. Повторный вызов из Reconcile —
 	// no-op (набор уже совпадает).
 	s.syncKeenDNSPreset(ctx, normalized)
-	return s.Reconcile(ctx)
+	return errors.Join(reapplyErr, s.Reconcile(ctx))
+}
+
+// reapplyRouterSettings переносит в применённый 20-router.json включённого
+// tproxy/policy-tun то, чем в нём владеют настройки: выбор WAN (F703) и
+// системные правила со сниффером (F704). Ensure* иначе звучат только на
+// Enable, и сохранённое не доезжало до sing-box до выключения/включения
+// режима. Байт-идентичный результат persistSlotDirect не пишет. Слот ещё не
+// поднят (окно провижининга) — пропуск: всё выставит сам Enable. Зовётся и
+// из Reconcile: долечивает состояние, сохранённое до мгновенного применения.
+func (s *ServiceImpl) reapplyRouterSettings(ctx context.Context, sr storage.SingboxRouterSettings) error {
+	mode := sr.RoutingMode
+	if mode == "" {
+		mode = stateTProxy // legacy-дефолт, как в currentState
+	}
+	if s.deps.Orch == nil || !sr.Enabled || (mode != stateTProxy && mode != statePolicyTun) {
+		return nil
+	}
+	if !s.routerSlotEnabled() {
+		return nil
+	}
+	cfg, err := s.loadAppliedRouterConfig()
+	if err != nil {
+		return err
+	}
+	cfg.EnsureSystemRules(sr.SnifferEnabled)
+	cfg.EnsureRouteWAN(sr.WANAutoDetect, sr.WANInterface)
+	return s.persistConfigDirect(ctx, cfg)
 }
 
 // reapplyFakeIPOverlay перегенерирует fakeip-overlay на ВКЛЮЧЁННОМ и
@@ -187,7 +317,7 @@ func (s *ServiceImpl) validateQoSClassOutbounds(ctx context.Context, classes []s
 		if !c.Enabled {
 			continue
 		}
-		if !s.isKnownOutboundTag(ctx, c.Outbound, cfg) {
+		if !s.isKnownQoSOutbound(ctx, c.Outbound, cfg) {
 			return fmt.Errorf("%w: qosClasses[%d]: неизвестный outbound %q", ErrQoSClassesInvalid, i, c.Outbound)
 		}
 	}
@@ -212,6 +342,15 @@ func NormalizeSingboxRouterSettings(sr storage.SingboxRouterSettings) (storage.S
 	case "policy", "all":
 	default:
 		return sr, fmt.Errorf("deviceMode must be %q or %q, got %q", "policy", "all", sr.DeviceMode)
+	}
+	if sr.InterceptFamily == "" {
+		sr.InterceptFamily = FamilyIPv4Only
+	}
+	switch sr.InterceptFamily {
+	case FamilyIPv4Only, FamilyBoth, FamilyIPv6Only:
+	default:
+		return sr, fmt.Errorf("interceptFamily must be %q, %q or %q, got %q",
+			FamilyIPv4Only, FamilyBoth, FamilyIPv6Only, sr.InterceptFamily)
 	}
 	if sr.RoutingMode == "" {
 		sr.RoutingMode = "tproxy"
@@ -259,6 +398,9 @@ func NormalizeSingboxRouterSettings(sr storage.SingboxRouterSettings) (storage.S
 		}
 	} else {
 		sr.PolicyTunNATSegments = nil
+	}
+	if err := normalizePolicyTunDescription(&sr); err != nil {
+		return sr, err
 	}
 	if err := validateQoSClasses(sr.QoSClasses); err != nil {
 		return sr, err
@@ -313,6 +455,14 @@ func normalizeFakeIPSettings(sr *storage.SingboxRouterSettings) error {
 	}
 	if sr.FakeIPMTU == 0 {
 		sr.FakeIPMTU = def.MTU
+	}
+	if sr.FakeIPTunAddr4 == "" {
+		sr.FakeIPTunAddr4 = def.TunAddr4
+	}
+	// DeriveTunDNS — та же проверка, на которой иначе упало бы включение:
+	// IPv4, /30, адрес хоста.
+	if _, err := DeriveTunDNS(sr.FakeIPTunAddr4); err != nil {
+		return fmt.Errorf("fakeipTunAddr4: %w", err)
 	}
 	// v4 pool must parse as an IPv4 prefix.
 	if p, err := netip.ParsePrefix(sr.FakeIPPool4); err != nil {
@@ -385,45 +535,14 @@ func (s *ServiceImpl) ListBindableInterfaces(ctx context.Context) ([]WANInterfac
 	return s.deps.BindableInterfaces.ListBindable(ctx)
 }
 
-// ListAllBindableInterfaces returns every bindable interface, including those
-// already used by a direct outbound. Subscriptions and manual tunnels may
-// share an interface with a direct outbound, so their picker must offer the
-// same set the bind validator accepts (#709).
-func (s *ServiceImpl) ListAllBindableInterfaces(ctx context.Context) ([]WANInterfaceInfo, error) {
-	if s.deps.BindableInterfaces == nil {
-		return []WANInterfaceInfo{}, nil
-	}
-	return s.deps.BindableInterfaces.ListAllBindable(ctx)
-}
-
-// ListIngressEligibleInterfaces возвращает интерфейсы, пригодные для
-// ingress-scope: bindable минус WAN минус LAN-бриджи (по Type). Для UI
-// router-страницы (мультиселект).
-func (s *ServiceImpl) ListIngressEligibleInterfaces(ctx context.Context) ([]WANInterfaceInfo, error) {
-	bindable, err := s.ListBindableInterfaces(ctx)
-	if err != nil {
-		return nil, err
-	}
-	wan, _ := s.ListWANInterfaces(ctx)
-	wanNames := map[string]bool{}
-	for _, w := range wan {
-		wanNames[w.Name] = true
-	}
-	out := make([]WANInterfaceInfo, 0, len(bindable))
-	for _, i := range bindable {
-		if wanNames[i.Name] || strings.EqualFold(i.Type, "Bridge") {
-			continue
-		}
-		out = append(out, i)
-	}
-	return out, nil
-}
-
 // validateBindInterface ensures name refers to a bindable interface. With
 // no lister wired (tests / minimal deployments) it is permissive.
 func (s *ServiceImpl) validateBindInterface(ctx context.Context, name string) error {
 	if s.deps.BindableInterfaces == nil {
 		return nil
+	}
+	if slices.Contains(s.foreignIfaces(), name) {
+		return nil // отмеченный сторонний — выбор пользователя, даже если его сейчас нет
 	}
 	ifaces, err := s.deps.BindableInterfaces.ListBindable(ctx)
 	if err != nil {
@@ -434,5 +553,15 @@ func (s *ServiceImpl) validateBindInterface(ctx context.Context, name string) er
 			return nil
 		}
 	}
-	return fmt.Errorf("bind_interface %q is not a selectable interface", name)
+	return fmt.Errorf("%w: %q", ErrBindNotSelectable, name)
+}
+
+// foreignIfaces — отметки «Сторонний интерфейс» из настроек; без NDMS.
+// nil при ошибке Settings.Get допустим только потому, что после Load Get
+// отдаёт кэш из памяти и не ошибается; иначе strip вырезал бы выходы.
+func (s *ServiceImpl) foreignIfaces() []string {
+	if s.deps.Settings == nil {
+		return nil
+	}
+	return s.deps.Settings.GetForeignInterfaces()
 }

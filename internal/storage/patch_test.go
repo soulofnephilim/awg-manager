@@ -348,26 +348,6 @@ var nonPatchableSettings = map[string]struct{}{
 	// fakeip/policyTun (легаси-ключи остаются в списке: PATCH не должен уметь
 	// подсунуть их и после миграции).
 	"opkgTun": {},
-	// amneziaPremiumKeyCipher — шифротекст ключа подписки Amnezia Premium,
-	// пишется ТОЛЬКО ручками premium. На общем PATCH он дал бы аутентифи-
-	// цированному клиенту подменить чужой ключ подписки (и затереть свой)
-	// мимо шифрования DeviceCipher — та же логика, что у serverPeerSecrets.
-	"amneziaPremiumKeyCipher": {},
-	// amneziaPremiumMirrorUrl — адрес зеркала Amnezia CP. Секретом он не
-	// является, причина исключения другая: поле принадлежит мастеру premium,
-	// а не странице настроек (решение владельца), и пишется ТОЛЬКО его
-	// ручкой — она же валидирует присланное и лечит испорченное хранимое.
-	// Оставь поле в патче — и появятся ДВЕ записи одного значения с разными
-	// правилами: у второй (общий PATCH) валидации больше нет вовсе, то есть
-	// мусор снова попадал бы в settings.json мимо всякой проверки.
-	"amneziaPremiumMirrorUrl": {},
-	// amneziaPremiumDeclaredCountry — страна подключения для выдачи
-	// конфигурации. Исключено по той же причине, что зеркало: поле
-	// принадлежит мастеру premium и пишется ТОЛЬКО его ручкой, которая
-	// сверяет значение со словарём портала. На общем PATCH появилась бы
-	// вторая запись того же значения без всякой проверки — и выдача уходила
-	// бы в портал с мусором, тратя попытку расходной ручки.
-	"amneziaPremiumDeclaredCountry": {},
 	// managedServers (и легаси-одиночка managedServer) несут приватные ключи
 	// самих серверов и их пиров — тот же ключевой материал, что и
 	// serverPeerSecrets, и хранит его только settings.json. Пишутся они
@@ -380,6 +360,30 @@ var nonPatchableSettings = map[string]struct{}{
 	// тело ответа целиком.
 	"managedServers": {},
 	"managedServer":  {},
+	// obfuscatorKmodTripped/obfuscatorKmodOopsHash — состояние сторожа ядро/
+	// процесс Phobos (§4.9), пишется ТОЛЬКО TripObfuscatorKmod/
+	// ClearObfuscatorKmodTripped/SetObfuscatorKmodOopsHash — та же
+	// single-writer логика, что у fakeip/opkgTun: общий PATCH не должен
+	// уметь подделать причину срабатывания или сбить дедуп по hash.
+	// obfuscatorRelayProcess (сам выключатель) — тоже вне патча: страница шлёт
+	// тело настроек целиком, и устаревшее false с другой вкладки через общий
+	// PATCH снимало бы срабатывание сторожа и возвращало ядро. Пишется ТОЛЬКО
+	// ручкой POST /settings/obfuscator-relay (SetObfuscatorRelayProcess) и
+	// сторожем (TripObfuscatorKmod).
+	"obfuscatorRelayProcess": {},
+	"obfuscatorKmodTripped":  {},
+	"obfuscatorKmodOopsHash": {},
+	// foreignInterfaces (#935) пишется ТОЛЬКО MarkForeignInterface/
+	// UnmarkForeignInterface под семафором пула OpkgTun (spec §4): ручка
+	// проверяет, что номер не занят туннелем, прежде чем отметить его как
+	// сторонний. Общий PATCH дал бы аутентифицированному клиенту обойти эту
+	// проверку границы — та же single-writer логика, что у fakeip/opkgTun.
+	"foreignInterfaces": {},
+	// singboxRouter (F684) пишется ТОЛЬКО ручками роутера (/singbox/router/
+	// settings, /mode, /enable, /disable): на общем PATCH частичный блок
+	// затирал пресеты обхода, пулы FakeIP и QoS, а routingMode/enabled уходили
+	// в персист мимо SwitchRoutingMode.
+	"singboxRouter": {},
 }
 
 // TestSettingsPatch_ExcludesServerSecrets pins the intentional exclusion: a
@@ -435,6 +439,12 @@ func TestSettingsPatchMirrorsSettings(t *testing.T) {
 			t.Errorf("Settings.%s (json:%q) has no corresponding field in SettingsPatch", f.Name, tag)
 			continue
 		}
+		// ApplyPatch ищет поле назначения по Go-имени: с тем же тегом, но
+		// другим именем поле не писалось бы никогда, молча.
+		if patchF.Name != f.Name {
+			t.Errorf("SettingsPatch.%s (json:%q): Go-имя должно совпадать с Settings.%s", patchF.Name, tag, f.Name)
+			continue
+		}
 		if patchF.Type.Kind() != reflect.Pointer {
 			t.Errorf("SettingsPatch.%s (json:%q) must be a pointer, got %s", patchF.Name, tag, patchF.Type)
 			continue
@@ -447,52 +457,68 @@ func TestSettingsPatchMirrorsSettings(t *testing.T) {
 				t.Errorf("SettingsPatch.%s: expected %s, got %s", patchF.Name, f.Type, patchF.Type)
 			}
 		} else {
-			if patchF.Type.Elem() != f.Type {
-				// Nested patch struct is allowed (e.g. LoggingSettingsPatch
-				// for LoggingSettings) as long as both sides are structs.
-				if patchF.Type.Elem().Kind() == reflect.Struct && f.Type.Kind() == reflect.Struct {
-					continue
+			if f.Type.Kind() == reflect.Struct {
+				// Блок-структура — только через свой patch-тип (F684):
+				// *XxxSettings ApplyPatch присваивает целиком, и опущенные
+				// поля обнуляются. Полноту patch-типа сторожит
+				// TestBlockPatchesMirrorBlocks.
+				if _, ok := blockPatches[patchF.Type.Elem()]; !ok {
+					t.Errorf("SettingsPatch.%s: блок %s должен патчиться своим patch-типом из blockPatches, а не %s", patchF.Name, f.Type, patchF.Type)
 				}
+				continue
+			}
+			if patchF.Type.Elem() != f.Type {
 				t.Errorf("SettingsPatch.%s: expected *%s, got %s", patchF.Name, f.Type, patchF.Type)
 			}
 		}
 	}
 }
 
-func TestLoggingSettingsPatchMirrorsLoggingSettings(t *testing.T) {
-	loggingT := reflect.TypeOf(LoggingSettings{})
-	patchT := reflect.TypeOf(LoggingSettingsPatch{})
+// blockPatches — patch-тип блока → сам блок. Каждый блок-структура
+// SettingsPatch обязан быть здесь (TestSettingsPatchMirrorsSettings).
+var blockPatches = map[reflect.Type]reflect.Type{
+	reflect.TypeOf(LoggingSettingsPatch{}):   reflect.TypeOf(LoggingSettings{}),
+	reflect.TypeOf(DownloadSettingsPatch{}):  reflect.TypeOf(DownloadSettings{}),
+	reflect.TypeOf(ServerSettingsPatch{}):    reflect.TypeOf(ServerSettings{}),
+	reflect.TypeOf(PingCheckSettingsPatch{}): reflect.TypeOf(PingCheckSettings{}),
+	reflect.TypeOf(PingCheckDefaultsPatch{}): reflect.TypeOf(PingCheckDefaults{}),
+	reflect.TypeOf(UpdateSettingsPatch{}):    reflect.TypeOf(UpdateSettings{}),
+	reflect.TypeOf(DNSRouteSettingsPatch{}):  reflect.TypeOf(DNSRouteSettings{}),
+	reflect.TypeOf(GeoFileSettingsPatch{}):   reflect.TypeOf(GeoFileSettings{}),
+}
 
-	patchByTag := map[string]reflect.StructField{}
-	for i := 0; i < patchT.NumField(); i++ {
-		f := patchT.Field(i)
-		tag := strings.Split(f.Tag.Get("json"), ",")[0]
-		if tag == "" || tag == "-" {
-			continue
+// TestBlockPatchesMirrorBlocks — у каждого поля блока есть указатель в его
+// patch-типе с тем же json-тегом (вложенный блок — своим patch-типом из
+// blockPatches): поле без пары патчем не пишется вовсе.
+func TestBlockPatchesMirrorBlocks(t *testing.T) {
+	for patchT, blockT := range blockPatches {
+		patchByTag := map[string]reflect.StructField{}
+		for i := 0; i < patchT.NumField(); i++ {
+			f := patchT.Field(i)
+			patchByTag[strings.Split(f.Tag.Get("json"), ",")[0]] = f
 		}
-		patchByTag[tag] = f
-	}
-
-	for i := 0; i < loggingT.NumField(); i++ {
-		f := loggingT.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		tag := strings.Split(f.Tag.Get("json"), ",")[0]
-		if tag == "" || tag == "-" {
-			continue
-		}
-		patchF, ok := patchByTag[tag]
-		if !ok {
-			t.Errorf("LoggingSettings.%s (json:%q) has no corresponding field in LoggingSettingsPatch", f.Name, tag)
-			continue
-		}
-		if patchF.Type.Kind() != reflect.Pointer {
-			t.Errorf("LoggingSettingsPatch.%s (json:%q) must be a pointer, got %s", patchF.Name, tag, patchF.Type)
-			continue
-		}
-		if patchF.Type.Elem() != f.Type {
-			t.Errorf("LoggingSettingsPatch.%s: expected *%s, got %s", patchF.Name, f.Type, patchF.Type)
+		for i := 0; i < blockT.NumField(); i++ {
+			f := blockT.Field(i)
+			tag := strings.Split(f.Tag.Get("json"), ",")[0]
+			if !f.IsExported() || tag == "" || tag == "-" {
+				continue
+			}
+			patchF, ok := patchByTag[tag]
+			switch {
+			case !ok:
+				t.Errorf("%s.%s (json:%q) нет в %s", blockT.Name(), f.Name, tag, patchT.Name())
+			case patchF.Name != f.Name:
+				// ApplyPatch ищет поле по Go-имени — иначе поле не пишется, молча.
+				t.Errorf("%s.%s (json:%q): Go-имя должно совпадать с %s.%s", patchT.Name(), patchF.Name, tag, blockT.Name(), f.Name)
+			case patchF.Type.Kind() != reflect.Pointer:
+				t.Errorf("%s.%s должен быть указателем, а не %s", patchT.Name(), patchF.Name, patchF.Type)
+			case f.Type.Kind() == reflect.Struct:
+				if blockPatches[patchF.Type.Elem()] != f.Type {
+					t.Errorf("%s.%s: вложенный блок %s — своим patch-типом, а не %s", patchT.Name(), patchF.Name, f.Type, patchF.Type)
+				}
+			case patchF.Type.Elem() != f.Type:
+				t.Errorf("%s.%s: ожидался *%s, а не %s", patchT.Name(), patchF.Name, f.Type, patchF.Type)
+			}
 		}
 	}
 }

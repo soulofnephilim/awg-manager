@@ -48,6 +48,11 @@ func NewSubscriptionHandler(svc *subscription.Service, presence SingboxPresenceP
 	}
 }
 
+// Service exposes the subscription service so other wiring (the MCP
+// adapter) works against the same instance the HTTP handlers use: a
+// second one would have its own locks and reload sing-box on its own.
+func (h *SubscriptionHandler) Service() *subscription.Service { return h.svc }
+
 // SetNDMSProxyToggler wires the global NDMS Proxy flag reader. When wired
 // and the flag is false, DTO converters surface proxyIndex=-1 so the UI
 // (and any other API consumer) sees that the composite NDMS Proxy is
@@ -63,6 +68,12 @@ func (h *SubscriptionHandler) SetOutboundRefCheckers(dp tunnelservice.DeviceProx
 	h.routerRefs = r
 }
 
+// OutboundRefCheckers returns the guards SetOutboundRefCheckers wired, for
+// MCP to refuse the same deletions.
+func (h *SubscriptionHandler) OutboundRefCheckers() (tunnelservice.DeviceProxyRefChecker, tunnelservice.RouterRefChecker) {
+	return h.deviceProxyRefs, h.routerRefs
+}
+
 // ndmsProxyEnabled reads the toggler; defaults to true when the toggler
 // is not wired (tests, legacy bootstrap paths).
 func (h *SubscriptionHandler) ndmsProxyEnabled() bool {
@@ -72,49 +83,49 @@ func (h *SubscriptionHandler) ndmsProxyEnabled() bool {
 	return h.settings.IsSingboxNDMSProxyEnabled()
 }
 
-// respondServiceError routes a subscription.Service mutation error to
-// the appropriate HTTP status. subscription.ErrValidation (Pass-2 sing-
-// box check rejected the merged config) → 422 VALIDATION_FAILED so the
-// frontend can surface a "your subscription has invalid outbound(s)"
-// banner instead of a generic 500. Other errors fall through to 500.
+// respondServiceError отвечает на ошибку мутации subscription.Service по
+// таблице subscriptionErrorStatus: ошибки клиента (фильтр, ввод, проверка
+// sing-box — 422, состав членов — 409, член не найден — 404, путь вне
+// разрешённых) — 4xx со своим кодом, прочее — 500.
+//
+// Ошибки клиента — Debug: ответ пользователь уже видит в UI, а Warn всегда
+// видим и содержит свободный ввод (не сворачивается коалесцером). Warn —
+// только для внутренних сбоев. Признак «внутренняя» выводится из той же
+// таблицы, а не отдельным списком: два списка расходились бы (F430).
 func (h *SubscriptionHandler) respondServiceError(w http.ResponseWriter, action string, err error) {
-	// Ошибки клиента (4xx: валидация, фильтры, not-found) — Debug: ответ
-	// пользователь уже видит в UI, а Warn всегда видим и содержит
-	// свободный ввод (не сворачивается коалесцером). Warn — только для
-	// внутренних сбоев (default → 500).
-	var filterErr *subscription.FilterError
-	isInternal := !errors.As(err, &filterErr) &&
-		!errors.Is(err, subscription.ErrInvalidInput) &&
-		!errors.Is(err, subscription.ErrValidation) &&
-		!errors.Is(err, subscription.ErrExcludeOnInline) &&
-		!errors.Is(err, subscription.ErrAllMembersExcluded) &&
-		!errors.Is(err, subscription.ErrAllMembersFiltered) &&
-		!errors.Is(err, subscription.ErrMemberNotFound) &&
-		!errors.Is(err, sysfiles.ErrPathDenied)
-	if isInternal {
+	status, code := subscriptionErrorStatus(err)
+	if status >= http.StatusInternalServerError {
 		h.log.Warn(action, "", err.Error())
-	} else {
-		h.log.Debug(action, "", err.Error())
+		response.InternalError(w, err.Error())
+		return
 	}
+	h.log.Debug(action, "", err.Error())
+	response.ErrorWithStatus(w, status, err.Error(), code)
+}
+
+// subscriptionErrorStatus — HTTP-статус и код ответа на ошибку службы
+// подписок; 500 без кода — внутренний сбой.
+func subscriptionErrorStatus(err error) (int, string) {
+	var filterErr *subscription.FilterError
 	switch {
 	case errors.As(err, &filterErr):
-		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
+		return http.StatusBadRequest, "INVALID_FILTER"
 	case errors.Is(err, subscription.ErrInvalidInput):
-		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "INVALID_INPUT")
+		return http.StatusBadRequest, "INVALID_INPUT"
 	case errors.Is(err, subscription.ErrValidation):
-		response.ErrorWithStatus(w, http.StatusUnprocessableEntity, err.Error(), "VALIDATION_FAILED")
+		return http.StatusUnprocessableEntity, "VALIDATION_FAILED"
 	case errors.Is(err, subscription.ErrExcludeOnInline):
-		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "EXCLUDE_ON_INLINE")
+		return http.StatusBadRequest, "EXCLUDE_ON_INLINE"
 	case errors.Is(err, subscription.ErrAllMembersExcluded):
-		response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "ALL_MEMBERS_EXCLUDED")
+		return http.StatusConflict, "ALL_MEMBERS_EXCLUDED"
 	case errors.Is(err, subscription.ErrAllMembersFiltered):
-		response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "ALL_MEMBERS_FILTERED")
+		return http.StatusConflict, "ALL_MEMBERS_FILTERED"
 	case errors.Is(err, subscription.ErrMemberNotFound):
-		response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "MEMBER_NOT_FOUND")
+		return http.StatusNotFound, "MEMBER_NOT_FOUND"
 	case errors.Is(err, sysfiles.ErrPathDenied):
-		response.ErrorWithStatus(w, http.StatusBadRequest, err.Error(), "PATH_DENIED")
+		return http.StatusBadRequest, "PATH_DENIED"
 	default:
-		response.InternalError(w, err.Error())
+		return http.StatusInternalServerError, ""
 	}
 }
 
@@ -322,12 +333,9 @@ func (h *SubscriptionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		if sub.Label != "" {
 			label = sub.Label
 		}
-		tags := make([]string, 0, 1+len(sub.MemberTags))
-		if sub.SelectorTag != "" {
-			tags = append(tags, sub.SelectorTag)
-		}
-		tags = append(tags, sub.MemberTags...)
-		if err := tunnelservice.CheckOutboundTagsReferenced(id, tags, h.deviceProxyRefs, h.routerRefs); err != nil {
+		// Все outbound'ы подписки в слоте, а не только группа и члены: сироты
+		// и исключённые остаются там именно из-за ссылок (F761).
+		if err := tunnelservice.CheckOutboundTagsReferenced(id, h.svc.OwnedOutboundTags(sub), h.deviceProxyRefs, h.routerRefs); err != nil {
 			var refErr tunnelservice.ErrTunnelReferenced
 			if errors.As(err, &refErr) {
 				h.log.Info("subscription-delete", id, "Refused: "+refErr.Error())

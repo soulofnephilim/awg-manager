@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { Toggle, Button } from '$lib/components/ui';
 	import type { Settings } from '$lib/types';
 
@@ -6,18 +7,23 @@
 		settings: Settings;
 		saving: boolean;
 		onToggle: (enabled: boolean) => void;
-		onSave: () => void;
+		onSave: (dnsRoute: Settings['dnsRoute']) => void | Promise<void>;
 	}
 
 	let {
-		settings = $bindable(),
+		settings,
 		saving,
 		onToggle,
 		onSave,
 	}: Props = $props();
 
+	// Поля формы — локальная копия сохранённых значений: начальное значение
+	// берётся один раз, дальше их держит в синхроне syncFromSettings().
+	// svelte-ignore state_referenced_locally
 	let localMode = $state(settings.dnsRoute.refreshMode || 'interval');
+	// svelte-ignore state_referenced_locally
 	let localInterval = $state(settings.dnsRoute.refreshIntervalHours || 6);
+	// svelte-ignore state_referenced_locally
 	let localDailyTime = $state(settings.dnsRoute.refreshDailyTime || '03:00');
 
 	let savedMode = $derived(settings.dnsRoute.refreshMode || 'interval');
@@ -30,53 +36,51 @@
 		(localMode === 'daily' && localDailyTime !== savedDailyTime)
 	);
 
-	$effect(() => {
+	function syncFromSettings() {
 		if (savedInterval > 0) {
 			localInterval = savedInterval;
 		}
-	});
-
-	$effect(() => {
 		localMode = savedMode;
-	});
-
-	$effect(() => {
 		localDailyTime = savedDailyTime;
-	});
+	}
+	$effect(syncFromSettings);
 
-	function handleSave() {
-		settings.dnsRoute.refreshMode = localMode;
-		if (localMode === 'interval') {
-			settings.dnsRoute.refreshIntervalHours = localInterval;
-		} else {
-			settings.dnsRoute.refreshDailyTime = localDailyTime;
-		}
-		onSave();
+	// `settings` is not touched until the page saves it: after a failed save the
+	// controls fall back to the last saved values instead of the rejected ones.
+	async function handleSave() {
+		await onSave({
+			...settings.dnsRoute,
+			refreshMode: localMode,
+			...(localMode === 'interval'
+				? { refreshIntervalHours: localInterval }
+				: { refreshDailyTime: localDailyTime }),
+		});
+		syncFromSettings();
 	}
 </script>
 
 <div class="setting-row dns-header-row">
 	<div class="flex flex-col gap-1">
-		<span class="font-medium">Автообновление подписок DNS</span>
+		<span class="font-medium">{m.settings_dnsroute_auto_label()}</span>
 		<span class="setting-description">
-			Периодически обновлять списки доменов из подписок DNS-маршрутизации.
+			{m.settings_dnsroute_auto_description()}
 		</span>
 	</div>
-	<Toggle checked={settings.dnsRoute.autoRefreshEnabled} onchange={onToggle} disabled={saving} />
+	<Toggle checked={settings.dnsRoute.autoRefreshEnabled} controlled onchange={onToggle} disabled={saving} />
 </div>
 
 {#if settings.dnsRoute.autoRefreshEnabled}
 	<div class="settings-panel">
 		<!-- svelte-ignore a11y_label_has_associated_control -->
-		<label class="form-label">Режим обновления:</label>
+		<label class="form-label">{m.settings_dnsroute_mode_label()}</label>
 		<div class="mode-options">
 			<label class="mode-option">
 				<input type="radio" value="interval" bind:group={localMode} disabled={saving} />
-				<span>каждые N часов</span>
+				<span>{m.settings_dnsroute_mode_interval()}</span>
 			</label>
 			<label class="mode-option">
 				<input type="radio" value="daily" bind:group={localMode} disabled={saving} />
-				<span>ежедневно</span>
+				<span>{m.settings_dnsroute_mode_daily()}</span>
 			</label>
 		</div>
 
@@ -91,7 +95,7 @@
 						max="48"
 						disabled={saving}
 					/>
-					<span class="input-suffix">ч.</span>
+					<span class="input-suffix">{m.settings_dnsroute_hours_suffix()}</span>
 				</div>
 				{#if settingsChanged}
 					<Button
@@ -100,11 +104,11 @@
 						onclick={handleSave}
 						loading={saving}
 					>
-						{saving ? 'Сохранение...' : 'Сохранить'}
+						{saving ? m.common_saving() : m.common_save()}
 					</Button>
 				{/if}
 			</div>
-			<p class="form-hint">Рекомендуется от 6 до 24 часов</p>
+			<p class="form-hint">{m.settings_dnsroute_interval_hint()}</p>
 		{/if}
 
 		{#if localMode === 'daily'}
@@ -122,11 +126,11 @@
 						onclick={handleSave}
 						loading={saving}
 					>
-						{saving ? 'Сохранение...' : 'Сохранить'}
+						{saving ? m.common_saving() : m.common_save()}
 					</Button>
 				{/if}
 			</div>
-			<p class="form-hint">Локальное время роутера</p>
+			<p class="form-hint">{m.settings_dnsroute_daily_hint()}</p>
 		{/if}
 	</div>
 {/if}

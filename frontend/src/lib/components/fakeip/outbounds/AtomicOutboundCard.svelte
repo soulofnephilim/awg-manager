@@ -25,6 +25,7 @@
 <script lang="ts">
 	import { Gauge, ArrowUpRight } from 'lucide-svelte';
 	import type { AtomicEgress } from './atomicEgress';
+	import { m } from '$lib/i18n';
 	import { delayHealth, formatDelay } from './formatDelay';
 
 	interface Props {
@@ -54,10 +55,10 @@
 	);
 	const manageLabel = $derived(
 		egress.source === 'subscription'
-			? 'Открыть подписку'
+			? m.fakeip_outbounds_atomic_open_subscription()
 			: egress.source === 'tunnel'
-				? 'Открыть туннель'
-				: 'Открыть Туннели',
+				? m.fakeip_outbounds_atomic_open_tunnel()
+				: m.fakeip_outbounds_atomic_open_tunnels(),
 	);
 </script>
 
@@ -93,14 +94,20 @@
 	{/if}
 
 	<div class="lat">
-		<span class="lat-label"
-			>задержка
+		<button
+			type="button"
+			class="lat-btn"
+			disabled={!live || testing}
+			onclick={() => onTest(egress.tag)}
+			title={live ? m.fakeip_outbounds_test_member({ name: egress.name }) : undefined}
+		>
+			<span class="lat-label">{m.fakeip_outbounds_atomic_delay()}</span>
 			{#if hasDelay}
 				<span class="ms" data-health={health}>{formatDelay(delay)}</span>
 			{:else}
 				<span class="ms" data-health="muted">—</span>
 			{/if}
-		</span>
+		</button>
 		<button
 			type="button"
 			class="test"
@@ -108,7 +115,7 @@
 			onclick={() => onTest(egress.tag)}
 		>
 			<Gauge size={13} aria-hidden="true" />
-			{testing ? 'тест…' : 'тест'}
+			{testing ? m.fakeip_outbounds_testing() : m.fakeip_outbounds_atomic_test()}
 		</button>
 	</div>
 </div>
@@ -221,6 +228,28 @@
 		padding-top: 0.5625rem;
 		font-size: 0.8125rem;
 		color: var(--text-secondary);
+	}
+
+	.lat-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		background: transparent;
+		border: 0;
+		padding: 2px 4px;
+		margin: -2px -4px;
+		border-radius: var(--radius-sm);
+		font: inherit;
+		color: inherit;
+		cursor: pointer;
+		text-align: left;
+		transition: background-color 0.12s ease;
+	}
+	.lat-btn:hover:not(:disabled) {
+		background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+	}
+	.lat-btn:disabled {
+		cursor: default;
 	}
 
 	.ms {

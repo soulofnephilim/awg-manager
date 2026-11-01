@@ -2,10 +2,9 @@ package routerinfo
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"regexp"
 	"runtime"
@@ -14,16 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
-	"github.com/hoaxisr/awg-manager/internal/sys/appver"
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 )
 
-var (
-	rciGetJSONFunc  = rciGetJSON
-	rciGetRawFunc   = rciGetRaw
-	statfsUsageFunc = statfsUsage
-)
+var statfsUsageFunc = statfsUsage
+
+// rciTimeout — потолок на все чтения RCI одного Collect (идут параллельно).
+const rciTimeout = 1500 * time.Millisecond
 
 // RouterDetails contains extended router metadata derived from NDMS/RCI and local procfs.
 type RouterDetails struct {
@@ -71,10 +68,6 @@ type rciVersionWire struct {
 	} `json:"ndw"`
 }
 
-type rciInterfaceTempWire map[string]struct {
-	Temperature int `json:"temperature"`
-}
-
 type rciOpkgDiskWire struct {
 	Disk string `json:"disk"`
 }
@@ -90,7 +83,12 @@ type rciLSRootWire struct {
 }
 
 // Collect gathers all router details from NDMS, RCI, and local procfs.
-func Collect() *RouterDetails {
+// ifaces — снимок общего списка интерфейсов (InterfaceStore): температура
+// радио берётся из него, своего полного списка routerinfo не читает (F580).
+// nil — температуры нет, как при сбое чтения.
+// rci — общий клиент RCI (семафор, журнал, код отказа в ошибке); своего
+// HTTP-клиента у пакета нет.
+func Collect(ctx context.Context, rci query.Getter, ifaces *query.Snapshot) *RouterDetails {
 	ver := ndmsinfo.Get()
 	if ver == nil {
 		return nil
@@ -103,41 +101,35 @@ func Collect() *RouterDetails {
 		FirmwareTitle:   strings.TrimSpace(ver.Title),
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, rciTimeout)
+	defer cancel()
+
 	// Run all RCI HTTP calls in parallel to avoid sequential 1500ms timeouts.
 	var (
 		rciVer     *rciVersionWire
-		wifi24     int
-		wifi5      int
 		opkgStore  string
 		meshMember []string
 		wg         sync.WaitGroup
 		mu         sync.Mutex
 	)
-	wg.Add(4)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		v := fetchRCIVersion()
+		v := fetchRCIVersion(ctx, rci)
 		mu.Lock()
 		rciVer = v
 		mu.Unlock()
 	}()
 	go func() {
 		defer wg.Done()
-		w24, w5 := fetchWiFiTemps()
-		mu.Lock()
-		wifi24, wifi5 = w24, w5
-		mu.Unlock()
-	}()
-	go func() {
-		defer wg.Done()
-		s := fetchOPKGStorage()
+		s := fetchOPKGStorage(ctx, rci)
 		mu.Lock()
 		opkgStore = s
 		mu.Unlock()
 	}()
 	go func() {
 		defer wg.Done()
-		m := fetchMeshMembers()
+		m := fetchMeshMembers(ctx, rci)
 		mu.Lock()
 		meshMember = m
 		mu.Unlock()
@@ -193,7 +185,7 @@ func Collect() *RouterDetails {
 	out.ModelDisplay, out.PortedBuild = buildModelDisplay(out.Model)
 	out.CPUModel = detectCPUModel()
 	out.CPUTempC = readThermalZoneC("/sys/devices/virtual/thermal/thermal_zone0/temp")
-	out.WiFi24TempC, out.WiFi5TempC = wifi24, wifi5
+	out.WiFi24TempC, out.WiFi5TempC = wifiTemp(ifaces, "WifiMaster0"), wifiTemp(ifaces, "WifiMaster1")
 	out.MemoryUsedMB, out.MemoryTotalMB, out.MemoryUsedPercent = readMemUsage()
 	out.UptimeHuman = formatUptime(readUptimeSeconds())
 	out.LoadAverage = readLoadAverage()
@@ -204,52 +196,12 @@ func Collect() *RouterDetails {
 	return out
 }
 
-func fetchRCIVersion() *rciVersionWire {
+func fetchRCIVersion(ctx context.Context, rci query.Getter) *rciVersionWire {
 	var v rciVersionWire
-	if err := rciGetJSON("/show/version", &v); err != nil {
+	if err := rci.Get(ctx, "/show/version", &v); err != nil {
 		return nil
 	}
 	return &v
-}
-
-func rciGetJSON(path string, dst any) error {
-	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: transport.SharedTransport()}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:79/rci"+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", appver.UA())
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(body, dst)
-}
-
-func rciGetRaw(path string) ([]byte, error) {
-	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: transport.SharedTransport()}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:79/rci"+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", appver.UA())
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
 }
 
 func buildModelDisplay(model string) (string, bool) {
@@ -338,12 +290,23 @@ func detectArchitecture(fallback string) string {
 	return runtime.GOARCH
 }
 
-func fetchWiFiTemps() (int, int) {
-	var payload rciInterfaceTempWire
-	if err := rciGetJSON("/show/interface", &payload); err != nil {
-		return 0, 0
+// wifiTemp — поле temperature записи name из снимка списка; нет снимка или
+// записи — 0.
+func wifiTemp(ifaces *query.Snapshot, name string) int {
+	if ifaces == nil {
+		return 0
 	}
-	return payload["WifiMaster0"].Temperature, payload["WifiMaster1"].Temperature
+	raw, ok := ifaces.Raw(name)
+	if !ok {
+		return 0
+	}
+	var rec struct {
+		Temperature int `json:"temperature"`
+	}
+	if json.Unmarshal(raw, &rec) != nil {
+		return 0
+	}
+	return rec.Temperature
 }
 
 func readThermalZoneC(path string) int {
@@ -429,16 +392,16 @@ func readLoadAverage() string {
 	return strings.Join(f[:3], ", ")
 }
 
-func fetchOPKGStorage() string {
-	if s := fetchOPKGStorageFromRCI(); s != "" {
+func fetchOPKGStorage(ctx context.Context, rci query.Getter) string {
+	if s := fetchOPKGStorageFromRCI(ctx, rci); s != "" {
 		return s
 	}
 	return fetchStorageByPath("/opt")
 }
 
-func fetchOPKGStorageFromRCI() string {
+func fetchOPKGStorageFromRCI(ctx context.Context, rci query.Getter) string {
 	var disk rciOpkgDiskWire
-	if err := rciGetJSONFunc("/show/sc/opkg/disk", &disk); err != nil {
+	if err := rci.Get(ctx, "/show/sc/opkg/disk", &disk); err != nil {
 		return ""
 	}
 	rawLabel := strings.TrimSpace(disk.Disk)
@@ -470,7 +433,7 @@ func fetchOPKGStorageFromRCI() string {
 		return ""
 	}
 
-	raw, err := rciGetRawFunc("/ls")
+	raw, err := rci.GetRaw(ctx, "/ls")
 	if err != nil {
 		return ""
 	}
@@ -606,9 +569,9 @@ func formatBytesPair(used, total int64) string {
 	return fmt.Sprintf("%d MB / %d MB", usedMB, totalMB)
 }
 
-func fetchMeshMembers() []string {
+func fetchMeshMembers(ctx context.Context, rci query.Getter) []string {
 	var members []map[string]any
-	if err := rciGetJSON("/show/mws/member", &members); err != nil {
+	if err := rci.Get(ctx, "/show/mws/member", &members); err != nil {
 		return nil
 	}
 	out := make([]string, 0, len(members))

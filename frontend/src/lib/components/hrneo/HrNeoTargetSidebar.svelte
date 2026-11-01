@@ -4,9 +4,13 @@
 	export interface TargetEntry {
 		name: string;
 		kind: 'policy' | 'interface';
+		/** TunnelID цели interface-правила (у системных — system:<id>, F498). */
+		tunnelId?: string;
 		ruleCount: number;
 		displayName?: string;
 		broken?: boolean;
+		/** Цель только из PolicyOrder, групп нет (правило HRweb без групп). */
+		empty?: boolean;
 	}
 
 	export type SidebarSelection =
@@ -20,6 +24,7 @@
 	import { usageLevel } from '$lib/stores/settings';
 	import { isRoutingSubTabVisible } from '$lib/types/usageLevel';
 	import { ChevronUp, ChevronDown } from 'lucide-svelte';
+	import { m } from '$lib/i18n';
 
 	interface Props {
 		targets: TargetEntry[];
@@ -71,7 +76,7 @@
 		<div class="section-label">Targets</div>
 
 		{#if targets.length === 0}
-			<div class="empty-hint">Пока нет правил</div>
+			<div class="empty-hint">{m.hrneo_sidebar_no_rules()}</div>
 		{/if}
 
 		{#each targets as t, i (t.name)}
@@ -83,6 +88,8 @@
 				class:broken={t.broken}
 				onclick={() => onselect({ type: 'target', name: t.name })}
 				onkeydown={(e) => {
+					// Enter/пробел на кнопках «вверх/вниз» — их нажатие, а не выбор строки.
+					if (e.target !== e.currentTarget) return;
 					if (e.key === 'Enter' || e.key === ' ') {
 						e.preventDefault();
 						onselect({ type: 'target', name: t.name });
@@ -98,6 +105,7 @@
 					<div class="row-meta">
 						<span class="kind kind-{t.kind}">{t.kind}</span>
 						<span class="count">{t.ruleCount}</span>
+						{#if t.empty}<span class="empty-badge">{m.hrneo_sidebar_no_groups()}</span>{/if}
 					</div>
 				</div>
 				<div class="row-arrows">
@@ -129,11 +137,11 @@
 			</div>
 		{/each}
 
-		<button type="button" class="add-row" onclick={onnewrule}>+ Новое правило</button>
+		<button type="button" class="add-row" onclick={onnewrule}>{m.hrneo_tab_new_rule()}</button>
 	</div>
 
 	<div class="sidebar-section">
-		<div class="section-label">Служебное</div>
+		<div class="section-label">{m.hrneo_sidebar_service()}</div>
 
 		{#if showGeodataLink}
 		<div
@@ -149,7 +157,7 @@
 			}}
 		>
 			<div class="row-body">
-				<div class="row-title">Гео-данные</div>
+				<div class="row-title">{m.hrneo_sidebar_geodata()}</div>
 				<div class="row-meta">
 					<span class="kind kind-policy">geosite {geoSiteCount}</span>
 					<span class="kind kind-interface">geoip {geoIPCount}</span>
@@ -173,7 +181,7 @@
 			}}
 		>
 			<div class="row-body">
-				<div class="row-title">Настройки демона</div>
+				<div class="row-title">{m.hrneo_sidebar_daemon_settings()}</div>
 			</div>
 		</div>
 
@@ -192,7 +200,7 @@
 				}}
 			>
 				<div class="row-body">
-					<div class="row-title">Отключённые теги</div>
+					<div class="row-title">{m.hrneo_sidebar_disabled_tags()}</div>
 					<div class="row-meta">
 						<span class="kind kind-warn">{oversizedCount}</span>
 					</div>
@@ -321,6 +329,12 @@
 
 	.count {
 		color: var(--text-muted);
+	}
+
+	.empty-badge {
+		color: var(--text-muted);
+		font-size: 0.6875rem;
+		font-style: italic;
 	}
 
 	.row-arrows {

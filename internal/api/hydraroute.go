@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/downloader"
 	"github.com/hoaxisr/awg-manager/internal/events"
@@ -29,6 +31,7 @@ type HydraRouteConfigData struct {
 	GeoIPFiles         []string `json:"geoIPFiles" example:"/opt/etc/hrneo/geoip.db"`
 	GeoSiteFiles       []string `json:"geoSiteFiles" example:"/opt/etc/hrneo/geosite.db"`
 	PolicyOrder        []string `json:"policyOrder" example:"default"`
+	HRRevision         string   `json:"hrRevision" example:"3f2a9c0d1b7e"`
 }
 
 // HydraRouteConfigResponse is the envelope for GET /hydraroute/config.
@@ -232,13 +235,62 @@ func (h *HydraRouteHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.Success(w, cfg)
+	rev, err := h.svc.RulesRevision()
+	if err != nil {
+		response.Error(w, err.Error(), "CONFIG_READ_ERROR")
+		return
+	}
+	// Ревизия файлов правил нужна пустой цели (§3 спеки F629): у неё нет
+	// групп, из id которых её можно взять.
+	response.Success(w, struct {
+		*hydraroute.Config
+		HRRevision string `json:"hrRevision"`
+	}{cfg, rev})
 }
 
-// UpdateConfig writes the HydraRoute config.
+// hydraRouteConfigPatch — поля hrneo.conf, правимые из веба; nil — поле не
+// прислали, в файле остаётся своё. Вкладка настроек держит снимок с момента
+// открытия, и запись целиком откатывала то, что поменяли за это время:
+// порядок политик (SetPolicyOrder) и правки MCP (F728). PolicyOrder и списки
+// geo-файлов этой ручкой не меняются — их пишут SetPolicyOrder и сервис.
+type hydraRouteConfigPatch struct {
+	AutoStart          *bool   `json:"autoStart"`
+	ClearIPSet         *bool   `json:"clearIPSet"`
+	CIDR               *bool   `json:"cidr"`
+	IpsetEnableTimeout *bool   `json:"ipsetEnableTimeout"`
+	IpsetTimeout       *int    `json:"ipsetTimeout"`
+	IpsetMaxElem       *int    `json:"ipsetMaxElem"`
+	DirectRouteEnabled *bool   `json:"directRouteEnabled"`
+	GlobalRouting      *bool   `json:"globalRouting"`
+	ConntrackFlush     *bool   `json:"conntrackFlush"`
+	Log                *string `json:"log"`
+	LogFile            *string `json:"logFile"`
+}
+
+func (p hydraRouteConfigPatch) apply(c *hydraroute.Config) {
+	assignSent(&c.AutoStart, p.AutoStart)
+	assignSent(&c.ClearIPSet, p.ClearIPSet)
+	assignSent(&c.CIDR, p.CIDR)
+	assignSent(&c.IpsetEnableTimeout, p.IpsetEnableTimeout)
+	assignSent(&c.IpsetTimeout, p.IpsetTimeout)
+	assignSent(&c.IpsetMaxElem, p.IpsetMaxElem)
+	assignSent(&c.DirectRouteEnabled, p.DirectRouteEnabled)
+	assignSent(&c.GlobalRouting, p.GlobalRouting)
+	assignSent(&c.ConntrackFlush, p.ConntrackFlush)
+	assignSent(&c.Log, p.Log)
+	assignSent(&c.LogFile, p.LogFile)
+}
+
+func assignSent[T any](dst, sent *T) {
+	if sent != nil {
+		*dst = *sent
+	}
+}
+
+// UpdateConfig changes the HydraRoute config fields present in the body.
 //
 //	@Summary		Update HydraRoute config
-//	@Description	Persists the HydraRoute (HrNeo) config and schedules a neo restart. The cached status becomes stale and is invalidated via SSE.
+//	@Description	Changes the HydraRoute (HrNeo) config fields present in the body (others keep their values; policyOrder and geo file lists are not changed here) and schedules a neo restart. The cached status becomes stale and is invalidated via SSE.
 //	@Tags			hydraroute
 //	@Accept			json
 //	@Produce		json
@@ -254,13 +306,21 @@ func (h *HydraRouteHandler) UpdateConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var cfg hydraroute.Config
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	var patch hydraRouteConfigPatch
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		response.Error(w, "invalid request body: "+err.Error(), "BAD_REQUEST")
 		return
 	}
 
-	if err := h.svc.WriteConfig(&cfg); err != nil {
+	cfg, err := h.svc.UpdateConfig(func(c *hydraroute.Config) error {
+		patch.apply(c)
+		return nil
+	})
+	if errors.Is(err, hydraroute.ErrNoConfig) {
+		response.Error(w, "HR Neo has not written hrneo.conf yet — start HR Neo, then save again", "NO_CONFIG")
+		return
+	}
+	if err != nil {
 		response.Error(w, err.Error(), "CONFIG_WRITE_ERROR")
 		return
 	}
@@ -719,4 +779,107 @@ func (h *HydraRouteHandler) GetOversizedTags(w http.ResponseWriter, r *http.Requ
 		"maxelem":   cfg.EffectiveMaxElem(),
 		"tags":      response.MustNotNil(tags),
 	})
+}
+
+// DeleteOversizedTag removes a tag from HR Neo's disabled tags list (the
+// `##impossible to use` section of ip.list). The tag is not put back into any
+// rule: HR Neo does not record where it came from.
+//
+//	@Summary		Remove HydraRoute disabled geo tag
+//	@Description	Removes the tag from HR Neo's `##impossible to use` section in ip.list (all duplicates; an emptied section is removed). The rest of ip.list, domain.conf and the rules are not changed and HR Neo is not restarted. 400 for an empty name or when HR Neo is not installed, 404 when the tag is not in the section.
+//	@Tags			hydraroute
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			name	query		string	true	"Tag name, e.g. geoip:ru-blocked"
+//	@Success		200		{object}	OkResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		404		{object}	APIErrorEnvelope
+//	@Failure		500		{object}	APIErrorEnvelope
+//	@Router			/hydraroute/oversized-tags/delete [delete]
+func (h *HydraRouteHandler) DeleteOversizedTag(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		response.MethodNotAllowed(w)
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	if strings.TrimSpace(name) == "" {
+		response.Error(w, "name query parameter is required", "BAD_REQUEST")
+		return
+	}
+
+	if err := h.svc.RemoveOversizedTag(name); err != nil {
+		switch {
+		case errors.Is(err, hydraroute.ErrInvalidOversizedTag):
+			response.Error(w, err.Error(), "BAD_REQUEST")
+		case errors.Is(err, hydraroute.ErrNotInstalled):
+			response.Error(w, err.Error(), "NOT_INSTALLED")
+		case errors.Is(err, hydraroute.ErrOversizedTagNotFound):
+			response.ErrorWithStatus(w, http.StatusNotFound, err.Error(), "TAG_NOT_FOUND")
+		default:
+			response.InternalError(w, err.Error())
+		}
+		return
+	}
+
+	// ip.list переписан — HR-id групп сменили ревизию.
+	h.bus.PublishInvalidated(events.ResourceRoutingDnsRoutes, "oversized-delete")
+	response.Success(w, map[string]bool{"ok": true})
+}
+
+// DeleteTargetRequest is the body for POST /hydraroute/targets/delete.
+type DeleteTargetRequest struct {
+	Target   string `json:"target" example:"Belka"`
+	Revision string `json:"revision" example:"3f2a9c0d1b7e"`
+}
+
+// DeleteTargetData reports the removed rule target.
+type DeleteTargetData struct {
+	Target string `json:"target" example:"Belka"`
+}
+
+// DeleteTargetResponse is the envelope for POST /hydraroute/targets/delete.
+type DeleteTargetResponse struct {
+	Success bool             `json:"success" example:"true"`
+	Data    DeleteTargetData `json:"data"`
+}
+
+// DeleteTarget removes an HR Neo rule (target) with all its groups and its
+// PolicyOrder entry. The NDMS policy stays.
+//
+//	@Summary		Delete HydraRoute rule target
+//	@Tags			hydraroute
+//	@Accept			json
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			body	body		DeleteTargetRequest	true	"Target and rules revision"
+//	@Success		200		{object}	DeleteTargetResponse
+//	@Failure		400		{object}	APIErrorEnvelope
+//	@Failure		409		{object}	APIErrorEnvelope
+//	@Router			/hydraroute/targets/delete [post]
+func (h *HydraRouteHandler) DeleteTarget(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.MethodNotAllowed(w)
+		return
+	}
+	var req DeleteTargetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "invalid request body: "+err.Error(), "BAD_REQUEST")
+		return
+	}
+	if req.Target == "" || req.Revision == "" {
+		response.Error(w, "target and revision are required", "BAD_REQUEST")
+		return
+	}
+	if err := h.svc.DeleteTarget(req.Target, req.Revision); err != nil {
+		if errors.Is(err, hydraroute.ErrRulesChanged) {
+			response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "HR_RULES_CHANGED")
+			return
+		}
+		response.Error(w, err.Error(), "TARGET_DELETE_ERROR")
+		return
+	}
+	h.bus.PublishInvalidated(events.ResourceRoutingDnsRoutes, "target-delete")
+	h.bus.PublishInvalidated(events.ResourceRoutingHydrarouteStatus, "target-delete")
+	response.Success(w, DeleteTargetData{Target: req.Target})
 }

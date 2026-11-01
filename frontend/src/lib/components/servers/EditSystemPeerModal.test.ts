@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import EditSystemPeerModal from './EditSystemPeerModal.svelte';
 import { api } from '$lib/api/client';
 import type { WireguardServerPeer } from '$lib/types';
 
 vi.mock('$lib/api/client', () => ({
-	api: { updateSystemServerPeer: vi.fn(), generateSignature: vi.fn() }
+	api: { updateSystemServerPeer: vi.fn(), generateSignature: vi.fn(), getSystemServerPeerPresets: vi.fn() }
 }));
 vi.mock('$lib/stores/notifications', () => ({ notifications: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('$lib/stores/servers', () => ({ servers: { applyMutationResponse: vi.fn() } }));
@@ -58,6 +59,8 @@ describe('EditSystemPeerModal', () => {
 			description: 'client',
 			tunnelIP: '10.9.0.2/32',
 			dns: '',
+			clientAllowedIPs: '',
+			remoteSubnets: [],
 			signature: { profile: 'quic_initial', i1: '<b 0xc0ffee>', i2: '', i3: '', i4: '', i5: '' }
 		});
 	});
@@ -75,6 +78,8 @@ describe('EditSystemPeerModal', () => {
 			description: 'laptop',
 			tunnelIP: '10.9.0.2/32',
 			dns: '',
+			clientAllowedIPs: '',
+			remoteSubnets: [],
 			signature: undefined
 		});
 	});
@@ -111,5 +116,76 @@ describe('EditSystemPeerModal: DNS пира', () => {
 			'pk',
 			expect.objectContaining({ dns: '1.0.0.1' })
 		);
+	});
+});
+
+// #713: сети клиента живут в локальной записи; у чужого пира им негде храниться.
+describe('EditSystemPeerModal: сети клиента', () => {
+	it('без локальной записи оба поля недоступны', () => {
+		const { getByLabelText } = openModal(basePeer({ confAvailable: false }));
+		expect((getByLabelText('AllowedIPs клиента') as HTMLTextAreaElement).disabled).toBe(true);
+		expect((getByLabelText('Сети за клиентом') as HTMLTextAreaElement).disabled).toBe(true);
+	});
+
+	it('предзаполняется из пира, tunnelIP берётся из записи, сети уходят массивом', async () => {
+		vi.mocked(api.updateSystemServerPeer).mockResolvedValue(
+			{} as Awaited<ReturnType<typeof api.updateSystemServerPeer>>
+		);
+		const { getByText, getByLabelText } = openModal(
+			basePeer({
+				tunnelIP: '10.9.0.2/32',
+				// Чужой /32 первым: эвристика «первый /32» выбрала бы его, запись — нет.
+				allowedIPs: ['192.168.77.1/32', '10.9.0.2/32'],
+				clientAllowedIPs: '0.0.0.0/1',
+				remoteSubnets: ['192.168.77.1/32']
+			})
+		);
+		expect((getByLabelText('Tunnel IP (CIDR)') as HTMLInputElement).value).toBe('10.9.0.2/32');
+		expect((getByLabelText('Сети за клиентом') as HTMLTextAreaElement).value).toBe('192.168.77.1/32');
+		await fireEvent.click(getByText('Сохранить'));
+		expect(api.updateSystemServerPeer).toHaveBeenCalledWith(
+			'Wireguard0',
+			'pk',
+			expect.objectContaining({
+				tunnelIP: '10.9.0.2/32',
+				clientAllowedIPs: '0.0.0.0/1',
+				remoteSubnets: ['192.168.77.1/32']
+			})
+		);
+	});
+
+	// Спека 5.4: отсутствие полей = снять сети; у чужого пира шлём пустые, бэкенд пропускает.
+	it('сохранение чужого пира шлёт пустые сети', async () => {
+		vi.mocked(api.updateSystemServerPeer).mockResolvedValue(
+			{} as Awaited<ReturnType<typeof api.updateSystemServerPeer>>
+		);
+		const { getByText } = openModal(basePeer({ confAvailable: false }));
+		const save = getByText('Сохранить').closest('button') as HTMLButtonElement;
+		expect(save.disabled).toBe(false);
+		await fireEvent.click(save);
+		expect(api.updateSystemServerPeer).toHaveBeenCalledWith(
+			'Wireguard0',
+			'pk',
+			expect.objectContaining({ clientAllowedIPs: '', remoteSubnets: [] })
+		);
+	});
+
+	it('поздний ответ пресета после переоткрытия не затирает новую сессию', async () => {
+		let resolve!: (v: { routerOnly: string; exceptRouter: string }) => void;
+		vi.mocked(api.getSystemServerPeerPresets).mockReturnValue(
+			new Promise((r) => {
+				resolve = r;
+			})
+		);
+		const { getByText, getByLabelText, rerender } = openModal(
+			basePeer({ clientAllowedIPs: '10.0.0.0/8' })
+		);
+		await fireEvent.click(getByText('Только сети роутера'));
+		await rerender({ open: false });
+		await rerender({ open: true });
+		resolve({ routerOnly: '192.168.1.0/24', exceptRouter: '' });
+		await tick();
+		await tick();
+		expect((getByLabelText('AllowedIPs клиента') as HTMLTextAreaElement).value).toBe('10.0.0.0/8');
 	});
 });

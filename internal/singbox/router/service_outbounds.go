@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
@@ -162,6 +163,9 @@ func (s *ServiceImpl) AddCompositeOutbound(ctx context.Context, o Outbound) erro
 		}
 	}
 	return s.withConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if err := s.validateCompositeTag(ctx, "", o); err != nil {
+			return err
+		}
 		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
 			return err
 		}
@@ -170,12 +174,14 @@ func (s *ServiceImpl) AddCompositeOutbound(ctx context.Context, o Outbound) erro
 }
 
 func (s *ServiceImpl) UpdateCompositeOutbound(ctx context.Context, tag string, o Outbound) error {
-	if strings.EqualFold(o.Type, "direct") {
-		if err := s.validateBindInterface(ctx, o.BindInterface); err != nil {
+	bindErr := s.directBindErr(ctx, o)
+	if err := s.withConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		if bindErr != nil && !keepsBind(c, tag, o) {
+			return bindErr
+		}
+		if err := s.validateCompositeTag(ctx, tag, o); err != nil {
 			return err
 		}
-	}
-	if err := s.withConfig(ctx, "outbounds", func(c *RouterConfig) error {
 		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
 			return err
 		}
@@ -191,6 +197,56 @@ func (s *ServiceImpl) UpdateCompositeOutbound(ctx context.Context, tag string, o
 		}
 	}
 	return nil
+}
+
+// SetCompositeOutboundMembers заменяет состав группы tag, не трогая прочие
+// поля, — правка участников без пересылки всей записи (MCP). Чтение и запись
+// в одном withConfig, как у SetDNSServerDetour. Порядок members сохраняется:
+// fallback идёт по нему. Default селектора, выпавший из нового состава,
+// переходит на первого участника — как форма при пустом default.
+func (s *ServiceImpl) SetCompositeOutboundMembers(ctx context.Context, tag string, members []string) error {
+	return s.withConfig(ctx, "outbounds", func(c *RouterConfig) error {
+		i := slices.IndexFunc(c.Outbounds, func(o Outbound) bool { return o.Tag == tag })
+		if i < 0 {
+			return fmt.Errorf("%w: %q", ErrOutboundNotFound, tag)
+		}
+		o := c.Outbounds[i]
+		switch o.Type {
+		case "selector", "urltest", "fallback":
+		default:
+			return fmt.Errorf("%w: outbound %q типа %q — не группа участников", ErrOutboundInvalid, tag, o.Type)
+		}
+		o.Outbounds = slices.Clone(members)
+		if o.Type == "selector" && o.Default != "" && !slices.Contains(members, o.Default) && len(members) > 0 {
+			o.Default = members[0]
+		}
+		if err := s.validateCompositeMembers(ctx, o, c); err != nil {
+			return err
+		}
+		return c.UpdateCompositeOutbound(tag, o)
+	})
+}
+
+// directBindErr — вердикт проверки bind_interface для direct; nil у прочих
+// типов. Считается ДО мутатора: проверка ходит в NDMS.
+func (s *ServiceImpl) directBindErr(ctx context.Context, o Outbound) error {
+	if !strings.EqualFold(o.Type, "direct") {
+		return nil
+	}
+	return s.validateBindInterface(ctx, o.BindInterface)
+}
+
+// keepsBind — запись tag в c уже direct с тем же bind_interface. Однажды
+// принятую привязку Update не перепроверяет: интерфейс мог пропасть из списка
+// (VPN отключён), и переименование outbound'а от этого ломаться не должно
+// (#961). Решается по конфигу, который мутатор и запишет.
+func keepsBind(c *RouterConfig, tag string, o Outbound) bool {
+	for _, e := range c.Outbounds {
+		if e.Tag == tag {
+			return strings.EqualFold(e.Type, "direct") && e.BindInterface == o.BindInterface
+		}
+	}
+	return false
 }
 
 func (s *ServiceImpl) DeleteCompositeOutbound(ctx context.Context, tag string, force bool) error {

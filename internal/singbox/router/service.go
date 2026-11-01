@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
+	"github.com/hoaxisr/awg-manager/internal/netdev"
 	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/presets"
 	"github.com/hoaxisr/awg-manager/internal/singbox/heavyop"
@@ -31,6 +33,7 @@ type Service interface {
 	GetStatus(ctx context.Context) (Status, error)
 	GetSettings(ctx context.Context) (storage.SingboxRouterSettings, error)
 	UpdateSettings(ctx context.Context, s storage.SingboxRouterSettings) error
+	UpdateSettingsWith(ctx context.Context, edit func(*storage.SingboxRouterSettings) error) error
 
 	// ListWANInterfaces returns all router WAN interfaces (no up/down
 	// filtering) for the WAN-binding picker. Pairs with
@@ -41,11 +44,6 @@ type Service interface {
 	// ListBindableInterfaces returns interfaces a user can bind a direct
 	// outbound to (all interfaces minus auto-managed AWG/WG ones).
 	ListBindableInterfaces(ctx context.Context) ([]WANInterfaceInfo, error)
-	ListAllBindableInterfaces(ctx context.Context) ([]WANInterfaceInfo, error)
-
-	// ListIngressEligibleInterfaces returns interfaces eligible for
-	// sing-box ingress-scope (bindable minus WAN minus LAN bridges).
-	ListIngressEligibleInterfaces(ctx context.Context) ([]WANInterfaceInfo, error)
 
 	// PolicyTunNATPreview returns the router segments with their current NAT
 	// mode — the editable "what will change" preview behind the policy-tun
@@ -53,6 +51,14 @@ type Service interface {
 	PolicyTunNATPreview(ctx context.Context) (NATPreview, error)
 
 	SetRouteFinal(ctx context.Context, tag string) error
+	// InsertRule, ReplaceUserRule, DeleteUserRule, MoveUserRule и
+	// SetUserRuleOutbound — правки правил пользователя для MCP со сверкой
+	// позиции (RuleCheck), см. service_user_rules.go.
+	InsertRule(ctx context.Context, index int, r Rule, check RuleCheck) error
+	ReplaceUserRule(ctx context.Context, index int, r Rule, check RuleCheck) error
+	DeleteUserRule(ctx context.Context, index int, check RuleCheck) (Rule, error)
+	MoveUserRule(ctx context.Context, from, to int, check RuleCheck) error
+	SetUserRuleOutbound(ctx context.Context, index int, outbound string, check RuleCheck) error
 
 	ListRules(ctx context.Context) ([]Rule, error)
 	AddRule(ctx context.Context, rule Rule) error
@@ -78,6 +84,9 @@ type Service interface {
 	ListCompositeOutbounds(ctx context.Context) ([]CompositeOutboundView, error)
 	AddCompositeOutbound(ctx context.Context, o Outbound) error
 	UpdateCompositeOutbound(ctx context.Context, tag string, o Outbound) error
+	// SetCompositeOutboundMembers заменяет только состав группы — см.
+	// ServiceImpl.SetCompositeOutboundMembers.
+	SetCompositeOutboundMembers(ctx context.Context, tag string, members []string) error
 	DeleteCompositeOutbound(ctx context.Context, tag string, force bool) error
 
 	ApplyPreset(ctx context.Context, presetID, outboundTag string) error
@@ -92,6 +101,9 @@ type Service interface {
 	ListDNSServers(ctx context.Context) ([]DNSServer, error)
 	AddDNSServer(ctx context.Context, s DNSServer) error
 	UpdateDNSServer(ctx context.Context, tag string, s DNSServer) error
+	// SetDNSServerDetour меняет только detour сервера — см.
+	// ServiceImpl.SetDNSServerDetour.
+	SetDNSServerDetour(ctx context.Context, tag, detour string) error
 	DeleteDNSServer(ctx context.Context, tag string, force bool) error
 	MoveDNSServer(ctx context.Context, from, to int) error
 
@@ -203,6 +215,11 @@ type WANInterfaceInfo struct {
 	Up       bool   `json:"up"`       // current up/down — info-only, never gates selection
 	Priority int    `json:"priority"` // NDMS priority (higher = preferred by user)
 	Type     string `json:"type"`     // NDMS-тип интерфейса: "Wireguard", "Bridge", "PPP", ...
+
+	// Foreign — отмеченный сторонний интерфейс (issue #935); Absent — его
+	// сейчас нет в системе (интерфейс ядра без устройства).
+	Foreign bool `json:"foreign,omitempty"`
+	Absent  bool `json:"absent,omitempty"`
 }
 
 // WANInterfaceLister is the narrow contract the service needs from the
@@ -217,11 +234,10 @@ type WANInterfaceLister interface {
 // direct outbound to (all router interfaces minus our own and the
 // awgoutbounds auto-managed set). Optional dep; nil = no existence check.
 type BindableInterfaceLister interface {
+	// ListBindable не вычитает интерфейсы, уже занятые outbound'ом:
+	// повторная привязка безвредна, а какие прятать — решает пикер по
+	// конфигу, в котором редактируют (#709, #961).
 	ListBindable(ctx context.Context) ([]WANInterfaceInfo, error)
-	// ListAllBindable — то же множество, но БЕЗ вычитания интерфейсов, уже
-	// занятых direct-outbound'ом: подписки и одиночные туннели делят
-	// интерфейс с direct-выходом свободно (#709).
-	ListAllBindable(ctx context.Context) ([]WANInterfaceInfo, error)
 }
 
 // IngressResolver резолвит ref интерфейса ("managed:Wireguard3") в
@@ -321,7 +337,7 @@ type Deps struct {
 	AWGOutboundsRefresh func(ctx context.Context) error
 	SingboxTunnels      SingboxTunnelCatalog // optional — when nil, computeIssues skips cross-slot tunnel tags
 	// SubscriptionComposites lists composite outbounds owned by the
-	// subscription slot (40-subscriptions.json). Optional — when nil,
+	// subscription slot (13-subscriptions.json). Optional — when nil,
 	// ListCompositeOutbounds returns only this service's own composites.
 	SubscriptionComposites *SubscriptionCompositesAdapter
 	// Orch is the config.d orchestrator. When non-nil (production),
@@ -352,6 +368,11 @@ type Deps struct {
 	// not loop back into sing-box. Optional — when nil, NewService
 	// defaults to the production collector backed by d.Log.
 	WANIPCollector WANIPCollector
+	// LocalAddrs — адреса интерфейсов роутера, против них проверяется
+	// inet4_bind_address DNS-сервера. Спрашиваем ядро, а не NDMS: bind
+	// sing-box отказывает (EADDRNOTAVAIL) именно по адресам ядра. Optional —
+	// при nil NewService ставит net.InterfaceAddrs.
+	LocalAddrs func() ([]net.Addr, error)
 	// WANInterfaces lists router WAN interfaces for the WAN-binding
 	// picker. Optional — when nil, ListWANInterfaces returns an empty
 	// slice (UI shows just the "auto" option). Production wiring in
@@ -419,6 +440,10 @@ type Deps struct {
 	// ключ владельца, и пул отдаёт свой номер по совпадению ключа. Прежнее
 	// вычитание ломалось на handover — там номер принадлежит другому режиму.
 	OpkgTunPool *opkgtun.Pool
+	// SwapGate — барьер списков на подмене устройства (D-N1), общий с
+	// query.InterfaceStore: снос оставшегося opkgtunN идёт под ним. nil в
+	// NewService — свой экземпляр (тесты).
+	SwapGate *netdev.SwapGate
 	// OpkgTunScan lists NDMS OpkgTun IDs carrying the given description —
 	// the reap's persist-less orphan fallback (see teardownOpkgTun for why
 	// such orphans are dangerous). Optional — nil skips the scan; wired in
@@ -480,9 +505,21 @@ type ServiceImpl struct {
 	bypassLog *logging.ScopedLogger
 	mu        sync.Mutex
 	// transitionMu serializes SwitchRoutingMode calls. It is DISTINCT from mu:
-	// Enable/Disable (which SwitchRoutingMode composes) take mu themselves, so
+	// enable/disable (which SwitchRoutingMode composes) take mu themselves, so
 	// holding mu across the whole switch would self-deadlock.
 	transitionMu sync.Mutex
+	// routerCfgMu / fakeipCfgMu сериализуют правки слота через withConfig /
+	// fakeipWithConfig: «прочитал → мутатор → записал» без замка терял
+	// параллельную правку (веб + MCP, F727). Порядок: после mu и
+	// transitionMu; под ними ни mu, ни transitionMu не берутся, событие
+	// публикуется уже после отпускания. Системные записи слота fakeip
+	// (enableFakeIPTun, healTunSettings, heal1140SlotMigration) берут
+	// fakeipCfgMu — черновика у fakeip нет, они пишут тот же файл (F741).
+	// ApplyStaging/DiscardStaging берут routerCfgMu: черновик пишет и
+	// withConfig. Системные записи применённого 20-router.json замок не берут:
+	// пользовательская правка идёт в черновик, а они все под transitionMu.
+	routerCfgMu sync.Mutex
+	fakeipCfgMu sync.Mutex
 	// transitionReadinessProgress emits readiness heartbeats during
 	// waitForSingbox while SwitchRoutingMode is in flight (nil otherwise).
 	transitionReadinessProgress func(message string)
@@ -492,7 +529,7 @@ type ServiceImpl struct {
 	// currentBypassGeoIPTags описывают то, что РЕАЛЬНО установлено в netfilter.
 	//
 	// ИНВАРИАНТ: взаимное исключение даёт transitionMu, и только он.
-	// Писатели: enableLocked, Disable, enablePolicyTun, disablePolicyTun,
+	// Писатели: enableLocked, disable, enablePolicyTun, disablePolicyTun,
 	// reconcileInstalled, reconcilePolicyTunQoS. Читатели: reconcileInstalled,
 	// reconcilePolicyTunQoS. Каждый достижим ровно двумя путями — Reconcile
 	// (берёт transitionMu через TryLock) и SwitchRoutingMode (через Lock).
@@ -503,10 +540,11 @@ type ServiceImpl struct {
 	// соседних полей в тех же критических секциях.
 	//
 	// Пока путей два, гонки нет по построению. Третий путь (например новая
-	// публичная ручка, зовущая Enable/Disable мимо transitionMu) её вернёт —
+	// публичная ручка, зовущая enable/disable мимо transitionMu) её вернёт —
 	// раньше такой путь давали ручки POST /singbox/router/{enable,disable},
 	// и они удалены именно поэтому. Новый вызывающий обязан заходить через
-	// Reconcile или SwitchRoutingMode.
+	// Reconcile или SwitchRoutingMode. Снаружи пакета это держит компилятор:
+	// enable/disable не экспортированы (F624); внутри — только этот комментарий.
 	//
 	// appliedSpec — снимок ровно того RestoreInputSpec, что уехал в
 	// IPTables.Install; nil = «ничего нашего в netfilter не установлено».
@@ -557,6 +595,45 @@ type ServiceImpl struct {
 	// TestReconcileInstalled_BlackholeFollowsWANIPChange.
 	appliedBlackhole *RestoreInputSpec
 
+	// appliedV6 — снимок ТРЕТЬЕГО ресурса: правил перехвата IPv6
+	// (iptables6.go). nil = v6-слой этим процессом не ставился; факт «стоит в
+	// ядре» после рестарта демона несёт файл правил (v6RulesFilePresent).
+	// Писатели и сериализация те же, что у appliedSpec: syncV6/teardownV6 под
+	// transitionMu.
+	appliedV6 *V6Spec
+	// appliedBlackhole6 — снимок fail-closed блокировки IPv6, зеркало
+	// appliedBlackhole: nil = блокировки нет. Сравнение — equalBlackholeSpec6.
+	appliedBlackhole6 *V6Spec
+	// v6LastWarn — последнее предупреждение v6-слоя, чтобы не повторять его
+	// каждым тиком reconcile (см. v6Warn).
+	v6LastWarn string
+	// v6Problem — то же предупреждение для GetStatus: почему перехват IPv6
+	// включён в настройках, но не работает. Atomic, потому что пишет его
+	// reconcile-тик, а читает HTTP-обработчик статуса; nil — проблем нет.
+	v6Problem atomic.Pointer[string]
+	// v6SkippedLogged — список пропущенных мостов, о котором уже написано в
+	// журнал. Отдельно от v6LastWarn: пропуск моста не мешает слою встать, и
+	// общий сброс предупреждения после успешной установки заставлял бы писать
+	// о нём каждым тиком.
+	v6SkippedLogged string
+	// v6SpecErrLogged — так же дедуплицированная ошибка разбора исключений
+	// (порты, подсети) при сборке спека v6.
+	v6SpecErrLogged string
+	// v6KernelUnknown — установка правил или блокировки IPv6 оборвалась
+	// ошибкой: что из них осталось в ядре, неизвестно, а файлов правил на
+	// диске при этом может не быть (они пишутся после успешного restore).
+	// Без этого признака снос слоя (teardownV6) счёл бы, что сносить нечего.
+	v6KernelUnknown bool
+	// v6StartSwept — безусловный снос v6-слоя на первой сверке уже был
+	// (syncV6). Один раз за жизнь процесса.
+	v6StartSwept bool
+	// v6PortsReserved — порты v6-слоя уже убраны из эфемерного пула ядра
+	// (один раз за жизнь процесса, при первом включении перехвата IPv6).
+	v6PortsReserved bool
+	// v6OffSettled — при выключенном слое конфиг уже проверен и наших
+	// инбаундов в нём нет (см. healV6Inbounds).
+	v6OffSettled bool
+
 	// last-installed geoip-теги обхода; в спеке от них остаётся только
 	// производный BypassGeoIPSet, то есть состав тегов из снимка
 	// невосстановим. Поэтому смена состава видна ТОЛЬКО здесь — и это триггер
@@ -578,6 +655,11 @@ type ServiceImpl struct {
 	bypassLastPopulate time.Time
 	bypassLastError    string
 	bypassMissingTags  []string
+	// bypass6Problem — отказ IPv6-половины последнего наполнения (набор
+	// AWGM-BYPASS6). Отдельно от bypassLastError: IPv4-набор при этом собран,
+	// и статус набора сбоем не становится — причина идёт в статус роутера
+	// предупреждением (bypass6Issue).
+	bypass6Problem atomic.Pointer[string]
 	// populateBypassSet — шов наполнения для тестов (nil = bypassset.Populate).
 	populateBypassSet func(ctx context.Context, tags []string) (bypassset.PopulateResult, error)
 	// teardownBypassSetFn — шов сноса набора для тестов (nil = реальный снос).
@@ -649,15 +731,23 @@ type ServiceImpl struct {
 	keenDNSAddrs       []string
 	keenDNSInfoAt      time.Time
 	keenDNSBypassCIDRs []string
+	// keenDNSBypassCIDRs6 — IPv6-часть того же обхода, для правил v6-слоя.
+	keenDNSBypassCIDRs6 []string
 }
 
 func NewService(d Deps) *ServiceImpl {
+	if d.SwapGate == nil {
+		d.SwapGate = &netdev.SwapGate{}
+	}
 	if d.IPTables == nil {
 		d.IPTables = NewIPTables()
 	}
 	appLog := logging.NewScopedLogger(d.AppLog, logging.GroupRouting, logging.SubSingboxRouter)
 	if d.WANIPCollector == nil {
 		d.WANIPCollector = NewWANIPCollector(&routerLoggerAdapter{log: appLog})
+	}
+	if d.LocalAddrs == nil {
+		d.LocalAddrs = net.InterfaceAddrs
 	}
 	if d.OpkgTunPool == nil {
 		// Не отказ: юнит-тесты собирают сервис без пула намеренно. Но в проде
@@ -892,9 +982,9 @@ func parseRouterConfigBytes(data []byte) (*RouterConfig, error) {
 	if cfg.Route.RuleSet == nil {
 		cfg.Route.RuleSet = []RuleSet{}
 	}
-	if cfg.Route.Rules == nil {
-		cfg.Route.Rules = []Rule{}
-	}
+	cfg.Route.Rules = withoutMDNSDrop(cfg.Route.Rules) // на диске его кладёт materializeConfig
+	// И служебный вход загрузки наборов — его тоже кладёт materializeConfig (F690).
+	stripRuleSetFetch(cfg)
 	if cfg.DNS.Servers == nil {
 		cfg.DNS.Servers = []DNSServer{}
 	}
@@ -1077,18 +1167,26 @@ func (s *ServiceImpl) persistConfig(ctx context.Context, cfg *RouterConfig) erro
 }
 
 func (s *ServiceImpl) withConfig(ctx context.Context, event string, fn func(*RouterConfig) error) error {
-	cfg, err := s.loadRouterConfig()
+	cfg, err := func() (*RouterConfig, error) {
+		s.routerCfgMu.Lock()
+		defer s.routerCfgMu.Unlock()
+		cfg, err := s.loadRouterConfig()
+		if err != nil {
+			return nil, err
+		}
+		cfg = s.ruleSetMaterializer().restoreConfig(cfg)
+		if err := fn(cfg); err != nil {
+			return nil, err
+		}
+		if err := s.ensureDNSChainOverlayFromState(cfg); err != nil {
+			return nil, err
+		}
+		if err := s.persistConfig(ctx, cfg); err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}()
 	if err != nil {
-		return err
-	}
-	cfg = s.ruleSetMaterializer().restoreConfig(cfg)
-	if err := fn(cfg); err != nil {
-		return err
-	}
-	if err := s.ensureDNSChainOverlayFromState(cfg); err != nil {
-		return err
-	}
-	if err := s.persistConfig(ctx, cfg); err != nil {
 		return err
 	}
 	s.emitCfgEvent(event, cfg)

@@ -2,7 +2,9 @@ package managed
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -29,25 +31,59 @@ func (s *Service) MigratePrivateKeys(ctx context.Context) {
 // firmware rejects multiple peers sharing it ("subnet overlaps with the other
 // peer"). Gated by a persisted flag so it runs once.
 //
-// Per-peer best-effort. The flag is set only when at least one removal
-// succeeded (or there was nothing to do): if every attempt failed, NDMS is
-// likely unreachable, so we leave the flag unset and retry on the next boot.
-// Legacy peers all carry 0.0.0.0/0, so a reachable NDMS removes it cleanly;
-// fresh installs default the flag to true and never enter this path.
+// Флаг встаёт, только если прочиталось всё: список интерфейсов и дерево rc
+// (одно чтение на все серверы, F546). Сбой чтения = состояние неизвестно → флаг не ставится,
+// проход повторится на следующей загрузке. Сервер, чьего интерфейса нет в
+// прочитанном списке (удалён вне панели), — обработан: снимать не у кого.
+//
+// Снятия — best-effort по пиру: флаг не встаёт, только если отказали ВСЕ
+// попытки снятия (NDMS, вероятно, недоступен). Если хоть одно прошло, флаг
+// встаёт и пиры с отказавшим снятием больше не повторяются — как и до #713.
+// Fresh installs default the flag to true and never enter this path.
 //
 // Called from the daemon boot path after the NDMS interface cache is ready.
 func (s *Service) MigratePeerAllowIPs(ctx context.Context) {
 	if s.settings.IsManagedPeerAllowIPsMigrated() {
 		return
 	}
+	// Любая операция allow-ips на отсутствующем ключе NDMS создаёт пира (стенд
+	// 5.02.A.11, 28.09): пира из записи, снятого в веб-морде, снятие 0/0
+	// воскресило бы. Наличие — свежим чтением rc сервера, под блокировкой,
+	// которую берёт и удаление пира.
+	defer s.LockPeerSubnets()()
+	var exists map[string]query.Confirmed
+	var onRouter map[string]map[string]bool
 	attempted, failures := 0, 0
 	for _, sv := range s.settings.GetManagedServers() {
+		if len(sv.Peers) == 0 {
+			continue
+		}
+		if exists == nil {
+			var err error
+			if exists, err = s.routerServers(ctx); err != nil {
+				if s.log != nil {
+					s.log.Warn("migrate-peer-allow-ips: interfaces not read, retry next boot", "error", err)
+				}
+				return
+			}
+			if onRouter, err = s.routerPeerKeys(ctx, exists); err != nil {
+				// Не знаем, есть ли пиры, — не шлём и не ставим флаг.
+				if s.log != nil {
+					s.log.Warn("migrate-peer-allow-ips: peers not read, retry next boot", "error", err)
+				}
+				return
+			}
+		}
+		iface, ok := exists[sv.InterfaceName]
+		if !ok {
+			continue // интерфейс удалён вне панели — пиров на роутере нет
+		}
 		for _, peer := range sv.Peers {
-			if peer.PublicKey == "" {
-				continue
+			if peer.PublicKey == "" || !onRouter[sv.InterfaceName][peer.PublicKey] {
+				continue // пира на роутере нет — снимать нечего
 			}
 			attempted++
-			if err := s.rciRemovePeerDefaultRoute(ctx, sv.InterfaceName, peer.PublicKey); err != nil {
+			if err := s.rciRemovePeerDefaultRoute(ctx, iface, peer.PublicKey); err != nil {
 				failures++
 				if s.log != nil {
 					s.log.Warn("migrate-peer-allow-ips: remove failed",
@@ -57,7 +93,7 @@ func (s *Service) MigratePeerAllowIPs(ctx context.Context) {
 		}
 	}
 	if attempted > 0 && failures == attempted {
-		// NDMS unreachable / transient — do not mark done; retry next boot.
+		// Состояние не прочитано или NDMS не принял ни одного снятия — повтор.
 		return
 	}
 	if err := s.settings.SetManagedPeerAllowIPsMigrated(true); err != nil {
@@ -69,6 +105,39 @@ func (s *Service) MigratePeerAllowIPs(ctx context.Context) {
 	if s.log != nil {
 		s.log.Info("migrate-peer-allow-ips: completed", "peers", attempted)
 	}
+}
+
+// routerServers — интерфейсы managed-серверов по одному свежему списку
+// роутера; в ответе только существующие.
+func (s *Service) routerServers(ctx context.Context) (map[string]query.Confirmed, error) {
+	if s.queries == nil || s.queries.Interfaces == nil {
+		return nil, fmt.Errorf("interface store not wired")
+	}
+	var names []string
+	for _, sv := range s.settings.GetManagedServers() {
+		names = append(names, sv.InterfaceName)
+	}
+	return s.queries.Interfaces.ConfirmEach(ctx, names)
+}
+
+// routerPeerKeys — ключи пиров серверов по одному свежему дереву rc.
+func (s *Service) routerPeerKeys(ctx context.Context, ifaces map[string]query.Confirmed) (map[string]map[string]bool, error) {
+	if s.queries == nil || s.queries.WGServers == nil {
+		return nil, fmt.Errorf("wireguard server store not wired")
+	}
+	byIface, err := s.queries.WGServers.PeersRCEach(ctx, ifaces)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]map[string]bool, len(byIface))
+	for id, peers := range byIface {
+		keys := make(map[string]bool, len(peers))
+		for _, p := range peers {
+			keys[p.PublicKey] = true
+		}
+		out[id] = keys
+	}
+	return out, nil
 }
 
 func (s *Service) migratePrivateKeysWith(ctx context.Context, resolve resolveFn, run wgRunner) {

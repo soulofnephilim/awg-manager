@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -22,8 +24,8 @@ import (
 // H1-H4, I1-I5, Qlen) and the user expects them to land in storage. Earlier
 // the whitelist always preserved AWG params from existing, silently
 // discarding every UI edit; the regression manifested as "save" being a
-// no-op for an Amnezia-Premium tunnel where the user wanted to clear or
-// regenerate the I1 signature packet.
+// no-op for a tunnel where the user wanted to clear or regenerate the I1
+// signature packet.
 func TestMergeInterfaceWhitelist_AppliesAWGParamsFromRequest(t *testing.T) {
 	existing := &storage.AWGTunnel{
 		Interface: storage.AWGInterface{
@@ -290,12 +292,13 @@ type stubTunnelSvc struct {
 	stateFn  func(tunnelID string) tunnel.StateInfo
 	getFn    func(ctx context.Context, id string) (*service.TunnelWithStatus, error)
 
-	replaceCalls int
-	replaceErr   error
-	// replaceOpts — опции ПОСЛЕДНЕЙ замены: по ним видно, какую семантику
-	// страны handler передал сервису (nil = «не трогать»).
-	replaceOpts  service.ReplaceOptions
-	replaceNames []string
+	replaceCalls   int
+	replaceErr     error
+	replaceNames   []string
+	startCalls     int
+	startCtxErrs   []error
+	restartCalls   int
+	restartCtxErrs []error
 
 	setEnabledCalls      []toggleCall
 	setDefaultRouteCalls []toggleCall
@@ -322,14 +325,22 @@ func (s *stubTunnelSvc) Delete(ctx context.Context, tunnelID string) error {
 	}
 	return nil
 }
-func (s *stubTunnelSvc) Start(context.Context, string) error { return nil }
+func (s *stubTunnelSvc) Start(ctx context.Context, _ string) error {
+	s.startCalls++
+	s.startCtxErrs = append(s.startCtxErrs, ctx.Err())
+	return nil
+}
 func (s *stubTunnelSvc) Stop(ctx context.Context, tunnelID string) error {
 	if s.stopFn != nil {
 		return s.stopFn(ctx, tunnelID)
 	}
 	return nil
 }
-func (s *stubTunnelSvc) Restart(context.Context, string) error                  { return nil }
+func (s *stubTunnelSvc) Restart(ctx context.Context, _ string) error {
+	s.restartCalls++
+	s.restartCtxErrs = append(s.restartCtxErrs, ctx.Err())
+	return nil
+}
 func (s *stubTunnelSvc) CheckAddressConflicts(context.Context, string) []string { return nil }
 func (s *stubTunnelSvc) GetState(_ context.Context, tunnelID string) tunnel.StateInfo {
 	if s.stateFn != nil {
@@ -348,15 +359,15 @@ func (s *stubTunnelSvc) SetDefaultRoute(_ context.Context, id string, v bool) er
 func (s *stubTunnelSvc) Import(context.Context, string, string, string, service.ImportLink) (*service.TunnelWithStatus, error) {
 	return nil, fmt.Errorf("stub")
 }
-func (s *stubTunnelSvc) ReplaceConfig(_ context.Context, _, _, newName string, opts service.ReplaceOptions) error {
+func (s *stubTunnelSvc) ReplaceConfig(_ context.Context, _, _, newName string) error {
 	s.replaceCalls++
-	s.replaceOpts = opts
 	s.replaceNames = append(s.replaceNames, newName)
 	return s.replaceErr
 }
-func (s *stubTunnelSvc) WANModel() *wan.Model                     { return nil }
-func (s *stubTunnelSvc) GetResolvedISP(string) string             { return "" }
-func (s *stubTunnelSvc) SetSelfCreateGate(tunnel.SelfCreateGater) {}
+func (s *stubTunnelSvc) SyncDescription(context.Context, string, string, string, string) {}
+
+func (s *stubTunnelSvc) WANModel() *wan.Model         { return nil }
+func (s *stubTunnelSvc) GetResolvedISP(string) string { return "" }
 
 func newTunnelsUpdateHarness(t *testing.T, stub *stubTunnelSvc) (*TunnelsHandler, *storage.AWGTunnelStore) {
 	t.Helper()
@@ -523,6 +534,27 @@ func TestTunnelUpdate_KeepsConcurrentRuntimeWrites(t *testing.T) {
 	}
 }
 
+// Отказ смены пути у неподключённого NativeWG — 409 со своим кодом: карточка
+// цела, повтор после подключения пройдёт; запись не тронута (F658).
+func TestTunnelUpdate_PathSwitchNotRunningIs409(t *testing.T) {
+	stub := &stubTunnelSvc{updateFn: func(context.Context, *storage.AWGTunnel, *storage.AWGTunnel) error {
+		return tunnel.ErrPathSwitchNotRunning
+	}}
+	h, store := newTunnelsUpdateHarness(t, stub)
+	if err := store.Create(&storage.AWGTunnel{ID: "awg10", Name: "прежнее"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	h.Update(rr, httptest.NewRequest(http.MethodPost, "/tunnels/update?id=awg10",
+		strings.NewReader(`{"name":"новое"}`)))
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "PATH_SWITCH_NOT_RUNNING") {
+		t.Fatalf("код %d, тело: %s", rr.Code, rr.Body.String())
+	}
+	if got, _ := store.Get("awg10"); got.Name != "прежнее" {
+		t.Fatalf("запись изменена при отказе: %q", got.Name)
+	}
+}
+
 // Issue #795: занятый пер-туннельный замок — ретраибельный конфликт, а не
 // провал удаления. 500 фронт показывает как фатальную «Ошибка удаления
 // (500)», хотя повтор через несколько секунд проходит. start/stop/restart
@@ -586,14 +618,19 @@ func TestTunnelReplaceConf_OperationInProgressIs409(t *testing.T) {
 	if stub.replaceCalls != 0 {
 		t.Fatalf("конфиг заменён вопреки занятому замку: вызовов ReplaceConfig = %d", stub.replaceCalls)
 	}
+	// Подъём под чужой операцией (например, пользовательским Stop) отменил
+	// бы её — на 409 ни старта, ни рестарта (F649).
+	if stub.startCalls != 0 || stub.restartCalls != 0 {
+		t.Fatalf("на 409 туннель поднят: start=%d restart=%d", stub.startCalls, stub.restartCalls)
+	}
 }
 
-// ReplaceConfig возвращает fmt.Errorf("validate conf: %w", err), когда
+// ReplaceConfig оборачивает tunnel.ErrValidateConf, когда
 // config.ValidateObfuscation отвергает конфиг. Хендлер обязан вернуть 400
 // INVALID_AWG3, а не 500 InternalError.
 func TestTunnelReplaceConf_ValidateConfIs400InvalidAWG3(t *testing.T) {
 	stub := &stubTunnelSvc{
-		replaceErr: fmt.Errorf("validate conf: %s", "H1 и H2 пересекаются"),
+		replaceErr: fmt.Errorf("%w: %s", tunnel.ErrValidateConf, "H1 и H2 пересекаются"),
 	}
 	h, store := newTunnelsUpdateHarness(t, stub)
 	if err := store.Create(&storage.AWGTunnel{ID: "awg11", Name: "NL_CHIS"}); err != nil {
@@ -848,16 +885,15 @@ func TestTunnelUpdate_FieldInventoryComplete(t *testing.T) {
 		"Enabled":            true,
 		"ActiveWAN":          true,
 		"StartedAt":          true,
+		"PolicyHolds":        true,
 		"ResolvedEndpointIP": true,
 		"WdttClientID":       true,
 		"FreeTurnClientID":   true,
-		// AmneziaCountry владеют импорт и замена конфигурации: метка обязана
-		// жить ровно столько, сколько конфигурация, которую она описывает.
-		// Правка карточкой развязала бы её с конфигом.
-		"AmneziaCountry": true,
-		"RawKernelIface": true,
-		"RawNdmsIface":   true,
-		"Locked":         true,
+		"RawKernelIface":     true,
+		"RawNdmsIface":       true,
+		"Locked":             true,
+		// Пишет только AWGTunnelStore.Update на смене Name (F535).
+		"PrevName": true,
 	}
 
 	rt := reflect.TypeOf(storage.AWGTunnel{})
@@ -1087,5 +1123,181 @@ func TestUpdate_BusyTunnelAnswersConflict(t *testing.T) {
 	}
 	if saved.Name != "t" {
 		t.Fatalf("карточка переписана вопреки отказу: %q", saved.Name)
+	}
+}
+
+// Имя длиннее предела описания NDMS (256 байт) отвергается ДО Stop: отказ
+// сервиса после остановки оставил бы работающий туннель выключенным.
+func TestTunnelReplaceConf_NameOverByteLimitRefusedBeforeStop(t *testing.T) {
+	stopped := 0
+	stub := &stubTunnelSvc{
+		stateFn: func(string) tunnel.StateInfo { return tunnel.StateInfo{State: tunnel.StateRunning} },
+		stopFn:  func(context.Context, string) error { stopped++; return nil },
+	}
+	h, store := newTunnelsUpdateHarness(t, stub)
+	if err := store.Create(&storage.AWGTunnel{ID: "awg11", Name: "NL_CHIS"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	body, _ := json.Marshal(map[string]string{"content": "[Interface]\nAddress = 10.0.0.2/32\n",
+		"name": strings.Repeat("ж", 128) + "a"})
+
+	rec := httptest.NewRecorder()
+	h.ReplaceConf(rec, httptest.NewRequest(http.MethodPost, "/tunnels/replace?id=awg11", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "длиннее 256 байт") {
+		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+	}
+	if stopped != 0 || stub.replaceCalls != 0 {
+		t.Fatalf("туннель тронут: stop=%d replace=%d", stopped, stub.replaceCalls)
+	}
+}
+
+// Предел — только при смене имени: прислали прежнее (заведённое до предела)
+// имя — замена конфигурации идёт.
+func TestTunnelReplaceConf_SameLongNameNotRefused(t *testing.T) {
+	long := strings.Repeat("ж", 128) + "a"
+	stub := &stubTunnelSvc{}
+	h, store := newTunnelsUpdateHarness(t, stub)
+	if err := store.Create(&storage.AWGTunnel{ID: "awg11", Name: long}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	body, _ := json.Marshal(map[string]string{"content": "[Interface]\nAddress = 10.0.0.2/32\n", "name": long})
+
+	rec := httptest.NewRecorder()
+	h.ReplaceConf(rec, httptest.NewRequest(http.MethodPost, "/tunnels/replace?id=awg11", bytes.NewReader(body)))
+
+	if stub.replaceCalls != 1 || strings.Contains(rec.Body.String(), "длиннее 256 байт") {
+		t.Fatalf("замена с прежним именем отвергнута: replace=%d, тело: %s", stub.replaceCalls, rec.Body.String())
+	}
+}
+
+// Код ответа ReplaceConf решают сентинелы службы, а не текст обёрток: их
+// переформулировка молча превращала 400 в 500 (F666).
+func TestTunnelReplaceConf_ErrorStatusBySentinel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		wantCode int
+		wantBody string
+	}{
+		{"not found", fmt.Errorf("lookup: %w", tunnel.ErrNotFound), http.StatusNotFound, "NOT_FOUND"},
+		{"parse", fmt.Errorf("%w: другая формулировка", tunnel.ErrParseConf), http.StatusBadRequest, ""},
+		{"validate", fmt.Errorf("%w: H1 и H2", tunnel.ErrValidateConf), http.StatusBadRequest, "INVALID_AWG3"},
+		{"прочее", errors.New("parse conf и validate conf, но не сентинел"), http.StatusInternalServerError, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubTunnelSvc{
+				stateFn:    func(string) tunnel.StateInfo { return tunnel.StateInfo{State: tunnel.StateStopped} },
+				replaceErr: tc.err,
+			}
+			h, store := newTunnelsUpdateHarness(t, stub)
+			if err := store.Create(&storage.AWGTunnel{ID: "awg11", Name: "NL"}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			body, _ := json.Marshal(map[string]string{"content": "[Interface]\n"})
+			rec := httptest.NewRecorder()
+			h.ReplaceConf(rec, httptest.NewRequest(http.MethodPost, "/tunnels/replace?id=awg11", bytes.NewReader(body)))
+			if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// F520: замена упала после Stop — работавший туннель поднимается обратно, а
+// не остаётся выключенным; невключённый так и остаётся невключённым.
+func TestTunnelReplaceConf_FailedReplaceRestartsRunningTunnel(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		state      tunnel.State
+		wantStarts int
+	}{
+		{"running", tunnel.StateRunning, 1},
+		{"stopped", tunnel.StateStopped, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubTunnelSvc{
+				stateFn:    func(string) tunnel.StateInfo { return tunnel.StateInfo{State: tc.state} },
+				replaceErr: fmt.Errorf("%w: bad key", tunnel.ErrParseConf),
+			}
+			h, store := newTunnelsUpdateHarness(t, stub)
+			if err := store.Create(&storage.AWGTunnel{ID: "awg11", Name: "NL"}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			body, _ := json.Marshal(map[string]string{"content": "[Interface]\n"})
+			rec := httptest.NewRecorder()
+			h.ReplaceConf(rec, httptest.NewRequest(http.MethodPost, "/tunnels/replace?id=awg11", bytes.NewReader(body)))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+			}
+			if stub.startCalls != tc.wantStarts {
+				t.Fatalf("Start вызван %d раз, ждали %d", stub.startCalls, tc.wantStarts)
+			}
+		})
+	}
+}
+
+// F520: клиент закрыл вкладку посреди замены — повторный старт всё равно
+// исполняется: оркестратор на отменённом контексте не делает ничего, а Stop
+// уже снял Enabled.
+func TestTunnelReplaceConf_RestartIgnoresClientCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		replaceErr error
+	}{
+		{"replace failed", fmt.Errorf("%w: bad key", tunnel.ErrParseConf)},
+		{"replace ok", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubTunnelSvc{
+				stateFn:    func(string) tunnel.StateInfo { return tunnel.StateInfo{State: tunnel.StateRunning} },
+				replaceErr: tc.replaceErr,
+			}
+			h, store := newTunnelsUpdateHarness(t, stub)
+			if err := store.Create(&storage.AWGTunnel{ID: "awg11", Name: "NL"}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			body, _ := json.Marshal(map[string]string{"content": "[Interface]\n"})
+			req := httptest.NewRequest(http.MethodPost, "/tunnels/replace?id=awg11", bytes.NewReader(body)).WithContext(ctx)
+			h.ReplaceConf(httptest.NewRecorder(), req)
+
+			if len(stub.startCtxErrs) != 1 || stub.startCtxErrs[0] != nil {
+				t.Fatalf("Start получил контекст с ошибкой %v, ждали живой", stub.startCtxErrs)
+			}
+		})
+	}
+}
+
+// F649: Stop перед заменой упал после того, как оркестратор записал
+// Enabled=false (сбой одного из действий остановки) — работавший туннель
+// поднимается обратно, иначе он лежал бы и после ребута.
+func TestTunnelReplaceConf_FailedStopRestartsTunnel(t *testing.T) {
+	stub := &stubTunnelSvc{
+		stateFn: func(string) tunnel.StateInfo { return tunnel.StateInfo{State: tunnel.StateRunning} },
+		stopFn:  func(context.Context, string) error { return errors.New("remove static routes: rci down") },
+	}
+	h, store := newTunnelsUpdateHarness(t, stub)
+	if err := store.Create(&storage.AWGTunnel{ID: "awg11", Name: "NL"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Клиент уже ушёл: подъём обязан пройти и на отменённом запросе.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	body, _ := json.Marshal(map[string]string{"content": "[Interface]\n"})
+	rec := httptest.NewRecorder()
+	h.ReplaceConf(rec, httptest.NewRequest(http.MethodPost, "/tunnels/replace?id=awg11", bytes.NewReader(body)).WithContext(ctx))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+	}
+	if stub.replaceCalls != 0 {
+		t.Fatal("замена пошла после отказа Stop")
+	}
+	if stub.restartCalls != 1 || stub.restartCtxErrs[0] != nil || stub.startCalls != 0 {
+		t.Fatalf("ждали один Restart на живом контексте: restart=%d ctx=%v start=%d",
+			stub.restartCalls, stub.restartCtxErrs, stub.startCalls)
 	}
 }

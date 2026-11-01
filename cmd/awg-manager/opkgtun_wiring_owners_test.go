@@ -48,7 +48,7 @@ func TestOwnersInventory(t *testing.T) {
 		return out
 	}
 	wantAll := []string{"записи туннелей", "запись режима роутера", "записи прокси",
-		"записи NDMS", "живые интерфейсы"}
+		"сторонние интерфейсы", "записи NDMS", "живые интерфейсы"}
 	if got := names(owners.all()); !equalStrings(got, wantAll) {
 		t.Errorf("состав all() = %v, want %v", got, wantAll)
 	}
@@ -299,7 +299,7 @@ func TestOwnerKeyIsPinnedForEverySource(t *testing.T) {
 		{
 			name:  "записи NDMS",
 			setup: func(*occEnv) {},
-			src:   func(*occEnv) opkgtun.Source { return opkgtun.Source{Name: "n", Read: ndmsHolders(adapter)} },
+			src:   func(*occEnv) opkgtun.Source { return opkgtun.Source{Name: "n", Read: ndmsHolders(adapter, nil)} },
 			idx:   10,
 			self:  opkgtun.RouterModeHolder(storage.OpkgTunModeFakeIP),
 			want:  relAnon,

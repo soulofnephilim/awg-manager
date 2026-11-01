@@ -18,13 +18,9 @@ import (
 // который страница настроек показывает и даёт скопировать.
 //
 // В списке НЕТ полей managedServers, serverPeerSecrets, serverInterfaceMeta,
-// amneziaPremiumKeyCipher, singboxRouter, opkgTun, dnsChainPreset и прочей
+// singboxRouter, opkgTun, dnsChainPreset и прочей
 // backend-managed записи владения: фронт их не читает, а половина несёт
 // ключевой материал.
-//
-// Нет и amneziaPremiumMirrorUrl: адрес зеркала Amnezia принадлежит мастеру
-// premium — его читают и пишут ручки premium, а общая страница настроек его
-// не показывает и никогда не читала.
 //
 // Отсутствует и hiddenSystemTunnels, объявленный в рукописном типе фронта:
 // поля с таким именем нет ни в storage.Settings, ни в SettingsPatch, и ни
@@ -33,8 +29,9 @@ var settingsResponseKeys = []string{
 	"schemaVersion",
 	"authEnabled",
 	"sessionTtlHours",
-	"entwareAuthEnabled",
 	"mcpEnabled",
+	"obfuscatorRelayProcess",
+	"obfuscatorKmodTripped",
 	"apiKey",
 	"server",
 	"pingCheck",
@@ -58,6 +55,7 @@ func seedAllResponseFields(t *testing.T, store *storage.SettingsStore) {
 	t.Helper()
 	if err := store.Update(func(cur *storage.Settings) error {
 		cur.ApiKey = "apikey-test-0000-0000"
+		cur.ObfuscatorKmodTripped = "oops-test"
 		cur.MonitoringExcludedTunnels = []string{"tn-1"}
 		cur.SingboxBootstrapDNS = "8.8.8.8"
 		cur.SingboxClashPort = 9099
@@ -152,8 +150,9 @@ func TestSettingsResponse_CoversHandwrittenFrontendType(t *testing.T) {
 	// hiddenSystemTunnels: у него нет ни хранилища, ни читателя (см. шапку
 	// settingsResponseKeys).
 	frontendFields := []string{
-		"schemaVersion", "authEnabled", "sessionTtlHours", "entwareAuthEnabled",
-		"mcpEnabled", "apiKey", "server", "pingCheck", "logging",
+		"schemaVersion", "authEnabled", "sessionTtlHours",
+		"mcpEnabled", "obfuscatorRelayProcess", "obfuscatorKmodTripped",
+		"apiKey", "server", "pingCheck", "logging",
 		"disableMemorySaving", "updates", "download", "dnsRoute", "geoFile",
 		"connectivityCheckUrl", "usageLevel", "monitoringExcludedTunnels",
 		"singboxBootstrapDNS", "singboxClashPort",

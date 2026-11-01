@@ -2,15 +2,22 @@
 // usage level. Imported by AppHeader, +layout.svelte (route guard),
 // routing/+page.svelte (sub-tabs), UsageLevelCard, and WelcomeBanner.
 
+import { m } from '$lib/i18n';
+
 export type UsageLevel = 'basic' | 'advanced' | 'expert';
 
 export const USAGE_LEVELS: UsageLevel[] = ['basic', 'advanced', 'expert'];
 
-export const USAGE_LEVEL_LABELS: Record<UsageLevel, string> = {
-	basic: 'Базовый',
-	advanced: 'Расширенный',
-	expert: 'Продвинутый',
-};
+const USAGE_LEVEL_MESSAGES = {
+	basic: m.usage_level_basic,
+	advanced: m.usage_level_advanced,
+	expert: m.usage_level_expert,
+} satisfies Record<UsageLevel, unknown>;
+
+/** Название уровня на языке интерфейса — для UI. */
+export function usageLevelLabel(level: UsageLevel): string {
+	return USAGE_LEVEL_MESSAGES[level]();
+}
 
 export type Section =
 	| 'tunnels'
@@ -31,6 +38,7 @@ export type RoutingSubTab =
 	| 'dnsRoutes'
 	| 'ipRoutes'
 	| 'hrNeo'
+	| 'zapret'
 	| 'geoData'
 	| 'singboxRouter';
 
@@ -54,6 +62,9 @@ const ROUTING_SUBTAB_MIN_LEVEL: Record<RoutingSubTab, UsageLevel> = {
 	dnsRoutes: 'basic',
 	ipRoutes: 'advanced',
 	hrNeo: 'expert',
+	// Zapret — правка параметров чужого демона и его списков: тот же
+	// уровень доверия, что у HR Neo.
+	zapret: 'expert',
 	geoData: 'expert',
 	singboxRouter: 'expert',
 };
@@ -110,6 +121,10 @@ export function isSectionVisible(level: UsageLevel, section: Section): boolean {
 	return LEVEL_RANK[level] >= LEVEL_RANK[SECTION_MIN_LEVEL[section]];
 }
 
+export function routingSubTabMinLevel(tab: RoutingSubTab): UsageLevel {
+	return ROUTING_SUBTAB_MIN_LEVEL[tab];
+}
+
 export function isRoutingSubTabVisible(level: UsageLevel, tab: RoutingSubTab): boolean {
 	return LEVEL_RANK[level] >= LEVEL_RANK[ROUTING_SUBTAB_MIN_LEVEL[tab]];
 }
@@ -136,16 +151,21 @@ export function pathToSection(pathname: string): Section | null {
 	return null;
 }
 
-export const SECTION_LABELS: Record<Section, string> = {
-	tunnels: 'Туннели',
-	systemTunnels: 'Системные туннели',
-	singboxTunnels: 'Sing-box',
-	servers: 'Серверы',
-	subscriptions: 'Подписки',
-	routing: 'Маршрутизация',
-	monitoring: 'Мониторинг',
-	diagnostics: 'Инструменты',
-	settings: 'Настройки',
-	terminal: 'Терминал',
-	proxy: 'Прокси',
+const SECTION_MESSAGES: Record<Section, () => string> = {
+	tunnels: m.nav_tunnels,
+	systemTunnels: m.section_system_tunnels,
+	singboxTunnels: () => 'Sing-box',
+	servers: m.nav_servers,
+	subscriptions: m.section_subscriptions,
+	routing: m.nav_routing,
+	monitoring: m.section_monitoring,
+	diagnostics: m.nav_tools,
+	settings: m.nav_settings,
+	terminal: m.nav_terminal,
+	proxy: m.nav_proxy,
 };
+
+/** Название раздела на языке интерфейса. */
+export function sectionLabel(section: Section): string {
+	return SECTION_MESSAGES[section]();
+}

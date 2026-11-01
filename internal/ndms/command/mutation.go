@@ -41,6 +41,36 @@ func postMutationCheckedTolerant(
 	tolerate func(msg string) bool,
 	invalidators ...func(),
 ) error {
+	return PostChecked(ctx, poster, payload, opDesc, tolerate,
+		append([]func(){save.Request}, invalidators...)...)
+}
+
+// PostChecked — разбор ответа postMutationCheckedTolerant для пакетов, которые
+// собирают payload сами (managed): транспортная ошибка или вложенный
+// status:"error" (кроме терпимых tolerate) — ошибка. after (save, инвалидация)
+// вызывается ПОСЛЕ POST на ОБОИХ путях — см. комментарий в теле.
+func PostChecked(
+	ctx context.Context,
+	poster Poster,
+	payload any,
+	opDesc string,
+	tolerate func(msg string) bool,
+	after ...func(),
+) error {
+	_, err := postChecked(ctx, poster, payload, opDesc, tolerate, after...)
+	return err
+}
+
+// postChecked — PostChecked, отдающий ответ NDMS (PostCreate читает из него
+// «interface created»).
+func postChecked(
+	ctx context.Context,
+	poster Poster,
+	payload any,
+	opDesc string,
+	tolerate func(msg string) bool,
+	after ...func(),
+) (json.RawMessage, error) {
 	resp, err := poster.Post(ctx, payload)
 	// Инвалидация и сохранение идут и по путям отказа. status:"error": NDMS
 	// применяет пакетный payload поэлементно, отвергнутый элемент не отменяет
@@ -48,17 +78,16 @@ func postMutationCheckedTolerant(
 	// payload, а ответ — не доехать; допущение «таймаут = ничего не применено»
 	// неверно, и применённое иначе не попало бы в startup-config. Лишний save
 	// на сбое коалесцируется SaveCoordinator (debounce/maxWait).
-	save.Request()
-	for _, inv := range invalidators {
-		inv()
+	for _, f := range after {
+		f()
 	}
 	if err != nil {
-		return fmt.Errorf("%s: %w", opDesc, err)
+		return nil, fmt.Errorf("%s: %w", opDesc, err)
 	}
 	if msgs := ndmsStatusErrors(resp); len(msgs) > 0 && !allTolerated(msgs, tolerate) {
-		return fmt.Errorf("%s: router reported error: %s", opDesc, strings.Join(msgs, "; "))
+		return nil, fmt.Errorf("%s: router reported error: %s", opDesc, strings.Join(msgs, "; "))
 	}
-	return nil
+	return resp, nil
 }
 
 // allTolerated: терпим ответ, только если КАЖДЫЙ отказ в нём признан

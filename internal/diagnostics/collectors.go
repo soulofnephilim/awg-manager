@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms"
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/ndms/types"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -65,7 +66,12 @@ func (r *Runner) collectSystem(ctx context.Context) SystemInfo {
 		}
 	}
 
-	info.RouterDetails = routerinfo.Collect()
+	// Температура радио — из общего снимка списка, не своим чтением (F580).
+	var ifaces *query.Snapshot
+	if r.deps.NDMSQueries != nil {
+		ifaces, _ = r.deps.NDMSQueries.Interfaces.Snapshot(ctx, query.SnapshotRecent)
+	}
+	info.RouterDetails = routerinfo.Collect(ctx, r.deps.NDMSGetter, ifaces)
 
 	return info
 }
@@ -123,8 +129,23 @@ func (r *Runner) collectTunnels(ctx context.Context) []TunnelInfo {
 		}
 	}
 
+	// Состояние NDMS — из ОДНОГО снимка полного списка на отчёт: по имени
+	// NDMS не спрашивают (F546), запрос по снятому без хука интерфейсу писал
+	// бы E. Список не прочитан — состояния в отчёте нет, как при сбое чтения.
+	var snap *query.Snapshot
+	if r.deps.NDMSQueries != nil {
+		snap, _ = r.deps.NDMSQueries.Interfaces.Snapshot(ctx, query.SnapshotRecent)
+	}
+
 	var infos []TunnelInfo
 	for _, t := range tunnels {
+		// Зеркальная запись прокси-выхода WDTT — не наш туннель: её жизненным
+		// циклом ведает прокси-рантайм (оркестратор её не грузит, state.go), и
+		// ни одна kernel-проверка к ней не применима. Имя из id не выводится:
+		// NewNames("wdttraw-…") дал бы opkgtun0 — интерфейс чужого туннеля (F588).
+		if t.Backend == "wdtt-raw" {
+			continue
+		}
 		stored, _ := r.deps.TunnelStore.Get(t.ID)
 
 		backend := "kernel"
@@ -167,8 +188,8 @@ func (r *Runner) collectTunnels(ctx context.Context) []TunnelInfo {
 		// NDMS interface state (using resolved ndmsName)
 		// For nativewg, this output is reused for Connection data
 		var ndmsJSON string
-		if r.deps.NDMSTransport != nil && ndmsName != "" {
-			if raw, err := r.deps.NDMSTransport.GetRaw(ctx, "/show/interface/"+ndmsName); err == nil {
+		if snap != nil {
+			if raw, ok := snap.Raw(ndmsName); ok {
 				ndmsJSON = string(raw)
 				ti.Interface.NDMSState = ndmsJSON
 			}
@@ -291,9 +312,14 @@ func (r *Runner) collectNativeWGConnection(ti *TunnelInfo, ndmsJSON string) {
 // collectKernelRoutesAndFirewall populates Routes and Firewall for kernel tunnels.
 func (r *Runner) collectKernelRoutesAndFirewall(ctx context.Context, ti *TunnelInfo, ifaceName string) {
 	if result, err := exec.Run(ctx, "/opt/sbin/ip", "route", "show"); err == nil {
-		endpointIP := extractEndpointIP(ti.Connection.RawOutput)
-		ti.Routes.EndpointRoute = extractEndpointRoute(result.Stdout, endpointIP)
 		ti.Routes.DefaultRoute = extractDefaultRoute(result.Stdout, ifaceName)
+		ti.Routes.EndpointRoute = findEndpointRoute(result.Stdout, extractEndpointIP(ti.Connection.RawOutput), func() (string, error) {
+			res, err := exec.Run(ctx, "/opt/sbin/ip", "-6", "route", "show")
+			if err != nil {
+				return "", err
+			}
+			return res.Stdout, nil
+		})
 	}
 	if result, err := exec.Run(ctx, "/opt/sbin/iptables", "-t", "mangle", "-S"); err == nil {
 		ti.Firewall.IPTablesRules = filterRules(result.Stdout, ifaceName)
@@ -411,7 +437,6 @@ func buildTunnelSettings(stored *storage.AWGTunnel) TunnelSettings {
 			Target:        stored.PingCheck.Target,
 			Interval:      stored.PingCheck.Interval,
 			FailThreshold: stored.PingCheck.FailThreshold,
-			DeadInterval:  stored.PingCheck.DeadInterval,
 		}
 	}
 	return ts
@@ -508,6 +533,21 @@ func extractEndpointIP(awgShow string) string {
 		}
 	}
 	return ""
+}
+
+// findEndpointRoute ищет маршрут до endpoint в таблице его семейства. До IPv6
+// endpoint оператор ставит маршрут через `ip -6 route replace`
+// (operator_os5_routing.go), и в IPv4-таблице его нет (F586); IPv6-таблица
+// читается только для такого endpoint.
+func findEndpointRoute(v4Table, endpointIP string, v6Table func() (string, error)) string {
+	if ip := net.ParseIP(endpointIP); ip != nil && ip.To4() == nil {
+		table, err := v6Table()
+		if err != nil {
+			return ""
+		}
+		return extractEndpointRoute(table, endpointIP)
+	}
+	return extractEndpointRoute(v4Table, endpointIP)
 }
 
 func extractEndpointRoute(routeTable, endpointIP string) string {
@@ -617,6 +657,28 @@ func (r *Runner) collectAWGProxyModule(ctx context.Context) AWGProxyModule {
 				if line != "" {
 					mod.DmesgLines = append(mod.DmesgLines, line)
 				}
+			}
+		}
+	}
+
+	return mod
+}
+
+// collectAWGMRelayModule reads kernel-релей обфускатора Phobos (awgm_relay,
+// спека §4.10). Никогда не паникует на отсутствующих /proc-файлах (relay
+// выключен настройкой или модуль не собран) — в этом случае Loaded=false.
+func (r *Runner) collectAWGMRelayModule() AWGMRelayModule {
+	mod := AWGMRelayModule{}
+
+	if v, err := r.readAWGMRelayVersion(); err == nil {
+		mod.Loaded = true
+		mod.Version = strings.TrimSpace(string(v))
+	}
+	if list, err := r.readAWGMRelayList(); err == nil {
+		mod.RawList = string(list)
+		for _, line := range strings.Split(mod.RawList, "\n") {
+			if strings.HasPrefix(line, "127.0.0.1:") {
+				mod.Slots++
 			}
 		}
 	}

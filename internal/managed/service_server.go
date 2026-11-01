@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -21,11 +22,28 @@ const (
 // Create creates a new managed WireGuard server interface and persists it.
 // Multiple managed servers may coexist; the only collision check is on the
 // allocated NDMS interface name.
+//
+// Ошибка с ErrASCUnverified приходит вместе с НЕ-nil сервером: он создан и
+// сохранён, не сверен только ASC (R44, L4).
 func (s *Service) Create(ctx context.Context, req CreateServerRequest) (*storage.ManagedServer, error) {
-	// Validate
-	if err := s.validateServerParams(ctx, req.Address, req.Mask, req.ListenPort, ""); err != nil {
+	switch req.Mode {
+	case "":
+	case ModeAWG31:
+		if !req.ShouldGenerateASC() {
+			return nil, fmt.Errorf("сервер AWG 3.1 создаётся только со сгенерированным ASC")
+		}
+		if !s.supportsASC3() {
+			return nil, ErrASC3Unsupported
+		}
+	default:
+		return nil, fmt.Errorf("неизвестный режим сервера %q", req.Mode)
+	}
+	// Validate; подсеть занята за этим созданием до выхода (F554).
+	release, err := s.reserveServerSubnet(ctx, req.Address, req.Mask, req.ListenPort, "")
+	if err != nil {
 		return nil, err
 	}
+	defer release()
 
 	// Find free index
 	idx, err := s.queries.WGServers.FindFreeIndex(ctx)
@@ -44,21 +62,29 @@ func (s *Service) Create(ctx context.Context, req CreateServerRequest) (*storage
 		description = ManagedServerDescription
 	}
 
-	// Create interface via RCI
-	if err := s.rciCreateInterface(ctx, ifaceName); err != nil {
+	// Create interface via RCI — подтверждение свежим списком на весь поток.
+	iface, _, err := s.rciCreateInterface(ctx, ifaceName, false)
+	if err != nil {
 		return nil, fmt.Errorf("create interface: %w", err)
 	}
 
 	// Configure all properties in a single RCI call:
 	// description, security-level, listen-port, ip address, mtu, name-servers, tcp adjust-mss, up
-	if err := s.rciConfigureServer(ctx, ifaceName, description, req.Address, mask, req.ListenPort, effectiveMTU(req.MTU)); err != nil {
-		s.cleanupInterface(ctx, ifaceName)
+	if err := s.rciConfigureServer(ctx, iface, description, req.Address, mask, req.ListenPort, effectiveMTU(req.MTU)); err != nil {
+		// Configure мог примениться частично (адрес встал), а снос — не пройти:
+		// метка «грязно» до снятия резервации, иначе следующая проверка до 2 с
+		// берёт память без адреса.
+		s.queries.Interfaces.Invalidate(ifaceName)
+		s.cleanupInterface(ctx, iface)
 		return nil, fmt.Errorf("configure interface: %w", err)
 	}
+	// Адрес и порт — в карту: метка «грязно», следующее чтение (проверка
+	// подсети следующего Create) берёт свежий список (П4, F546).
+	s.queries.Interfaces.Invalidate(ifaceName)
 
 	// Enable NAT by default
-	if err := s.rciSetNAT(ctx, ifaceName, true); err != nil {
-		s.cleanupInterface(ctx, ifaceName)
+	if err := s.rciSetNAT(ctx, iface, true); err != nil {
+		s.cleanupInterface(ctx, iface)
 		return nil, fmt.Errorf("enable NAT: %w", err)
 	}
 
@@ -67,21 +93,29 @@ func (s *Service) Create(ctx context.Context, req CreateServerRequest) (*storage
 	// exported/restored safely, so Create must not succeed in that state.
 	privateKey, err := s.readCreatedServerPrivateKey(ctx, ifaceName)
 	if err != nil {
-		s.cleanupInterface(ctx, ifaceName)
+		s.cleanupInterface(ctx, iface)
 		return nil, fmt.Errorf("read private key: %w", err)
 	}
 
 	// Generate/apply ASC params by default (backward-compatible) but allow
 	// callers to opt out explicitly via generateAsc=false.
+	//
+	// ASC записан, но сверка не прочиталась (R44) — сервер не откатывается и
+	// сохраняется, но Create отвечает ErrASCUnverified ВМЕСТЕ с сервером:
+	// успехом это не является, handler говорит об этом пользователю (L4).
+	var unverified error
 	if req.ShouldGenerateASC() {
-		asc, err := s.generateDefaultASCParams()
+		asc, err := s.generateDefaultASCParams(req.Mode)
 		if err != nil {
-			s.cleanupInterface(ctx, ifaceName)
+			s.cleanupInterface(ctx, iface)
 			return nil, fmt.Errorf("generate ASC params: %w", err)
 		}
-		if err := s.applyASCParams(ctx, ifaceName, asc); err != nil {
-			s.cleanupInterface(ctx, ifaceName)
-			return nil, fmt.Errorf("apply ASC params: %w", err)
+		if err := s.applyASCParams(ctx, iface, asc); err != nil {
+			if !s.ascUnverified("create", ifaceName, err) {
+				s.cleanupInterface(ctx, iface)
+				return nil, fmt.Errorf("apply ASC params: %w", err)
+			}
+			unverified = fmt.Errorf("сервер %s создан, но ASC не сверен: %w", ifaceName, err)
 		}
 	}
 
@@ -101,24 +135,14 @@ func (s *Service) Create(ctx context.Context, req CreateServerRequest) (*storage
 		Peers:         []storage.ManagedPeer{},
 	}
 	if err := s.settings.AddManagedServer(server); err != nil {
-		s.cleanupInterface(ctx, ifaceName)
+		s.cleanupInterface(ctx, iface)
 		return nil, fmt.Errorf("save to storage: %w", err)
-	}
-
-	// Refresh InterfaceStore so a subsequent Create call sees the
-	// freshly-created interface (subnet/listen-port conflict checks
-	// rely on Interfaces.List). In production the NDMS ifcreated hook
-	// reaches the same store via Dispatcher.OnCreated; this call also
-	// covers the no-hook test path and any race where validation runs
-	// before the hook arrives.
-	if s.queries != nil && s.queries.Interfaces != nil {
-		s.queries.Interfaces.InvalidateAll()
 	}
 
 	s.log.Info("managed server created", "interface", ifaceName, "address", req.Address, "port", req.ListenPort)
 	s.appLog.Info("create", ifaceName, fmt.Sprintf("Managed server created on %s", ifaceName))
 	saved := server
-	return &saved, nil
+	return &saved, unverified
 }
 
 // Update updates the managed server's address and/or listen port.
@@ -128,9 +152,12 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateServerRequest
 		return fmt.Errorf("managed server not found: %s", id)
 	}
 
-	if err := s.validateServerParams(ctx, req.Address, req.Mask, req.ListenPort, server.InterfaceName); err != nil {
+	// Новые подсеть и порт — за этой правкой до выхода, как у Create (F554).
+	release, err := s.reserveServerSubnet(ctx, req.Address, req.Mask, req.ListenPort, server.InterfaceName)
+	if err != nil {
 		return err
 	}
+	defer release()
 
 	mask := s.resolveMask(req.Mask)
 
@@ -174,8 +201,21 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateServerRequest
 		changes.mtuSet = true
 		changes.mtu = effectiveMTU(*req.MTU)
 	}
-	if err := s.rciUpdateServer(ctx, server.InterfaceName, changes); err != nil {
-		return fmt.Errorf("update server: %w", err)
+	// Интерфейс нужен, только когда есть что слать в NDMS: правка одних
+	// полей записи (endpoint, DNS) проходит и у сервера со снятым интерфейсом.
+	var iface query.Confirmed
+	if changes != (updateServerChanges{}) {
+		if iface, err = s.requireServer(ctx, server.InterfaceName); err != nil {
+			return err
+		}
+		if err := s.rciUpdateServer(ctx, iface, changes); err != nil {
+			// Ответ мог потеряться после применения (таймаут) — новый адрес на
+			// роутере: метка «грязно» до снятия резервации, как в Create (Q1).
+			s.queries.Interfaces.Invalidate(server.InterfaceName)
+			return fmt.Errorf("update server: %w", err)
+		}
+		// Новые адрес/порт — в запись кэша: по ней проверяются подсети (П4).
+		s.queries.Interfaces.Invalidate(server.InterfaceName)
 	}
 
 	// Сменилась подсеть → пересобрать LAN ACL под новую peer-подсеть, иначе
@@ -183,7 +223,15 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateServerRequest
 	// applyLANSegmentsRaw гарантирует, что невалидный запрос (неизвестный
 	// сегмент, недоступный каталог) не начнёт разрушать рабочий ACL.
 	if changes.addressChanged && len(server.LANSegments) > 0 {
-		if err := s.applyLANSegmentsRaw(ctx, server.InterfaceName, req.Address, mask, server.LANSegments); err != nil {
+		// Сети пиров — свежие и под блокировкой их правок (см. SetLANSegments).
+		unlock := s.LockPeerSubnets()
+		var peerNets []string
+		if fresh, ok := s.settings.GetManagedServerByID(id); ok {
+			peerNets = serverPeerSubnets(fresh.Peers)
+		}
+		err := s.applyLANSegmentsRaw(ctx, iface, req.Address, mask, server.LANSegments, peerNets)
+		unlock()
+		if err != nil {
 			// Роутер уже сменил подсеть (rciUpdateServer выше), но storage ещё
 			// хранит старую — рассинхрон до следующего успешного Update. Это
 			// fail-closed по доступу (ACL не пересобран → сегмент недоступен),
@@ -217,12 +265,6 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateServerRequest
 		return nil
 	}); err != nil {
 		return fmt.Errorf("save to storage: %w", err)
-	}
-
-	// Refresh InterfaceStore so subsequent subnet/listen-port checks
-	// see the new address/port. Mirrors the post-Create invalidate.
-	if s.queries != nil && s.queries.Interfaces != nil {
-		s.queries.Interfaces.InvalidateAll()
 	}
 
 	s.log.Info("managed server updated", "interface", server.InterfaceName, "address", req.Address, "port", req.ListenPort)
@@ -271,18 +313,38 @@ func (s *Service) natStaticTargets(ctx context.Context) ([]string, error) {
 // it (no speculative live-WAN lookup). In internet-only prevWANs are the
 // tail of the previous enable: targets are re-queried live, and whatever is
 // no longer among them gets removed. Reused by restore.
-func (s *Service) applyNATModeRaw(ctx context.Context, ifaceName, mode string, prevWANs []string) ([]string, error) {
+//
+// Выходы подтверждаются одним списком (ConfirmEach): `ip static` со ссылкой
+// на отсутствующий выход — E в журнале ndm. Отсутствующая цель пропускается с
+// предупреждением; не осталось ни одной — отказ до `no ip nat`, иначе
+// интерфейс остался бы вовсе без подмены источника.
+func (s *Service) applyNATModeRaw(ctx context.Context, iface query.Confirmed, mode string, prevWANs []string) ([]string, error) {
+	ifaceName := iface.Name()
 	switch mode {
 	case "full":
-		if err := s.rciSetNAT(ctx, ifaceName, true); err != nil {
+		if err := s.rciSetNAT(ctx, iface, true); err != nil {
 			return nil, fmt.Errorf("set NAT: %w", err)
 		}
 		if len(prevWANs) > 0 { // только если ранее реально ставили static (internet-only)
-			s.removeStaticNATs(ctx, ifaceName, prevWANs)
+			if err := s.removeStaticNATs(ctx, iface, prevWANs); err != nil {
+				// `ip nat` первым — без окна вовсе без подмены источника; static
+				// не снят — откатываем его: прежний internet-only был без `ip nat`,
+				// иначе роутер полуприменён, а запись не меняется (F555).
+				if rbErr := s.rciSetNAT(ctx, iface, false); rbErr != nil {
+					s.log.Warn("full rollback: disable NAT failed", "error", rbErr, "interface", ifaceName)
+					s.appLog.Warn("nat", ifaceName, "откат `ip nat` не удался: "+rbErr.Error())
+					return nil, errors.Join(err, fmt.Errorf("откат ip nat: %w", rbErr))
+				}
+				return nil, err
+			}
 		}
 		return nil, nil
 	case "internet-only":
 		targets, err := s.natStaticTargets(ctx)
+		if err != nil {
+			return nil, err
+		}
+		wans, err := s.confirmWANs(ctx, append(slices.Clone(targets), prevWANs...))
 		if err != nil {
 			return nil, err
 		}
@@ -298,37 +360,50 @@ func (s *Service) applyNATModeRaw(ctx context.Context, ifaceName, mode string, p
 				if slices.Contains(prevWANs, a) {
 					continue // стоял до вызова — оставляем
 				}
-				if rbErr := s.rciSetStaticNAT(ctx, ifaceName, a, false); rbErr != nil {
+				if rbErr := s.rciSetStaticNAT(ctx, iface, wans[a], false); rbErr != nil {
 					s.log.Warn("internet-only rollback: remove static NAT failed", "error", rbErr, "interface", ifaceName, "target", a)
 				}
 			}
 		}
 		for _, t := range targets {
-			if err := s.rciSetStaticNAT(ctx, ifaceName, t, true); err != nil {
+			wan, ok := wans[t]
+			if !ok {
+				s.appLog.Warn("nat", ifaceName, "выход "+t+" не найден в NDMS: static NAT на него не ставится")
+				continue
+			}
+			if err := s.rciSetStaticNAT(ctx, iface, wan, true); err != nil {
 				rollback()
 				return nil, fmt.Errorf("set static NAT (%s): %w", t, err)
 			}
 			applied = append(applied, t)
 		}
-		if err := s.rciSetNAT(ctx, ifaceName, false); err != nil {
+		if len(applied) == 0 {
+			return nil, fmt.Errorf("internet-only: ни одного выхода для static NAT нет в NDMS")
+		}
+		if err := s.rciSetNAT(ctx, iface, false); err != nil {
 			rollback()
 			return nil, fmt.Errorf("disable NAT: %w", err)
 		}
 		// Хвосты прошлого включения, не попавшие в новый список целей.
 		for _, w := range prevWANs {
-			if !slices.Contains(applied, w) {
-				if rbErr := s.rciSetStaticNAT(ctx, ifaceName, w, false); rbErr != nil {
+			wan, ok := wans[w]
+			if ok && !slices.Contains(applied, w) { // выхода нет — ссылаться не на что
+				if rbErr := s.rciSetStaticNAT(ctx, iface, wan, false); rbErr != nil {
 					s.log.Warn("internet-only: remove stale static NAT failed", "error", rbErr, "interface", ifaceName, "target", w)
 				}
 			}
 		}
 		return applied, nil
 	case "none":
-		if err := s.rciSetNAT(ctx, ifaceName, false); err != nil {
-			return nil, fmt.Errorf("disable NAT: %w", err)
-		}
+		// Static снимается ПЕРВЫМ: список выходов не прочитан — ни одной
+		// команды, `no ip nat` не уходит впереди (F555).
 		if len(prevWANs) > 0 { // только если ранее реально ставили static (internet-only)
-			s.removeStaticNATs(ctx, ifaceName, prevWANs)
+			if err := s.removeStaticNATs(ctx, iface, prevWANs); err != nil {
+				return nil, err
+			}
+		}
+		if err := s.rciSetNAT(ctx, iface, false); err != nil {
+			return nil, fmt.Errorf("disable NAT: %w", err)
 		}
 		return nil, nil
 	default:
@@ -342,7 +417,11 @@ func (s *Service) SetNATMode(ctx context.Context, id, mode string) error {
 	if !ok {
 		return fmt.Errorf("managed server not found: %s", id)
 	}
-	wans, err := s.applyNATModeRaw(ctx, server.InterfaceName, mode, server.StaticNATList())
+	iface, err := s.requireServer(ctx, server.InterfaceName)
+	if err != nil {
+		return err
+	}
+	wans, err := s.applyNATModeRaw(ctx, iface, mode, server.StaticNATList())
 	if err != nil {
 		return err
 	}
@@ -359,26 +438,52 @@ func (s *Service) SetNATMode(ctx context.Context, id, mode string) error {
 	return nil
 }
 
+// confirmWANs — выходы static NAT по одному свежему списку; в ответе только
+// существующие.
+func (s *Service) confirmWANs(ctx context.Context, names []string) (map[string]query.Confirmed, error) {
+	if s.queries == nil || s.queries.Interfaces == nil {
+		return nil, fmt.Errorf("interface store not wired")
+	}
+	return s.queries.Interfaces.ConfirmEach(ctx, names)
+}
+
 // removeStaticNATs снимает ip static для интерфейса по сохранённому списку;
 // пустой список — fallback на текущий дефолт-WAN (back-compat для серверов
-// без сохранённых выходов). Best-effort.
-func (s *Service) removeStaticNATs(ctx context.Context, ifaceName string, storedWANs []string) {
+// без сохранённых выходов; дефолт не прочитан — ошибка). Отказ снятия отдельного правила — в журнал.
+// Выхода нет в NDMS — правило ушло вместе с ним, ссылка на него дала бы E.
+// Список не прочитан — ни одной команды и ошибка: состояние неизвестно, и
+// вызывающий не вправе записать «static NAT снят» (иначе правила-сироты).
+func (s *Service) removeStaticNATs(ctx context.Context, iface query.Confirmed, storedWANs []string) error {
 	wans := storedWANs
 	if len(wans) == 0 {
 		if s.queries == nil || s.queries.Routes == nil {
-			return
+			return nil
 		}
+		// Маршрут не прочитан — выход неизвестен: ошибка, а не «снимать
+		// нечего», иначе `ip static` остаются сиротами (F556, решение 4).
 		wan, err := s.queries.Routes.GetDefaultGatewayInterface(ctx)
-		if err != nil || wan == "" {
-			return
+		if err != nil {
+			return fmt.Errorf("remove static NAT: WAN по умолчанию: %w", err)
+		}
+		if wan == "" {
+			return fmt.Errorf("remove static NAT: WAN по умолчанию не определён")
 		}
 		wans = []string{wan}
 	}
+	present, err := s.confirmWANs(ctx, wans)
+	if err != nil {
+		return fmt.Errorf("remove static NAT: %w", err)
+	}
 	for _, w := range wans {
-		if err := s.rciSetStaticNAT(ctx, ifaceName, w, false); err != nil {
-			s.log.Warn("remove static NAT failed", "error", err, "interface", ifaceName, "target", w)
+		wan, ok := present[w]
+		if !ok {
+			continue
+		}
+		if err := s.rciSetStaticNAT(ctx, iface, wan, false); err != nil {
+			s.log.Warn("remove static NAT failed", "error", err, "interface", iface.Name(), "target", w)
 		}
 	}
+	return nil
 }
 
 // SetEnabled brings the managed server interface up or down.
@@ -388,12 +493,22 @@ func (s *Service) SetEnabled(ctx context.Context, id string, enabled bool) error
 		return fmt.Errorf("managed server not found: %s", id)
 	}
 
+	iface, ok, err := s.confirmServer(ctx, server.InterfaceName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if !enabled {
+			return nil // выключение — снос: опускать нечего (R27)
+		}
+		return errServerGone(server.InterfaceName)
+	}
 	if enabled {
-		if err := s.rciInterfaceUp(ctx, server.InterfaceName); err != nil {
+		if err := s.rciInterfaceUp(ctx, iface); err != nil {
 			return fmt.Errorf("interface up: %w", err)
 		}
 	} else {
-		if err := s.rciInterfaceDown(ctx, server.InterfaceName); err != nil {
+		if err := s.rciInterfaceDown(ctx, iface); err != nil {
 			return fmt.Errorf("interface down: %w", err)
 		}
 	}
@@ -412,17 +527,21 @@ func (s *Service) RestartOrStart(ctx context.Context, id string) error {
 		return fmt.Errorf("managed server not found: %s", id)
 	}
 
+	iface, err := s.requireServer(ctx, server.InterfaceName)
+	if err != nil {
+		return err
+	}
 	stats, err := s.GetStats(ctx, id)
 	wasUp := err == nil && stats != nil && stats.Status == "up"
 
 	if wasUp {
-		if err := s.rciInterfaceDown(ctx, server.InterfaceName); err != nil {
+		if err := s.rciInterfaceDown(ctx, iface); err != nil {
 			return fmt.Errorf("interface down: %w", err)
 		}
 		time.Sleep(1200 * time.Millisecond)
 	}
 
-	if err := s.rciInterfaceUp(ctx, server.InterfaceName); err != nil {
+	if err := s.rciInterfaceUp(ctx, iface); err != nil {
 		return fmt.Errorf("interface up: %w", err)
 	}
 
@@ -439,57 +558,56 @@ func (s *Service) RestartOrStart(ctx context.Context, id string) error {
 // especially bad in the multi-server world (the user might re-create a server
 // at the same Wireguard<N> slot and collide with the orphan).
 //
-// NAT removal and interface-down are best-effort: failing to undo NAT or to
-// down the interface should not block deletion, since rciDeleteInterface will
-// destroy both anyway. Errors are logged via appLog (visible in /logs).
+// Интерфейс подтверждается одним свежим списком (F546, F547). Список не
+// прочитан — отказ без команд, запись остаётся для повтора. Интерфейса нет
+// (снят мимо панели) — снимать нечего: ни одной команды (каждая по
+// отсутствующему дала бы фантом или E), запись удаляется. Есть — NAT и static
+// NAT снимаются best-effort (errors logged via appLog, visible in /logs),
+// затем `no interface`; `down` не шлём — интерфейс уходит целиком.
 func (s *Service) Delete(ctx context.Context, id string) error {
 	server, ok := s.settings.GetManagedServerByID(id)
 	if !ok {
 		return fmt.Errorf("managed server not found: %s", id)
 	}
 
-	// Disable NAT if enabled — best-effort. NAT cleanup is opportunistic;
-	// rciDeleteInterface below removes the interface (and thus its NAT rule)
-	// regardless.
-	if server.NATMode == "full" {
-		if err := s.rciSetNAT(ctx, server.InterfaceName, false); err != nil {
-			s.log.Warn("failed to disable NAT during delete", "error", err, "interface", server.InterfaceName)
-			s.appLog.Warn("delete", server.InterfaceName, fmt.Sprintf("Failed to disable NAT before delete: %v (continuing)", err))
+	iface, present, err := s.confirmServer(ctx, server.InterfaceName)
+	if err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	if present {
+		// Disable NAT if enabled — best-effort. NAT cleanup is opportunistic;
+		// rciDeleteInterface below removes the interface regardless.
+		if server.NATMode == "full" {
+			if err := s.rciSetNAT(ctx, iface, false); err != nil {
+				s.log.Warn("failed to disable NAT during delete", "error", err, "interface", server.InterfaceName)
+				s.appLog.Warn("delete", server.InterfaceName, fmt.Sprintf("Failed to disable NAT before delete: %v (continuing)", err))
+			}
 		}
-	}
-	if server.NATMode == "internet-only" {
-		s.removeStaticNATs(ctx, server.InterfaceName, server.StaticNATList())
-	}
-	if len(server.LANSegments) > 0 {
-		// Teardown-only ветка applyLANSegmentsRaw: unbind + remove ACL (best-effort).
-		_ = s.applyLANSegmentsRaw(ctx, server.InterfaceName, "", "", nil)
-	}
+		if server.NATMode == "internet-only" {
+			if err := s.removeStaticNATs(ctx, iface, server.StaticNATList()); err != nil {
+				s.appLog.Warn("delete", server.InterfaceName, fmt.Sprintf("Static NAT not removed before delete: %v (continuing)", err))
+			}
+		}
+		if len(server.LANSegments) > 0 {
+			// Teardown-only ветка applyLANSegmentsRaw: unbind + remove ACL (best-effort).
+			_ = s.applyLANSegmentsRaw(ctx, iface, "", "", nil, nil)
+		}
 
-	// Bring down — best-effort. rciDeleteInterface implies down.
-	if err := s.rciInterfaceDown(ctx, server.InterfaceName); err != nil {
-		s.log.Warn("failed to bring interface down during delete", "error", err, "interface", server.InterfaceName)
-		s.appLog.Warn("delete", server.InterfaceName, fmt.Sprintf("Failed to bring interface down before delete: %v (continuing)", err))
-	}
-
-	// Delete interface (removes all peers too). This is the CRITICAL step:
-	// if it fails we MUST NOT proceed with the storage delete, otherwise we
-	// leak an orphan kernel/NDMS interface that has no storage entry to
-	// retry the cleanup from.
-	if err := s.rciDeleteInterface(ctx, server.InterfaceName); err != nil {
-		s.appLog.Warn("delete", server.InterfaceName, fmt.Sprintf("Failed to delete NDMS interface: %v", err))
-		return fmt.Errorf("delete interface: %w", err)
+		// Delete interface (removes all peers too). This is the CRITICAL step:
+		// if it fails we MUST NOT proceed with the storage delete, otherwise we
+		// leak an orphan kernel/NDMS interface that has no storage entry to
+		// retry the cleanup from.
+		if err := s.rciDeleteInterface(ctx, iface); err != nil {
+			s.appLog.Warn("delete", server.InterfaceName, fmt.Sprintf("Failed to delete NDMS interface: %v", err))
+			return fmt.Errorf("delete interface: %w", err)
+		}
+	} else {
+		s.appLog.Info("delete", server.InterfaceName, "интерфейса нет в NDMS — снимать нечего, удаляем запись")
 	}
 
 	// Delete from storage
 	if err := s.settings.DeleteManagedServer(id); err != nil {
 		return fmt.Errorf("delete from storage: %w", err)
-	}
-
-	// Refresh InterfaceStore so its map drops the deleted entry
-	// without waiting for the eventual ifdestroyed hook. Mirrors the
-	// post-Create / post-Update invalidate.
-	if s.queries != nil && s.queries.Interfaces != nil {
-		s.queries.Interfaces.InvalidateAll()
 	}
 
 	s.log.Info("managed server deleted", "interface", server.InterfaceName)
@@ -539,6 +657,17 @@ func (s *Service) GetStats(ctx context.Context, id string) (*ManagedServerStats,
 	if err != nil {
 		return nil, fmt.Errorf("get runtime data: %w", err)
 	}
+	// WGServers.Get — кэш на 30 с; живые поля пиров — из PeerStore, его
+	// держит тёплым поллер метрик (тот же класс, что F476 у системных
+	// серверов). Сбой чтения оставляет данные кэша и не логируется — поллер
+	// пишет ту же ошибку на каждом тике.
+	srv := *wgServer
+	if s.queries.Peers != nil {
+		if live, err := s.queries.Peers.GetPeers(ctx, server.InterfaceName); err == nil {
+			srv = query.WithLivePeers(srv, live)
+		}
+	}
+	wgServer = &srv
 
 	peers := make([]ManagedPeerStats, 0, len(wgServer.Peers))
 	for _, p := range wgServer.Peers {
@@ -558,7 +687,11 @@ func (s *Service) GetStats(ctx context.Context, id string) (*ManagedServerStats,
 	}, nil
 }
 
-func (s *Service) validateServerParams(ctx context.Context, address, mask string, port int, excludeIface string) error {
+// validateServerParams — проверка параметров сервера. inflight/inflightPorts —
+// резервации серверов в создании или правке (F554), снятые ДО чтения списка:
+// операция, снявшая резервацию после этого, уже поставила адрес на роутере
+// (Invalidate) и запись в хранилище, и список и хранилище её видят.
+func (s *Service) validateServerParams(ctx context.Context, address, mask string, port int, excludeIface string, inflight []usedSubnet, inflightPorts []usedPort) error {
 	if net.ParseIP(address) == nil {
 		return fmt.Errorf("invalid IP address: %s", address)
 	}
@@ -585,15 +718,16 @@ func (s *Service) validateServerParams(ctx context.Context, address, mask string
 		return err
 	}
 
-	if portConflict := findPortConflict(port, s.listUsedListenPorts(excludeIface)); portConflict != nil {
+	if portConflict := findPortConflict(port, append(s.listUsedListenPorts(excludeIface), inflightPorts...)); portConflict != nil {
 		return fmt.Errorf("listen-port %d уже используется managed-сервером %q", port, portConflict.iface)
 	}
 
 	used, err := s.listUsedSubnets(ctx, excludeIface)
 	if err != nil {
-		s.log.Warn("validateServerParams: cannot read interface list, skipping overlap check", "error", err)
-		return nil
+		// Пересечение не проверить — отказ, а не пропуск (F573, решение 4).
+		return fmt.Errorf("проверка пересечения подсети: список интерфейсов: %w", err)
 	}
+	used = append(used, inflight...)
 	if conflict := findConflict(cidr, used); conflict != nil {
 		return fmt.Errorf("подсеть %s пересекается с интерфейсом «%s» (%s)", cidr.String(), conflict.label, conflict.cidr.String())
 	}
@@ -608,8 +742,8 @@ func (s *Service) resolveMask(mask string) string {
 	return mask
 }
 
-func (s *Service) cleanupInterface(ctx context.Context, name string) {
-	_ = s.rciDeleteInterface(ctx, name)
+func (s *Service) cleanupInterface(ctx context.Context, iface query.Confirmed) {
+	_ = s.rciDeleteInterface(ctx, iface)
 }
 
 func (s *Service) readCreatedServerPrivateKey(ctx context.Context, ifaceName string) (string, error) {
@@ -641,43 +775,84 @@ func (s *Service) readCreatedServerPrivateKey(ctx context.Context, ifaceName str
 	return "", fmt.Errorf("cannot read private key after %d attempts: %w", createPrivateKeyReadAttempts, lastErr)
 }
 
-// permitRule — одно правило permit (src→dst) для ACL.
+// permitRule — одно правило permit (src→dst) для ACL; seg — имя сегмента dst.
 type permitRule struct {
-	srcSub, srcMask, dstSub, dstMask string
+	srcSub, srcMask, dstSub, dstMask, seg string
 }
 
 // resolveLANSegmentsPlan валидирует peer-подсеть и каждый запрошенный сегмент
 // против каталога бриджей БЕЗ обращения к роутеру. Возвращает правила permit
 // или ошибку, если сегмент неизвестен/подсеть не парсится. Вызывать ДО
 // удаления существующего ACL — тогда плохой запрос не ломает рабочий доступ.
-func resolveLANSegmentsPlan(addr, mask string, segments []string, bridges []query.LANBridge) ([]permitRule, error) {
+//
+// Источники: подсеть сервера, затем сети за клиентом (peerNets, CIDR) —
+// интерфейс сервера private, и без своего permit трафик из них в LAN режет
+// isolate-private (#713). Порядок правил: источник × сегмент, как переданы.
+func resolveLANSegmentsPlan(addr, mask string, peerNets, segments []string, bridges []query.LANBridge) ([]permitRule, error) {
 	cidr, err := parseManagedSubnet(addr, mask)
 	if err != nil {
 		return nil, fmt.Errorf("peer subnet: %w", err)
 	}
-	peerSub, peerMask := cidr.IP.String(), net.IP(cidr.Mask).String()
+	nets, err := parseCIDRs(peerNets)
+	if err != nil {
+		return nil, err
+	}
+	return segmentRules(append([]*net.IPNet{cidr}, nets...), segments, bridges)
+}
+
+// segmentRules — permit каждого источника в каждый сегмент (сегменты
+// резолвятся по каталогу бриджей; неизвестный — ошибка до RCI).
+func segmentRules(srcs []*net.IPNet, segments []string, bridges []query.LANBridge) ([]permitRule, error) {
 	byName := make(map[string]query.LANBridge, len(bridges))
 	for _, b := range bridges {
 		byName[b.Name] = b
 	}
-	rules := make([]permitRule, 0, len(segments))
+	dsts := make([]*net.IPNet, 0, len(segments))
 	for _, seg := range segments {
 		b, ok := byName[seg]
 		if !ok {
-			return nil, fmt.Errorf("LAN-сегмент %q не найден", seg)
+			return nil, fmt.Errorf("%w: %q", ErrUnknownLANSegment, seg)
 		}
 		segCidr, err := parseManagedSubnet(b.Address, b.Mask)
 		if err != nil {
 			return nil, fmt.Errorf("segment %q subnet: %w", seg, err)
 		}
-		rules = append(rules, permitRule{
-			srcSub:  peerSub,
-			srcMask: peerMask,
-			dstSub:  segCidr.IP.String(),
-			dstMask: net.IP(segCidr.Mask).String(),
-		})
+		dsts = append(dsts, segCidr)
+	}
+	rules := make([]permitRule, 0, len(srcs)*len(dsts))
+	for _, src := range srcs {
+		for i, dst := range dsts {
+			rules = append(rules, permitRule{
+				srcSub:  src.IP.String(),
+				srcMask: net.IP(src.Mask).String(),
+				dstSub:  dst.IP.String(),
+				dstMask: net.IP(dst.Mask).String(),
+				seg:     segments[i],
+			})
+		}
 	}
 	return rules, nil
+}
+
+func parseCIDRs(cidrs []string) ([]*net.IPNet, error) {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("remote subnet %q: %w", c, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// serverPeerSubnets — сети за клиентом всех пиров сервера, в порядке пиров.
+func serverPeerSubnets(peers []storage.ManagedPeer) []string {
+	var out []string
+	for _, p := range peers {
+		out = append(out, p.RemoteSubnets...)
+	}
+	return out
 }
 
 // applyLANSegmentsRaw applies LAN-forward ACL rules to an interface without
@@ -692,8 +867,10 @@ func resolveLANSegmentsPlan(addr, mask string, segments []string, bridges []quer
 // permit-all. Прежний код снимал его по имени, целиком и на каждом старте
 // демона — issue #879 (стенд 12.09: `permit tcp 10.77.0.2 …` исчезал вместе со
 // списком). Показываем его в карточке (`foreignAcls`), не снимаем.
-func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface, addr, mask string, segments []string) error {
-	acl := "AWGM_" + iface
+//
+// peerNets — сети за клиентом пиров сервера: получают permit в те же сегменты.
+func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface query.Confirmed, addr, mask string, segments, peerNets []string) error {
+	acl := "AWGM_" + iface.Name()
 	commandsWired := s.commands != nil && s.commands.Interfaces != nil
 
 	if len(segments) == 0 {
@@ -702,12 +879,7 @@ func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface, addr, mask str
 		if !commandsWired {
 			return nil
 		}
-		if err := s.commands.Interfaces.ACLUnbind(ctx, iface, acl); err != nil {
-			s.log.Debug("unbind ACL (teardown)", "error", err, "iface", iface)
-		}
-		if err := s.commands.Interfaces.ACLRemove(ctx, acl); err != nil {
-			s.log.Debug("remove ACL (teardown)", "error", err, "iface", iface)
-		}
+		s.clearLANACL(ctx, iface)
 		return nil
 	}
 	if !commandsWired {
@@ -723,27 +895,19 @@ func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface, addr, mask str
 	if err != nil {
 		return fmt.Errorf("list LAN bridges: %w", err)
 	}
-	plan, err := resolveLANSegmentsPlan(addr, mask, segments, bridges)
+	plan, err := resolveLANSegmentsPlan(addr, mask, peerNets, segments, bridges)
 	if err != nil {
 		return err // старый ACL не тронут
 	}
 
-	// Apply — destroy → rebuild. unbind/remove best-effort (ACL может ещё не
-	// существовать), но больше не глушим молча. С auto-delete unbind может
-	// унести список сам (стенд 2026-09-05) — remove после него no-op или
-	// отказ, он и так best-effort.
-	if err := aclCmd.ACLUnbind(ctx, iface, acl); err != nil {
-		s.log.Debug("unbind ACL before rebuild", "error", err, "iface", iface)
-	}
-	if err := aclCmd.ACLRemove(ctx, acl); err != nil {
-		s.log.Debug("remove ACL before rebuild", "error", err, "iface", iface)
-	}
-	for i, r := range plan {
+	// Apply — destroy → rebuild.
+	s.clearLANACL(ctx, iface)
+	for _, r := range plan {
 		// Дубль толерируем (как SetPermitAllACL): best-effort remove выше мог
 		// транзиентно не удалить старый идентичный список — состояние роутера
 		// уже совпадает с планом, падать не за что (ревью).
 		if err := aclCmd.ACLPermitIP(ctx, acl, r.srcSub, r.srcMask, r.dstSub, r.dstMask); err != nil && !command.IsACLDuplicate(err) {
-			return fmt.Errorf("permit %s: %w", segments[i], err)
+			return fmt.Errorf("permit %s/%s → %s: %w", r.srcSub, r.srcMask, r.seg, err)
 		}
 	}
 	if err := aclCmd.ACLBind(ctx, iface, acl); err != nil {
@@ -757,9 +921,42 @@ func (s *Service) applyLANSegmentsRaw(ctx context.Context, iface, addr, mask str
 	// auto-deletion for unreferenced lists»). Отказ — не отказ применения:
 	// список привязан и работает, остаток лишь переживёт интерфейс.
 	if err := aclCmd.ACLAutoDelete(ctx, acl); err != nil {
-		s.appLog.Warn("lan-acl", iface, "auto-delete списка "+acl+" не включён: "+err.Error())
+		s.appLog.Warn("lan-acl", iface.Name(), "auto-delete списка "+acl+" не включён: "+err.Error())
 	}
 	return nil
+}
+
+// clearLANACL снимает привязку и список AWGM_<iface> перед пересборкой или
+// при teardown — только то, что есть: unbind без привязки и `no access-list`
+// без списка NDMS отвергает `argument parse error`, и это E в журнале роутера
+// (стенд 05.09, 28.09). С auto-delete unbind уносит список сам (стенд 05.09),
+// поэтому после него наличие списка читается заново.
+//
+// Состояние не прочитано — снимаем вслепую, как до этой правки: ради ACL в
+// running-config не ходим обязательно (#879), слепое снятие вредно лишь E в
+// журнале. Отказы команд — Debug: пересборка идёт дальше.
+func (s *Service) clearLANACL(ctx context.Context, iface query.Confirmed) {
+	acl := "AWGM_" + iface.Name()
+	exists, bound, err := s.lanACLState(ctx, iface.Name())
+	if err != nil {
+		s.log.Debug("ACL state unreadable, clearing blindly", "error", err, "iface", iface.Name())
+		exists, bound = true, true
+	}
+	if bound {
+		if err := s.commands.Interfaces.ACLUnbind(ctx, iface, acl); err != nil {
+			s.log.Debug("unbind ACL", "error", err, "iface", iface.Name())
+		}
+		if exists {
+			if e, _, err := s.lanACLState(ctx, iface.Name()); err == nil {
+				exists = e
+			}
+		}
+	}
+	if exists {
+		if err := s.commands.Interfaces.ACLRemove(ctx, acl); err != nil {
+			s.log.Debug("remove ACL", "error", err, "iface", iface.Name())
+		}
+	}
 }
 
 // ListLANSegments returns the router's LAN bridge catalog for the UI picker.
@@ -791,11 +988,18 @@ func (s *Service) ListLANSegments(ctx context.Context) ([]LANSegmentDTO, error) 
 // SetLANSegments sets the LAN segments (by NDMS bridge name) that peers of
 // the managed server are allowed to reach via ACL-based forwarding.
 func (s *Service) SetLANSegments(ctx context.Context, id string, segments []string) error {
+	// Под блокировкой правок сетей: сети пиров для плана и запись сегментов
+	// согласованы с точечными правками ACL в AddPeer/UpdatePeer/DeletePeer.
+	defer s.LockPeerSubnets()()
 	server, ok := s.settings.GetManagedServerByID(id)
 	if !ok {
 		return fmt.Errorf("managed server not found: %s", id)
 	}
-	if err := s.applyLANSegmentsRaw(ctx, server.InterfaceName, server.Address, server.Mask, segments); err != nil {
+	iface, err := s.requireServer(ctx, server.InterfaceName)
+	if err != nil {
+		return err
+	}
+	if err := s.applyLANSegmentsRaw(ctx, iface, server.Address, server.Mask, segments, serverPeerSubnets(server.Peers)); err != nil {
 		return err
 	}
 	if err := s.settings.UpdateManagedServer(id, func(sv *storage.ManagedServer) error {

@@ -22,6 +22,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/proxyapp/install"
 	"github.com/hoaxisr/awg-manager/internal/proxyapp/wdttusers"
 	"github.com/hoaxisr/awg-manager/internal/proxyrt"
+	"github.com/hoaxisr/awg-manager/internal/proxyrt/control"
 	"github.com/hoaxisr/awg-manager/internal/proxyrt/exitreg"
 	"github.com/hoaxisr/awg-manager/internal/proxyrt/instance"
 	"github.com/hoaxisr/awg-manager/internal/proxyrt/instancestore"
@@ -874,6 +875,7 @@ type fakeRunning struct{}
 func (fakeRunning) Start(context.Context)       {}
 func (fakeRunning) Post(proxyrt.EventKind) bool { return true }
 func (fakeRunning) ResetStartBackoff()          {}
+func (fakeRunning) Restart(string) bool         { return true }
 func (fakeRunning) Stop()                       {}
 
 // newProdAllocManager — менеджер с БОЕВЫМИ аллокаторами поверх настоящего
@@ -1121,7 +1123,12 @@ func TestProxyServerKeysAreServersOnly(t *testing.T) {
 // вызов чего-то ещё уронит тест, а не пройдёт молча.
 type stubTunnelSvc struct {
 	api.TunnelService
-	deleted []string
+	deleted   []string
+	described []string
+}
+
+func (s *stubTunnelSvc) SyncDescription(_ context.Context, id, prev, name, earlier string) {
+	s.described = append(s.described, id+"|"+prev+"|"+name+"|"+earlier)
 }
 
 func (s *stubTunnelSvc) Delete(_ context.Context, id string) error {
@@ -1154,7 +1161,7 @@ func TestProxyLinkedCleanersDeleteOwnFieldOnly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.kind), func(t *testing.T) {
 			svc := &stubTunnelSvc{}
-			cleaners := proxyLinkedCleaners(store, svc, nil, nil)
+			cleaners := proxyLinkedCleaners(store, svc, nil, nil, nil)
 			cleaner, ok := cleaners[tt.kind]
 			if !ok {
 				t.Fatalf("уборщика для роли %s нет", tt.kind)
@@ -1193,7 +1200,7 @@ func TestProxyLinkedCleanerSkipsMirrorRecord(t *testing.T) {
 	}
 
 	svc := &stubTunnelSvc{}
-	cleaner := proxyLinkedCleaners(store, svc, nil, nil)[instancestore.KindWdttClient]
+	cleaner := proxyLinkedCleaners(store, svc, nil, nil, nil)[instancestore.KindWdttClient]
 	deleted, errs := cleaner.DeleteLinked(context.Background(), "same")
 
 	if len(deleted) != 1 || deleted[0] != "awg10" {
@@ -1288,5 +1295,139 @@ func TestUpdateRunsMutatorExactlyOnce(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("мутатор исполнен %d раз(а), want 1", calls)
+	}
+}
+
+// F465: аптайм снимка стареет вместе со снимком, иначе страница «Прокси»
+// показывает застывшее значение последнего наблюдения.
+func TestAgedState_UptimeGrowsWithSnapshotAge(t *testing.T) {
+	at := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	now := at.Add(90 * time.Second)
+	cases := []struct {
+		name string
+		st   awgmproto.State
+		want int64
+	}{
+		{"наблюдение сразу после старта", awgmproto.State{PID: 7, UptimeS: 0}, 90},
+		{"наблюдение живого процесса", awgmproto.State{PID: 7, UptimeS: 600}, 690},
+		{"процесса нет — аптайма нет", awgmproto.State{PID: 0, UptimeS: 0}, 0},
+	}
+	for _, c := range cases {
+		got := agedState(control.Snapshot{State: c.st, At: at}, now)
+		if got.UptimeS != c.want {
+			t.Errorf("%s: UptimeS = %d, want %d", c.name, got.UptimeS, c.want)
+		}
+	}
+}
+
+// Отметка «Сторонний интерфейс» держит номер в пуле (issue #935): без
+// шестого поставщика туннель мог бы получить номер, который пользователь
+// явно закрепил за чужой программой.
+func TestOwners_ForeignMarkHoldsNumber(t *testing.T) {
+	e := newOccEnv(t)
+	if err := e.settings.MarkForeignInterface("opkgtun12"); err != nil {
+		t.Fatal(err)
+	}
+	noPins := func(context.Context) (map[int]string, error) { return nil, nil }
+	pool := e.pool(t, nil, noPins)
+	res, err := pool.Reserve(context.Background(), opkgtun.WantPinned(opkgtun.TunnelHolder("awg12", "дом"), 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Close()
+	if res.Numbers()[0] == 12 {
+		t.Fatal("номер отмеченного opkgtun12 выдан туннелю")
+	}
+}
+
+// ownedIndices отдаёт номера ТОЛЬКО наших владельцев (туннели, режим
+// роутера, прокси): сторонние отметки и анонимы (записи NDMS, живые
+// интерфейсы) каталогу маршрутизации не наши (F496).
+func TestOwners_OwnedIndicesExcludeForeignAndAnon(t *testing.T) {
+	e := newOccEnv(t)
+	_ = e.settings.MarkForeignInterface("opkgtun12")
+	e.putRecord(t, rawClientRecord("vk", "OpkgTun13", "opkgtun13"))
+	noPins := func(context.Context) (map[int]string, error) {
+		return map[int]string{14: "запись NDMS OpkgTun14"}, nil
+	}
+	got, err := e.owners(map[int]bool{15: true}, noPins).ownedIndices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[13] || got[12] || got[14] || got[15] {
+		t.Fatalf("ownedIndices = %v, ждали только 13", got)
+	}
+}
+
+// F494: пул видит и kernel-половину. Клиент wg-режима, сохранённый с одним
+// RawIface, при переходе в raw пинится менеджером на этот номер (halfIndex);
+// без kernel-половины в занятости номер 13 ушёл бы чужому.
+func TestProxyRecordIfacesSeesKernelHalf(t *testing.T) {
+	client := instancestore.Record{ID: "de", Kind: instancestore.KindWdttClient,
+		WdttClient: &roles.WdttClientConfig{Mode: "wg", RawIface: "opkgtun13"}}
+	server := serverRecord("srv", "", "opkgtun4", "OpkgTun5", "opkgtun5")
+	corrupt := serverRecord("bad", "OpkgTun6", "opkgtun7", "", "")
+
+	cases := []struct {
+		rec  instancestore.Record
+		want []recordHalf
+	}{
+		{client, []recordHalf{{iface: "opkgtun13"}}},
+		{server, []recordHalf{{field: "wg", iface: "opkgtun4"}, {field: "raw", iface: "OpkgTun5"}}},
+		// Половины разошлись: один номер на ключ, NDMS-имя главнее (как halfIndex).
+		{corrupt, []recordHalf{{field: "wg", iface: "OpkgTun6"}, {field: "raw", iface: ""}}},
+	}
+	for _, c := range cases {
+		got := proxyRecordIfaces(c.rec)
+		if len(got) != len(c.want) {
+			t.Fatalf("%s: got %v, want %v", c.rec.ID, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Fatalf("%s: got %v, want %v", c.rec.ID, got, c.want)
+			}
+		}
+	}
+	if idx, _ := opkgtun.IndexOf(proxyRecordIfaces(client)[0].iface); idx != 13 {
+		t.Fatalf("клиент: номер %d, want 13", idx)
+	}
+}
+
+// F665: за переименованием инстанса идут только имена, которые панель сама
+// вывела из него (прежнее имя инстанса и «<имя> wdtt»); имя пользователя,
+// туннель другой связи и зеркальная запись не трогаются. Описание NDMS
+// синхронизируется с прежним именем (F517).
+func TestProxyLinkedCleanerRenameLinked(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewAWGTunnelStoreWithLockDir(filepath.Join(dir, "tunnels"), filepath.Join(dir, "lock"))
+	for _, tun := range []*storage.AWGTunnel{
+		{ID: "awg10", Name: "Нидерланды wdtt", WdttClientID: "nl", PrevName: "Амстердам wdtt"},
+		{ID: "awg11", Name: "Нидерланды", WdttClientID: "nl"},
+		{ID: "awg12", Name: "Мой туннель", WdttClientID: "nl"},
+		{ID: "awg14", Name: "Нидерланды", WdttClientID: "nl", Locked: true},
+		{ID: "awg13", Name: "Нидерланды wdtt", WdttClientID: "de"},
+		{ID: "wdttraw-nl", Name: "Нидерланды", Backend: proxyBackendWdttRaw, WdttClientID: "nl"},
+	} {
+		if err := store.Create(tun); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := &stubTunnelSvc{}
+	cleaner := proxyLinkedCleaners(store, svc, nil, nil, nil)[instancestore.KindWdttClient]
+
+	renamed := cleaner.RenameLinked(context.Background(), "nl", "Нидерланды", "Берлин")
+	if !slices.Equal(renamed, []string{"awg10", "awg11"}) {
+		t.Fatalf("переименованы %v, want [awg10 awg11]", renamed)
+	}
+	for id, want := range map[string]string{
+		"awg10": "Берлин wdtt", "awg11": "Берлин", "awg12": "Мой туннель",
+		"awg13": "Нидерланды wdtt", "wdttraw-nl": "Нидерланды", "awg14": "Нидерланды",
+	} {
+		if got, _ := store.Get(id); got.Name != want {
+			t.Errorf("%s = %q, want %q", id, got.Name, want)
+		}
+	}
+	if !slices.Equal(svc.described, []string{"awg10|Нидерланды wdtt|Берлин wdtt|Амстердам wdtt", "awg11|Нидерланды|Берлин|"}) {
+		t.Fatalf("описания NDMS: %v", svc.described)
 	}
 }

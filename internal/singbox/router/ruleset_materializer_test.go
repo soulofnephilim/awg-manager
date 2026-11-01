@@ -245,8 +245,9 @@ func TestInlineRuleSetMaterializer_RewritesRuleRefsOnMaterialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Route.Rules) != 1 || len(out.Route.Rules[0].RuleSet) != 1 || out.Route.Rules[0].RuleSet[0] != "foo-srs" {
-		t.Fatalf("route rule_set refs = %+v", out.Route.Rules[0].RuleSet)
+	rules := withoutMDNSDrop(out.Route.Rules)
+	if len(rules) != 1 || len(rules[0].RuleSet) != 1 || rules[0].RuleSet[0] != "foo-srs" {
+		t.Fatalf("route rule_set refs = %+v", rules)
 	}
 }
 
@@ -455,7 +456,7 @@ func TestMaterializeConfig_RewritesNestedRuleRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materializeConfig: %v", err)
 	}
-	nested := persisted.Route.Rules[0].Rules[0].RuleSet
+	nested := withoutMDNSDrop(persisted.Route.Rules)[0].Rules[0].RuleSet
 	if len(nested) != 1 || nested[0] != "geo-telegram-srs" {
 		t.Fatalf("nested ref must be rewritten to the materialized tag, got %v", nested)
 	}
@@ -464,6 +465,43 @@ func TestMaterializeConfig_RewritesNestedRuleRefs(t *testing.T) {
 	nested = restored.Route.Rules[0].Rules[0].RuleSet
 	if len(nested) != 1 || nested[0] != "geo-telegram" {
 		t.Fatalf("restored nested ref must be the inline tag, got %v", nested)
+	}
+}
+
+// Материализация не трогает конфиг вызывающего: X-srs-теги — только в
+// результате, у вызывающего прежние inline-теги (F334 п.4), включая
+// вложенные logical-правила и DNS-правила.
+func TestMaterializeConfig_DoesNotMutateCaller(t *testing.T) {
+	dir := t.TempDir()
+	withFakeRuleSetCompiler(t, func(binary string, args []string) (string, string, error) {
+		writeCompiledOutput(t, args, "compiled")
+		return "", "", nil
+	})
+	m := ruleSetMaterializer{configDir: dir, binary: "/opt/bin/sing-box"}
+
+	cfg := NewEmptyConfig()
+	cfg.Route.RuleSet = []RuleSet{{
+		Tag: "geo-telegram", Type: "inline",
+		Rules: []map[string]any{{"domain_suffix": []any{"t.me"}}},
+	}}
+	cfg.Route.Rules = []Rule{
+		{RuleSet: []string{"geo-telegram"}, Action: "route", Outbound: "vpn"},
+		{Type: "logical", Mode: "or", Rules: []Rule{{RuleSet: []string{"geo-telegram"}}, {Protocol: "dns"}},
+			Action: "route", Outbound: "vpn"},
+	}
+	cfg.DNS.Rules = []DNSRule{{RuleSet: []string{"geo-telegram"}, Server: "dns-remote"}}
+
+	if _, err := m.materializeConfig(orchestrator.SlotRouter, cfg); err != nil {
+		t.Fatalf("materializeConfig: %v", err)
+	}
+	if got := cfg.Route.Rules[0].RuleSet[0]; got != "geo-telegram" {
+		t.Fatalf("правило вызывающего переписано: %q", got)
+	}
+	if got := cfg.Route.Rules[1].Rules[0].RuleSet[0]; got != "geo-telegram" {
+		t.Fatalf("вложенное правило вызывающего переписано: %q", got)
+	}
+	if got := cfg.DNS.Rules[0].RuleSet[0]; got != "geo-telegram" {
+		t.Fatalf("DNS-правило вызывающего переписано: %q", got)
 	}
 }
 
@@ -861,10 +899,32 @@ func TestMaterializeConfig_UnreadableInlineSourceKeepsCompiledArtifact(t *testin
 	if len(out.Route.RuleSet) != 1 || out.Route.RuleSet[0].Path != srsPath {
 		t.Fatalf("rule_set = %+v, want the original artifact %s", out.Route.RuleSet, srsPath)
 	}
-	if out.Route.Rules[0].RuleSet[0] != "legacy-srs" {
-		t.Errorf("rule ref = %q, want legacy-srs", out.Route.Rules[0].RuleSet[0])
+	if withoutMDNSDrop(out.Route.Rules)[0].RuleSet[0] != "legacy-srs" {
+		t.Errorf("rule ref = %q, want legacy-srs", withoutMDNSDrop(out.Route.Rules)[0].RuleSet[0])
 	}
 	if data, err := os.ReadFile(srsPath); err != nil || string(data) != "compiled" {
 		t.Errorf("compiled artifact must stay untouched, got %q (%v)", data, err)
+	}
+}
+
+// F333: запись слота снимает detour, которого sing-box видеть не должен, —
+// чистка была только в мутаторах, и сервер, пришедший другим путём (импорт,
+// старый файл), уходил в sing-box как есть. Вход при этом не правится.
+func TestMaterializeConfig_StripsDNSDirectDetour(t *testing.T) {
+	m := ruleSetMaterializer{configDir: t.TempDir(), binary: "/opt/bin/sing-box"}
+	cfg := NewEmptyConfig()
+	cfg.DNS.Servers = []DNSServer{
+		{Tag: "dns-direct", Type: "udp", Server: "77.88.8.8", Detour: "wg-nl"},
+		{Tag: "dns-tunnel", Type: "udp", Server: "9.9.9.9", Detour: "wg-nl"},
+	}
+	out, err := m.materializeConfig(orchestrator.SlotRouter, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.DNS.Servers[0].Detour != "" || out.DNS.Servers[1].Detour != "wg-nl" {
+		t.Fatalf("detour в записи: %+v", out.DNS.Servers)
+	}
+	if cfg.DNS.Servers[0].Detour != "wg-nl" {
+		t.Fatalf("вход изменён: %+v", cfg.DNS.Servers)
 	}
 }

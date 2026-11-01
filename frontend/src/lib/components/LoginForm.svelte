@@ -1,21 +1,42 @@
 <script lang="ts">
 	import { auth } from '$lib/stores/auth';
-	import { Button } from '$lib/components/ui';
+	import { createPersistedStore } from '$lib/stores/persisted';
+	import { Button, SegmentedControl } from '$lib/components/ui';
+	import type { SegmentedOption } from '$lib/components/ui/segmentedControl';
 	import BrandLogoMark from '$lib/components/layout/BrandLogoMark.svelte';
+	import type { LoginMethod } from '$lib/types';
+	import { m, locale, LOCALES, LOCALE_LABELS, type Locale } from '$lib/i18n';
 
 	let login = $state('');
 	let password = $state('');
 	let submitting = $state(false);
 
-	// Бэкенд с Entware-авторизацией сообщает об этом в /auth/status
-	// (auth.checkStatus); на легаси-бэкендах флага нет → false.
-	const entwareAuthEnabled = $derived($auth.entwareAuthEnabled);
+	// $derived, а не константа: подписи пересчитываются при смене языка.
+	const methodOptions: SegmentedOption<LoginMethod>[] = $derived([
+		{ value: 'router', label: m.login_method_router() },
+		{ value: 'entware', label: 'Entware' }
+	]);
+
+	// Выбор способа входа помнит браузер; мусор в хранилище → роутер.
+	const method = createPersistedStore<LoginMethod>('awgm-login-method', {
+		defaultValue: 'router',
+		deserialize: (raw) => (raw === 'entware' ? 'entware' : 'router'),
+		serialize: (value) => value
+	});
+	const isEntware = $derived($method === 'entware');
+
+	// Язык выбирают и до входа: настройки за авторизацией, а форма входа —
+	// первое, что видит пользователь. Самоназвания языков не переводятся.
+	const languageOptions: SegmentedOption<Locale>[] = LOCALES.map((value) => ({
+		value,
+		label: LOCALE_LABELS[value]
+	}));
 
 	async function handleSubmit() {
 		if (!login || !password) return;
 
 		submitting = true;
-		await auth.login(login, password);
+		await auth.login(login, password, $method);
 		submitting = false;
 	}
 
@@ -28,15 +49,22 @@
 
 <div class="login-container">
 	<div class="login-card">
+		<div class="login-language">
+			<SegmentedControl
+				value={locale.current}
+				options={languageOptions}
+				ariaLabel={m.settings_language_label()}
+				onchange={(next) => locale.set(next)}
+			/>
+		</div>
+
 		<div class="login-header">
 			<div class="login-brand">
 				<BrandLogoMark dimension={52} />
 			</div>
 			<h1>AWG Manager</h1>
 			<p class="login-subtitle">
-				{entwareAuthEnabled
-					? 'Данные роутера или учётной записи Entware'
-					: 'Введите данные от входа в админ-панель роутера'}
+				{isEntware ? m.login_subtitle_entware() : m.login_subtitle_router()}
 			</p>
 		</div>
 
@@ -47,29 +75,43 @@
 		{/if}
 
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }} class="login-form">
+			<div class="login-method">
+				<SegmentedControl
+					value={$method}
+					options={methodOptions}
+					ariaLabel={m.login_method_aria()}
+					disabled={submitting}
+					fullWidth
+					onchange={(v) => {
+						method.set(v);
+						auth.clearError();
+					}}
+				/>
+			</div>
+
 			<div class="form-group">
-				<label for="login">Логин</label>
+				<label for="login">{m.login_label_login()}</label>
 				<input
 					id="login"
 					type="text"
 					bind:value={login}
 					oninput={() => auth.clearError()}
 					onkeydown={handleKeydown}
-					placeholder="admin"
+					placeholder={isEntware ? m.login_placeholder_login_entware() : m.login_placeholder_login_router()}
 					autocomplete="username"
 					disabled={submitting}
 				/>
 			</div>
 
 			<div class="form-group">
-				<label for="password">Пароль</label>
+				<label for="password">{m.login_label_password()}</label>
 				<input
 					id="password"
 					type="password"
 					bind:value={password}
 					oninput={() => auth.clearError()}
 					onkeydown={handleKeydown}
-					placeholder="Пароль от роутера"
+					placeholder={isEntware ? m.login_placeholder_password_entware() : m.login_placeholder_password_router()}
 					autocomplete="current-password"
 					disabled={submitting}
 				/>
@@ -85,19 +127,17 @@
 					disabled={!login || !password}
 					loading={submitting}
 				>
-					{submitting ? 'Вход...' : 'Войти'}
+					{submitting ? m.login_submitting() : m.login_submit()}
 				</Button>
 			</div>
 		</form>
 
 	<p class="login-hint">
-		{entwareAuthEnabled
-			? 'Используйте логин и пароль администратора роутера или учётной записи Entware'
-			: 'Используйте логин и пароль администратора роутера'}
+		{isEntware ? m.login_hint_entware() : m.login_hint_router()}
 	</p>
 
 	<p class="login-hint" style="margin-top: 0.2rem;">
-		Продолжая использование, вы соглашаетесь с <a href="/terms">пользовательским соглашением</a>
+		{m.login_terms_prefix()} <a href="/terms">{m.login_terms_link()}</a>
 	</p>
 </div>
 </div>
@@ -120,6 +160,12 @@
 		border-radius: var(--radius);
 		border: 1px solid var(--border);
 		box-shadow: var(--shadow);
+	}
+
+	.login-language {
+		display: flex;
+		justify-content: flex-end;
+		margin: -0.75rem -0.75rem 0.5rem 0;
 	}
 
 	.login-header {
@@ -174,6 +220,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0rem;
+	}
+
+	.login-method {
+		margin-bottom: 1rem;
 	}
 
 	.form-group {

@@ -54,14 +54,11 @@ func versionComparator(channel string) func(a, b string) int {
 	return semver.Compare
 }
 
-// Check queries the entware repo's Packages.gz for the latest awg-manager
-// version and returns update info including the .ipk download URL if a newer
-// version is available. Uses the stable channel.
-func Check(ctx context.Context, currentVersion string) *UpdateInfo {
-	return checkWithDownloader(ctx, currentVersion, channelStable, newDefaultDownloader())
-}
-
-func checkWithDownloader(ctx context.Context, currentVersion, channel string, dl Downloader) *UpdateInfo {
+// checkWithDownloader queries the entware repo's Packages.gz for the latest
+// awg-manager version and returns update info including the .ipk download URL
+// if a newer version is available.
+// stats — заголовки анонимной статистики (Service.statsHeaders), nil — без них.
+func checkWithDownloader(ctx context.Context, currentVersion, channel string, dl Downloader, stats http.Header) *UpdateInfo {
 	info := &UpdateInfo{
 		CurrentVersion: currentVersion,
 		CheckedAt:      time.Now(),
@@ -72,7 +69,7 @@ func checkWithDownloader(ctx context.Context, currentVersion, channel string, dl
 	archDir := archSuffixToRepoDir(archSuffix())
 	pkgsURL := fmt.Sprintf("%s/%s/Packages.gz", base, archDir)
 
-	pkg, err := fetchLatestPackageWithDownloader(ctx, dl, pkgsURL, pkgName, cmp)
+	pkg, err := fetchLatestPackageWithDownloader(ctx, dl, pkgsURL, pkgName, cmp, stats)
 	if err != nil {
 		info.Error = fmt.Sprintf("entware repo: %s", err)
 		return info
@@ -129,7 +126,10 @@ var startDetachedUpgrade = func(ipkPath string) error {
 	return nil
 }
 
-func upgradeWithDownloader(ctx context.Context, downloadURL, wantSHA256 string, dl Downloader) error {
+// beforeInstall (может быть nil) зовётся с путём пакета после скачивания и
+// проверки, перед установкой: снимок не пишется, если обновление не дошло до
+// установки.
+func upgradeWithDownloader(ctx context.Context, downloadURL, wantSHA256 string, dl Downloader, beforeInstall func(ipkPath string)) error {
 	if dl == nil {
 		dl = newDefaultDownloader()
 	}
@@ -159,6 +159,9 @@ func upgradeWithDownloader(ctx context.Context, downloadURL, wantSHA256 string, 
 	if err := verifyFileSHA256(ipkPath, wantSHA256); err != nil {
 		os.Remove(ipkPath)
 		return err
+	}
+	if beforeInstall != nil {
+		beforeInstall(ipkPath)
 	}
 	if err := startDetachedUpgrade(ipkPath); err != nil {
 		os.Remove(ipkPath)

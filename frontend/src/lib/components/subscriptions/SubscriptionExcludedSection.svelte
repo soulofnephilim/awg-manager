@@ -1,7 +1,9 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { SubscriptionMember } from '$lib/types';
 	import { RotateCcw } from 'lucide-svelte';
 	import { Button } from '$lib/components/ui';
+	import { formatHostPort } from '$lib/utils/endpoint';
 
 	interface Props {
 		members: SubscriptionMember[];
@@ -39,8 +41,7 @@
 	<section class="excluded">
 		<div class="excluded-head">
 			<div class="hint">
-				Эти серверы вы исключили вручную. Они не материализуются и не участвуют в выборе,
-				пока вы их не вернёте. Набор переживает обновление подписки.
+				{m.subscriptions_excluded_hint()}
 			</div>
 			{#if selected.size > 0}
 				<Button
@@ -51,7 +52,7 @@
 					iconBefore={restoreIcon}
 					onclick={restoreSelected}
 				>
-					{restoring ? 'Возвращаем...' : `Вернуть выбранные (${selected.size})`}
+					{restoring ? m.subscriptions_excluded_restoring() : m.subscriptions_excluded_restore_selected({ count: selected.size })}
 				</Button>
 			{/if}
 		</div>
@@ -67,9 +68,9 @@
 						/>
 					</label>
 					<div class="excluded-main">
-						<div class="excluded-title">{member.label || `${member.server}:${member.port}`}</div>
+						<div class="excluded-title">{member.label || formatHostPort(member.server, member.port)}</div>
 						<div class="excluded-meta mono">
-							{member.protocol} · {member.server}:{member.port} · {tagSuffix(member.tag)}
+							{member.protocol} · {formatHostPort(member.server, member.port)} · {tagSuffix(member.tag)}
 						</div>
 					</div>
 					<Button
@@ -79,7 +80,7 @@
 						iconBefore={restoreIcon}
 						onclick={() => restoreOne(member.tag)}
 					>
-						Вернуть
+						{m.subscriptions_excluded_restore()}
 					</Button>
 				</div>
 			{/each}

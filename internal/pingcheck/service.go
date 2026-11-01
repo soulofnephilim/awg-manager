@@ -2,7 +2,6 @@ package pingcheck
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"os"
 	"sort"
@@ -25,10 +24,15 @@ var ifaceUp = func(name string) bool {
 	return err == nil && ifi.Flags&net.FlagUp != 0
 }
 
+// deviceExists — шов над проверкой /sys/class/net/<имя>.
+var deviceExists = func(name string) bool {
+	_, err := os.Stat("/sys/class/net/" + name)
+	return err == nil
+}
+
 // wgClient is the subset of wg.Client needed by the health sensor.
 type wgClient interface {
 	Show(ctx context.Context, iface string) (*wg.ShowResult, error)
-	LatestHandshake(ctx context.Context, iface string) (time.Time, error)
 }
 
 // Service manages ping check monitoring for all tunnels.
@@ -38,6 +42,7 @@ type Service struct {
 	wg       wgClient
 	appLog   *logging.ScopedLogger
 	bus      *events.Bus
+	policies policyPermits
 
 	mu        sync.RWMutex
 	monitors  map[string]*tunnelMonitor
@@ -45,10 +50,6 @@ type Service struct {
 	running   bool
 	ctx       context.Context
 	cancel    context.CancelFunc
-
-	// handshakeTimeout controls how long waitHandshake waits for a fresh
-	// handshake after link toggle before considering recovery failed.
-	handshakeTimeout time.Duration
 }
 
 // tunnelMonitor tracks monitoring state for a single tunnel.
@@ -56,6 +57,7 @@ type tunnelMonitor struct {
 	tunnelID      string
 	tunnelName    string
 	failCount     int
+	okCount       int // удачных проверок подряд (restoreAfterSuccesses)
 	restartCount  int
 	failThreshold int
 	lastCheck     time.Time
@@ -65,6 +67,9 @@ type tunnelMonitor struct {
 	// tickMu сериализует sensorTick между циклом монитора и check-now:
 	// два параллельных лечения на одном интерфейсе недопустимы.
 	tickMu sync.Mutex
+	// linkDown — линк был опущен на прошлом тике (под tickMu): переход
+	// пишется в журнал один раз (linkUp).
+	linkDown bool
 }
 
 // checkConfig holds resolved check configuration for a tunnel.
@@ -85,13 +90,12 @@ func NewService(
 	appLogger logging.AppLogger,
 ) *Service {
 	return &Service{
-		settings:         settings,
-		tunnels:          tunnels,
-		wg:               wgClient,
-		appLog:           logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubPingcheck),
-		monitors:         make(map[string]*tunnelMonitor),
-		logBuffer:        NewLogBuffer(),
-		handshakeTimeout: handshakeTimeout,
+		settings:  settings,
+		tunnels:   tunnels,
+		wg:        wgClient,
+		appLog:    logging.NewScopedLogger(appLogger, logging.GroupTunnel, logging.SubPingcheck),
+		monitors:  make(map[string]*tunnelMonitor),
+		logBuffer: NewLogBuffer(),
 	}
 }
 
@@ -144,6 +148,10 @@ func (s *Service) Stop() {
 		m.wg.Wait()
 	}
 
+	// Permit'ы здесь НЕ возвращаем: на перезапуске демона мёртвый туннель
+	// вернулся бы в политики до порога, ценой двух сохранений во флеш.
+	// Позиции лежат в записи — их вернёт первая успешная проверка после
+	// старта. Удаление пакета сносит интерфейсы, permit уходит с ними.
 	s.logBuffer.Stop()
 	s.logInfo("", "PingCheck service stopped")
 }
@@ -179,6 +187,10 @@ func (s *Service) StartMonitoring(tunnelID string, tunnelName string, skipConfig
 
 // StopMonitoring stops monitoring a specific tunnel.
 func (s *Service) StopMonitoring(tunnelID string) {
+	// Без монитора снятый permit вернуть некому (F743). И когда монитора нет:
+	// демон мог упасть с permit'ом снятым, а мониторинг потом выключили.
+	defer s.restorePolicies(tunnelID)
+
 	s.mu.Lock()
 	m, exists := s.monitors[tunnelID]
 	if !exists {
@@ -228,17 +240,22 @@ func (s *Service) GetStatus() []TunnelStatus {
 		// зеркальную запись прокси-выхода этот цикл тоже перечисляет, и
 		// зашитое "kernel" врало о её природе.
 		backend := "kernel"
-		if stored, err := s.tunnels.Get(tunnelID); err == nil && stored.Backend != "" {
-			backend = stored.Backend
+		var holds []string
+		if stored, err := s.tunnels.Get(tunnelID); err == nil {
+			if stored.Backend != "" {
+				backend = stored.Backend
+			}
+			holds = holdNames(stored.PolicyHolds)
 		}
 
-		// Как nwgCardStatus: лежащий интерфейс — «stopped», но не во время
-		// лечения (см. pingStatus).
+		// Как nwgCardStatus: лежащий интерфейс — «stopped». Лечение линк больше
+		// не кладёт (F746), а на опущенном линке проверок нет (F750) — иначе
+		// «recovering» прошлого порога висел бы всё время, пока линк лежит.
 		running := ifaceUp(s.resolveIfaceName(tunnelID))
 		status := "disabled"
 		if config != nil {
 			status = pingStatus(m, config.FailThreshold, backend)
-			if status == "alive" && !running {
+			if !running {
 				status = "stopped"
 			}
 		}
@@ -250,10 +267,12 @@ func (s *Service) GetStatus() []TunnelStatus {
 
 		failThreshold := 3
 		method := "http"
+		target := ""
 		lastLatency := 0
 		if config != nil {
 			failThreshold = config.FailThreshold
 			method = config.Method
+			target = checkTarget(config.Method, config.Target, config.CheckURL)
 		}
 		if m.lastResult != nil {
 			lastLatency = m.lastResult.Latency
@@ -272,6 +291,8 @@ func (s *Service) GetStatus() []TunnelStatus {
 			FailThreshold: failThreshold,
 			RestartCount:  m.restartCount,
 			TunnelRunning: running,
+			CheckTarget:   target,
+			PolicyHolds:   holds,
 		})
 	}
 
@@ -297,7 +318,7 @@ func (s *Service) GetStatus() []TunnelStatus {
 			}
 			// Fast sysfs check — no subprocess or network call
 			ifaceName := s.resolveIfaceName(t.ID)
-			if _, err := os.Stat(fmt.Sprintf("/sys/class/net/%s", ifaceName)); err != nil {
+			if !deviceExists(ifaceName) {
 				continue
 			}
 			result = append(result, TunnelStatus{
@@ -309,6 +330,9 @@ func (s *Service) GetStatus() []TunnelStatus {
 				Method:        "http",
 				FailThreshold: 3,
 				TunnelRunning: ifaceUp(ifaceName),
+				// Мониторинг выключен, а возврат permit упал — удержание висит,
+				// и вернуть его некому: хотя бы видно (ревью F748).
+				PolicyHolds: holdNames(t.PolicyHolds),
 			})
 		}
 	}
@@ -348,7 +372,7 @@ func (s *Service) GetTunnelPingStatus(tunnelID string) TunnelPingInfo {
 
 // pingStatus — единая для карточки туннеля и страницы мониторинга оценка
 // живого монитора: «recovering» пока лечение не подтверждено успешной
-// проверкой либо идёт его окно down/up (failCount на пороге; зеркало wdtt-raw
+// проверкой либо идёт само лечение (failCount на пороге; зеркало wdtt-raw
 // не лечится и счётчик не сбрасывает — для него это не окно), иначе «alive».
 func pingStatus(m *tunnelMonitor, threshold int, backend string) string {
 	if m.restartCount > 0 && (m.lastResult == nil || !m.lastResult.Success) {
@@ -392,13 +416,11 @@ func (s *Service) CheckAllNow() {
 }
 
 // checkNowAsync запускает внеочередную проверку kernel-монитора, не блокируя
-// вызывающего: sensorTick на пороге уходит в лечение (ждёт рукопожатие до
-// 30 с, затем backoff до maxBackoff), и HTTP-хендлер check-now висел бы всё
-// это время. Занятый монитор (тик или лечение в процессе) пропускается —
-// второе лечение на том же интерфейсе недопустимо. Горутина учтена в m.wg
-// под s.mu вместе с проверкой stopCh: StopMonitoring закрывает канал под тем
-// же локом и ждёт её, а закрытый канал мгновенно выводит из ожидания
-// рукопожатия и backoff (doLinkToggle снимает канал под локом до лечения).
+// вызывающего: проверка ждёт ответа до таймаута, а на пороге идёт лечение с
+// RCI-походами в политики — HTTP-хендлер check-now висел бы всё это время.
+// Занятый монитор (тик или лечение в процессе) пропускается — второе лечение
+// на том же интерфейсе недопустимо. Горутина учтена в m.wg под s.mu вместе с
+// проверкой stopCh: StopMonitoring закрывает канал под тем же локом и ждёт её.
 func (s *Service) checkNowAsync(m *tunnelMonitor, config *checkConfig) {
 	s.mu.RLock()
 	stopCh := m.stopCh
@@ -419,6 +441,12 @@ func (s *Service) checkNowAsync(m *tunnelMonitor, config *checkConfig) {
 		case <-stopCh:
 			return
 		default:
+		}
+		// Тик на опущенном линке молчит (переход уже в журнале), а «проверить
+		// сейчас» нажали руками — ответ нужен.
+		if !ifaceUp(s.resolveIfaceName(m.tunnelID)) {
+			s.logInfo(m.tunnelID, "Check skipped: link is down")
+			return
 		}
 		s.sensorTick(m, config)
 	}()
@@ -453,11 +481,35 @@ func (s *Service) StartMonitoringAllRunning() {
 		}
 		// Fast sysfs check — tunnel is running if its interface exists
 		ifaceName := s.resolveIfaceName(t.ID)
-		if _, err := os.Stat(fmt.Sprintf("/sys/class/net/%s", ifaceName)); err != nil {
+		if !deviceExists(ifaceName) {
+			continue
+		}
+		// Устройства мало: OpkgTunN на OS5 создаёт NDMS из своего конфига
+		// независимо от нашего старта. Упавший на буте старт оставлял
+		// opkgtunN без пира, и монитор «лечил» его link toggle-ем в вечном
+		// backoff (F626). Наш туннель — тот, где awg видит пир. wdtt-raw —
+		// не wg-устройство, ему проверка не применима.
+		if t.Backend != "wdtt-raw" && !s.hasPeer(ifaceName) {
 			continue
 		}
 		s.StartMonitoring(t.ID, t.Name)
 	}
+}
+
+// hasPeer — применён ли к устройству наш конфиг. Ошибка awg show (не
+// wg-устройство, нет awg) — «нет».
+func (s *Service) hasPeer(ifaceName string) bool {
+	if s.wg == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := s.wg.Show(ctx, ifaceName)
+	if err != nil {
+		s.appLog.Debug("pingcheck", ifaceName, "awg show: "+err.Error()+" — монитор не заводим")
+		return false
+	}
+	return res != nil && res.HasPeer
 }
 
 // StopMonitoringAll stops monitoring for all tunnels.
@@ -477,6 +529,9 @@ func (s *Service) StopMonitoringAll() {
 	for _, m := range monitors {
 		m.wg.Wait()
 	}
+	// Глобальное выключение: дальше StopMonitoring по туннелям не позовут
+	// (мониторинг на записях снят), и permit'ы остались бы снятыми.
+	s.restoreAllPolicies()
 
 	s.logInfo("", "Stopped all monitoring")
 }
@@ -551,7 +606,9 @@ func (s *Service) addLogEntry(entry LogEntry) {
 		return
 	}
 	s.bus.Publish("pingcheck:log", events.PingCheckLogEvent{
-		Timestamp:   entry.Timestamp.Format(time.RFC3339),
+		// Формат как у GET /pingcheck/logs (time.Time в JSON): иначе дедуп
+		// стора на фронте не узнаёт одну запись из снимка и из SSE (F751).
+		Timestamp:   entry.Timestamp.Format(time.RFC3339Nano),
 		TunnelID:    entry.TunnelID,
 		TunnelName:  entry.TunnelName,
 		Success:     entry.Success,

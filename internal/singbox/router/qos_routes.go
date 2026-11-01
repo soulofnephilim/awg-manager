@@ -90,6 +90,7 @@ func marshalQoSRoutesSlot(rules []Rule) ([]byte, error) {
 // exactly like EnsureSystemRules does, and cannot shorten the timeout above —
 // route/conn.go prefers metadata.UDPTimeout over the sniffed-protocol defaults.
 func buildQoSRouteRules(classes []qosClass, sr storage.SingboxRouterSettings) []Rule {
+	classes = routedQoSClasses(classes)
 	if len(classes) == 0 {
 		return nil
 	}
@@ -98,6 +99,10 @@ func buildQoSRouteRules(classes []qosClass, sr storage.SingboxRouterSettings) []
 	for _, q := range classes {
 		udpInbounds = append(udpInbounds, qosTProxyTag(q.DSCP))
 		allInbounds = append(allInbounds, qosTProxyTag(q.DSCP), qosRedirectTag(q.DSCP))
+		if q.V6 {
+			udpInbounds = append(udpInbounds, qosTProxy6Tag(q.DSCP))
+			allInbounds = append(allInbounds, qosTProxy6Tag(q.DSCP), qosRedirect6Tag(q.DSCP))
+		}
 	}
 	out := make([]Rule, 0, len(classes)+2)
 	if sr.SnifferEnabled {
@@ -110,8 +115,12 @@ func buildQoSRouteRules(classes []qosClass, sr storage.SingboxRouterSettings) []
 		UDPTimeout: resolveUDPTimeout(sr.UDPTimeout),
 	})
 	for _, q := range classes {
+		inbounds := []string{qosTProxyTag(q.DSCP), qosRedirectTag(q.DSCP)}
+		if q.V6 {
+			inbounds = append(inbounds, qosTProxy6Tag(q.DSCP), qosRedirect6Tag(q.DSCP))
+		}
 		out = append(out, Rule{
-			Inbound:  []string{qosTProxyTag(q.DSCP), qosRedirectTag(q.DSCP)},
+			Inbound:  inbounds,
 			Action:   "route",
 			Outbound: q.Outbound,
 		})
@@ -136,13 +145,19 @@ func (s *ServiceImpl) filterQoSClassesWithKnownOutbounds(ctx context.Context, cl
 	}
 	known = make([]qosClass, 0, len(classes))
 	for _, c := range classes {
-		if s.isKnownOutboundTag(ctx, c.Outbound, cfg) {
+		if s.isKnownQoSOutbound(ctx, c.Outbound, cfg) {
 			known = append(known, c)
 			continue
 		}
 		missing = append(missing, c)
 	}
 	return known, missing
+}
+
+// isKnownQoSOutbound — isKnownOutboundTag плюс зарезервированный
+// QoSBypassOutbound, который outbound'ом sing-box не является.
+func (s *ServiceImpl) isKnownQoSOutbound(ctx context.Context, tag string, cfg *RouterConfig) bool {
+	return tag == QoSBypassOutbound || s.isKnownOutboundTag(ctx, tag, cfg)
 }
 
 // syncQoSRoutesSlot writes the managed QoS route rules into
@@ -337,7 +352,7 @@ func (s *ServiceImpl) disableQoSClassesForOutbound(tag string) error {
 // edits, bypassing the «Применить» gate. persistConfigDirect's byte-equal
 // short-circuit keeps the steady state write-free.
 func (s *ServiceImpl) healQoSConfig(ctx context.Context, sr storage.SingboxRouterSettings) (bool, error) {
-	classes := activeQoSClasses(sr.QoSClasses)
+	classes := qosClassesFor(sr)
 	cfg, err := s.loadAppliedRouterConfig()
 	if err != nil {
 		return false, err

@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +22,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/obfuscator"
+	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/proxyapp/captcha"
 	"github.com/hoaxisr/awg-manager/internal/proxyapp/ftlink"
 	"github.com/hoaxisr/awg-manager/internal/proxyapp/install"
@@ -38,19 +43,18 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/appver"
 	"github.com/hoaxisr/awg-manager/internal/sys/exec"
+	"github.com/hoaxisr/awg-manager/internal/sys/kmod"
 	"github.com/hoaxisr/awg-manager/internal/sys/routerclock"
 	"github.com/hoaxisr/awg-manager/internal/testing"
 	"github.com/hoaxisr/awg-manager/internal/traffic"
+	"github.com/hoaxisr/awg-manager/internal/tunnel"
+	"github.com/hoaxisr/awg-manager/internal/tunnel/nwg"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/ops"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/service"
 )
 
 // Проводка прокси-рантайма: аллокаторы номеров и портов, посев, менеджер,
 // фабрика инстансов и продуктовые ручки под /api/proxyrt/*.
-
-// proxySubgroup — подгруппа app-журнала прокси-рантайма (у старого мира была
-// своя, "wdtt": рантайм один на обе подсистемы, поэтому подгруппа общая).
-const proxySubgroup = "proxy"
 
 // proxyBackendWdttRaw — бэкенд зеркальной записи raw-клиента. Локальная
 // константа, а не импорт internal/wdtt: тот пакет умирает вместе со старым
@@ -105,26 +109,56 @@ func (b *proxyLinkBook) snapshot(key string) (awgmproto.State, bool) {
 	if !ok {
 		return awgmproto.State{}, false
 	}
-	return snap.State, true
+	return agedState(snap, time.Now()), true
+}
+
+// agedState — состояние снимка с аптаймом на момент now. Снимок обновляет
+// только прогон реконсиляции: у серверов он идёт раз в 15 с (перепроверка
+// правил), у клиентов — лишь в окне старта, дальше наблюдений нет. Без
+// поправки аптайм клиента застывал на последнем наблюдении, а наблюдение
+// сразу после старта (uptime_s=0) и вовсе стирало его из ответа (F465, #950).
+func agedState(snap control.Snapshot, now time.Time) awgmproto.State {
+	st := snap.State
+	if st.PID > 0 {
+		st.UptimeS += int64(now.Sub(snap.At) / time.Second)
+	}
+	return st
 }
 
 // ── занятость номеров OpkgTun ────────────────────────────────────
 
-// proxyRecordIfaces — NDMS-имена, которые держит запись, по ПОЛЮ записи.
+// proxyRecordIfaces — имена, которые держит запись, по ПОЛЮ записи.
 // Поле — вторая половина ключа владельца (opkgtun.ProxyHolder):
 // у сервера половин две, и номер каждой закреплён за своим ключом, иначе
 // освобождение одной снимало бы пин другой. У клиента поле пустое.
+//
+// Имя каждой пары (NDMS + kernel) выбирается как в halfIndex менеджера
+// (internal/proxyrt/manager): NDMS-имя, а если оно не разбирается — kernel.
+// Иначе запись с одной kernel-половиной (wg-клиент, позже ушедший в raw)
+// пинилась бы менеджером на номер, которого занятость не видит (F494).
+// Половины битой пары с РАЗНЫМИ номерами дают одно NDMS-имя: два номера
+// под одним ключом владельца конфликтовали бы.
 func proxyRecordIfaces(rec instancestore.Record) []recordHalf {
 	switch {
 	case rec.WdttClient != nil:
-		return []recordHalf{{iface: rec.WdttClient.NdmsIface}}
+		c := rec.WdttClient
+		return []recordHalf{{iface: pairName(c.NdmsIface, c.RawIface)}}
 	case rec.WdttServer != nil:
+		s := rec.WdttServer
 		return []recordHalf{
-			{field: "wg", iface: rec.WdttServer.NdmsIface},
-			{field: "raw", iface: rec.WdttServer.RawNdmsIface},
+			{field: "wg", iface: pairName(s.NdmsIface, s.WgIface)},
+			{field: "raw", iface: pairName(s.RawNdmsIface, s.RawIface)},
 		}
 	}
 	return nil
+}
+
+// pairName — разбираемое имя пары: NDMS, иначе kernel (порядок halfIndex).
+func pairName(ndms, kernel string) string {
+	if _, ok := opkgtun.IndexOf(ndms); ok {
+		return ndms
+	}
+	return kernel
 }
 
 // recordHalf — половина записи: поле ключа владельца и её NDMS-имя. Срез, а не
@@ -287,6 +321,79 @@ type proxyLinkedCleaner struct {
 	field   api.LinkedField
 	traffic *traffic.History
 	pub     proxyrt.Publisher
+	journal *logging.ScopedLogger
+}
+
+// linkedTunnelName — имя связанного туннеля, производное от имени инстанса
+// (то же, что ставят мастер выхода и усыновление): «<имя> wdtt» / «<имя> FT».
+func (c proxyLinkedCleaner) linkedTunnelName(instanceName string) string {
+	if c.field == api.LinkedFreeTurn {
+		return ftlink.TunnelNameFromClient(instanceName)
+	}
+	return wdttlink.TunnelNameFromClient(instanceName)
+}
+
+func (c proxyLinkedCleaner) RenameLinked(ctx context.Context, clientID, oldName, newName string) (renamed []string) {
+	if strings.TrimSpace(clientID) == "" || c.store == nil || c.svc == nil {
+		return nil
+	}
+	tunnels, err := c.store.List()
+	if err != nil {
+		c.warn(clientID, "связанные туннели не переименованы: "+err.Error())
+		return nil
+	}
+	for _, tun := range tunnels {
+		// Зеркальной записью raw-клиента владеет зеркало (MirrorName).
+		if !proxyTunnelLinkedTo(tun, c.field, clientID) || tun.Backend == proxyBackendWdttRaw {
+			continue
+		}
+		want := ""
+		switch tun.Name {
+		case oldName:
+			want = newName
+		case c.linkedTunnelName(oldName):
+			want = c.linkedTunnelName(newName)
+		}
+		if want == "" || want == tun.Name {
+			continue // имя пользователя — не наше дело
+		}
+		if tun.Locked {
+			// Защищённый туннель не правится ничем, кроме снятия защиты (#818).
+			c.warn(tun.ID, fmt.Sprintf("туннель %q защищён — имя не изменено", tun.Name))
+			continue
+		}
+		if err := tunnel.ValidateName(want); err != nil {
+			c.warn(tun.ID, fmt.Sprintf("туннель %q не переименован: %v", tun.Name, err))
+			continue
+		}
+		prev, earlier := tun.Name, ""
+		if err := c.store.Update(tun.ID, func(t *storage.AWGTunnel) error {
+			if t.Name != prev {
+				return storage.ErrNoChange // переименован параллельно — не наше
+			}
+			earlier = t.PrevName // до перезаписи стором — для повтора F535
+			t.Name = want
+			return nil
+		}); err != nil {
+			if !errors.Is(err, storage.ErrNoChange) {
+				c.warn(tun.ID, fmt.Sprintf("туннель %q не переименован: %v", prev, err))
+			}
+			continue
+		}
+		// Описание записи NDMS = имя (F517): иначе после ребута запись чужая.
+		c.svc.SyncDescription(ctx, tun.ID, prev, want, earlier)
+		renamed = append(renamed, tun.ID)
+	}
+	if len(renamed) > 0 {
+		proxyPublishTunnels(c.pub, "proxy-linked-tunnel-rename")
+	}
+	return renamed
+}
+
+func (c proxyLinkedCleaner) warn(subject, msg string) {
+	if c.journal != nil {
+		c.journal.Warn("linked-rename", subject, msg)
+	}
 }
 
 func (c proxyLinkedCleaner) DeleteLinked(ctx context.Context, clientID string) (deleted []string, errs []string) {
@@ -362,7 +469,7 @@ func proxyTunnelLinkedTo(tun storage.AWGTunnel, field api.LinkedField, clientID 
 // удаляются. Один источник поля (proxyLinkedField) и одно место сборки — чтобы
 // перепутать было негде.
 func proxyLinkedCleaners(store *storage.AWGTunnelStore, svc api.TunnelService,
-	traffic *traffic.History, pub proxyrt.Publisher,
+	traffic *traffic.History, pub proxyrt.Publisher, journal *logging.ScopedLogger,
 ) map[instancestore.Kind]api.LinkedTunnelCleaner {
 	out := map[instancestore.Kind]api.LinkedTunnelCleaner{}
 	// Перечень — из канонического источника (instancestore.ClientKinds), а не
@@ -370,7 +477,7 @@ func proxyLinkedCleaners(store *storage.AWGTunnelStore, svc api.TunnelService,
 	// молча.
 	for _, kind := range instancestore.ClientKinds() {
 		out[kind] = proxyLinkedCleaner{store: store, svc: svc,
-			field: proxyLinkedField(kind), traffic: traffic, pub: pub}
+			field: proxyLinkedField(kind), traffic: traffic, pub: pub, journal: journal}
 	}
 	return out
 }
@@ -419,6 +526,10 @@ func (t proxyTunnelImporter) Import(ctx context.Context, conf, name, clientID st
 
 func (t proxyTunnelImporter) Start(ctx context.Context, tunnelID string) error {
 	return t.svc.Start(ctx, tunnelID)
+}
+
+func (t proxyTunnelImporter) SyncDescription(ctx context.Context, tunnelID, prevName, name, earlierName string) {
+	t.svc.SyncDescription(ctx, tunnelID, prevName, name, earlierName)
 }
 
 func (t proxyTunnelImporter) AddressConflicts(address string) []string {
@@ -693,7 +804,7 @@ var _ proxyrt.BackoffResetter = (*proxyAdoptedRole)(nil)
 // Зовётся ПОСЛЕ конструкции router-сервиса: proxyIngressEnsurer держит на нём
 // reconcile, а до присвоения a.routerSvc там nil.
 func (a *app) wireProxyrt() {
-	journal := logging.NewScopedLogger(a.loggingService, logging.GroupRouting, proxySubgroup)
+	journal := logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubProxy) // одна подгруппа на WDTT и FreeTurn
 	// Хранилище — то же, что читают потребители вне рантайма (setupCore):
 	// писатель у proxy-instances.json один, и второй экземпляр развёл бы
 	// сериализацию записи по разным замкам.
@@ -721,7 +832,7 @@ func (a *app) wireProxyrt() {
 
 	// (4) Уборщик NDMS-интерфейсов без живой декларации.
 	cmds := proxyNDMSCommands{
-		InterfaceCommands: a.ndmsCommands.Interfaces,
+		confirmingOpkgTun: confirmingOpkgTun{a.ndmsCommands.Interfaces, a.ndmsQueries.Interfaces},
 		routes:            a.ndmsCommands.Routes,
 	}
 	sweeper := proxyrt.NewSweeper(
@@ -790,15 +901,30 @@ func (a *app) wireProxyrt() {
 		Installed: func(install.Subsystem) { go a.proxyRuntimeNudge("install", proxyrt.EventBoot) },
 	})
 
+	obfLog := logging.NewScopedLogger(a.loggingService, logging.GroupTunnel, logging.SubOps)
 	// Релей wg-obfuscator: один процесс на туннель, бинарь докачивается тем
 	// же установщиком, что и прокси.
 	obfRunner := obfuscator.NewRunner(obfuscator.RunnerDeps{
 		BinaryFor: func(ctx context.Context, flavor string) (string, error) {
 			return installSvc.EnsureInstalled(ctx, "obf-"+flavor)
 		},
-		Log: logging.NewScopedLogger(a.loggingService, logging.GroupTunnel, logging.SubOps),
+		Log: obfLog,
 	})
-	a.nwgOp.SetObfuscator(obfRunner)
+	// Kernel-релей awgm_relay.ko для Phobos (спека §4). Старт демона до
+	// первого Start: сторож → сверка версии модуля → уборка сирот.
+	relayKmod := nwg.NewRelayKmod(a.loggingService, obfuscator.Arm, obfuscator.DisarmAfter)
+	lastOops := a.settingsStore.ObfuscatorKmodOopsHash()
+	reason, hash := obfuscator.WatchdogCheck(lastOops)
+	applyObfWatchdog(reason, hash, lastOops, a.settingsStore.TripObfuscatorKmod,
+		a.settingsStore.SetObfuscatorKmodOopsHash, &a.obfKmodTripped, obfLog)
+	relayKmod.ReconcileVersion(context.Background())
+	kernelRelay := obfuscator.NewKernelRunner(obfuscator.KernelDeps{
+		Ensure: relayKmod.Ensure, ProcWrite: func(p string, b []byte) error { return os.WriteFile(p, b, 0) },
+		ProcRead: kmod.ReadProc, Log: obfLog,
+	})
+	useKernel := obfUseKernel(a.settingsStore.IsObfuscatorRelayProcess, relayKmod.Available, &a.obfKmodTripped)
+	a.obfDispatcher = obfuscator.NewDispatcher(obfRunner, kernelRelay, useKernel, obfLog)
+	a.nwgOp.SetObfuscator(a.obfDispatcher)
 	// Два туннеля могут смотреть на один IP сервера: host-route до него общий,
 	// и Stop одного не имеет права обрубить второй. Бэкенд значения не имеет —
 	// обфусцированный nativewg ставит ту же запись `ip route host`, что и
@@ -832,7 +958,24 @@ func (a *app) wireProxyrt() {
 		return err == nil && t != nil && t.Obfuscator != nil && t.Enabled
 	}
 	if adopted := obfRunner.AdoptAll(keep); len(adopted) > 0 {
-		journal.Info("obfuscator", "", "усыновлены процессы: "+strings.Join(adopted, ", "))
+		obfLog.Info("obfuscator", "", "усыновлены процессы: "+strings.Join(adopted, ", "))
+	}
+	// Слоты awgm_relay — по тому же критерию, но ключ слота — локальный порт.
+	keepPort := func(port int) bool {
+		list, err := a.awgStore.List()
+		if err != nil {
+			return true // не знаем — не трогаем
+		}
+		for i := range list {
+			t := &list[i]
+			if t.Enabled && t.Obfuscator != nil && t.Obfuscator.LocalPort == port {
+				return true
+			}
+		}
+		return false
+	}
+	if removed := kernelRelay.Sweep(keepPort); len(removed) > 0 {
+		obfLog.Info("obfuscator", "", fmt.Sprintf("сняты сироты awgm_relay: %v", removed))
 	}
 
 	records := proxyRecords{ref: ref}
@@ -859,9 +1002,12 @@ func (a *app) wireProxyrt() {
 			func() error { return instancestore.ClearCleanupPending(store) }),
 		EnsureBinaries: proxyEnsureBinaries(installSvc, journal),
 		OpkgTunPool:    a.opkgPool,
-		AllocListen:    allocListen,
-		ReleasePins:    proxyReleasePins(a.shutdownCtx, portAlloc, book, journal),
-		WaitDisabled:   proxyWaitDisabled(states),
+		DefaultDeviceID: func(ctx context.Context) string {
+			return proxyDefaultDeviceID(ctx, a.ndmsTransportClient)
+		},
+		AllocListen:  allocListen,
+		ReleasePins:  proxyReleasePins(a.shutdownCtx, portAlloc, book, journal),
+		WaitDisabled: proxyWaitDisabled(states),
 		RecordsChanged: func(reason string) {
 			a.eventBus.PublishInvalidated(events.ResourceProxyInstances, reason)
 		},
@@ -880,7 +1026,7 @@ func (a *app) wireProxyrt() {
 	// Уборщик связанных туннелей — один на систему; потребитель у него теперь
 	// тоже один: путь удаления инстанса. Ручка linked-tunnels/clear снесена
 	// вместе со своим единственным вызывающим на фронте (PF24).
-	linkedCleaners := proxyLinkedCleaners(a.awgStore, a.proxyTunnels(), a.trafficHistory, a.eventBus)
+	linkedCleaners := proxyLinkedCleaners(a.awgStore, a.proxyTunnels(), a.trafficHistory, a.eventBus, journal)
 
 	linkHandler := wdttlink.NewHandler(wdttlink.Deps{
 		Records:   records,
@@ -899,7 +1045,8 @@ func (a *app) wireProxyrt() {
 			}),
 		},
 	})
-	allowlist := ftlink.New(ftlink.Deps{Records: records, Mutator: mutator, DataDir: a.dataDir})
+	allowlist := ftlink.New(ftlink.Deps{Records: records, Mutator: mutator, DataDir: a.dataDir,
+		Warn: func(msg string) { journal.Warn("allowlist", "freeturn", msg) }})
 	subs := proxysub.New(proxysub.Deps{Records: records, Mutator: mutator,
 		Fetch: wdttlink.DecodeLink})
 	captchaSvc := captcha.New(captcha.Deps{
@@ -944,6 +1091,14 @@ func (a *app) wireProxyrt() {
 	a.srv.SetProxyRuntime(mgr)
 	a.srv.SetProxyRuntimeNudge(func(reason string) {
 		a.proxyRuntimeNudge(reason, proxyrt.EventWANUp)
+	})
+
+	// F497: клиентские маршруты на system:-выходе теряются на down/up
+	// интерфейса — ядро снимает default dev, и переприменить их некому.
+	a.srv.SetIPv4RunningHook(func(ndmsID string) {
+		ctx, cancel := context.WithTimeout(a.shutdownCtx, 30*time.Second)
+		defer cancel()
+		a.systemClientRoutes().reapply(ctx, ndmsID)
 	})
 
 	// (9) Боот — горутиной ПОСЛЕ старта HTTP: на бооте роутера RCI ещё
@@ -1096,16 +1251,19 @@ func (a *app) proxyFactory(ref *proxyManagerRef, journal *logging.ScopedLogger,
 				Instance: rec.ID, Binary: binary,
 				PinnedSHA256: installSvc.PinnedSHA256(rec.Kind),
 				Link:         link, Runner: runner, Gate: gate,
-				Cmds:  proxyNDMSCommands{InterfaceCommands: a.ndmsCommands.Interfaces, routes: a.ndmsCommands.Routes},
+				Cmds:  proxyNDMSCommands{confirmingOpkgTun: confirmingOpkgTun{a.ndmsCommands.Interfaces, a.ndmsQueries.Interfaces}, routes: a.ndmsCommands.Routes},
 				Query: proxyNDMSQuery{ifaces: a.ndmsQueries.Interfaces, rc: a.ndmsQueries.RunningConfig},
 				// Policies/Permit — членство raw-клиента в политиках.
 				Policies: a.ndmsQueries.Policies,
-				Permit:   a.ndmsCommands.Policies,
+				Permit:   confirmingPermitter{a.ndmsCommands.Policies, a.ndmsQueries.Interfaces},
 				Hooks:    proxyRouteHooks{svc: a.clientRouteService},
 				Registry: a.exitRegistry,
 				Sync: newProxyEndpointSync(a.awgStore, a.proxyTunnels(),
 					proxyLinkedField(rec.Kind), a.eventBus),
-				Occ: newProxyOccupancy(store, a.awgStore, rec.Kind, rec.ID),
+				Occ:  newProxyOccupancy(store, a.awgStore, rec.Kind, rec.ID),
+				Wake: func() { ref.mgr.Post(key, proxyrt.EventProcessState) },
+				Log:  func(msg string) { journal.Info("proc", key, msg) },
+				Warn: func(msg string) { journal.Warn("proc", key, msg) },
 			})
 			if err != nil {
 				return nil, err
@@ -1117,7 +1275,7 @@ func (a *app) proxyFactory(ref *proxyManagerRef, journal *logging.ScopedLogger,
 				Instance: rec.ID, Binary: binary,
 				PinnedSHA256: installSvc.PinnedSHA256(rec.Kind),
 				Link:         link, Runner: runner, Gate: gate,
-				Cmds:        proxyNDMSCommands{InterfaceCommands: a.ndmsCommands.Interfaces, routes: a.ndmsCommands.Routes},
+				Cmds:        proxyNDMSCommands{confirmingOpkgTun: confirmingOpkgTun{a.ndmsCommands.Interfaces, a.ndmsQueries.Interfaces}, routes: a.ndmsCommands.Routes},
 				Query:       proxyNDMSQuery{ifaces: a.ndmsQueries.Interfaces, rc: a.ndmsQueries.RunningConfig},
 				IPT:         proxyIPT{},
 				FW:          book.forInstance(key),
@@ -1143,7 +1301,10 @@ func (a *app) proxyFactory(ref *proxyManagerRef, journal *logging.ScopedLogger,
 				Link:         link, Runner: runner, Gate: gate,
 				Sync: newProxyEndpointSync(a.awgStore, a.proxyTunnels(),
 					proxyLinkedField(rec.Kind), a.eventBus),
-				Occ: newProxyOccupancy(store, a.awgStore, rec.Kind, rec.ID),
+				Occ:  newProxyOccupancy(store, a.awgStore, rec.Kind, rec.ID),
+				Wake: func() { ref.mgr.Post(key, proxyrt.EventProcessState) },
+				Log:  func(msg string) { journal.Info("proc", key, msg) },
+				Warn: func(msg string) { journal.Warn("proc", key, msg) },
 			})
 			if err != nil {
 				return nil, err
@@ -1247,3 +1408,30 @@ func obfFlavor(name install.Subsystem) (string, bool) {
 	}
 	return "", false
 }
+
+// proxyDefaultDeviceID — device-id нового wdtt-клиента (F138): hostname
+// роутера (`show system`), понятный админу сервера; пустой, нечитаемый или с
+// символами, которым не место в аргументе форка, — случайный. Hostname
+// Keenetic по умолчанию одинаков ли у одной модели — не проверено; случайный
+// хвост не добавляем по решению владельца 14.10.
+func proxyDefaultDeviceID(ctx context.Context, g interface {
+	Get(ctx context.Context, path string, dst any) error
+}) string {
+	// Поле косметическое: зависший RCI не должен держать создание клиента
+	// (семафор до 60 с + HTTP 30 с) — по таймауту уходим в случайный id.
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var sys struct {
+		Hostname string `json:"hostname"`
+	}
+	if g.Get(ctx, "/show/system", &sys) == nil {
+		if h := strings.TrimSpace(sys.Hostname); deviceIDRe.MatchString(h) {
+			return h
+		}
+	}
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+var deviceIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)

@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,13 +26,13 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/singbox/awgoutbounds"
 	singboxcfg "github.com/hoaxisr/awg-manager/internal/singbox/configmerge"
 	"github.com/hoaxisr/awg-manager/internal/singbox/dnsrewrite"
-	"github.com/hoaxisr/awg-manager/internal/singbox/installer"
 	singboxorch "github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router"
 	"github.com/hoaxisr/awg-manager/internal/singbox/router/bypassset"
 	"github.com/hoaxisr/awg-manager/internal/singbox/subscription"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
+	"github.com/hoaxisr/awg-manager/internal/tunnel"
 )
 
 // setupServer registers routing snapshot providers and constructs the HTTP
@@ -56,9 +58,6 @@ func (a *app) setupServer() {
 	})
 	a.catalog.SetSnapshotProvider("clientRoutes", func(ctx context.Context) (interface{}, error) {
 		return a.clientRouteService.List()
-	})
-	a.catalog.SetSnapshotProvider("hydrarouteStatus", func(ctx context.Context) (interface{}, error) {
-		return a.hydraService.GetStatus(), nil
 	})
 
 	var slowHTTPThreshold time.Duration
@@ -107,6 +106,7 @@ func (a *app) setupServer() {
 			Orch:                a.orch,
 			Bus:                 a.eventBus,
 			HydraService:        a.hydraService,
+			ZapretService:       a.zapretService,
 			SingboxHandler:      a.singboxHandler,
 			SingboxOrch:         a.sbOrch,
 			ClashProxy:          a.clashProxy,
@@ -135,12 +135,80 @@ func (a *app) setupServer() {
 			},
 			OrphanIfaces:          orphanIfaces(a.opkgPool, a.ndmsQueries.Interfaces),
 			OrphanIfacesExclusive: orphanIfacesExclusive(a.opkgPool, a.ndmsQueries.Interfaces),
+			OrphanNDMS:            orphanNDMS{confirmingOpkgTun{a.ndmsCommands.Interfaces, a.ndmsQueries.Interfaces}, a.backendImpl},
+			ForeignIfaces: &foreignIfaces{
+				settings:  a.settingsStore,
+				pool:      a.opkgPool,
+				ndmsNames: ndmsSystemNames(a.ndmsQueries.Interfaces),
+				// a.routerSvc заводит setupRouter — позже setupServer, но
+				// раньше setupListen, поэтому читаем его в момент вызова.
+				boundBy: func(ctx context.Context) (map[string]bool, error) {
+					return routerDirectBinds(ctx, a.routerSvc)
+				},
+				orphans: orphanIfaces(a.opkgPool, a.ndmsQueries.Interfaces),
+				sysNet:  "/sys/class/net",
+			},
+			ObfuscatorRelayChanged: obfuscatorRelayChanged(a.settingsStore, a.awgStore, a.nwgOp.RestartObfuscatorRelay,
+				func(id string) bool { return a.obfDispatcher != nil && a.obfDispatcher.Alive(id) },
+				&a.obfKmodTripped, logging.NewScopedLogger(a.loggingService, logging.GroupTunnel, logging.SubOps)),
 		},
 	)
 
 	a.srv.SetSingboxOperator(a.singboxOp)
 
 }
+
+// obfuscatorRelayChanged — хук выключателя ядро/процесс (спека §4.8): живые
+// Phobos-релеи переезжают на новый бэкенд сразу, не дожидаясь следующего
+// Start; неподнятым бэкенд выберет их Start. Возврат к ядру снимает отметку
+// сторожа (§4.9) — и в настройках, и в памяти: пользователь сам решил
+// попробовать снова. Зовётся обработчиком настроек в горутине; restart
+// берёт лок туннеля сам.
+//
+// F478: прогоны сериализованы, а значение выключателя берётся из стора, а не
+// из аргумента — быстрое true→false, отработавшее в обратном порядке, всё
+// равно сходится к последнему записанному. F477 M6: туннель, занятый
+// оркестратором, получает повтор, а не остаётся на старом бэкенде до Start.
+func obfuscatorRelayChanged(settings *storage.SettingsStore, tunnels *storage.AWGTunnelStore,
+	restart func(ctx context.Context, tunnelID string) error, alive func(tunnelID string) bool,
+	tripped *atomic.Bool, log *logging.ScopedLogger) func() {
+	var mu sync.Mutex
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !settings.IsObfuscatorRelayProcess() {
+			tripped.Store(false)
+			if err := settings.ClearObfuscatorKmodTripped(); err != nil {
+				log.Warn("obfuscator", "", "отметка сторожа не снята: "+err.Error())
+			}
+		}
+		list, err := tunnels.List()
+		if err != nil {
+			log.Warn("obfuscator", "", "смена бэкенда релея: "+err.Error())
+			return
+		}
+		for i := range list {
+			t := &list[i]
+			if t.Enabled && t.Obfuscator != nil && t.Obfuscator.Flavor == storage.ObfuscatorFlavorPhobos && alive(t.ID) {
+				err := restart(context.Background(), t.ID)
+				for i := 0; i < obfRelayBusyRetries && errors.Is(err, tunnel.ErrOperationInProgress); i++ {
+					time.Sleep(obfRelayBusyDelay)
+					err = restart(context.Background(), t.ID)
+				}
+				if err != nil {
+					log.Warn("obfuscator", t.ID, "смена бэкенда релея: "+err.Error())
+				}
+			}
+		}
+	}
+}
+
+// ponytail: фиксированный повтор; занятость дольше ~10 с — Warn, бэкенд
+// выберет следующий Start туннеля.
+var (
+	obfRelayBusyRetries = 5
+	obfRelayBusyDelay   = 2 * time.Second
+)
 
 // setupDeviceProxy wires awg-outbounds, the device-proxy service and the
 // shared download service (+ geo/dns refresh schedulers, installer
@@ -192,7 +260,7 @@ func (a *app) setupDeviceProxy() {
 	})
 	// Reflect deviceproxy storage state into the orchestrator slot so
 	// the saved Enabled flag matches the on-disk active/disabled
-	// location of 30-deviceproxy.json from boot.
+	// location of 12-deviceproxy.json from boot.
 	_ = a.sbOrch.SetEnabled(singboxorch.SlotDeviceProxy, deviceProxyStore.Get().Enabled)
 	a.deviceProxySvc.SetTunnelInboundPorts(func() []int {
 		cfg, err := a.singboxOp.LoadCurrentConfig()
@@ -236,6 +304,9 @@ func (a *app) setupDeviceProxy() {
 	a.dnsRefreshScheduler.Start()
 	a.geoRefreshScheduler.Start()
 	a.updaterService.SetDownloader(sharedDownloadSvc)
+	a.updaterService.SetFeatures(a.usageFeatures)
+	a.updaterService.Start()
+	a.deferOnExit(a.updaterService.Stop)
 	if a.singboxInstaller != nil {
 		a.singboxInstaller.SetDownloader(&installerDownloaderAdapter{svc: sharedDownloadSvc})
 		// Auto-migration goroutine: when legacy sing-box-naive opkg
@@ -244,7 +315,7 @@ func (a *app) setupDeviceProxy() {
 		// awg-manager on the legacy install — retry happens on next boot.
 		go func() {
 			ctx := context.Background()
-			if a.singboxInstaller.CurrentVersion(ctx) != "" {
+			if a.singboxInstaller.HasManagedBinary() {
 				return // managed binary already in place
 			}
 			if !a.singboxInstaller.IsLegacyOpkgInstalled(ctx) {
@@ -253,7 +324,7 @@ func (a *app) setupDeviceProxy() {
 			// Skip migration if there is not enough disk space — GetStatus
 			// will surface InstallStateMissingNoSpace automatically; no
 			// point burning bandwidth on a download that will fail.
-			if a.singboxInstaller.EvaluateInstallState("") == installer.InstallStateMissingNoSpace {
+			if a.singboxInstaller.EvaluateInstallState("").NoSpace() {
 				a.bootLog.Warn("singbox-auto-migration", "", "skipped: not enough disk space")
 				return
 			}
@@ -278,10 +349,26 @@ func (a *app) setupDeviceProxy() {
 	// trigger; the migration tax is at most one stale file fragment that
 	// gets stripped on the next Save/Enable.
 	a.srv.SetNDMSDispatcher(a.ndmsDispatcher)
+	a.srv.SetHookSink(a.ndmsHookSink)
 	a.srv.SetNDMSTransport(a.ndmsTransportClient)
 	a.srv.SetNDMSSaveCoordinator(a.ndmsSaveCoord)
 	a.srv.SetMetricsPoller(a.ndmsMetricsPoller)
 
+}
+
+// routerDirectBinds — имена ядра, к которым привязан direct-выход роутера.
+func routerDirectBinds(ctx context.Context, svc *router.ServiceImpl) (map[string]bool, error) {
+	obs, err := svc.ListCompositeOutbounds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]bool)
+	for _, o := range obs {
+		if o.Type == "direct" && o.BindInterface != "" {
+			set[o.BindInterface] = true
+		}
+	}
+	return set, nil
 }
 
 // setupRouter builds the sing-box router service with its adapters,
@@ -295,7 +382,8 @@ func (a *app) setupRouter() {
 		logging.NewScopedLogger(a.loggingService, logging.GroupRouting, logging.SubSingboxRouter).
 			Warn("reserve-ports", "", "зарезервировать порты инбаундов: "+err.Error())
 	}
-	bindableAdapter := &routerWANInterfaceAdapter{store: a.ndmsQueries.Interfaces, nativeProxies: a.singboxOp.ListNativeProxies}
+	bindableAdapter := &routerWANInterfaceAdapter{store: a.ndmsQueries.Interfaces, nativeProxies: a.singboxOp.ListNativeProxies,
+		foreign: a.settingsStore.GetForeignInterfaces, sysNet: "/sys/class/net"}
 	routerSvc := router.NewService(router.Deps{
 		AppLog:                 a.loggingService,
 		Settings:               a.settingsStore,
@@ -314,9 +402,10 @@ func (a *app) setupRouter() {
 		PresetCatalog:          a.presetCatalog,
 		GeoData:                a.geoDataStore,
 		GeoTagCounts:           a.geoDataStore,
-		OpkgTun:                a.ndmsCommands.Interfaces, // *InterfaceCommands satisfies OpkgTunProvisioner directly
-		StaticRoutes:           &routerStaticRouteAdapter{routes: a.ndmsCommands.Routes},
+		OpkgTun:                confirmingOpkgTun{a.ndmsCommands.Interfaces, a.ndmsQueries.Interfaces},
+		StaticRoutes:           &routerStaticRouteAdapter{routes: a.ndmsCommands.Routes, ifaces: a.ndmsQueries.Interfaces},
 		OpkgTunIndices:         &routerOpkgTunIndexAdapter{store: a.ndmsQueries.Interfaces},
+		SwapGate:               a.swapGate,
 		// ОБЩИЙ пул, один на процесс и на все четыре подсистемы. Своя
 		// удерживающая запись из состава НЕ вычитается: режим узнаёт свой
 		// номер по ключу держателя, и пул отдаёт его пину по совпадению
@@ -324,8 +413,8 @@ func (a *app) setupRouter() {
 		// принадлежит ДРУГОМУ режиму, и вычитать было нечего.
 		OpkgTunPool:   a.opkgPool,
 		OpkgTunScan:   opkgTunScanner(a.ndmsQueries.Interfaces),
-		DefaultRoute:  a.ndmsCommands.Routes, // *RouteCommands satisfies DefaultRouteProvider directly
-		SegmentNAT:    a.ndmsCommands.NAT,    // *NATCommands satisfies SegmentNATProvider directly
+		DefaultRoute:  confirmingDefaultRoute{a.ndmsCommands.Routes, a.ndmsQueries.Interfaces},
+		SegmentNAT:    confirmingSegmentNAT{a.ndmsCommands.NAT, a.ndmsQueries.Interfaces},
 		Segments:      &routerSegmentDetailsAdapter{store: a.ndmsQueries.Interfaces},
 		RunningConfig: a.ndmsQueries.RunningConfig,
 		NATState:      &routerNATStateAdapter{nat: a.ndmsQueries.NAT, static: a.ndmsQueries.StaticNAT},
@@ -358,28 +447,13 @@ func (a *app) setupRouter() {
 	a.geoDataStore.SetOnChange(routerSvc.TriggerBypassSetPopulate)
 	a.srv.SetBypassSetHandler(api.NewBypassSetHandler(routerSvc, a.loggingService))
 
-	// Exclude interfaces already bound by an existing direct outbound from the
-	// bindable picker (#323). Wired post-construction — needs routerSvc.
-	bindableAdapter.occupiedBinds = func(ctx context.Context) (map[string]bool, error) {
-		obs, err := routerSvc.ListCompositeOutbounds(ctx)
-		if err != nil {
-			return nil, err
-		}
-		set := make(map[string]bool)
-		for _, o := range obs {
-			if o.Type == "direct" && o.BindInterface != "" {
-				set[o.BindInterface] = true
-			}
-		}
-		return set, nil
-	}
 	a.singboxOp.SetOutboundReferenceRenamer(routerSvc)
 	a.tunnelService.SetAWGSyncer(a.awgoutboundsSvc)
 	a.tunnelService.SetDeviceProxyRefChecker(a.deviceProxySvc)
 	a.tunnelService.SetRouterRefChecker(routerSvc)
 	a.singboxHandler.SetOutboundRefCheckers(a.deviceProxySvc, routerSvc)
 	a.singboxHandler.SetBindValidator(subscriptionBindValidator{adapter: bindableAdapter}.ValidateBindInterface)
-	a.deviceProxySvc.SetRouterOutbounds(&deviceproxyRouterOutboundsAdapter{src: routerSvc})
+	a.deviceProxySvc.SetRouterOutbounds(&deviceproxyRouterOutboundsAdapter{src: routerSvc, foreign: a.settingsStore.GetForeignInterfaces})
 	// Initial reconcile on boot — idempotent, brings config.json in sync
 	// with storage + current tunnel set. Runs strictly AFTER
 	// SetRouterOutbounds (см. комментарий у SubscribeBus выше): каталог
@@ -599,6 +673,11 @@ func (a *app) setupShutdown() {
 	// исполнять его надо под жизнью демона, иначе бут на нескольких туннелях
 	// обрывается посередине и повтора не будет.
 	a.orch.SetBaseContext(a.shutdownCtx)
+	// Сохранение на SIGTERM: shutdown-хуки ниже исполняются только перед
+	// syscall.Exec, а обычный выход идёт через onExit. Регистрация до
+	// shutdownCancel — исполнение после него (LIFO): фоновые действия уже
+	// отменены; шина ndm и транспорт зарегистрированы раньше — живы до конца.
+	a.deferOnExit(a.flushSaveOnShutdown)
 	a.deferOnExit(a.shutdownCancel)
 
 	// Start the monitoring scheduler now that shutdownCtx exists.
@@ -649,13 +728,7 @@ func (a *app) setupShutdown() {
 	a.srv.AddShutdownHook(a.sbOrch.Close)
 	a.srv.AddShutdownHook(a.nwgOp.Close)
 	a.srv.AddShutdownHook(a.tunnelService.Close)
-	a.srv.AddShutdownHook(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := a.ndmsSaveCoord.Flush(ctx); err != nil {
-			a.bootLog.Warn("ndms-savecoord-flush", "shutdown", err.Error())
-		}
-	})
+	a.srv.AddShutdownHook(a.flushSaveOnShutdown)
 	a.srv.AddShutdownHook(a.ndmsDispatcher.Stop)
 	a.srv.AddShutdownHook(a.sysfsTrafficPoller.Stop)
 	a.srv.AddShutdownHook(a.ndmsMetricsPoller.Stop)

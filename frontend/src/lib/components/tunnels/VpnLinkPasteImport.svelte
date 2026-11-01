@@ -6,7 +6,7 @@
 		isVpnLink,
 		vpnLinkUnsupportedPortalReason
 	} from '$lib/utils/vpnlink';
-	import { shouldShowPremiumChrome } from '$lib/utils/amneziaPremiumVpnPaste';
+	import { m, uiText, type UiText } from '$lib/i18n';
 
 	interface Props {
 		/** vpn:// ввод */
@@ -25,16 +25,14 @@
 		configContent = $bindable(''),
 		linkPreview = $bindable(''),
 		variant = 'page',
-		placeholder = 'Вставьте vpn:// — клиентский конфиг или ключ Amnezia Premium',
+		placeholder,
 		onregularconfig
 	}: Props = $props();
 
-	let linkError = $state('');
+	let linkError = $state<UiText>('');
 
 	let vpnDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let vpnAnalysisGen = 0;
-
-	let showPremiumChrome = $derived(shouldShowPremiumChrome(value));
 
 	const previewVariant = $derived(variant === 'modal' ? 'modal-preview' : 'preview');
 
@@ -68,7 +66,7 @@
 		if (!raw) return;
 
 		if (!isVpnLink(raw)) {
-			linkError = 'Ожидается ссылка вида vpn://…';
+			linkError = () => m.tunnel_edit_vpn_expected();
 			return;
 		}
 
@@ -83,14 +81,12 @@
 				}
 			} catch (e) {
 				configContent = '';
-				linkError = e instanceof Error ? e.message : 'Ошибка декодирования';
+				linkError = e instanceof Error ? e.message : () => m.tunnel_edit_vpn_decode_error();
 			}
 			return;
 		}
 
-		// Ключ Amnezia Premium. Отсюда в портал не ходим и ключ никуда не
-		// отправляем: подпиской занимается отдельный мастер, у которого ключ
-		// и сессия портала не покидают бэкенд.
+		// Ключ облачного портала Amnezia (Free или Premium) — не принимается.
 		const portalBlock = vpnLinkUnsupportedPortalReason(raw);
 		if (portalBlock) linkError = portalBlock;
 	}
@@ -103,17 +99,11 @@
 		bind:value
 		oninput={scheduleVpnPasteAnalysis}
 		onpaste={() => queueMicrotask(() => void runVpnPasteAnalysis())}
-		{placeholder}
+		placeholder={placeholder ?? m.tunnel_edit_vpn_placeholder()}
 		spellcheck="false"
 	></textarea>
-	{#if showPremiumChrome}
-		<p class="premium-banner">
-			Это ключ Amnezia Premium. Список стран и выдачу конфигураций обслуживает мастер подписки —
-			откройте его.
-		</p>
-	{/if}
 	{#if linkError}
-		<p class="link-error">{linkError}</p>
+		<p class="link-error">{uiText(linkError)}</p>
 	{/if}
 	{#if linkPreview}
 		<AmneziaConfEditor bind:value={linkPreview} variant={previewVariant} readonly />
@@ -160,16 +150,5 @@
 		color: var(--error, var(--color-error));
 		margin: 8px 0 0;
 		padding: 0 2px;
-	}
-
-	.premium-banner {
-		font-size: 0.8125rem;
-		line-height: 1.45;
-		color: var(--text-secondary, var(--color-text-secondary));
-		margin: 10px 0 0;
-		padding: 8px 12px;
-		background: var(--color-accent-tint);
-		border: 1px solid var(--accent, var(--color-accent));
-		border-radius: 8px;
 	}
 </style>

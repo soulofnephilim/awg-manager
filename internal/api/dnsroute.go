@@ -2,14 +2,26 @@ package api
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"net/http"
 
 	"github.com/hoaxisr/awg-manager/internal/dnsroute"
 	"github.com/hoaxisr/awg-manager/internal/events"
+	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/response"
 )
+
+// writeDNSRouteError: HR-группа адресуется позицией на ревизии файлов; если
+// файлы с тех пор переписали (HRweb, руки), клиент получает 409 и
+// перечитывает список, а не правит не ту группу.
+func writeDNSRouteError(w http.ResponseWriter, err error, code string) {
+	if errors.Is(err, hydraroute.ErrRulesChanged) {
+		response.ErrorWithStatus(w, http.StatusConflict, err.Error(), "HR_RULES_CHANGED")
+		return
+	}
+	response.Error(w, err.Error(), code)
+}
 
 // ── Response DTOs ────────────────────────────────────────────────
 
@@ -40,6 +52,7 @@ type DnsRouteDTO struct {
 	ManualDomains      []string                  `json:"manualDomains" example:"corp.internal"`
 	ManualText         string                    `json:"manualText,omitempty" example:"# streaming\nyoutube.com\n# backup\ngooglevideo.com"`
 	Subscriptions      []DnsRouteSubscriptionDTO `json:"subscriptions,omitempty"`
+	SkipIPv6           bool                      `json:"skipIPv6,omitempty" example:"true"`
 	Routes             []DnsRouteTargetDTO       `json:"routes"`
 	Enabled            bool                      `json:"enabled" example:"true"`
 	CreatedAt          string                    `json:"createdAt" example:"2024-01-01T00:00:00Z"`
@@ -54,13 +67,14 @@ type DnsRouteDTO struct {
 // DnsRouteUpsertRequest is the request body for DNS/HR route list create/update.
 type DnsRouteUpsertRequest struct {
 	Name               string                    `json:"name" example:"Youtube"`
-	ManualDomains      []string                  `json:"manualDomains" example:"youtube.com,.googlevideo.com,geosite:GOOGLE"`
+	ManualDomains      []string                  `json:"manualDomains" example:"youtube.com,.googlevideo.com"`
 	ManualText         string                    `json:"manualText,omitempty" example:"# game servers\nexample.com\n203.0.113.0/24"`
 	Subscriptions      []DnsRouteSubscriptionDTO `json:"subscriptions,omitempty"`
 	Excludes           []string                  `json:"excludes,omitempty" example:"ads.youtube.com"`
 	ExcludesText       string                    `json:"excludesText,omitempty" example:"# local bypass\n.local\n10.0.0.0/8"`
 	ExcludeSubnets     []string                  `json:"excludeSubnets,omitempty" example:"10.0.0.0/24"`
 	Subnets            []string                  `json:"subnets,omitempty" example:"142.250.0.0/15"`
+	SkipIPv6           *bool                     `json:"skipIPv6,omitempty" example:"true"`
 	Routes             []DnsRouteTargetDTO       `json:"routes,omitempty"`
 	Enabled            bool                      `json:"enabled" example:"true"`
 	Backend            string                    `json:"backend,omitempty" enums:"ndms,hydraroute" example:"hydraroute"`
@@ -93,6 +107,9 @@ type DNSRouteService interface {
 	Get(ctx context.Context, id string) (*dnsroute.DomainList, error)
 	List(ctx context.Context) ([]dnsroute.DomainList, error)
 	Update(ctx context.Context, list dnsroute.DomainList) (*dnsroute.DomainList, error)
+	// UpdateWith is Update with the patch built by edit from the stored
+	// list, under the same lock as the write (dnsroute.ServiceImpl).
+	UpdateWith(ctx context.Context, id string, edit func(dnsroute.DomainList) (dnsroute.DomainList, error)) (*dnsroute.DomainList, error)
 	Delete(ctx context.Context, id string) error
 	DeleteBatch(ctx context.Context, ids []string) (int, error)
 	CreateBatch(ctx context.Context, lists []dnsroute.DomainList) ([]*dnsroute.DomainList, error)
@@ -114,7 +131,7 @@ func (h *DNSRouteHandler) SetEventBus(bus *events.Bus) { h.bus = bus }
 // publishDnsUpdated posts a resource:invalidated hint so clients refetch
 // their DNS route list. The fresh list is also returned inline from every
 // mutation handler (Create/Update return the single entity for its
-// lastDedupeReport; Delete/SetEnabled/DeleteBatch/BulkBackend/Refresh
+// lastDedupeReport; Delete/SetEnabled/DeleteBatch/Refresh
 // return the whole list so the caller can apply it without an extra
 // round-trip). The hint remains as a safety net for tabs subscribed on
 // different pages that did not issue the mutation themselves.
@@ -227,6 +244,7 @@ func (h *DNSRouteHandler) Create(w http.ResponseWriter, r *http.Request) {
 //	@Param			body	body	DnsRouteUpsertRequest	true	"DNS route list payload"
 //	@Success		200	{object}	DnsRouteResponse
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/dns-routes/update [post]
 func (h *DNSRouteHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +260,7 @@ func (h *DNSRouteHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.svc.Update(r.Context(), list)
 	if err != nil {
-		response.Error(w, err.Error(), "DNS_ROUTE_UPDATE_ERROR")
+		writeDNSRouteError(w, err, "DNS_ROUTE_UPDATE_ERROR")
 		return
 	}
 
@@ -262,6 +280,7 @@ func (h *DNSRouteHandler) Update(w http.ResponseWriter, r *http.Request) {
 //	@Param			id	query	string	true	"List id"
 //	@Success		200	{object}	APIEnvelope
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/dns-routes/delete [post]
 func (h *DNSRouteHandler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +295,7 @@ func (h *DNSRouteHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.svc.Delete(r.Context(), id); err != nil {
-		response.Error(w, err.Error(), "DNS_ROUTE_DELETE_ERROR")
+		writeDNSRouteError(w, err, "DNS_ROUTE_DELETE_ERROR")
 		return
 	}
 
@@ -302,6 +321,7 @@ func (h *DNSRouteHandler) Delete(w http.ResponseWriter, r *http.Request) {
 //	@Param			body	body	DnsRouteDeleteBatchRequest	true	"IDs to delete"
 //	@Success		200	{object}	APIEnvelope
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/dns-routes/delete-batch [post]
 func (h *DNSRouteHandler) DeleteBatch(w http.ResponseWriter, r *http.Request) {
@@ -318,7 +338,7 @@ func (h *DNSRouteHandler) DeleteBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := h.svc.DeleteBatch(r.Context(), body.IDs); err != nil {
-		response.Error(w, err.Error(), "DNS_ROUTE_DELETE_BATCH_ERROR")
+		writeDNSRouteError(w, err, "DNS_ROUTE_DELETE_BATCH_ERROR")
 		return
 	}
 
@@ -383,6 +403,7 @@ func (h *DNSRouteHandler) CreateBatch(w http.ResponseWriter, r *http.Request) {
 //	@Param			body	body	EnabledToggleRequest	true	"Enabled flag"
 //	@Success		200	{object}	APIEnvelope
 //	@Failure		400	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
 //	@Failure		500	{object}	APIErrorEnvelope
 //	@Router			/dns-routes/set-enabled [post]
 func (h *DNSRouteHandler) SetEnabled(w http.ResponseWriter, r *http.Request) {
@@ -397,7 +418,7 @@ func (h *DNSRouteHandler) SetEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.svc.SetEnabled(r.Context(), id, body.Enabled); err != nil {
-		response.Error(w, err.Error(), "DNS_ROUTE_SET_ENABLED_ERROR")
+		writeDNSRouteError(w, err, "DNS_ROUTE_SET_ENABLED_ERROR")
 		return
 	}
 
@@ -415,66 +436,6 @@ func (h *DNSRouteHandler) SetEnabled(w http.ResponseWriter, r *http.Request) {
 
 	response.Success(w, list)
 	h.publishDnsUpdated("set-enabled")
-}
-
-// BulkBackend switches the routing backend for multiple lists.
-//
-//	@Summary		Bulk set DNS route backend
-//	@Tags			dns-routes
-//	@Accept			json
-//	@Produce		json
-//	@Security		CookieAuth
-//	@Success		200	{object}	APIEnvelope
-//	@Failure		400	{object}	APIErrorEnvelope
-//	@Failure		500	{object}	APIErrorEnvelope
-//	@Router			/dns-routes/bulk-backend [post]
-func (h *DNSRouteHandler) BulkBackend(w http.ResponseWriter, r *http.Request) {
-	req, ok := parseJSON[struct {
-		ListIDs []string `json:"listIDs"`
-		Backend string   `json:"backend"`
-	}](w, r, http.MethodPost)
-	if !ok {
-		return
-	}
-	if req.Backend != "ndms" && req.Backend != "hydraroute" {
-		response.Error(w, "Invalid backend: must be 'ndms' or 'hydraroute'", "INVALID_BACKEND")
-		return
-	}
-	if len(req.ListIDs) == 0 {
-		response.Error(w, "No list IDs provided", "EMPTY_LIST")
-		return
-	}
-
-	changed := 0
-	for _, id := range req.ListIDs {
-		list, err := h.svc.Get(r.Context(), id)
-		if err != nil {
-			h.log.Warn("bulk-backend", id, "Failed to load list: "+err.Error())
-			continue
-		}
-		list.Backend = req.Backend
-		if _, err := h.svc.Update(r.Context(), *list); err != nil {
-			h.log.Warn("bulk-backend", id, "Failed to update backend: "+err.Error())
-			continue
-		}
-		changed++
-	}
-	if changed == 0 {
-		response.Error(w, "no lists were changed", "BULK_BACKEND_FAILED")
-		return
-	}
-	h.log.Info("bulk-backend", req.Backend, fmt.Sprintf("bulk backend change: %d lists → %s", changed, req.Backend))
-
-	fresh, err := h.svc.List(r.Context())
-	if err != nil {
-		response.Error(w, err.Error(), "DNS_ROUTE_LIST_ERROR")
-		return
-	}
-
-	h.publishDnsUpdated("bulk-backend")
-
-	// Return fresh list so clients can call applyMutationResponse.
-	response.Success(w, fresh)
 }
 
 // Refresh refreshes subscriptions for a single list or all lists.

@@ -14,6 +14,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/events"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms/cache"
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/obfuscator"
 	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/orchestrator"
@@ -56,6 +57,15 @@ type ServiceImpl struct {
 	// Key: tunnelID (string), Value: *sync.Mutex
 	tunnelMu sync.Map
 
+	// importIDMu — выбор идентификатора импорта и запись туннеля одной
+	// критической секцией (F318). У NativeWG между выбором (NextAvailableID)
+	// и store.Create стоит RCI-импорт, и два импорта внахлёст брали один
+	// awg<N>; проигравший откатывал kmod/guard по ИДЕНТИФИКАТОРУ — то есть
+	// записи победителя. На OS 4.x kernel-путь берёт awgm<N> тем же перебором
+	// без резервации, поэтому замок держит и его.
+	// ponytail: один замок на все импорты; они редки и ручные.
+	importIDMu sync.Mutex
+
 	// wan is the unified WAN state model (up/down tracking).
 	wan *wan.Model
 
@@ -70,13 +80,6 @@ type ServiceImpl struct {
 	stateCache      *cache.KeyedStore[string, tunnel.StateInfo]
 	invalidatorOnce sync.Once
 	invalidatorStop func() // unsubscribe шины; nil, пока инвалидатор не поднят
-
-	// selfCreateGate (optional) suppresses the hook-driven snapshot refresh
-	// during awg-manager-initiated NDMS interface creations. Without it,
-	// the ifcreated hook fires (and rebroadcasts system tunnels) before
-	// our own store.Save completes — producing a transient ghost entry in
-	// the system tunnels list.
-	selfCreateGate tunnel.SelfCreateGater
 
 	awgSyncer AWGSyncer
 
@@ -136,11 +139,6 @@ func New(
 
 // WANModel returns the WAN state model for direct access by API handlers.
 func (s *ServiceImpl) WANModel() *wan.Model { return s.wan }
-
-// SetSelfCreateGate wires the self-create gate used to suppress hook-driven
-// snapshot refreshes during Create/Import. Optional; nil is safe (code paths
-// degrade to the old behavior).
-func (s *ServiceImpl) SetSelfCreateGate(g tunnel.SelfCreateGater) { s.selfCreateGate = g }
 
 // GetResolvedISP returns the resolved ISP interface name for a running tunnel.
 func (s *ServiceImpl) GetResolvedISP(tunnelID string) string {
@@ -362,6 +360,13 @@ func (s *ServiceImpl) Update(ctx context.Context, oldStored, newStored *storage.
 	if newStored.Interface.MTU <= 0 {
 		return fmt.Errorf("MTU must be > 0")
 	}
+	// Только на переименовании: имя, заведённое до предела, не должно
+	// блокировать правку остальных полей карточки.
+	if oldStored.Name != newStored.Name {
+		if err := tunnel.ValidateName(newStored.Name); err != nil {
+			return err
+		}
+	}
 
 	// Block address change in kernel mode once OpkgTun or the backend process
 	// exists — NDMS/kernel cannot rename the live interface. Before first
@@ -382,27 +387,37 @@ func (s *ServiceImpl) Update(ctx context.Context, oldStored, newStored *storage.
 		}
 	}
 
-	// Description rename — cheap, dispatch on change.
-	if oldStored.Name != newStored.Name {
-		if s.isNativeWG(newStored) && s.nwgOperator != nil {
-			if err := s.nwgOperator.UpdateDescription(ctx, newStored, newStored.Name); err != nil {
-				s.logWarn("update", tunnelID, "Failed to update description: "+err.Error())
-			}
-		} else {
-			if err := s.legacyOperator.UpdateDescription(ctx, tunnelID, newStored.Name); err != nil {
-				s.logWarn("update", tunnelID, "Failed to update description: "+err.Error())
-			}
-		}
-	}
-
-	// Below this point we only act on the running interface. Skip if not.
+	// Состояние — до любой записи в NDMS: отказ смены пути (F658) обязан
+	// случиться раньше переименования ниже, иначе описание в NDMS уехало бы
+	// на новое имя, а запись осталась бы прежней.
 	var stateInfo tunnel.StateInfo
 	if s.isNativeWG(newStored) && s.nwgOperator != nil {
 		stateInfo = s.nwgOperator.GetState(ctx, newStored)
 	} else {
 		stateInfo = s.state.GetState(ctx, tunnelID)
 	}
+	pathSwitch := nwg.UsesProxyPath(&oldStored.Interface) != nwg.UsesProxyPath(&newStored.Interface)
+	if refusePathSwitch(newStored, stateInfo, pathSwitch) {
+		return tunnel.ErrPathSwitchNotRunning
+	}
+
+	// Description rename — cheap, dispatch on change.
+	if oldStored.Name != newStored.Name {
+		s.syncDescription(ctx, "update", newStored, oldStored.Name, newStored.Name)
+	}
+
+	// Below this point we only act on the running interface. Skip if not.
 	if !shouldSyncRuntime(newStored, stateInfo) {
+		// Ключ и пир NativeWG живут в конфигурации интерфейса NDMS, а Start
+		// их не шлёт (только адрес, DNS, ASC, endpoint) — правка на
+		// остановленном туннеле иначе осталась бы только в записи (F650).
+		if s.isNativeWG(newStored) && s.nwgOperator != nil {
+			if err := s.withTunnelLock(ctx, tunnelID, "update", func() error {
+				return s.syncKeyAndPeer(ctx, oldStored, newStored)
+			}); err != nil {
+				return err
+			}
+		}
 		s.logInfo("update", tunnelID, "Tunnel updated (not running, runtime sync skipped)")
 		return nil
 	}
@@ -429,20 +444,90 @@ func (s *ServiceImpl) Update(ctx context.Context, oldStored, newStored *storage.
 	return nil
 }
 
-// shouldSyncRuntime — пускать ли правку в живой интерфейс. Обычный туннель
-// синхронизируется только запущенным. У обфусцированного правка обязана
-// доехать до релея и без рукопожатия: без ASC такой туннель висит в Starting
-// (PeerRemoteAddr=127.0.0.1 при живом релее), с ASC уезжает в Broken, а
-// упавший релей даёт Broken с DetailsNotRunning — во всех трёх случаях
-// «Сохранить» с новым ключом обязано перезапустить релей, иначе туннель
-// лечится только ручным рестартом (Q21). Набор состояний — как у
-// ReplaceConfig.
+// shouldSyncRuntime — пускать ли правку в живой интерфейс. Kernel-туннель
+// синхронизируется только запущенным. У NativeWG Starting и Broken — это
+// conf=running без рукопожатия: интерфейс NDMS поднят, и правка обязана
+// доехать целиком — частый случай как раз починка неверного ключа у туннеля,
+// который не может сделать рукопожатие (решение владельца 14.10, F658). Для
+// обфусцированного это же нужно релею: без ASC он висит в Starting, с ASC и
+// при упавшем релее — Broken, и «Сохранить» с новым ключом обязано его
+// перезапустить (Q21). Набор состояний — как у ReplaceConfig.
 func shouldSyncRuntime(stored *storage.AWGTunnel, stateInfo tunnel.StateInfo) bool {
 	if stateInfo.State == tunnel.StateRunning {
 		return true
 	}
-	return stored.Obfuscator != nil &&
+	return (stored.Backend == "nativewg" || stored.Obfuscator != nil) &&
 		(stateInfo.State == tunnel.StateStarting || stateInfo.State == tunnel.StateBroken)
+}
+
+// refusePathSwitch — правку, меняющую путь ASC ↔ awg_proxy (это Stop+Start),
+// у обычного NativeWG в Starting/Broken отклонить (решение владельца 14.10,
+// F658): такой туннель мог быть подвешен на WAN-down (SuspendProxy, conf
+// остался running → Broken) — перезапуск обошёл бы приостановку, а
+// отложенная смена разводила бы кэш оркестратора и NDMS. Остановленный идёт
+// прежней веткой (ключ и пир, путь — со стартом); запущенный и
+// обфусцированный перезапускаются, как прежде.
+func refusePathSwitch(newStored *storage.AWGTunnel, stateInfo tunnel.StateInfo, pathSwitch bool) bool {
+	return pathSwitch && newStored.Backend == "nativewg" && newStored.Obfuscator == nil &&
+		(stateInfo.State == tunnel.StateStarting || stateInfo.State == tunnel.StateBroken)
+}
+
+// syncDescription ставит описание записи туннеля в NDMS = name. Инвариант
+// F517: запись kernel-туннеля признаётся нашей по равенству её описания имени
+// туннеля, поэтому КАЖДЫЙ путь, меняющий имя, обязан звать это. Оператор
+// пишет только в НАШУ запись — по тому же правилу, проверенному с prevName
+// (имя до переименования); чужую не трогает. Провал или чужая запись — Warn,
+// как у переименования всегда: запись остаётся со старым описанием, и после
+// ребута (живого amneziawg под ней нет) F517 откажет туннелю в старте.
+func (s *ServiceImpl) syncDescription(ctx context.Context, scope string, stored *storage.AWGTunnel, prevName, name string) {
+	var err error
+	if s.isNativeWG(stored) && s.nwgOperator != nil {
+		var iface query.Confirmed
+		if iface, err = s.nwgOperator.RequireIface(ctx, stored); err == nil {
+			err = s.nwgOperator.UpdateDescription(ctx, iface, name)
+		}
+	} else if s.legacyOperator != nil {
+		err = s.legacyOperator.UpdateDescription(ctx, stored.ID, prevName, name)
+		// Прошлое переименование могло не дописать описание (F535): в записи
+		// NDMS тогда ещё более раннее имя — оно в stored.PrevName. Один повтор
+		// с ним, иначе цепочка переименований навсегда оставит запись «чужой».
+		var foreign *ops.ForeignRecordError
+		if errors.As(err, &foreign) && stored.PrevName != "" && stored.PrevName != prevName {
+			err = s.legacyOperator.UpdateDescription(ctx, stored.ID, stored.PrevName, name)
+		}
+	}
+	if err != nil {
+		s.logWarn(scope, stored.ID, "Failed to update description: "+err.Error())
+	}
+}
+
+// SyncDescription — syncDescription для путей, меняющих имя мимо Update
+// (усыновление wdttlink, переименование инстанса прокси). Такие пути пишут
+// стор ДО синхронизации, и PrevName в нём уже равен prevName: повтор F535
+// (запись NDMS с ещё более ранним именем) остался бы мёртвым. Поэтому раннее
+// имя вызывающий снимает в мутаторе до перезаписи и передаёт earlierName.
+func (s *ServiceImpl) SyncDescription(ctx context.Context, tunnelID, prevName, name, earlierName string) {
+	stored, err := s.store.Get(tunnelID)
+	if err != nil {
+		s.logWarn("update_description", tunnelID, "Failed to update description: "+err.Error())
+		return
+	}
+	cp := *stored
+	cp.PrevName = earlierName
+	s.syncDescription(ctx, "update_description", &cp, prevName, name)
+}
+
+// CaptureDescription — описание записи kernel-туннеля без проверки владения:
+// взятие стороннего туннеля (Adopt) забирает его запись осознанно. Больше его
+// не зовёт никто: любой другой путь переписал бы описание чужой записи, и
+// F517 взял бы её как свою. Провал — Warn (после ребута F517 откажет).
+func (s *ServiceImpl) CaptureDescription(ctx context.Context, tunnelID, name string) {
+	if s.legacyOperator == nil {
+		return
+	}
+	if err := s.legacyOperator.CaptureDescription(ctx, tunnelID, name); err != nil {
+		s.logWarn("adopt", tunnelID, "Failed to set description: "+err.Error())
+	}
 }
 
 // applyDiffKernel applies field-level diffs to a running kernel-backend
@@ -454,6 +539,7 @@ func shouldSyncRuntime(stored *storage.AWGTunnel, stateInfo tunnel.StateInfo) bo
 // reconciliation of the others. Returns nil only if every dispatch
 // succeeded.
 func (s *ServiceImpl) applyDiffKernel(ctx context.Context, oldStored, newStored *storage.AWGTunnel) error {
+	ctx = query.WithActionList(ctx) // один список на SetMTU/SyncDNS/SyncAddress (F557)
 	tunnelID := newStored.ID
 	confPath := tunnel.NewNames(tunnelID).ConfPath
 	var errs []error
@@ -514,6 +600,7 @@ func (s *ServiceImpl) applyDiffKernel(ctx context.Context, oldStored, newStored 
 // applyDiffNWG applies field-level diffs to a running NativeWG tunnel.
 // See applyDiffKernel for the error-collection contract.
 func (s *ServiceImpl) applyDiffNWG(ctx context.Context, oldStored, newStored *storage.AWGTunnel) error {
+	ctx = query.WithActionList(ctx) // один список на правку, включая SyncKmodSlot и Stop/Start (F557)
 	tunnelID := newStored.ID
 	var errs []error
 
@@ -529,6 +616,20 @@ func (s *ServiceImpl) applyDiffNWG(ctx context.Context, oldStored, newStored *st
 			s.logWarn("update", tunnelID, "Failed to stop on path switch: "+err.Error())
 			return fmt.Errorf("stop on path switch: %w", err)
 		}
+		// Start применяет адрес, DNS, ASC и endpoint, но не приватный ключ и
+		// не поля пира: правка, сменившая их вместе с путём, иначе осталась бы
+		// только в записи (F650). Досылаем ПОСЛЕ Stop: до него при переходе
+		// proxy → ASC настоящий endpoint встал бы на ещё живой proxy-путь, и
+		// рукопожатия ушли бы без обфускации. Отказ (резолв при смене ключа
+		// пира — до любой отправки, см. syncKeyAndPeer) возвращает туннель на
+		// прежнюю запись: handler fail-closed её и не сменит.
+		if err := s.syncKeyAndPeer(ctx, oldStored, newStored); err != nil {
+			if sErr := s.nwgOperator.Start(ctx, oldStored); sErr != nil {
+				s.logWarn("update", tunnelID, "Failed to restore tunnel after key/peer sync failure: "+sErr.Error())
+				return errors.Join(err, fmt.Errorf("restore after failed sync: %w", sErr))
+			}
+			return err
+		}
 		if err := s.nwgOperator.Start(ctx, newStored); err != nil {
 			s.logWarn("update", tunnelID, "Failed to start on path switch: "+err.Error())
 			return fmt.Errorf("start on path switch: %w", err)
@@ -536,39 +637,58 @@ func (s *ServiceImpl) applyDiffNWG(ctx context.Context, oldStored, newStored *st
 		return nil
 	}
 
-	if oldStored.Interface.PrivateKey != newStored.Interface.PrivateKey {
-		if err := s.nwgOperator.SyncPrivateKey(ctx, newStored); err != nil {
+	// Интерфейс подтверждается один раз на правку и только если в NDMS есть
+	// что слать. Снят — явная ошибка: handler fail-closed не сохранит
+	// карточку, а команды по нему создали бы его заново (F546).
+	// Каждая Sync-ветка ниже гейтится своим флагом, а флаги — вместе с
+	// подтверждением: ветка без флага здесь не получила бы Confirmed.
+	keyChanged := oldStored.Interface.PrivateKey != newStored.Interface.PrivateKey
+	addrChanged := oldStored.Interface.Address != newStored.Interface.Address ||
+		oldStored.Interface.MTU != newStored.Interface.MTU
+	dnsChanged := oldStored.Interface.DNS != newStored.Interface.DNS
+	peerChanged := !awgPeerEqual(oldStored.Peer, newStored.Peer)
+	ascChanged := !awgParamsEqual(oldStored.Interface, newStored.Interface)
+	var iface query.Confirmed
+	if keyChanged || addrChanged || dnsChanged || peerChanged || ascChanged {
+		var err error
+		if iface, err = s.nwgOperator.RequireIface(ctx, newStored); err != nil {
+			s.logWarn("update", tunnelID, "NDMS sync: "+err.Error())
+			return err
+		}
+	}
+
+	if keyChanged {
+		if err := s.nwgOperator.SyncPrivateKey(ctx, iface, newStored); err != nil {
 			s.logWarn("update", tunnelID, "Failed to sync NWG private-key: "+err.Error())
 			errs = append(errs, fmt.Errorf("sync private-key: %w", err))
 		}
 	}
 
-	if oldStored.Interface.Address != newStored.Interface.Address ||
-		oldStored.Interface.MTU != newStored.Interface.MTU {
-		if err := s.nwgOperator.SyncAddressMTU(ctx, newStored); err != nil {
+	if addrChanged {
+		if err := s.nwgOperator.SyncAddressMTU(ctx, iface, newStored); err != nil {
 			s.logWarn("update", tunnelID, "Failed to sync NWG address/MTU: "+err.Error())
 			errs = append(errs, fmt.Errorf("sync address/MTU: %w", err))
 		}
 	}
 
-	if oldStored.Interface.DNS != newStored.Interface.DNS {
+	if dnsChanged {
 		oldList := tunnel.ParseDNSList(oldStored.Interface.DNS)
 		newList := tunnel.ParseDNSList(newStored.Interface.DNS)
-		if err := s.nwgOperator.SyncDNS(ctx, newStored, oldList, newList); err != nil {
+		if err := s.nwgOperator.SyncDNS(ctx, iface, oldList, newList); err != nil {
 			s.logWarn("update", tunnelID, "Failed to sync NWG DNS: "+err.Error())
 			errs = append(errs, fmt.Errorf("sync DNS: %w", err))
 		}
 	}
 
-	if !awgPeerEqual(oldStored.Peer, newStored.Peer) {
-		if err := s.nwgOperator.SyncPeer(ctx, newStored, oldStored.Peer.PublicKey); err != nil {
+	if peerChanged {
+		if err := s.nwgOperator.SyncPeer(ctx, iface, newStored, oldStored.Peer.PublicKey); err != nil {
 			s.logWarn("update", tunnelID, "Failed to sync NWG peer: "+err.Error())
 			errs = append(errs, fmt.Errorf("sync peer: %w", err))
 		}
 	}
 
-	if !awgParamsEqual(oldStored.Interface, newStored.Interface) {
-		if err := s.nwgOperator.SyncAWGParams(ctx, newStored); err != nil {
+	if ascChanged {
+		if err := s.nwgOperator.SyncAWGParams(ctx, iface, newStored); err != nil {
 			// AWG params may need restart on some firmware — log Warn but
 			// don't fail the entire Update; user gets the rest of the diff
 			// applied and a restart hint.
@@ -602,7 +722,12 @@ func (s *ServiceImpl) applyDiffNWG(ctx context.Context, oldStored, newStored *st
 	//
 	// У обфусцированного туннеля kmod-слота нет по построению: пир смотрит на
 	// loopback, и слот увёл бы WG в awg_proxy мимо релея.
-	if newStored.Obfuscator == nil {
+	//
+	// Пересобирается только существующий слот: его нет — туннель подвешен
+	// на WAN-down (SuspendProxy снял слот, conf остался running → Broken) или
+	// не поднят, и слот строит Start. Иначе «Сохранить» у Starting/Broken
+	// (F658) обходило бы приостановку, а без связи падало бы на резолве.
+	if newStored.Obfuscator == nil && s.nwgOperator.HasKmodSlot(newStored.ID) {
 		if kmodShapingChanged(oldStored, newStored) {
 			if err := s.nwgOperator.SyncKmodSlot(ctx, newStored); err != nil {
 				s.logWarn("update", tunnelID, "Failed to sync kmod slot: "+err.Error())
@@ -620,6 +745,45 @@ func (s *ServiceImpl) applyDiffNWG(ctx context.Context, oldStored, newStored *st
 	}
 
 	return errors.Join(errs...)
+}
+
+// syncKeyAndPeer — приватный ключ и пир NativeWG, если правка их меняет.
+// Start ни ключа, ни пира не шлёт (F650), поэтому досылаются они там, где
+// посинхронной правки нет: на остановленном туннеле и на смене пути
+// (ASC ↔ awg_proxy, Stop+Start). Интерфейса в NDMS нет — слать некуда и не
+// нужно: правка остановленного туннеля не должна от этого отказывать.
+func (s *ServiceImpl) syncKeyAndPeer(ctx context.Context, oldStored, newStored *storage.AWGTunnel) error {
+	keyChanged := oldStored.Interface.PrivateKey != newStored.Interface.PrivateKey
+	peerChanged := !awgPeerEqual(oldStored.Peer, newStored.Peer)
+	if !keyChanged && !peerChanged {
+		return nil
+	}
+	iface, err := s.nwgOperator.RequireIface(ctx, newStored)
+	if errors.Is(err, tunnel.ErrInterfaceGone) {
+		s.logInfo("update", newStored.ID, "NDMS sync of key/peer skipped: interface absent")
+		return nil
+	}
+	if err != nil {
+		s.logWarn("update", newStored.ID, "NDMS sync of key/peer: "+err.Error())
+		return err
+	}
+	// Пир первым: его ожидаемый отказ (резолв при смене ключа пира) случается
+	// до любой отправки, и тогда приватный ключ тоже не уходит — роутер и
+	// запись не расходятся. Сбой самого RCI-батча после этого может оставить
+	// частичное состояние, как и в посинхронной правке.
+	if peerChanged {
+		if err := s.nwgOperator.SyncPeer(ctx, iface, newStored, oldStored.Peer.PublicKey); err != nil {
+			s.logWarn("update", newStored.ID, "Failed to sync NWG peer: "+err.Error())
+			return fmt.Errorf("sync peer: %w", err)
+		}
+	}
+	if keyChanged {
+		if err := s.nwgOperator.SyncPrivateKey(ctx, iface, newStored); err != nil {
+			s.logWarn("update", newStored.ID, "Failed to sync NWG private-key: "+err.Error())
+			return fmt.Errorf("sync private-key: %w", err)
+		}
+	}
+	return nil
 }
 
 // awgInterfaceEqual returns true when two AWGInterface structs are
@@ -696,6 +860,12 @@ func (s *ServiceImpl) SetEnabled(ctx context.Context, tunnelID string, enabled b
 
 	s.logInfo("set-enabled", tunnelID, fmt.Sprintf("Enabled set to %v", enabled))
 	s.invalidateState(tunnelID)
+	// Кэш оркестратора решает по Enabled на WAN-up/WAN-down/reconnect:
+	// без обновления выключенный автостарт поднимался бы на ближайшем WAN-up,
+	// а включённый — не поднимался (F668).
+	if s.orch != nil {
+		s.orch.RefreshTunnelState(tunnelID)
+	}
 	return nil
 }
 
@@ -762,7 +932,7 @@ func (s *ServiceImpl) Import(ctx context.Context, confContent, name, backend str
 	// Parse config
 	parsed, err := config.Parse(confContent)
 	if err != nil {
-		return nil, fmt.Errorf("parse conf: %w", err)
+		return nil, fmt.Errorf("%w: %w", tunnel.ErrParseConf, err)
 	}
 
 	// Тот же гейт, что и на create/update: чужой .conf с битым
@@ -779,6 +949,9 @@ func (s *ServiceImpl) Import(ctx context.Context, confContent, name, backend str
 	if parsed.Name == "" {
 		parsed.Name = "Imported Tunnel"
 	}
+	if err := tunnel.ValidateName(parsed.Name); err != nil {
+		return nil, err
+	}
 
 	// Determine backend
 	if backend == "" {
@@ -792,13 +965,22 @@ func (s *ServiceImpl) Import(ctx context.Context, confContent, name, backend str
 	// невидим.
 	parsed.WdttClientID = strings.TrimSpace(link.WdttClientID)
 	parsed.FreeTurnClientID = strings.TrimSpace(link.FreeTurnClientID)
-	parsed.AmneziaCountry = normalizeAmneziaCountry(link.AmneziaCountry)
 
 	if link.Obfuscator != nil {
+		// Ручной ClusterM принимает любой .conf, а AWG-параметры легли бы
+		// ASC-обфускацией поверх обфускации релея — правка туннеля это уже
+		// отвергает (applyTunnelUpdate), импорт был несимметричен (F119 5.7).
+		if link.Obfuscator.Flavor == storage.ObfuscatorFlavorClusterM && config.IsAWGObfuscated(&parsed.Interface) {
+			return nil, fmt.Errorf("параметры AWG несовместимы с обфускатором ClusterM: уберите Jc/Jmin/Jmax/S1–S4/H1–H4/I1–I5 из .conf")
+		}
+		// Выбор порта и запись — под одним importIDMu: иначе два параллельных
+		// импорта видят один свободный порт по стору и оба его занимают (F119 4.1).
+		s.importIDMu.Lock()
+		defer s.importIDMu.Unlock()
 		if err := prepareObfuscatorImport(parsed, link.Obfuscator, s.obfuscatorPortTaken); err != nil {
 			return nil, err
 		}
-		backend = parsed.Backend
+		return s.importNativeWGLocked(ctx, parsed)
 	}
 
 	if backend == "nativewg" {
@@ -806,8 +988,10 @@ func (s *ServiceImpl) Import(ctx context.Context, confContent, name, backend str
 	}
 
 	// Kernel path.
+	s.importIDMu.Lock()
 	tunnelID, res, err := s.kernelID(ctx, parsed.Name)
 	if err != nil {
+		s.importIDMu.Unlock()
 		return nil, fmt.Errorf("generate ID: %w", err)
 	}
 	// Резервация держит номер до записи: без неё между выбором и Create
@@ -819,7 +1003,9 @@ func (s *ServiceImpl) Import(ctx context.Context, confContent, name, backend str
 	parsed.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	parsed.Enabled = false
 
-	if err := s.store.Create(parsed); err != nil {
+	err = s.store.Create(parsed)
+	s.importIDMu.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("save tunnel: %w", err)
 	}
 	if err := config.WriteFile(parsed); err != nil {
@@ -852,14 +1038,6 @@ func prepareObfuscatorImport(parsed *storage.AWGTunnel, o *storage.Obfuscator, t
 	parsed.ResolvedEndpointIP = ""
 	parsed.Backend = "nativewg"
 	return nil
-}
-
-// normalizeAmneziaCountry приводит код страны к виду, в котором он лежит в
-// записи: нижний регистр, без пробелов по краям. Сравнение кода записи с
-// кодом каталога в мастере — строковое, и «NL» рядом с «nl» дало бы туннель,
-// не совпавший ни с одной страной каталога.
-func normalizeAmneziaCountry(code string) string {
-	return strings.ToLower(strings.TrimSpace(code))
 }
 
 // withTunnelLock выполняет fn под per-tunnel замком оркестратора. Замка может
@@ -973,6 +1151,13 @@ func identifierHolders(tunnels []storage.AWGTunnel) opkgtun.Taken {
 
 // importNativeWG creates a tunnel using the NativeWG backend.
 func (s *ServiceImpl) importNativeWG(ctx context.Context, parsed *storage.AWGTunnel) (*TunnelWithStatus, error) {
+	s.importIDMu.Lock()
+	defer s.importIDMu.Unlock()
+	return s.importNativeWGLocked(ctx, parsed)
+}
+
+// importNativeWGLocked — importNativeWG под уже взятым importIDMu.
+func (s *ServiceImpl) importNativeWGLocked(ctx context.Context, parsed *storage.AWGTunnel) (*TunnelWithStatus, error) {
 	if s.nwgOperator == nil {
 		return nil, fmt.Errorf("NativeWG backend not available")
 	}
@@ -982,7 +1167,7 @@ func (s *ServiceImpl) importNativeWG(ctx context.Context, parsed *storage.AWGTun
 	// вовсе (storage.nwgFloor). Пересечение было бы гонкой, а не просто
 	// чересполосицей: номер kernel'а выдаёт пул, и открытую резервацию этот
 	// перебор не видит — проигравший получил бы «tunnel already exists» без
-	// ретрая (F317).
+	// ретрая (F317). importIDMu держит вызывающий.
 	tunnelID, err := s.store.NextAvailableID("nativewg")
 	if err != nil {
 		return nil, fmt.Errorf("generate ID: %w", err)
@@ -992,18 +1177,6 @@ func (s *ServiceImpl) importNativeWG(ctx context.Context, parsed *storage.AWGTun
 	parsed.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	parsed.Enabled = false
 	parsed.Backend = "nativewg"
-
-	// Guard: the ifcreated hook fires from NDMS AS SOON AS the interface
-	// is created. Without the gate, the hook handler rebroadcasts a
-	// snapshot that sees the new NDMS interface but does NOT see this
-	// tunnel in our managed store yet (Save hasn't run), so the interface
-	// is misclassified as a "system tunnel" — a ghost duplicate vanishing
-	// only on next refresh. Gate spans both Create and Save; the caller
-	// (import handler) publishes the final snapshot after us.
-	if s.selfCreateGate != nil {
-		s.selfCreateGate.EnterSelfCreate()
-		defer s.selfCreateGate.ExitSelfCreate()
-	}
 
 	// Create NDMS WireGuard interface via NativeWG operator
 	index, err := s.nwgOperator.Create(ctx, parsed)
@@ -1026,13 +1199,23 @@ func (s *ServiceImpl) importNativeWG(ctx context.Context, parsed *storage.AWGTun
 
 // ReplaceConfig replaces a tunnel's Interface and Peer from a parsed .conf,
 // preserving identity, routing, monitoring, and all other metadata.
-func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, newName string, opts ReplaceOptions) error {
+func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, newName string) error {
 	s.lockTunnel(tunnelID)
 	defer s.unlockTunnel(tunnelID)
+	ctx = query.WithActionList(ctx) // один список на замену: RequireIface, Stop, Start (F557)
 
 	stored, err := s.store.Get(tunnelID)
 	if err != nil {
 		return tunnel.ErrNotFound
+	}
+	// Имя до замены: ниже stored.Name перезаписывается. Предел и описание
+	// записи — только если имя действительно меняют (как в Update).
+	prevName := stored.Name
+	renamed := newName != "" && newName != prevName
+	if renamed {
+		if err := tunnel.ValidateName(newName); err != nil {
+			return err
+		}
 	}
 
 	// Секция [instance] читается ДО Strip: дальше config.Parse видит чистый
@@ -1042,19 +1225,19 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 	if stored.Obfuscator != nil {
 		var err error
 		if inst, _, instPresent, err = obfuscator.ParseInstance(confContent); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", tunnel.ErrParseConf, err)
 		}
 	}
 	confContent = obfuscator.StripInstance(confContent)
 
 	parsed, err := config.Parse(confContent)
 	if err != nil {
-		return fmt.Errorf("parse conf: %w", err)
+		return fmt.Errorf("%w: %w", tunnel.ErrParseConf, err)
 	}
 	// Тот же гейт, что у импорта, create и update: модуль такой конфиг всё
 	// равно отвергнет на setconf, отказать здесь — честнее.
 	if err := config.ValidateObfuscation(&parsed.Interface.AWGObfuscation); err != nil {
-		return fmt.Errorf("validate conf: %w", err)
+		return fmt.Errorf("%w: %w", tunnel.ErrValidateConf, err)
 	}
 
 	// Обфусцированный туннель: endpoint остаётся loopback, [instance] из
@@ -1118,12 +1301,17 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 	stored.ActiveWAN = ""
 	stored.StartedAt = ""
 
-	// Нормализация — ДО мутатора: под dir-lock'ом позволены только
-	// присваивания заранее вычисленных значений.
-	var amneziaCountry *string
-	if opts.AmneziaCountry != nil {
-		normalized := normalizeAmneziaCountry(*opts.AmneziaCountry)
-		amneziaCountry = &normalized
+	// Доказательство интерфейса nativewg — ДО сохранения записи (F546): список
+	// не прочитан — отказ, запись прежняя и в NDMS не уходит ничего; иначе
+	// замена молча разошлась бы с роутером под видом успеха. Интерфейс снят —
+	// запись сохраняется, синхронизация ниже пропускается (как и было).
+	var iface query.Confirmed
+	var nwgIfaceErr error
+	if s.nwgOperator != nil && s.isNativeWG(stored) {
+		iface, nwgIfaceErr = s.nwgOperator.RequireIface(ctx, stored)
+		if nwgIfaceErr != nil && !errors.Is(nwgIfaceErr, tunnel.ErrInterfaceGone) {
+			return fmt.Errorf("ndms: %w", nwgIfaceErr)
+		}
 	}
 
 	// Save to storage. Мутатор присваивает уже вычисленные выше поля свежей
@@ -1140,13 +1328,6 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 		}
 		if stored.Obfuscator != nil {
 			t.Obfuscator = stored.Obfuscator
-		}
-		// Страна подписки описывает ровно ту конфигурацию, которую кладёт
-		// этот же мутатор, — поэтому едет с ней одной записью. Вторым
-		// Update это был бы лишний цикл флеша и окно, в котором конфигурация
-		// уже новая, а метка страны ещё от прежней.
-		if amneziaCountry != nil {
-			t.AmneziaCountry = *amneziaCountry
 		}
 		t.ResolvedEndpointIP = stored.ResolvedEndpointIP
 		t.ActiveWAN = stored.ActiveWAN
@@ -1176,30 +1357,37 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 			if err := s.nwgOperator.Stop(ctx, stored); err != nil {
 				s.logWarn("replace-config", tunnelID, "Stop before peer sync failed: "+err.Error())
 			}
-		} else if oldDNS != stored.Interface.DNS {
-			// Tunnel was not running — handler skipped Stop (which would
-			// clear OLD DNS) and will skip Start (which would set NEW DNS).
-			// Sync DNS here so NDMS doesn't keep orphan entries from the
-			// previous conf.
-			oldList := tunnel.ParseDNSList(oldDNS)
-			newList := tunnel.ParseDNSList(stored.Interface.DNS)
-			if err := s.nwgOperator.SyncDNS(ctx, stored, oldList, newList); err != nil {
-				s.logWarn("replace-config", tunnelID, "SyncDNS failed: "+err.Error())
+		}
+		// Один список на все синхронизации ниже (взят до сохранения). Интерфейс
+		// снят — в NDMS не шлём ничего (F546); запись уже сохранена.
+		if nwgIfaceErr != nil {
+			s.logWarn("replace-config", tunnelID, "NDMS sync skipped: "+nwgIfaceErr.Error())
+		} else {
+			if !wasNativeRunning && oldDNS != stored.Interface.DNS {
+				// Tunnel was not running — handler skipped Stop (which would
+				// clear OLD DNS) and will skip Start (which would set NEW DNS).
+				// Sync DNS here so NDMS doesn't keep orphan entries from the
+				// previous conf.
+				oldList := tunnel.ParseDNSList(oldDNS)
+				newList := tunnel.ParseDNSList(stored.Interface.DNS)
+				if err := s.nwgOperator.SyncDNS(ctx, iface, oldList, newList); err != nil {
+					s.logWarn("replace-config", tunnelID, "SyncDNS failed: "+err.Error())
+				}
 			}
-		}
-		if err := s.nwgOperator.SyncPrivateKey(ctx, stored); err != nil {
-			s.logWarn("replace-config", tunnelID, "SyncPrivateKey failed: "+err.Error())
-		}
-		if err := s.nwgOperator.SyncPeer(ctx, stored, oldPublicKey); err != nil {
-			s.logWarn("replace-config", tunnelID, "SyncPeer failed: "+err.Error())
-		}
-		if err := s.nwgOperator.SyncAddressMTU(ctx, stored); err != nil {
-			s.logWarn("replace-config", tunnelID, "SyncAddressMTU failed: "+err.Error())
-		}
-		// Update description if name changed
-		if newName != "" {
-			if err := s.nwgOperator.UpdateDescription(ctx, stored, newName); err != nil {
-				s.logWarn("replace-config", tunnelID, "UpdateDescription failed: "+err.Error())
+			if err := s.nwgOperator.SyncPrivateKey(ctx, iface, stored); err != nil {
+				s.logWarn("replace-config", tunnelID, "SyncPrivateKey failed: "+err.Error())
+			}
+			if err := s.nwgOperator.SyncPeer(ctx, iface, stored, oldPublicKey); err != nil {
+				s.logWarn("replace-config", tunnelID, "SyncPeer failed: "+err.Error())
+			}
+			if err := s.nwgOperator.SyncAddressMTU(ctx, iface, stored); err != nil {
+				s.logWarn("replace-config", tunnelID, "SyncAddressMTU failed: "+err.Error())
+			}
+			// Update description if name changed
+			if newName != "" {
+				if err := s.nwgOperator.UpdateDescription(ctx, iface, newName); err != nil {
+					s.logWarn("replace-config", tunnelID, "UpdateDescription failed: "+err.Error())
+				}
 			}
 		}
 		if wasNativeRunning {
@@ -1215,6 +1403,12 @@ func (s *ServiceImpl) ReplaceConfig(ctx context.Context, tunnelID, confContent, 
 		if stored.Obfuscator != nil && wasNativeRunning {
 			s.persistObfuscatorTargetIP(tunnelID, s.nwgOperator.GetTrackedEndpointIP(tunnelID))
 		}
+	}
+
+	// Имя у kernel-туннеля — описание его записи OpkgTun (F517); у nativewg
+	// описание переписано выше, между синхронизациями пира.
+	if renamed && !s.isNativeWG(stored) {
+		s.syncDescription(ctx, "replace-config", stored, prevName, newName)
 	}
 
 	// Kernel-backend tunnels: hot-apply the new conf to a running interface

@@ -9,11 +9,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms"
+	"github.com/hoaxisr/awg-manager/internal/ndms/command"
+	"github.com/hoaxisr/awg-manager/internal/ndms/query"
+	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/singbox/vlink"
 	sysfiles "github.com/hoaxisr/awg-manager/internal/sys/files"
+	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 )
 
 func withLegacySetupNoop(svc *Service) {
@@ -25,6 +32,7 @@ type ensuredProxyCall struct {
 	idx         int
 	port        int
 	description string
+	ownedDesc   string
 }
 
 // fakeMutator records what the service tries to commit.
@@ -41,12 +49,17 @@ type fakeMutator struct {
 	ensuredProxies   []ensuredProxyCall
 	removedProxies   []int
 	selectedSelector []string          // "selectorTag→memberTag" pairs recorded by SelectClashProxy
+	persistedDefault []string          // "selectorTag→memberTag" pairs recorded by PersistSelectorDefault
 	clashActiveByTag map[string]string // selectorTag → live active member
 	declaredTags     []string          // DeclaredOutboundTags result; nil = no-op (no pruning)
 	bodies           map[string][]byte // tag → последний JSON из AddOutbound/UpdateOutbound
 	reloads          int               // сколько раз вызывался Reload (батч-коммит)
 	rollbacks        int               // сколько раз вызывался Rollback (сброс батча)
 	reloadErr        error             // если задан, Reload возвращает эту ошибку
+	createNotOurs    bool              // CreateProxy: индекс занят чужим (ours=false)
+	createErr        error             // CreateProxy возвращает эту ошибку
+	ensureErrs       map[int]error     // EnsureProxy по индексу возвращает эту ошибку
+	slot             map[string]bool   // не nil — живой слот: Add/Update/Remove отражаются в DeclaredOutboundTags
 }
 
 func (m *fakeMutator) reset() {
@@ -134,6 +147,9 @@ func (f *fakeMutator) AllocProxyIndex(_ context.Context) (int, error) {
 }
 func (f *fakeMutator) AddOutbound(tag string, jsonBody []byte) error {
 	f.addedOutbounds = append(f.addedOutbounds, tag)
+	if f.slot != nil {
+		f.slot[tag] = true
+	}
 	if f.bodies == nil {
 		f.bodies = map[string][]byte{}
 	}
@@ -142,6 +158,9 @@ func (f *fakeMutator) AddOutbound(tag string, jsonBody []byte) error {
 }
 func (f *fakeMutator) UpdateOutbound(tag string, jsonBody []byte) error {
 	f.updatedOutbounds = append(f.updatedOutbounds, tag)
+	if f.slot != nil {
+		f.slot[tag] = true
+	}
 	if f.bodies == nil {
 		f.bodies = map[string][]byte{}
 	}
@@ -150,8 +169,11 @@ func (f *fakeMutator) UpdateOutbound(tag string, jsonBody []byte) error {
 }
 func (f *fakeMutator) RemoveOutbound(tag string) error {
 	f.removedOutbounds = append(f.removedOutbounds, tag)
+	delete(f.slot, tag)
 	return nil
 }
+func (f *fakeMutator) ReferencedAmong([]string) (map[string]bool, error) { return nil, nil }
+
 func (f *fakeMutator) AddInbound(tag string, jsonBody []byte) error {
 	f.addedInbounds = append(f.addedInbounds, tag)
 	return nil
@@ -168,11 +190,15 @@ func (f *fakeMutator) RemoveRouteRule(inboundTag, outboundTag string) error {
 	f.removedRules++
 	return nil
 }
-func (f *fakeMutator) EnsureProxy(_ context.Context, idx, port int, description string) error {
-	f.ensuredProxies = append(f.ensuredProxies, ensuredProxyCall{idx: idx, port: port, description: description})
-	return nil
+func (f *fakeMutator) EnsureProxy(_ context.Context, idx, port int, description, ownedDesc string) error {
+	f.ensuredProxies = append(f.ensuredProxies, ensuredProxyCall{idx: idx, port: port, description: description, ownedDesc: ownedDesc})
+	return f.ensureErrs[idx]
 }
-func (f *fakeMutator) RemoveProxy(_ context.Context, idx int) error {
+func (f *fakeMutator) CreateProxy(ctx context.Context, idx, port int, description string) (bool, error) {
+	_ = f.EnsureProxy(ctx, idx, port, description, description)
+	return !f.createNotOurs, f.createErr
+}
+func (f *fakeMutator) RemoveProxy(_ context.Context, idx int, _ string) error {
 	f.removedProxies = append(f.removedProxies, idx)
 	return nil
 }
@@ -183,8 +209,21 @@ func (f *fakeMutator) Reload(ctx context.Context) error {
 	f.reloads++
 	return nil
 }
-func (f *fakeMutator) Rollback()                      { f.rollbacks++ }
-func (f *fakeMutator) DeclaredOutboundTags() []string { return f.declaredTags }
+func (f *fakeMutator) Rollback() { f.rollbacks++ }
+func (f *fakeMutator) DeclaredOutboundTags() []string {
+	if f.slot != nil {
+		tags := make([]string, 0, len(f.slot))
+		for t := range f.slot {
+			tags = append(tags, t)
+		}
+		return tags
+	}
+	return f.declaredTags
+}
+func (f *fakeMutator) PersistSelectorDefault(selectorTag, memberTag string) error {
+	f.persistedDefault = append(f.persistedDefault, selectorTag+"→"+memberTag)
+	return nil
+}
 func (f *fakeMutator) SelectClashProxy(selectorTag, memberTag string) error {
 	f.selectedSelector = append(f.selectedSelector, selectorTag+"→"+memberTag)
 	return nil
@@ -250,7 +289,10 @@ func (m *scanMutator) AllocProxyIndex(_ context.Context) (int, error) {
 		}
 	}
 }
-func (m *scanMutator) EnsureProxy(_ context.Context, idx, port int, description string) error {
+func (m *scanMutator) CreateProxy(ctx context.Context, idx, port int, description string) (bool, error) {
+	return true, m.EnsureProxy(ctx, idx, port, description, description)
+}
+func (m *scanMutator) EnsureProxy(_ context.Context, idx, port int, description, ownedDesc string) error {
 	if m.live == nil {
 		m.live = map[int]bool{}
 	}
@@ -707,10 +749,12 @@ func TestService_SetActiveMember_UsesClashAPI(t *testing.T) {
 		t.Errorf("clash select args wrong: got %q want %q", mutator.selectedSelector[0], expected)
 	}
 
-	// Switching the active member is runtime-only: no selector Remove/Add, so
-	// no open batch and no SIGHUP. The slot's selector.default is rebuilt as
-	// first-member on every refresh anyway, so persisting it here is pointless;
-	// the choice lives in store.ActiveMember + the live Clash selector.
+	// Switching the active member never opens a batch: no selector
+	// Remove/Add, so no SIGHUP. The slot file still gets the new default
+	// (no reload) — a sing-box restart must start from it (F427).
+	if len(mutator.persistedDefault) != 1 || mutator.persistedDefault[0] != expected {
+		t.Errorf("slot default not persisted: %v, want [%s]", mutator.persistedDefault, expected)
+	}
 	if len(mutator.addedOutbounds) != addedAfterCreate {
 		t.Errorf("SetActiveMember must not add outbounds, got %d new", len(mutator.addedOutbounds)-addedAfterCreate)
 	}
@@ -938,6 +982,12 @@ func TestService_RemoveMember_BumpsActiveOnRemoval(t *testing.T) {
 }
 
 func TestService_SetActiveMember_RejectsURLTestMode(t *testing.T) {
+	for _, mode := range []SubscriptionMode{ModeURLTest, ModeFallback} {
+		t.Run(string(mode), func(t *testing.T) { testSetActiveMemberRejected(t, mode) })
+	}
+}
+
+func testSetActiveMemberRejected(t *testing.T, mode SubscriptionMode) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(
 			"vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h1.example:443?security=tls&sni=h\n",
@@ -953,7 +1003,7 @@ func TestService_SetActiveMember_RejectsURLTestMode(t *testing.T) {
 		Label:   "test",
 		URL:     srv.URL,
 		Enabled: true,
-		Mode:    ModeURLTest,
+		Mode:    mode,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1443,6 +1493,10 @@ func TestUpdate_LabelChangeUpdatesProxyDescription(t *testing.T) {
 	if got.description != newLabel {
 		t.Errorf("EnsureProxy description=%q want %q", got.description, newLabel)
 	}
+	// F577: запись наша по прежнему Label — на роутере стоит он.
+	if got.ownedDesc != "Original Label" {
+		t.Errorf("EnsureProxy ownedDesc=%q want %q", got.ownedDesc, "Original Label")
+	}
 	if got.idx != sub.ProxyIndex {
 		t.Errorf("EnsureProxy idx=%d want %d", got.idx, sub.ProxyIndex)
 	}
@@ -1824,7 +1878,7 @@ func TestCreate_ExcludedKeys(t *testing.T) {
 	if len(parsed.Outbounds) != 1 {
 		t.Fatalf("want 1 parsed outbound, got %d (errors=%v)", len(parsed.Outbounds), parsed.Errors)
 	}
-	keyB := IdentityHash(parsed.Outbounds[0])
+	keyB := suffixOf(keysOf(parsed.Outbounds[0]).narrow)
 	sub, err := svc.Create(context.Background(), CreateInput{Label: "x", Inline: links, ExcludedKeys: []string{keyB}})
 	if err != nil {
 		t.Fatal(err)
@@ -1895,6 +1949,91 @@ func TestAddManualMember_ExactRepeatRejected(t *testing.T) {
 		"vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=a.sni#dup")
 	if !errors.Is(err, ErrMemberDuplicate) {
 		t.Fatalf("exact repeat must be ErrMemberDuplicate, got %v", err)
+	}
+}
+
+// Другая учётка на том же адресе — не повтор: при общем пароле naive-логины
+// различаются только username, у vless — только uuid (F734), у hysteria2 —
+// только паролем обфускации (F737).
+func TestAddManualMember_OtherAccountOnSameEndpoint(t *testing.T) {
+	for _, tc := range []struct{ seed, other string }{
+		{"naive+https://alice:shared@h.example:443#A", "naive+https://bob:shared@h.example:443#B"},
+		{"vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=a.sni#A",
+			"vless://3a3b1c2e-9999-4321-aaaa-1234567890cd@h.example:443?security=tls&sni=a.sni#B"},
+		{"hysteria2://shared@h.example:443?sni=h&obfs=salamander&obfs-password=one#A",
+			"hysteria2://shared@h.example:443?sni=h&obfs=salamander&obfs-password=two#B"},
+	} {
+		svc, _ := newTestService(t)
+		sub, err := svc.Create(context.Background(), CreateInput{Label: "manual", Inline: tc.seed, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated, err := svc.AddManualMember(context.Background(), sub.ID, tc.other)
+		if err != nil {
+			t.Fatalf("%s: other account must add, got %v", tc.other, err)
+		}
+		if len(updated.MemberTags) != 2 {
+			t.Fatalf("%s: MemberTags=%d want 2", tc.other, len(updated.MemberTags))
+		}
+		// Повтор засеянной записи: её тег узкий, у повтора — широкий, так что
+		// поймать его может только сравнение тел, а не совпадение тегов.
+		if _, err := svc.AddManualMember(context.Background(), sub.ID, tc.seed); !errors.Is(err, ErrMemberDuplicate) {
+			t.Fatalf("%s: repeat must be ErrMemberDuplicate, got %v", tc.seed, err)
+		}
+	}
+}
+
+// Ручные варианты одного сервера с разным шифром получают разные теги: тег
+// считается по wire, а не по cred, иначе третий вариант совпал бы тегом со
+// вторым и был бы отвергнут как коллизия (F737).
+func TestAddManualMember_CipherVariantsGetDistinctTags(t *testing.T) {
+	svc, _ := newTestService(t)
+	ss := func(method string) string {
+		return "ss://" + method + ":shared@h.example:8388#" + method
+	}
+	sub, err := svc.Create(context.Background(), CreateInput{Label: "manual", Inline: ss("aes-128-gcm"), Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"aes-256-gcm", "chacha20-ietf-poly1305"} {
+		if _, err := svc.AddManualMember(context.Background(), sub.ID, ss(method)); err != nil {
+			t.Fatalf("%s must add, got %v", method, err)
+		}
+	}
+}
+
+// То же для вариантов, различающихся только диапазоном портов: тег — по
+// уровню ports (F739).
+func TestAddManualMember_PortRangeVariantsGetDistinctTags(t *testing.T) {
+	svc, _ := newTestService(t)
+	hy2 := func(mport string) string {
+		return "hysteria2://shared@h.example:443?sni=h&mport=" + mport + "#" + mport
+	}
+	sub, err := svc.Create(context.Background(), CreateInput{Label: "manual", Inline: hy2("20000-21000"), Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mport := range []string{"30000-31000", "40000-41000"} {
+		if _, err := svc.AddManualMember(context.Background(), sub.ID, hy2(mport)); err != nil {
+			t.Fatalf("%s must add, got %v", mport, err)
+		}
+	}
+	if _, err := svc.AddManualMember(context.Background(), sub.ID, hy2("20000-21000")); !errors.Is(err, ErrMemberDuplicate) {
+		t.Fatalf("repeat must be ErrMemberDuplicate, got %v", err)
+	}
+}
+
+// Члена без тела в слоте (сброшен flush'ем) повтор ловится по метаданным.
+func TestAddManualMember_RepeatOfMemberWithoutBody(t *testing.T) {
+	svc, mut := newTestService(t)
+	link := "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=a.sni#A"
+	sub, err := svc.Create(context.Background(), CreateInput{Label: "manual", Inline: link, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mut.bodies = nil
+	if _, err := svc.AddManualMember(context.Background(), sub.ID, link); !errors.Is(err, ErrMemberDuplicate) {
+		t.Fatalf("repeat must be ErrMemberDuplicate, got %v", err)
 	}
 }
 
@@ -2155,6 +2294,31 @@ func TestService_Create_TrimsBindBeforeValidation(t *testing.T) {
 	}
 	if v.seen != "eth3" {
 		t.Fatalf("validator got %q, want trimmed eth3", v.seen)
+	}
+}
+
+// F429: имя вне каталога — ввод (ErrInvalidInput → 400), сбой чтения
+// каталога — нет (500): иначе отказ RCI выглядел бы опечаткой пользователя.
+func TestService_Create_BindNotSelectableIsInvalidInput(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		invalid bool
+	}{
+		{"нет в каталоге", fmt.Errorf("%w: %q", ErrBindNotSelectable, "eth9"), true},
+		{"сбой каталога", errors.New("rci: timeout"), false},
+	} {
+		svc, _ := newTestService(t)
+		svc.SetBindInterfaceValidator(&recordingBindValidator{err: tc.err})
+		_, err := svc.Create(context.Background(), CreateInput{
+			Label:         "bind-" + tc.name,
+			Inline:        "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=a#A",
+			Enabled:       true,
+			BindInterface: "eth9",
+		})
+		if err == nil || errors.Is(err, ErrInvalidInput) != tc.invalid {
+			t.Errorf("%s: err=%v, ErrInvalidInput=%v want %v", tc.name, err, errors.Is(err, ErrInvalidInput), tc.invalid)
+		}
 	}
 }
 
@@ -2598,5 +2762,271 @@ func TestService_Refresh_DropsStaleActiveMemberFromSelectorDefault(t *testing.T)
 	}
 	if def != members[0] {
 		t.Errorf("selector default=%q want %q (первый член)", def, members[0])
+	}
+}
+
+// F574 M2: откат Create сносит ProxyN только созданный этой командой. Индекс
+// занят чужим, ещё не видимым ProxyN (ours=false) — ни на отказе
+// CreateProxy, ни на отказе первичной загрузки RemoveProxy не зовётся.
+func TestService_Create_RollbackOnlyOwnProxy(t *testing.T) {
+	failFetch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200) // пусто — 0 серверов, Create падает
+	}))
+	defer failFetch.Close()
+	cases := []struct {
+		name      string
+		notOurs   bool
+		createErr error
+		wantRm    int
+	}{
+		{"чужой, отказ CreateProxy", true, errors.New("injected: create"), 0},
+		{"чужой, отказ загрузки", true, nil, 0},
+		{"свой, отказ CreateProxy", false, errors.New("injected: create"), 1},
+		{"свой, отказ загрузки", false, nil, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+			mutator := &fakeMutator{createNotOurs: c.notOurs, createErr: c.createErr}
+			svc := NewService(store, mutator)
+			withLegacySetupNoop(svc)
+			if _, err := svc.Create(context.Background(), CreateInput{Label: "x", URL: failFetch.URL, Enabled: true}); err == nil {
+				t.Fatal("Create must fail")
+			}
+			if len(mutator.removedProxies) != c.wantRm {
+				t.Fatalf("removedProxies=%v want %d", mutator.removedProxies, c.wantRm)
+			}
+		})
+	}
+}
+
+// ndmsProxyMutator — fakeMutator, у которого ProxyN — настоящий
+// singbox.ProxyManager поверх оракула NDMS; AllocProxyIndex отдаёт idx (индекс
+// выбран свободным, а чужой занял его до создания).
+type ndmsProxyMutator struct {
+	*fakeMutator
+	pm  *singbox.ProxyManager
+	idx int
+}
+
+func (m *ndmsProxyMutator) AllocProxyIndex(context.Context) (int, error) { return m.idx, nil }
+func (m *ndmsProxyMutator) CreateProxy(ctx context.Context, idx, port int, d string) (bool, error) {
+	return m.pm.CreateProxy(ctx, idx, port, d)
+}
+func (m *ndmsProxyMutator) EnsureProxy(ctx context.Context, idx, port int, d, owned string) error {
+	return m.pm.EnsureProxy(ctx, idx, port, d, owned)
+}
+func (m *ndmsProxyMutator) RemoveProxy(ctx context.Context, idx int, desc string) error {
+	return m.pm.RemoveProxy(ctx, idx, desc)
+}
+
+// F577 (д), ревью F574 N2: на 5.01+ индекс подписки/группы занят чужим
+// ProxyN (NDMS не ответил «created») — создание отказывает, к чужому ничего
+// не привязано, его description цел.
+func TestService_Create_ForeignProxyIndex_NotBound(t *testing.T) {
+	ndmsinfo.Reset()
+	t.Cleanup(ndmsinfo.Reset)
+	sys := query.NewSystemInfoStore(nil, nil)
+	sys.Adopt(ndms.Version{Release: "5.01.C.6.0-0", Components: []string{"proxy"}}, "test")
+	if err := ndmsinfo.Init(context.Background(), sys, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"subscription", "group"} {
+		t.Run(kind, func(t *testing.T) {
+			f := query.NewFakeNDMS(ndms.Interface{ID: "Proxy0", Type: "Proxy", Description: "Work", State: "up"})
+			q := query.NewQueries(query.Deps{Getter: f, Logger: query.NopLogger(), IsOS5: func() bool { return true }})
+			c := command.NewCommands(command.Deps{
+				Poster:  f,
+				Queries: q,
+				Save:    command.NewSaveCoordinator(f, nil, time.Hour, time.Hour, 0, q.RunningConfig),
+				IsOS5:   func() bool { return true },
+			})
+			svc, fm, gs := newTestServiceWithGroups(t)
+			svc.mutator = &ndmsProxyMutator{fakeMutator: fm, pm: singbox.NewProxyManager(q, c)}
+			var err error
+			if kind == "subscription" {
+				_, err = svc.Create(context.Background(), CreateInput{Label: "x", Inline: "vless://3a3b1c2e-9999-4321-aaaa-1234567890a1@a.example:443#A"})
+			} else {
+				_, err = svc.CreateGroup(context.Background(), GroupCreateInput{Label: "x", Enabled: true})
+			}
+			if !errors.Is(err, command.ErrNotCreated) {
+				t.Fatalf("err=%v", err)
+			}
+			if n, g := len(svc.store.List()), len(gs.List()); n != 0 || g != 0 {
+				t.Fatalf("привязано: подписок=%d групп=%d", n, g)
+			}
+			_, rec, ok, err := q.Interfaces.Confirm(context.Background(), "Proxy0")
+			if err != nil || !ok || rec.Description != "Work" || f.E != 0 {
+				t.Fatalf("Proxy0: rec=%+v ok=%v err=%v E=%d posts=%v", rec, ok, err, f.E, f.Posts)
+			}
+		})
+	}
+}
+
+// F577 (опасение 1): Label подписки пишется в store только после того, как
+// роутер принял description: отказ — Label прежний и ошибка; слот чужой —
+// переименовывать на роутере нечего, Label пишется.
+func TestService_Update_LabelAfterRouter(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		ensureErr error
+		wantErr   bool
+		wantLabel string
+	}{
+		{"отказ роутера", errors.New("rci down"), true, "old"},
+		{"чужой слот", singbox.ErrProxyForeign, false, "new"},
+		{"принято", nil, false, "new"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			svc, mut := newTestService(t)
+			sub := createInlineSubWithTwoMembers(t, svc)
+			old := "old"
+			if _, err := svc.Update(sub.ID, UpdatePatch{Label: &old}); err != nil {
+				t.Fatal(err)
+			}
+			mut.ensureErrs = map[int]error{sub.ProxyIndex: c.ensureErr}
+			label := "new"
+			_, err := svc.Update(sub.ID, UpdatePatch{Label: &label})
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err=%v", err)
+			}
+			got, _ := svc.store.Get(sub.ID)
+			if got.Label != c.wantLabel {
+				t.Fatalf("Label=%q want %q", got.Label, c.wantLabel)
+			}
+		})
+	}
+}
+
+// F577 (опасение 1): чужая запись на индексе первой подписки не обрывает
+// SyncProxies — вторая подписка обслужена, ошибки нет.
+func TestService_SyncProxies_ForeignSkippedContinues(t *testing.T) {
+	svc, mut := newTestService(t)
+	a := createInlineSubWithTwoMembers(t, svc)
+	b, err := svc.Create(context.Background(), CreateInput{Label: "y", Inline: "vless://3a3b1c2e-9999-4321-aaaa-1234567890a3@c.example:443#C"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mut.ensuredProxies = nil
+	mut.ensureErrs = map[int]error{a.ProxyIndex: singbox.ErrProxyForeign, b.ProxyIndex: nil}
+	if err := svc.SyncProxies(context.Background()); err != nil {
+		t.Fatalf("SyncProxies: %v", err)
+	}
+	if len(mut.ensuredProxies) != 2 {
+		t.Fatalf("EnsureProxy: %+v", mut.ensuredProxies)
+	}
+}
+
+// F577 N3: созданное и оставленное на роутере (метку поставил ProxyManager)
+// не обрывает SyncProxies — вторая подписка обслужена, ошибки нет.
+func TestService_SyncProxies_LeftCreatedContinues(t *testing.T) {
+	svc, mut := newTestService(t)
+	a := createInlineSubWithTwoMembers(t, svc)
+	b, err := svc.Create(context.Background(), CreateInput{Label: "y", Inline: "vless://3a3b1c2e-9999-4321-aaaa-1234567890a3@c.example:443#C"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mut.ensuredProxies = nil
+	left := &command.LeftCreatedError{Name: "Proxy1", Err: errors.New("not seen")}
+	mut.ensureErrs = map[int]error{a.ProxyIndex: fmt.Errorf("create proxy: %w", left), b.ProxyIndex: nil}
+	if err := svc.SyncProxies(context.Background()); err != nil {
+		t.Fatalf("SyncProxies: %v", err)
+	}
+	if len(mut.ensuredProxies) != 2 {
+		t.Fatalf("EnsureProxy: %+v", mut.ensuredProxies)
+	}
+}
+
+// F652: flush отбросил добавленный вручную сервер — в записи его быть не
+// должно (UI показал бы сервер, которого нет в селекторе), а вызывающий
+// получает отказ проверки.
+func TestService_AddManualMember_DroppedByFlushIsRolledBack(t *testing.T) {
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	mut := &fakeMutator{}
+	svc := NewService(store, mut)
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label:   "manual",
+		Inline:  "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h1.example:443?security=tls&sni=h\n",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Объявленными после flush остались только селектор и прежний член.
+	mut.declaredTags = append([]string{sub.SelectorTag}, sub.MemberTags...)
+
+	_, err = svc.AddManualMember(context.Background(), sub.ID, "trojan://p@h2.example:443?security=tls&sni=h")
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("err = %v, want ErrValidation", err)
+	}
+	got, _ := store.Get(sub.ID)
+	if !slices.Equal(got.MemberTags, sub.MemberTags) {
+		t.Fatalf("MemberTags = %v, want прежние %v", got.MemberTags, sub.MemberTags)
+	}
+
+	// Тот же сервер, материализованный flush'ем, — добавляется.
+	mut.declaredTags = nil
+	added, err := svc.AddManualMember(context.Background(), sub.ID, "trojan://p@h2.example:443?security=tls&sni=h")
+	if err != nil || len(added.MemberTags) != len(sub.MemberTags)+1 {
+		t.Fatalf("материализованный сервер не добавлен: err=%v tags=%v", err, added)
+	}
+}
+
+// F652: отказ коммита (адаптер откатил пакет) — в записи нового члена нет.
+func TestService_AddManualMember_ReloadFailureRollsBackStore(t *testing.T) {
+	store, _ := NewStore(filepath.Join(t.TempDir(), "sub.json"))
+	mut := &fakeMutator{}
+	svc := NewService(store, mut)
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label:   "manual",
+		Inline:  "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h1.example:443?security=tls&sni=h\n",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	mut.reloadErr = errors.New("sing-box check failed")
+
+	if _, err := svc.AddManualMember(context.Background(), sub.ID, "trojan://p@h2.example:443?security=tls&sni=h"); err == nil {
+		t.Fatal("отказ коммита обязан дойти до вызывающего")
+	}
+	got, _ := store.Get(sub.ID)
+	if !slices.Equal(got.MemberTags, sub.MemberTags) {
+		t.Fatalf("MemberTags = %v, want прежние %v", got.MemberTags, sub.MemberTags)
+	}
+}
+
+// F733: член с тем же тегом, но другими метаданными (коллизия 4-байтового
+// хэша тега) — отказ, а не перезапись чужого outbound по тегу.
+func TestAddManualMember_TagCollisionRejected(t *testing.T) {
+	svc, _ := newTestService(t)
+	sub, err := svc.Create(context.Background(), CreateInput{
+		Label:   "manual",
+		Inline:  "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@seed.example:443?security=tls&sni=s.sni#S",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Ручной член получает тег по полному ключу — как и повторное добавление.
+	link := "vless://3a3b1c2e-9999-4321-aaaa-1234567890ab@h.example:443?security=tls&sni=a.sni#A"
+	added, err := svc.AddManualMember(context.Background(), sub.ID, link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Тот же тег, другой сервер — так выглядит коллизия: проверка по
+	// метаданным его не узнаёт.
+	members := append([]MemberInfo(nil), added.Members...)
+	members[len(members)-1].Server = "other.example"
+	if err := svc.store.SetMembers(sub.ID, members, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.AddManualMember(context.Background(), sub.ID, link)
+	if !errors.Is(err, ErrMemberDuplicate) {
+		t.Fatalf("tag collision must be ErrMemberDuplicate, got %v", err)
+	}
+	got, _ := svc.store.Get(sub.ID)
+	if len(got.MemberTags) != 2 {
+		t.Fatalf("MemberTags=%v, want the two members before the collision", got.MemberTags)
 	}
 }

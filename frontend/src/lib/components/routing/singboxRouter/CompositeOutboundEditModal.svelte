@@ -1,34 +1,44 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { Button, Dropdown, SegmentedControl, type DropdownOption } from '$lib/components/ui';
-	import { X } from 'lucide-svelte';
+	import { X, ChevronUp, ChevronDown } from 'lucide-svelte';
 	import type { SegmentedOption } from '$lib/components/ui/segmentedControl';
 	import SingboxSettingsModal from './SingboxSettingsModal.svelte';
+	import ForeignIfacePanel from './ForeignIfacePanel.svelte';
 	import type { SingboxRouterOutbound, SingboxRouterWANInterface } from '$lib/types';
-	import type { OutboundGroup } from './outboundOptions';
+	import { outboundGroupLabel, type OutboundGroup } from './outboundOptions';
 	import { isSubscriptionOutbound } from '$lib/components/sb-router/outboundLabel';
 	import { subscriptionsStore } from '$lib/stores/subscriptions';
 	import { resolveMemberLabel } from '$lib/utils/memberLabel';
 	import { api } from '$lib/api/client';
+	import { bindInterfaceLabel, directBindChoices } from '$lib/utils/bindInterface';
 
-	// Only urltest and selector are offered for new groups — `loadbalance`
-	// was removed in sing-box 1.13+ and FATALs on startup if present. Legacy
-	// loadbalance entries that may exist in older 20-router.json files are
-	// still tolerated at read time. When the user edits such an entry through
+	// Only urltest, fallback and selector are offered for new groups —
+	// `loadbalance` was removed in sing-box 1.13+ and FATALs on startup if
+	// present (fallback is our fork's group, awgm.34+). Legacy loadbalance
+	// entries that may exist in older 20-router.json files are still
+	// tolerated at read time. When the user edits such an entry through
 	// this modal, the type narrows to urltest on open — that's a deliberate
 	// one-way migration, not an accidental data loss.
 
 	interface Props {
 		outbound?: SingboxRouterOutbound;
+		/** Outbound'ы того же конфига (tproxy или fakeip) — чьи привязки прятать. */
+		outbounds: SingboxRouterOutbound[];
 		outboundOptions: OutboundGroup[];
 		onClose: () => void;
 		onSave: (o: SingboxRouterOutbound) => Promise<void> | void;
 	}
-	let { outbound, outboundOptions, onClose, onSave }: Props = $props();
+	let { outbound, outbounds, outboundOptions, onClose, onSave }: Props = $props();
+
+	type OutboundType = 'urltest' | 'fallback' | 'selector' | 'direct';
+
+	function editableType(t: SingboxRouterOutbound['type'] | undefined): OutboundType {
+		return t === 'selector' || t === 'direct' || t === 'fallback' ? t : 'urltest';
+	}
 
 	// svelte-ignore state_referenced_locally
-	let type: 'urltest' | 'selector' | 'direct' = $state(
-		outbound?.type === 'selector' ? 'selector' : outbound?.type === 'direct' ? 'direct' : 'urltest'
-	);
+	let type: OutboundType = $state(editableType(outbound?.type));
 	// svelte-ignore state_referenced_locally
 	let tag = $state(outbound?.tag ?? '');
 	// svelte-ignore state_referenced_locally
@@ -45,22 +55,49 @@
 	let bindInterface = $state(outbound?.bind_interface ?? '');
 	let bindables = $state<SingboxRouterWANInterface[]>([]);
 	let bindablesLoading = $state(true);
-	$effect(() => {
-		void api.singboxRouterListBindableInterfaces()
+	function loadBindables(): Promise<void> {
+		return api.singboxRouterListBindableInterfaces()
 			.then((l) => { bindables = l; })
 			.catch(() => { bindables = []; })
 			.finally(() => { bindablesLoading = false; });
-	});
+	}
+	$effect(() => { void loadBindables(); });
+	// До ответа роутера — пусто: заглушка «нет в системе» для своей привязки
+	// заслонила бы плейсхолдер «Загрузка интерфейсов…».
+	const bindChoices = $derived(bindablesLoading ? [] : directBindChoices(bindables, outbounds, outbound));
 	const bindableOptions = $derived<DropdownOption[]>(
-		bindables.map((i) => ({ value: i.name, label: `${i.label} · ${i.name}${i.up ? '' : ' (down)'}` }))
+		bindChoices.map((i) => ({ value: i.name, label: bindInterfaceLabel(i), group: i.foreign ? m.routing_singbox_outbound_foreign_group() : undefined }))
 	);
+	async function onForeignPicked(name: string): Promise<void> {
+		await loadBindables();
+		if (bindChoices.some((i) => i.name === name)) {
+			bindInterface = name;
+			error = '';
+			errorKind = '';
+		} else {
+			errorKind = 'foreign-missing';
+		}
+	}
 
 	let busy = $state(false);
 	let error = $state('');
+	let errorKind = $state<'' | 'foreign-missing' | 'tag' | 'iface' | 'members'>('');
+	const errorText = $derived(
+		error ||
+			(errorKind === 'foreign-missing'
+				? m.routing_singbox_outbound_err_foreign_missing()
+				: errorKind === 'tag'
+					? m.routing_singbox_outbound_err_tag()
+					: errorKind === 'iface'
+						? m.routing_singbox_outbound_err_iface()
+						: errorKind === 'members'
+							? m.routing_singbox_outbound_err_members()
+							: ''),
+	);
 	let memberPicker = $state('');
 
 	// Snapshot initial state for isDirty detection
-	let initialType: 'urltest' | 'selector' | 'direct' = $state('urltest');
+	let initialType: OutboundType = $state('urltest');
 	let initialTag = $state('');
 	let initialMembers = $state<string[]>([]);
 	let initialUrl = $state('https://www.gstatic.com/generate_204');
@@ -72,7 +109,7 @@
 	// Initialize snapshot when modal opens
 	$effect(() => {
 		if (outbound) {
-			initialType = outbound.type === 'selector' ? 'selector' : outbound.type === 'direct' ? 'direct' : 'urltest';
+			initialType = editableType(outbound.type);
 			initialTag = outbound.tag;
 			initialMembers = [...(outbound.outbounds ?? [])];
 			initialUrl = outbound.url ?? 'https://www.gstatic.com/generate_204';
@@ -120,7 +157,7 @@
 		outboundOptions.flatMap((g) =>
 			g.items
 				.filter((i) => !members.includes(i.value) && i.value !== tag.trim())
-				.map((i) => ({ value: i.value, label: i.label, group: g.group }))
+				.map((i) => ({ value: i.value, label: i.label, group: outboundGroupLabel(g.id) }))
 		)
 	);
 
@@ -143,7 +180,7 @@
 		return resolveMemberLabel(tag, subsData, outboundOptions);
 	}
 	const defaultOptions = $derived<DropdownOption[]>(
-		members.map((m) => ({ value: m, label: memberLabel(m) }))
+		members.map((mem) => ({ value: mem, label: memberLabel(mem) }))
 	);
 
 	function addMember(v: string): void {
@@ -155,18 +192,28 @@
 		memberPicker = '';
 	}
 
+	function moveMember(index: number, direction: -1 | 1): void {
+		if (isSubscription) return;
+		const target = index + direction;
+		if (target < 0 || target >= members.length) return;
+		const next = [...members];
+		[next[index], next[target]] = [next[target], next[index]];
+		members = next;
+	}
+
 	function removeMember(v: string): void {
 		if (isSubscription) return;
-		members = members.filter((m) => m !== v);
+		members = members.filter((mem) => mem !== v);
 		if (defaultOutbound === v) defaultOutbound = '';
 	}
 
 	async function save(): Promise<void> {
 		busy = true;
 		error = '';
+		errorKind = '';
 		try {
 			if (!tag.trim()) {
-				error = 'Tag обязателен';
+				errorKind = 'tag';
 				busy = false;
 				return;
 			}
@@ -174,7 +221,7 @@
 			let built: SingboxRouterOutbound;
 			if (type === 'direct') {
 				if (!bindInterface) {
-					error = 'Выберите интерфейс';
+					errorKind = 'iface';
 					busy = false;
 					return;
 				}
@@ -182,7 +229,7 @@
 			} else {
 				const memberList = isSubscription && outbound ? [...(outbound.outbounds ?? [])] : [...members];
 				if (memberList.length < 2) {
-					error = 'Нужно минимум 2 члена';
+					errorKind = 'members';
 					busy = false;
 					return;
 				}
@@ -198,6 +245,10 @@
 					built.url = url;
 					built.interval = interval;
 					built.tolerance = tolerance;
+				} else if (type === 'fallback') {
+					built.url = url;
+					built.interval = interval;
+					built.interrupt_exist_connections = true;
 				} else {
 					built.default = defaultOutbound || members[0];
 				}
@@ -211,66 +262,97 @@
 		}
 	}
 
-	type OutboundType = 'urltest' | 'selector' | 'direct';
-
 	const typeOptions = $derived<SegmentedOption<OutboundType>[]>([
 		{ value: 'urltest', label: 'URLTest', disabled: !!outbound && outbound.type === 'direct' },
+		{ value: 'fallback', label: 'Fallback', disabled: !!outbound && outbound.type === 'direct' },
 		{ value: 'selector', label: 'Selector', disabled: !!outbound && outbound.type === 'direct' },
-		{ value: 'direct', label: 'Интерфейс', disabled: !!outbound && outbound.type !== 'direct' },
+		{ value: 'direct', label: m.routing_singbox_outbound_type_interface(), disabled: !!outbound && outbound.type !== 'direct' },
 	]);
 
 	const typeDescription = $derived(
 		type === 'direct'
-			? 'Прямое соединение через выбранный интерфейс (IPSec/IKEv2/др. VPN). Трафик правила пойдёт через этот интерфейс.'
+			? m.routing_singbox_outbound_desc_direct()
 			: type === 'urltest'
-				? 'Периодически пингует каждого члена и автоматически направляет через самого быстрого.'
-				: 'Ручное переключение через Clash API. Новые подключения идут через выбранный default.'
+				? m.routing_singbox_outbound_desc_urltest()
+				: type === 'fallback'
+					? m.routing_singbox_outbound_desc_fallback()
+					: m.routing_singbox_outbound_desc_selector()
 	);
 </script>
 
 <SingboxSettingsModal
-	title={outbound ? 'Редактировать outbound' : 'Новый outbound'}
+	title={outbound ? m.routing_singbox_outbound_edit_title() : m.routing_singbox_outbound_new_title()}
 	onClose={onClose}
 	size="lg"
 	hasUnsavedChanges={() => isDirty}
 >
 	<div class="form">
 		<div class="field type-field">
-			<div class="lbl">Тип</div>
+			<div class="lbl">{m.routing_singbox_outbound_type()}</div>
 			<SegmentedControl
 				value={type}
 				options={typeOptions}
-				ariaLabel="Тип outbound"
+				ariaLabel={m.routing_singbox_outbound_type_aria()}
 				onchange={(next) => (type = next)}
 			/>
 			<div class="type-hint">{typeDescription}</div>
 		</div>
 
 		<label class="field">
-			<div class="lbl">Tag (имя)</div>
+			<div class="lbl">{m.routing_singbox_outbound_tag_label()}</div>
 			<input bind:value={tag} placeholder="fast-de" />
 			{#if tagCollision}
-				<div class="tag-warn">⚠ Имя совпадает с именем существующего туннеля — их легко перепутать в списке участников. Лучше дать группе отличающееся имя.</div>
+				<div class="tag-warn">{m.routing_singbox_outbound_tag_collision()}</div>
 			{/if}
 		</label>
 
 		{#if type !== 'direct'}
 			<div class="field">
-				<div class="lbl">{isSubscription ? 'Участники' : 'Members (минимум 2)'}</div>	
+				<div class="lbl">{isSubscription ? m.routing_singbox_outbound_members_sub() : m.routing_singbox_outbound_members_min()}</div>	
 				<div class="member-chips" class:empty={members.length === 0}>
 					{#if members.length === 0}
-						<span class="chips-placeholder">Участники не выбраны</span>
+						<span class="chips-placeholder">{m.routing_singbox_outbound_members_none()}</span>
 					{:else}
-						{#each members as m (m)}
-							<span class="member-chip" title={m}>
-								<span class="member-chip-label">{memberLabel(m)}</span>
+						{#each members as mem, i (mem)}
+							<span class="member-chip" title={mem}>
+								{#if type === 'fallback'}
+									<span class="member-chip-order" class:primary={i === 0}>#{i + 1}</span>
+								{/if}
+								<span class="member-chip-label">{memberLabel(mem)}</span>
 								{#if !isSubscription}
+									{#if type === 'fallback'}
+										<!-- Порядок участников fallback — приоритет. -->
+										<span class="member-chip-nav-col">
+											{#if i > 0}
+												<button
+													type="button"
+													class="member-chip-nav"
+													aria-label={m.routing_singbox_outbound_move_up_prio()}
+													title={m.routing_singbox_outbound_move_up_prio()}
+													onclick={() => moveMember(i, -1)}
+												>
+													<ChevronUp size={11} />
+												</button>
+											{/if}
+											{#if i < members.length - 1}
+												<button
+													type="button"
+													class="member-chip-nav"
+													aria-label={m.routing_singbox_outbound_move_down_prio()}
+													title={m.routing_singbox_outbound_move_down_prio()}
+													onclick={() => moveMember(i, 1)}
+												>
+													<ChevronDown size={11} />
+												</button>
+											{/if}
+										</span>
+									{/if}
 									<button
 										type="button"
 										class="member-chip-remove"
-										aria-label={`Удалить ${m}`}
-										title="Удалить"
-										onclick={() => removeMember(m)}
+										aria-label={m.routing_singbox_outbound_remove_aria({ name: mem })}
+										title={m.routing_singbox_outbound_remove()}
+										onclick={() => removeMember(mem)}
 									>
 										<X size={14} strokeWidth={2.5} aria-hidden="true" />
 									</button>
@@ -280,20 +362,20 @@
 					{/if}
 				</div>
 				{#if isSubscription}
-					<div class="type-hint">Список редактируется в разделе «Туннели» -> «Sing-box подписки»</div>
+					<div class="type-hint">{m.routing_singbox_outbound_sub_hint()}</div>
 				{/if}
 				{#if !isSubscription}
 					<Dropdown
 						value={memberPicker}
 						options={memberDropdownOptions}
-						placeholder="Добавить участника"
+						placeholder={m.routing_singbox_outbound_add_member()}
 						onchange={addMember}
 						fullWidth
 					/>
 				{/if}
 			</div>
 
-			{#if type === 'urltest'}
+			{#if type === 'urltest' || type === 'fallback'}
 				<label class="field">
 					<div class="lbl">Test URL</div>
 					<input bind:value={url} />
@@ -303,18 +385,20 @@
 						<div class="lbl">Interval</div>
 						<input bind:value={interval} placeholder="3m" />
 					</label>
-					<label class="field">
-						<div class="lbl">Tolerance (ms)</div>
-						<input type="number" bind:value={tolerance} />
-					</label>
+					{#if type === 'urltest'}
+						<label class="field">
+							<div class="lbl">Tolerance (ms)</div>
+							<input type="number" bind:value={tolerance} />
+						</label>
+					{/if}
 				</div>
-			{:else}
+			{:else if type === 'selector'}
 				<div class="field">
-					<div class="lbl">Default (один из members)</div>
+					<div class="lbl">{m.routing_singbox_outbound_default_label()}</div>
 					<Dropdown
 						bind:value={defaultOutbound}
 						options={defaultOptions}
-						placeholder={members.length === 0 ? 'Сначала добавьте участников' : '— выбрать —'}
+						placeholder={members.length === 0 ? m.routing_singbox_outbound_add_members_first() : m.routing_singbox_outbound_choose()}
 						disabled={members.length === 0}
 						fullWidth
 					/>
@@ -324,24 +408,25 @@
 
 		{#if type === 'direct'}
 			<div class="field">
-				<div class="lbl">Интерфейс</div>
+				<div class="lbl">{m.routing_singbox_outbound_type_interface()}</div>
 				<Dropdown
 					bind:value={bindInterface}
 					options={bindableOptions}
-					placeholder={bindablesLoading ? 'Загрузка интерфейсов…' : bindables.length === 0 ? 'Нет доступных интерфейсов' : '— выбрать интерфейс —'}
-					disabled={bindablesLoading || bindables.length === 0}
+					placeholder={bindablesLoading ? m.routing_singbox_outbound_loading_ifaces() : bindChoices.length === 0 ? m.routing_singbox_outbound_no_ifaces() : m.routing_singbox_outbound_choose_iface()}
+					disabled={bindablesLoading || bindChoices.length === 0}
 					fullWidth
 				/>
+				<ForeignIfacePanel onpicked={onForeignPicked} />
 			</div>
 		{/if}
 
-		{#if error}<div class="error">{error}</div>{/if}
+		{#if errorText}<div class="error">{errorText}</div>{/if}
 	</div>
 
 	{#snippet actions()}
-		<Button variant="ghost" size="md" onclick={onClose} type="button">Отмена</Button>
+		<Button variant="ghost" size="md" onclick={onClose} type="button">{m.common_cancel()}</Button>
 		<Button variant="primary" size="md" onclick={save} disabled={busy} loading={busy} type="button">
-			Сохранить
+			{m.common_save()}
 		</Button>
 	{/snippet}
 </SingboxSettingsModal>

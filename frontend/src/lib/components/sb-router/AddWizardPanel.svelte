@@ -4,6 +4,7 @@
 -->
 
 <script lang="ts">
+  import { m } from '$lib/i18n';
   import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
   import {
@@ -17,7 +18,7 @@
   import { resolveOutboundDisplay } from './adapters';
   import OutboundToneIcon from './OutboundToneIcon.svelte';
   import { displayTone, toneClass } from './outboundTileTone';
-  import { Button } from '$lib/components/ui';
+  import { Button, SegmentedControl, type SegmentedOption } from '$lib/components/ui';
   import StepPill from './StepPill.svelte';
   import WizardStep from './WizardStep.svelte';
   import OutboundOption from './OutboundOption.svelte';
@@ -27,9 +28,10 @@
   import SbRouterServiceCatalogModal from './SbRouterServiceCatalogModal.svelte';
   import {
     addWizardOpen,
-    wizardOutboundCategory, wizardTunnelTags, wizardCustom,
+    wizardOutboundCategory, wizardTunnelTags, wizardCompositeMode, wizardCustom,
     wizardEditRuleIndex, wizardEditMode, wizardExistingInlineRuleSetTag, wizardWasInlineText,
-    closeAddWizard, setOutboundCategory, toggleTunnelTag, resetWizardState,
+    closeAddWizard, setOutboundCategory, toggleTunnelTag, setWizardCompositeMode, resetWizardState,
+    type WizardCompositeMode,
   } from './addWizardStore';
   import {
     templatesSelection, openTemplatesModal, clearSelection,
@@ -40,9 +42,11 @@
   import MobileBottomBar from './MobileBottomBar.svelte';
   import { mode } from './modeStore';
   import { ensureTunnelDnsInfra, syncTunnelDnsRule } from './emptyStateActions';
-  import { pluralize, RULE_WORDS, SERVICE_WORDS, SET_WORDS } from '$lib/utils/pluralize';
   import { findScrollContainer } from '$lib/utils/findScrollContainer';
-  import { previewTunnelOutboundResolution, formatWizardOutboundPreview } from './wizardCompositeOutbound';
+  import {
+    previewTunnelOutboundResolution,
+    formatWizardOutboundPreview,
+  } from './wizardCompositeOutbound';
 
   const outbounds = singboxRouterStore.outbounds;
   const options = singboxRouterStore.options;
@@ -67,7 +71,7 @@
   }
 
   const tunnelOutbounds = $derived(
-    $options.filter((g) => g.group !== 'Специальные').flatMap((g) => g.items),
+    $options.filter((g) => g.id !== 'special').flatMap((g) => g.items),
   );
   const directTag = $derived(
     $outbounds.find((o) => o.type === 'direct')?.tag ?? 'direct',
@@ -92,9 +96,26 @@
   });
   const canSave = $derived(step1Ok && step2Ok);
 
+  const compositeModeOptions = $derived<SegmentedOption<WizardCompositeMode>[]>([
+    { value: 'urltest', label: m.sb_router_wizard_mode_urltest() },
+    { value: 'fallback', label: m.sb_router_wizard_mode_fallback() },
+    { value: 'selector', label: m.sb_router_wizard_mode_selector() },
+  ]);
+
+  function compositeModeDescription(compositeMode: WizardCompositeMode): string {
+    switch (compositeMode) {
+      case 'urltest':
+        return m.sb_router_wizard_mode_urltest_desc();
+      case 'fallback':
+        return m.sb_router_wizard_mode_fallback_desc();
+      case 'selector':
+        return m.sb_router_wizard_mode_selector_desc();
+    }
+  }
+
   const tunnelOutboundPreview = $derived.by(() => {
     if ($wizardOutboundCategory !== 'tunnel' || $wizardTunnelTags.length === 0) return null;
-    return previewTunnelOutboundResolution($wizardTunnelTags, $outbounds);
+    return previewTunnelOutboundResolution($wizardTunnelTags, $outbounds, $wizardCompositeMode);
   });
 
   const outboundPreviewText = $derived(
@@ -158,6 +179,7 @@
           customFields: get(wizardCustom),
           outboundCategory: get(wizardOutboundCategory)!,
           tunnelTags: get(wizardTunnelTags),
+          compositeMode: get(wizardCompositeMode),
           groups,
           presets: get(presets),
           existingRuleSetTags: get(ruleSets).map((r) => r.tag),
@@ -166,7 +188,7 @@
           wasInlineText: get(wizardWasInlineText),
         });
         await syncDnsAfterSave();
-        notifications.success('Правило обновлено');
+        notifications.success(m.sb_router_wizard_rule_updated());
         clearSelection();
         closeAddWizard();
         await singboxRouterStore.loadAll();
@@ -178,6 +200,7 @@
         customFields: get(wizardCustom),
         outboundCategory: get(wizardOutboundCategory)!,
         tunnelTags: get(wizardTunnelTags),
+        compositeMode: get(wizardCompositeMode),
         groups,
         existingRuleSetTags: get(ruleSets).map((r) => r.tag),
         existingOutbounds: get(outbounds),
@@ -186,14 +209,14 @@
         await syncDnsAfterSave();
         const created = result.successes.length;
         if (continueAfter) {
-          notifications.success(`Создано ${pluralize(created, RULE_WORDS)}. Можно добавить ещё одно.`);
+          notifications.success(m.sb_router_wizard_created_continue({ count: created }));
           clearSelection();
           await scrollWizardToTop();
           resetWizardState();
           customResetKey++;
           await singboxRouterStore.loadAll();
         } else {
-          notifications.success(`Создано ${pluralize(created, RULE_WORDS)}`);
+          notifications.success(m.sb_router_wizard_created({ count: created }));
           clearSelection();
           closeAddWizard();
           await singboxRouterStore.loadAll();
@@ -203,15 +226,15 @@
         const fN = result.failures.length;
         notifications.error(
           sN > 0
-            ? `Создано ${sN} из ${sN + fN}. Ошибок: ${fN}`
-            : `Не удалось создать (${fN})`,
+            ? m.sb_router_wizard_created_partial({ done: sN, total: sN + fN, failed: fN })
+            : m.sb_router_wizard_create_failed({ count: fN }),
         );
       }
     } catch (e) {
       if (e instanceof ValidationError) {
         notifications.error(e.message);
       } else {
-        notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+        notifications.error(m.sb_router_common_error({ message: e instanceof Error ? e.message : String(e) }));
       }
     } finally {
       submitting = false;
@@ -228,35 +251,35 @@
   <div class="wizard" bind:this={wizardEl}>
     <div class="bc">
       <button type="button" class="bc-back" onclick={closeAddWizard}>
-        <ArrowLeft size={12} /> Правила
+        <ArrowLeft size={12} /> {m.sb_router_wizard_bc_rules()}
       </button>
       <span class="bc-sep">/</span>
-      <span class="bc-current">{isEditMode ? 'Редактирование' : 'Новое правило'}</span>
+      <span class="bc-current">{isEditMode ? m.sb_router_wizard_bc_edit() : m.sb_router_wizard_bc_new()}</span>
     </div>
 
-    <h1 class="title">{isEditMode ? 'Редактировать правило' : 'Куда направить трафик?'}</h1>
+    <h1 class="title">{isEditMode ? m.sb_router_wizard_title_edit() : m.sb_router_wizard_title_new()}</h1>
     <p class="sub">
       {#if isEditMode && editMode === 'external'}
-        Выберите другой шаблон и куда направить трафик.
+        {m.sb_router_wizard_sub_edit_external()}
       {:else if isEditMode}
-        Измените список и куда направить трафик.
+        {m.sb_router_wizard_sub_edit_inline()}
       {:else}
-        Выберите сервис или опишите свой. Затем — куда его пустить.
+        {m.sb_router_wizard_sub_new()}
       {/if}
     </p>
 
     <div class="stepper">
-      <StepPill n={1} label="Что направить" shortLabel="Что" active={!step1Ok} done={step1Ok} />
+      <StepPill n={1} label={m.sb_router_wizard_step_what()} shortLabel={m.sb_router_wizard_step_what_short()} active={!step1Ok} done={step1Ok} />
       <div class="connector" aria-hidden="true"></div>
-      <StepPill n={2} label="Куда" shortLabel="Куда" active={step1Ok && !step2Ok} done={step1Ok && step2Ok} />
+      <StepPill n={2} label={m.sb_router_wizard_step_where_short()} shortLabel={m.sb_router_wizard_step_where_short()} active={step1Ok && !step2Ok} done={step1Ok && step2Ok} />
       <div class="connector" aria-hidden="true"></div>
-      <StepPill n={3} label="Предпросмотр" shortLabel="Проверка" active={step1Ok && step2Ok} done={false} />
+      <StepPill n={3} label={m.sb_router_wizard_step_preview()} shortLabel={m.sb_router_wizard_step_preview_short()} active={step1Ok && step2Ok} done={false} />
     </div>
 
     <WizardStep
       n={1}
-      title="Что направить"
-      hint={isEditMode && editMode === 'inline' ? 'список доменов и адресов' : 'выберите шаблон или опишите вручную'}
+      title={m.sb_router_wizard_step_what()}
+      hint={isEditMode && editMode === 'inline' ? m.sb_router_wizard_what_hint_inline() : m.sb_router_wizard_what_hint_new()}
       active={true}
     >
       {#if !isEditMode || editMode === 'external'}
@@ -264,13 +287,13 @@
           <div class="picker-icon"><Plus size={20} /></div>
           <div class="picker-text">
             <div class="picker-title">
-              {isEditMode ? 'Заменить шаблон' : 'Выбрать из готовых шаблонов'}
+              {isEditMode ? m.sb_router_wizard_pick_replace() : m.sb_router_wizard_pick_new()}
             </div>
             <div class="picker-sub">
               {#if $mode === 'beginner'}
-                {pluralize($presets.length, SERVICE_WORDS)}
+                {m.sb_router_wizard_services_count({ count: $presets.length })}
               {:else}
-                {pluralize($presets.length, SERVICE_WORDS)} · {pluralize($ruleSets.length, SET_WORDS)}
+                {m.sb_router_wizard_services_count({ count: $presets.length })} · {m.sb_router_wizard_sets_count({ count: $ruleSets.length })}
               {/if}
             </div>
           </div>
@@ -287,21 +310,21 @@
       {/if}
     </WizardStep>
 
-    <WizardStep n={2} title="Куда направить" active={step1Ok}>
+    <WizardStep n={2} title={m.sb_router_wizard_step_where()} active={step1Ok}>
       <div class="grid-3">
         <OutboundOption
           icon={iconTunnel}
-          label="Через туннель"
-          sub="AWG / прокси"
-          count="{tunnelOutbounds.length} доступно"
+          label={m.sb_router_wizard_opt_tunnel()}
+          sub={m.sb_router_wizard_opt_tunnel_sub()}
+          count={m.sb_router_wizard_tunnels_available({ count: tunnelOutbounds.length })}
           tone="accent"
           selected={$wizardOutboundCategory === 'tunnel'}
           onclick={() => setOutboundCategory('tunnel')}
         />
         <OutboundOption
           icon={iconDirect}
-          label="Напрямую"
-          sub="Через интерфейс провайдера"
+          label={m.sb_router_wizard_opt_direct()}
+          sub={m.sb_router_wizard_opt_direct_sub()}
           count={directTag}
           tone="muted"
           selected={$wizardOutboundCategory === 'direct'}
@@ -309,8 +332,8 @@
         />
         <OutboundOption
           icon={iconBlock}
-          label="Заблокировать"
-          sub="Трафик отбрасывается"
+          label={m.sb_router_wizard_opt_block()}
+          sub={m.sb_router_wizard_opt_block_sub()}
           count="reject"
           tone="error"
           selected={$wizardOutboundCategory === 'block'}
@@ -321,12 +344,12 @@
       {#if $wizardOutboundCategory === 'tunnel'}
         <div class="tunnel-row">
           <div class="tunnel-cap">
-            Выбрать туннели
+            {m.sb_router_wizard_pick_tunnels()}
             {#if $wizardTunnelTags.length > 1}
-              <span class="tunnel-count">{$wizardTunnelTags.length} выбрано</span>
+              <span class="tunnel-count">{m.sb_router_wizard_tunnels_selected({ count: $wizardTunnelTags.length })}</span>
             {/if}
           </div>
-          <p class="tunnel-hint">Можно выбрать несколько — будет использован composite outbound</p>
+          <p class="tunnel-hint">{m.sb_router_wizard_tunnels_hint()}</p>
           {#if tunnelOutbounds.length > 0}
             <div class="tunnel-chips">
               {#each tunnelOutbounds as ob (ob.value)}
@@ -350,23 +373,39 @@
               {/each}
             </div>
           {:else if $optionsReady}
-            <div class="empty-tunnels">Нет доступных туннелей.</div>
+            <div class="empty-tunnels">{m.sb_router_wizard_no_tunnels()}</div>
           {/if}
         </div>
       {/if}
     </WizardStep>
 
-    <WizardStep n={3} title="Предпросмотр" active={step1Ok && step2Ok}>
+    <WizardStep n={3} title={m.sb_router_wizard_step_preview()} active={step1Ok && step2Ok}>
+      {#if $wizardOutboundCategory === 'tunnel' && $wizardTunnelTags.length >= 2}
+        <div class="composite-mode-card">
+          <div class="composite-mode-header">
+            <span class="composite-mode-title">{m.sb_router_wizard_composite_group_mode()}</span>
+            <span class="composite-mode-count">{m.sb_router_wizard_tunnels_count({ count: $wizardTunnelTags.length })}</span>
+          </div>
+          <SegmentedControl
+            value={$wizardCompositeMode}
+            options={compositeModeOptions}
+            ariaLabel={m.sb_router_wizard_composite_group_mode()}
+            fullWidth
+            onchange={(val) => setWizardCompositeMode(val)}
+          />
+          <p class="composite-mode-desc">{compositeModeDescription($wizardCompositeMode)}</p>
+        </div>
+      {/if}
       {#if isEditMode}
-        <p class="preview-hint">Изменения применятся к текущему правилу.</p>
+        <p class="preview-hint">{m.sb_router_wizard_preview_edit_hint()}</p>
       {:else}
         <p class="preview-hint">
-          Правила появятся в конце списка. После создания можно перетаскивать.
+          {m.sb_router_wizard_preview_new_hint()}
         </p>
         <div class="preview-info">
           <Info size={14} />
           <span>
-            {pluralize($templatesSelection.size + (hasCustom ? 1 : 0), RULE_WORDS)} будет создано.
+            {m.sb_router_wizard_will_create({ count: $templatesSelection.size + (hasCustom ? 1 : 0) })}
           </span>
         </div>
       {/if}
@@ -379,24 +418,24 @@
     </WizardStep>
 
     <div class="actions desktop-only">
-      <Button variant="ghost" size="md" onclick={closeAddWizard} disabled={submitting}>Отмена</Button>
+      <Button variant="ghost" size="md" onclick={closeAddWizard} disabled={submitting}>{m.common_cancel()}</Button>
       <div class="actions-right">
         {#if !isEditMode}
           <Button variant="secondary" size="md" onclick={() => doSave(true)} disabled={!canSave || submitting}>
-            + Добавить ещё одно
+            {m.sb_router_wizard_add_another()}
           </Button>
         {/if}
         <Button variant="primary" size="md" onclick={() => doSave(false)} disabled={!canSave || submitting} iconBefore={iconCheck}>
-          {isEditMode ? 'Сохранить изменения' : 'Сохранить'}
+          {isEditMode ? m.sb_router_wizard_save_changes() : m.common_save()}
         </Button>
       </div>
     </div>
 
     <MobileBottomBar>
-      <Button variant="ghost" size="sm" onclick={closeAddWizard} disabled={submitting}>Отмена</Button>
+      <Button variant="ghost" size="sm" onclick={closeAddWizard} disabled={submitting}>{m.common_cancel()}</Button>
       <div style="flex:1"></div>
       <Button variant="primary" size="sm" onclick={() => doSave(false)} disabled={!canSave || submitting} iconBefore={iconCheck}>
-        Сохранить
+        {m.common_save()}
       </Button>
     </MobileBottomBar>
 
@@ -552,6 +591,34 @@
     margin: 0 0 8px;
     font-size: 13px;
     color: var(--text-secondary);
+  }
+  .composite-mode-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+  .composite-mode-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .composite-mode-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .composite-mode-count {
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+  .composite-mode-desc {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
   }
   .preview-info,
   .preview-outbound {

@@ -50,6 +50,7 @@ type RunningInstance interface {
 	// ResetStartBackoff снимает у процесса инстанса паузу повторного старта
 	// (proxyrt.BackoffResetter).
 	ResetStartBackoff()
+	Restart(reason string) bool
 	Stop()
 }
 
@@ -92,6 +93,12 @@ type Factory func(rec instancestore.Record, live *Live) (RunningInstance, error)
 // не собраны; повтор — забота проводки (proxyBinariesRetry).
 var ErrBinariesPending = errors.New("бинари не загружены")
 
+// ErrInstanceNotFound сообщает, что управляемый инстанс с таким ключом не зарегистрирован в памяти.
+var ErrInstanceNotFound = errors.New("инстанс не найден")
+
+// ErrRestartUnsupported сообщает, что роль инстанса не поддерживает перезапуск.
+var ErrRestartUnsupported = errors.New("перезапуск для этой роли не поддерживается")
+
 // Deps — все зависимости, конструктором (G4).
 type Deps struct {
 	Store    *instancestore.Store
@@ -116,6 +123,13 @@ type Deps struct {
 	// писателя конфига (план 3), то есть наша (Щ1): без этого создание
 	// raw-клиента и сервера через API невозможно.
 	OpkgTunPool *opkgtun.Pool
+	// DefaultDeviceID — device-id нового wdtt-клиента, если его не прислали
+	// (F138): у форка умолчание «unknown», и два роутера на одном сервере с
+	// одним паролем делили одну запись устройства — адрес и ключи пира.
+	// Значение пишется в запись при создании, поэтому поздняя смена источника
+	// (hostname роутера) запись на сервере не переназначает. Существующие
+	// клиенты через Create не идут и не меняются. nil — шаг пропущен.
+	DefaultDeviceID func(ctx context.Context) string
 	// AllocListen выдаёт клиенту локальный listen. current — адрес, который уже
 	// стоит в записи: годный (в пуле и ничей) возвращается как есть, негодный
 	// заменяется свободным. Занятость считается без собственной записи
@@ -304,6 +318,14 @@ func (m *Manager) Boot(ctx context.Context) error {
 		}
 		if err := m.deps.EnsureBinaries(ctx, list, progress); err != nil {
 			m.deps.Journal.Warn("boot", "proxy", "загрузка бинарей не удалась: "+err.Error())
+			progress(err.Error())
+			return err
+		}
+		// Ворота могли ждать загрузку минутами, а за это время демон
+		// завершается (SIGTERM рвёт ctx): дальше — добивание старого
+		// поколения и сборка воркеров, которые с отменённым ctx не спавнят.
+		// Выход здесь, а не короткий разрыв (F304 M2).
+		if err := ctx.Err(); err != nil {
 			progress(err.Error())
 			return err
 		}
@@ -824,6 +846,12 @@ func (m *Manager) Create(ctx context.Context, rec instancestore.Record) error {
 	if err := control.ValidateInstance(rec.ID); err != nil {
 		return err
 	}
+	if rec.Kind == instancestore.KindWdttClient && rec.WdttClient != nil &&
+		strings.TrimSpace(rec.WdttClient.DeviceID) == "" && m.deps.DefaultDeviceID != nil {
+		cfg := *rec.WdttClient // копия: конфиг вызывающего не трогаем
+		cfg.DeviceID = m.deps.DefaultDeviceID(ctx)
+		rec.WdttClient = &cfg
+	}
 	// Намерение по listen — ДО аллокатора, как на пути правки: переезд это
 	// когда аллокатор ОТВЕРГ желаемый порт. У создания без явного listen
 	// намерение пусто, и переезда не будет; но поле принимается и прямым
@@ -1056,6 +1084,20 @@ func (m *Manager) SetEnabled(ctx context.Context, key string, on bool) error {
 		r.Enabled = on
 		return nil
 	})
+}
+
+// Restart запрашивает перезапуск процесса инстанса с указанной причиной.
+func (m *Manager) Restart(ctx context.Context, key string, reason string) error {
+	m.mu.Lock()
+	mg, ok := m.m[key]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrInstanceNotFound, key)
+	}
+	if !mg.inst.Restart(reason) {
+		return fmt.Errorf("%w: %s", ErrRestartUnsupported, key)
+	}
+	return nil
 }
 
 // Delete — порядок G3 (требование 3 + Щ5 + замечание 6): teardown-прогон с

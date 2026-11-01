@@ -9,6 +9,12 @@ var (
 	ErrOutboundReferenced        = errors.New("outbound is referenced by one or more rules")
 	ErrInvalidMatchers           = errors.New("rule must have at least one matcher")
 	ErrRuleIndexOutOfRange       = errors.New("rule index out of range")
+	// ErrRuleProtected — правило системное или managed: правки MCP его не
+	// трогают (InsertRule и соседи). Ввод, не сбой.
+	ErrRuleProtected = errors.New("правило защищено")
+	// ErrRuleUnsupported — правило из MCP не route с известным outbound и
+	// не reject. Ввод, не сбой.
+	ErrRuleUnsupported = errors.New("правило не поддерживается")
 	// ErrBulkEmptyIndices / ErrBulkEmptyTags reject an empty selection passed
 	// to a bulk rule/ruleset mutation (nothing to do — client error). Mapped
 	// to 400 by the API.
@@ -28,7 +34,10 @@ var (
 	ErrDatRuleSetForbidden = errors.New("dat rule set token is invalid")
 	ErrOutboundTagConflict = errors.New("outbound with this tag already exists")
 	// ErrCompositeMemberUnknown — член selector/urltest ссылается на несуществующий выход (#567).
-	ErrCompositeMemberUnknown   = errors.New("неизвестный член композита")
+	ErrCompositeMemberUnknown = errors.New("неизвестный член композита")
+	// ErrOutboundInvalid — форма outbound отвергнута validateOutbound (тип,
+	// участники, direct в urltest, ссылка на себя). Ввод, не сбой: API — 400.
+	ErrOutboundInvalid          = errors.New("некорректный outbound")
 	ErrOutboundNotFound         = errors.New("outbound not found")
 	ErrDNSServerTagConflict     = errors.New("dns server with this tag already exists")
 	ErrDNSServerReferenced      = errors.New("dns server is referenced by one or more dns rules or used as final/default")
@@ -36,11 +45,23 @@ var (
 	ErrDNSRuleIndexOutOfRange   = errors.New("dns rule index out of range")
 	ErrDNSServerIndexOutOfRange = errors.New("dns server index out of range")
 	ErrDNSInvalidServer         = errors.New("dns rule references unknown server tag")
+	// ErrDNSServerDetour — detour сервера отвергнут SetDNSServerDetour:
+	// неизвестный outbound или сервер, который никуда не подключается. Ввод,
+	// не сбой.
+	ErrDNSServerDetour = errors.New("недопустимый detour DNS-сервера")
+
+	// ErrIfaceAbsent — интерфейса нет в свежем списке NDMS; команда по нему не
+	// уходила (адаптеры подтверждения cmd/awg-manager, F546).
+	ErrIfaceAbsent = errors.New("нет в NDMS")
+	// ErrWANAbsent — выхода static NAT нет в свежем списке NDMS; команда не
+	// уходила. Не ErrIfaceAbsent: включение отвечает ошибкой, восстановление —
+	// «возвращать не на что» (F563).
+	ErrWANAbsent = errors.New("выхода нет в NDMS")
 
 	ErrPolicyNotConfigured = errors.New("router policy not configured (settings.policyName is empty)")
 	ErrPolicyMissing       = errors.New("policy has no fwmark in NDMS (deleted or has no permitted interface)")
 
-	// ErrSingboxNotReady is returned by Enable when sing-box did not
+	// ErrSingboxNotReady is returned by enable when sing-box did not
 	// become ready within the boot-wait window. Callers should surface
 	// this as 503 Service Unavailable — the iptables/policy install was
 	// deliberately skipped to avoid orphaning DNS:53 redirects at a
@@ -65,11 +86,25 @@ var (
 	// 400 with the detailed Russian message intact.
 	ErrQoSClassesInvalid = errors.New("некорректные классы QoS")
 
+	// ErrIP6TablesMissing: в настройках выбран перехват IPv6, а ip6tables на
+	// роутере нет (в Entware это отдельный пакет). Mapped to 400 by the API.
+	ErrIP6TablesMissing = errors.New("для перехвата IPv6 нужен пакет ip6tables: opkg install ip6tables")
+
+	// ErrIPv6BypassInactive: в исключениях по подсетям есть IPv6-адреса, а
+	// v6-слой при этих настройках не работает (режим не TProxy или семейство
+	// без IPv6) — правило под них поставить некому. Mapped to 400 by the API.
+	ErrIPv6BypassInactive = errors.New("IPv6-адреса в исключениях по подсетям действуют только при перехвате IPv6 (режим TProxy, семейства «IPv4 и IPv6» или «Только IPv6»)")
+
 	// ErrTransitionInProgress: PUT настроек лёг в окно живого SwitchRoutingMode.
 	// Save отсюда откатил бы persistMode(target), и Enable перехода поднялся бы
 	// по чужому режиму. Не ждём (переход держит transitionMu минуты) — честно
 	// отказываем, клиент повторит после завершения перехода.
 	ErrTransitionInProgress = errors.New("смена режима роутинга выполняется — повторите после её завершения")
+
+	// ErrTunAddrLocked rejects a fakeipTunAddr4 change while a tun mode
+	// (fakeip-tun / policy-tun) holds a provisioned OpkgTun: the address is
+	// applied only on enable.
+	ErrTunAddrLocked = errors.New("адрес tun меняется только при выключенном режиме")
 
 	// ErrDNSChainTagReserved rejects a user DNS rule that claims (or references)
 	// the awgm-dns-* tag namespace owned by the DNS-preset overlay: such a rule
@@ -87,4 +122,18 @@ var (
 	// slot, so such a user rule could never match — it would only sit in the
 	// UI as an inert, confusing shadow rule. Mapped to 400 by the API.
 	ErrReservedInboundTag = errors.New("теги qos-* зарезервированы для QoS-классов")
+
+	// ErrBindNotSelectable — bind_interface вне каталога выбираемых
+	// интерфейсов: ошибка ввода (400), в отличие от сбоя чтения каталога
+	// (500) (F429).
+	ErrBindNotSelectable = errors.New("bind_interface is not a selectable interface")
+
+	// ErrDNSBindAddress — адрес отправителя DNS-сервера неприменим: не IPv4,
+	// не назначен роутеру или задан там, где sing-box его не использует.
+	// Ошибка ввода (400); сбой чтения адресов роутера идёт мимо него (500).
+	ErrDNSBindAddress = errors.New("адрес отправителя DNS-сервера неприменим")
+
+	// ErrDNSServerInvalid — поля DNS-сервера не прошли проверку (тип, адрес,
+	// порт, диапазоны fakeip, стратегия…): ошибка ввода (400), не сбой (F671).
+	ErrDNSServerInvalid = errors.New("dns server is invalid")
 )

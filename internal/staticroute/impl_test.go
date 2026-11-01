@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/ndms/command"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
 	"github.com/hoaxisr/awg-manager/internal/routing"
@@ -88,8 +89,8 @@ func TestIsOS4Kernel(t *testing.T) {
 }
 
 func TestOnTunnelStart_NoopForNDMS(t *testing.T) {
-	s := &ServiceImpl{ifaceExists: defaultIfaceExists}
-	// OS5 kernel tunnel — should be no-op (NDMS auto flag)
+	s := &ServiceImpl{ifaceExists: defaultIfaceExists, store: newTestStore(t, nil)}
+	// OS5 kernel tunnel без списков — no-op (R37b)
 	if err := s.OnTunnelStart(nil, "awg10", "opkgtun10"); err != nil {
 		t.Errorf("OnTunnelStart for OS5 tunnel should be no-op, got: %v", err)
 	}
@@ -155,12 +156,24 @@ func (nopPublisher) Publish(string, any) {}
 func newTestRouteCommands() (*command.RouteCommands, *fakePoster) {
 	poster := &fakePoster{}
 	sc := command.NewSaveCoordinator(poster, nopPublisher{}, 500*time.Millisecond, 5*time.Second, 0, nil)
+	// Без шины событий: иначе сработавший fire ждёт запасные 10 с, и goleak
+	// пакета ловит его, если тесты шли дольше debounce (флейк CI 28.10).
+	sc.SetSaveTimings(command.SaveEventCap, 0, command.SaveAfterRemoval)
 	q := query.NewQueries(query.Deps{
 		Getter: query.NewFakeGetter(),
 		Logger: query.NopLogger(),
 		IsOS5:  func() bool { return true },
 	})
 	return command.NewRouteCommands(poster, sc, q), poster
+}
+
+// testIfaces — подтверждение по списку, где есть ровно names (F546).
+func testIfaces(names ...string) *query.InterfaceStore {
+	var list []ndms.Interface
+	for _, n := range names {
+		list = append(list, ndms.Interface{ID: n, Type: "OpkgTun"})
+	}
+	return query.NewQueries(query.Deps{Getter: query.NewFakeNDMS(list...), Logger: query.NopLogger()}).Interfaces
 }
 
 // newTestStore creates a StaticRouteStore backed by a temp file with given lists.
@@ -198,6 +211,7 @@ func TestUpdate_PartialPayloadPreservesFields(t *testing.T) {
 	svc := &ServiceImpl{
 		store:       store,
 		routes:      routes,
+		ifaces:      testIfaces("OpkgTun10", "OpkgTun11"),
 		catalog:     &mockCatalog{ifaces: map[string]string{"awg10": "OpkgTun10", "awg11": "OpkgTun11"}},
 		ifaceExists: func(string) bool { return false },
 	}
@@ -240,6 +254,7 @@ func TestOnTunnelDelete_NDMS_UninstallsRoutesAndOrphansLists(t *testing.T) {
 	svc := &ServiceImpl{
 		store:       store,
 		routes:      routes,
+		ifaces:      testIfaces("OpkgTun10"),
 		catalog:     &mockCatalog{ifaces: map[string]string{"awg10": "OpkgTun10"}},
 		ifaceExists: defaultIfaceExists,
 	}
@@ -247,6 +262,13 @@ func TestOnTunnelDelete_NDMS_UninstallsRoutesAndOrphansLists(t *testing.T) {
 	err := svc.OnTunnelDelete(context.Background(), "awg10")
 	if err != nil {
 		t.Fatalf("OnTunnelDelete: %v", err)
+	}
+	// F609: до ForgetTunnel списки ещё привязаны — удаление может отказать.
+	if lists := svc.allListsForTunnel("awg10"); len(lists) == 0 {
+		t.Fatal("OnTunnelDelete отвязал списки раньше успешного удаления")
+	}
+	if err := svc.ForgetTunnel(context.Background(), "awg10"); err != nil {
+		t.Fatalf("ForgetTunnel: %v", err)
 	}
 
 	// Routes for the enabled list should have been uninstalled via NDMS.
@@ -299,6 +321,9 @@ func TestOnTunnelDelete_OS4Kernel_SkipsRoutesAndOrphansLists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnTunnelDelete: %v", err)
 	}
+	if err := svc.ForgetTunnel(context.Background(), "awgm0"); err != nil {
+		t.Fatalf("ForgetTunnel: %v", err)
+	}
 
 	// No NDMS calls for OS4 kernel tunnel.
 	if n := len(poster.Payloads()); n != 0 {
@@ -339,6 +364,7 @@ func TestReconcile_SkipsOrphanLists(t *testing.T) {
 	svc := &ServiceImpl{
 		store:       store,
 		routes:      routes,
+		ifaces:      testIfaces("OpkgTun10"),
 		catalog:     &mockCatalog{ifaces: map[string]string{"awg10": "OpkgTun10"}},
 		ifaceExists: defaultIfaceExists,
 	}
@@ -391,6 +417,7 @@ func TestDelete_EnabledListRemovesRoutesViaNDMS(t *testing.T) {
 	svc := &ServiceImpl{
 		store:   store,
 		routes:  routes,
+		ifaces:  testIfaces("OpkgTun10"),
 		catalog: &mockCatalog{ifaces: map[string]string{"awg10": "OpkgTun10"}},
 	}
 
@@ -415,6 +442,7 @@ func TestDelete_DisabledListTouchesNoRoutes(t *testing.T) {
 	svc := &ServiceImpl{
 		store:   store,
 		routes:  routes,
+		ifaces:  testIfaces("OpkgTun10"),
 		catalog: &mockCatalog{ifaces: map[string]string{"awg10": "OpkgTun10"}},
 	}
 	if err := svc.Delete(context.Background(), "srl8"); err != nil {

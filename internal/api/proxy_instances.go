@@ -36,12 +36,14 @@ const proxyrtListenMovesPath = "/api/proxyrt/seed/listen-moves"
 // планом (требования 15 и 17); остальные заведены здесь под гейты создания, у
 // каждого из которых своя причина отказа и свой текст для пользователя.
 const (
-	proxyCodeNotSeeded       = "PROXY_NOT_SEEDED"
-	proxyCodeDeclareFailed   = "PROXY_DECLARE_FAILED"
-	proxyCodeNotFound        = "NOT_FOUND"
-	proxyCodeConfigInvalid   = "PROXY_CONFIG_INVALID"
-	proxyCodeOpkgUnsupported = "PROXY_OPKGTUN_UNSUPPORTED"
-	proxyCodeKindSingleton   = "PROXY_KIND_SINGLETON"
+	proxyCodeNotSeeded          = "PROXY_NOT_SEEDED"
+	proxyCodeDeclareFailed      = "PROXY_DECLARE_FAILED"
+	proxyCodeNotFound           = "NOT_FOUND"
+	proxyCodeConfigInvalid      = "PROXY_CONFIG_INVALID"
+	proxyCodeOpkgUnsupported    = "PROXY_OPKGTUN_UNSUPPORTED"
+	proxyCodeKindSingleton      = "PROXY_KIND_SINGLETON"
+	proxyCodeInstanceDisabled   = "PROXY_INSTANCE_DISABLED"
+	proxyCodeRestartUnsupported = "PROXY_RESTART_UNSUPPORTED"
 )
 
 // ProxyManager — узкий срез *manager.Manager, нужный поверхности.
@@ -52,6 +54,7 @@ type ProxyManager interface {
 	SetEnabled(ctx context.Context, key string, on bool) error
 	Delete(ctx context.Context, key string) error
 	Post(key string, k proxyrt.EventKind) bool
+	Restart(ctx context.Context, key string, reason string) error
 	SeedInfo() manager.SeedInfo
 	AckListenMoves() error
 }
@@ -270,6 +273,11 @@ type LinkedTunnelCleaner interface {
 	// туннелей, — поэтому звать его можно и после захвата записи, до её
 	// удаления.
 	DeleteLinked(ctx context.Context, clientID string) (deleted []string, errs []string)
+	// RenameLinked ведёт имена связанных туннелей за переименованием инстанса
+	// (F665): туннель с прежним именем инстанса или его производным получает
+	// то же от нового; имя, заданное пользователем, не трогается. Отказы
+	// пишет в журнал сам — переименование инстанса они не отменяют.
+	RenameLinked(ctx context.Context, clientID, oldName, newName string) (renamed []string)
 }
 
 // ProxyInstancesHandler обслуживает /api/proxyrt/instances*.
@@ -323,6 +331,12 @@ func (h *ProxyInstancesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.apply(w, key)
+	case "restart":
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		h.restart(w, r, key)
 	default:
 		response.ErrorWithStatus(w, http.StatusNotFound, "неизвестный путь", proxyCodeNotFound)
 	}
@@ -476,7 +490,8 @@ func (h *ProxyInstancesHandler) patch(w http.ResponseWriter, r *http.Request, ke
 	if !h.requireSeeded(w) {
 		return
 	}
-	if _, ok := h.recordByKey(key); !ok {
+	before, ok := h.recordByKey(key)
+	if !ok {
 		h.notFound(w, key)
 		return
 	}
@@ -528,6 +543,13 @@ func (h *ProxyInstancesHandler) patch(w http.ResponseWriter, r *http.Request, ke
 	if err != nil {
 		h.fail(w, err)
 		return
+	}
+	if req.Name != nil {
+		if newName := strings.TrimSpace(*req.Name); newName != before.Name {
+			if c, ok := h.deps.Cleaners[before.Kind]; ok {
+				c.RenameLinked(r.Context(), before.ID, before.Name, newName)
+			}
+		}
 	}
 	h.respondRecord(w, key)
 }
@@ -658,6 +680,49 @@ func (h *ProxyInstancesHandler) apply(w http.ResponseWriter, key string) {
 	if !h.deps.Manager.Post(key, proxyrt.EventIntentChanged) {
 		response.ErrorWithStatus(w, http.StatusNotFound,
 			"инстанс "+key+" не запущен: будить нечего", proxyCodeNotFound)
+		return
+	}
+	response.Success(w, OkData{Ok: true})
+}
+
+// restart — POST /api/proxyrt/instances/{key}/restart
+//
+//	@Summary		Перезапустить процесс инстанса
+//	@Tags			proxyrt
+//	@Produce		json
+//	@Security		CookieAuth
+//	@Param			key	path		string	true	"Ключ инстанса (роль:id)"
+//	@Success		200	{object}	OkResponse
+//	@Failure		404	{object}	APIErrorEnvelope
+//	@Failure		409	{object}	APIErrorEnvelope
+//	@Failure		500	{object}	APIErrorEnvelope
+//	@Failure		503	{object}	APIErrorEnvelope
+//	@Router			/proxyrt/instances/{key}/restart [post]
+func (h *ProxyInstancesHandler) restart(w http.ResponseWriter, r *http.Request, key string) {
+	if !h.requireSeeded(w) {
+		return
+	}
+	rec, ok := h.recordByKey(key)
+	if !ok {
+		h.notFound(w, key)
+		return
+	}
+	if !rec.Enabled {
+		response.ErrorWithStatus(w, http.StatusConflict, "инстанс выключен", proxyCodeInstanceDisabled)
+		return
+	}
+	if err := h.deps.Manager.Restart(r.Context(), key, "запрос пользователя"); err != nil {
+		if errors.Is(err, manager.ErrInstanceNotFound) {
+			response.ErrorWithStatus(w, http.StatusNotFound,
+				"инстанс "+key+" не запущен", proxyCodeNotFound)
+			return
+		}
+		if errors.Is(err, manager.ErrRestartUnsupported) {
+			response.ErrorWithStatus(w, http.StatusConflict,
+				"перезапуск для этой роли не поддерживается", proxyCodeRestartUnsupported)
+			return
+		}
+		response.InternalError(w, err.Error())
 		return
 	}
 	response.Success(w, OkData{Ok: true})
@@ -962,10 +1027,12 @@ func proxyApplyConfig(rec *instancestore.Record, raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &keys); err != nil {
 		return fmt.Errorf("невалидный конфиг роли %s: %w", rec.Kind, err)
 	}
+	restorePins := proxyKeepPins(rec)
 	proxyResetPresentSlices(proxyConfigPtr(rec), keys)
 	if err := json.Unmarshal(raw, proxyConfigPtr(rec)); err != nil {
 		return fmt.Errorf("невалидный конфиг роли %s: %w", rec.Kind, err)
 	}
+	restorePins()
 	// natStaticWan и natStaticWans — две формы одного поля, и присланная
 	// форма обязана стать источником правды целиком. Иначе выбор WAN в UI
 	// (фронт говорит ТОЛЬКО на одиночку) молча не вступал бы в силу:
@@ -979,6 +1046,25 @@ func proxyApplyConfig(rec *instancestore.Record, raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// proxyKeepPins запоминает пины интерфейсов записи и возвращает функцию,
+// которая кладёт их обратно после декодирования присланного конфига (F494).
+// Пины — поля сервера: их выделяет менеджер (ensurePins) из общего пула,
+// а присланная половина пары ушла бы туда пином номера, которого пул не видит.
+// У новой записи пины пусты — и остаются пустыми до менеджера.
+func proxyKeepPins(rec *instancestore.Record) func() {
+	switch {
+	case rec.WdttClient != nil:
+		c := rec.WdttClient
+		ndms, kernel := c.NdmsIface, c.RawIface
+		return func() { c.NdmsIface, c.RawIface = ndms, kernel }
+	case rec.WdttServer != nil:
+		c := rec.WdttServer
+		ndms, wg, rawNdms, rawKernel := c.NdmsIface, c.WgIface, c.RawNdmsIface, c.RawIface
+		return func() { c.NdmsIface, c.WgIface, c.RawNdmsIface, c.RawIface = ndms, wg, rawNdms, rawKernel }
+	}
+	return func() {}
 }
 
 // proxyResetPresentSlices обнуляет срезы конфига, чьи ключи есть в присланном

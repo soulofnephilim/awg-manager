@@ -20,16 +20,6 @@ type Status struct {
 	LastError    string       `json:"lastError,omitempty"`
 }
 
-// ManagedEntry represents a single DNS list to be written into HydraRoute config files.
-// The list name is the identity — there's no separate ID.
-type ManagedEntry struct {
-	ListName string   // human-readable name, unique per file (== identity)
-	Domains  []string // regular domains + geosite: tags
-	Subnets  []string // CIDR ranges + geoip: tags
-	Iface    string   // kernel interface name or policy name (DirectRoute target)
-	Disabled bool     // rule is commented out in HR files with a leading '#'
-}
-
 // Config represents the managed subset of hrneo.conf fields.
 type Config struct {
 	AutoStart          bool     `json:"autoStart"`

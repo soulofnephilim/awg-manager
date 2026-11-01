@@ -43,10 +43,20 @@ func TestPeerTunnelIPInUse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := peerTunnelIPInUse(server, tt.tunnelIP); got != tt.want {
+			if got := peerTunnelIPInUse(server, tt.tunnelIP, nil); got != tt.want {
 				t.Errorf("peerTunnelIPInUse(%q) = %v, want %v", tt.tunnelIP, got, tt.want)
 			}
 		})
+	}
+	// У пира с записью адрес берётся из неё: allow-ips A= говорят 10.0.0.20, запись — 10.0.0.50.
+	stored := func(pub string) string {
+		if pub == "A=" {
+			return "10.0.0.50"
+		}
+		return ""
+	}
+	if !peerTunnelIPInUse(server, "10.0.0.50/32", stored) || peerTunnelIPInUse(server, "10.0.0.20/32", stored) {
+		t.Fatal("запись пира обязана перекрывать эвристику по allow-ips")
 	}
 }
 
@@ -56,7 +66,7 @@ func TestPeerTunnelIPInUse(t *testing.T) {
 const peerFixturePubKey = "AB/CD+EF" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + "="
 
 // stubPeerKeygen подменяет швы генерации ключей: без этого AddServerPeer
-// зовёт /opt/sbin/awg на хосте.
+// зовёт /opt/bin/wg на хосте.
 func stubPeerKeygen(t *testing.T) {
 	t.Helper()
 	oldPair, oldPSK := genKeyPair, genPSK
@@ -236,12 +246,18 @@ func TestServersHandler_AddServerPeer_RejectsMalformedGeneratedKey(t *testing.T)
 // статичен, пир, добавленный через AddServerPeer, в списке не появится.
 func newServersPeerHarness(t *testing.T, seedPeer bool) (*ServersHandler, *storage.SettingsStore, *natPoster, *busProbe, *appLogSpy) {
 	t.Helper()
-	peers := ""
+	peers, rc := "", `{}`
 	if seedPeer {
 		peers = `,"wireguard":{"peer":[{"public-key":"` + peerFixturePubKey + `","comment":"phone"}]}`
+		// Правка по ключу проверяет наличие пира свежим rc.
+		rc = `{"wireguard":{"peer":[{"key":"` + peerFixturePubKey + `","comment":"phone"}]}}`
 	}
 	fg := query.NewFakeGetter()
 	fg.SetJSON("/show/interface/", `{"Wireguard0":{"id":"Wireguard0","type":"Wireguard","description":"Wireguard VPN Server","state":"up","link":"up","address":"10.9.0.1","mask":"255.255.255.0"`+peers+`}}`)
+	// Обогащение списка серверов читает rc каждого: без него List — ошибка (F510).
+	fg.SetRC("Wireguard0", rc)
+	// Удаление пира снимает маршруты с его меткой по свежему чтению (#713).
+	fg.SetJSON("/show/rc/ip/route", `[]`)
 	fg.SetJSON("/show/running-config", `{"message":["interface PPPoE0","    ip global 32767","!"]}`)
 	queries := query.NewQueries(query.Deps{Getter: fg, Logger: query.NopLogger()})
 	poster := &natPoster{}
@@ -266,6 +282,18 @@ func deleteServerPeer(t *testing.T, h *ServersHandler, pubkey string) *httptest.
 	req := httptest.NewRequest(http.MethodDelete, "/api/servers/Wireguard0/peers/"+pubkey, nil)
 	rr := httptest.NewRecorder()
 	h.DeleteServerPeer(rr, req, "Wireguard0", pubkey)
+	return rr
+}
+
+func toggleServerPeer(t *testing.T, h *ServersHandler, pubkey string, enabled bool) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"enabled":false}`
+	if enabled {
+		body = `{"enabled":true}`
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/Wireguard0/peers/"+pubkey+"/toggle", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ToggleServerPeer(rr, req, "Wireguard0", pubkey)
 	return rr
 }
 
@@ -428,7 +456,8 @@ func TestServersHandler_UpdateServerPeer_SignatureWithoutSecret(t *testing.T) {
 func newServerConfHarness(t *testing.T, ascJSON string, ndnsJSON ...string) *ServersHandler {
 	t.Helper()
 	fg := query.NewFakeGetter()
-	fg.SetJSON("/show/rc/interface/"+harnessServerID+"/wireguard/asc", ascJSON)
+	fg.SetJSON("/show/interface/", `{"`+harnessServerID+`":{"id":"`+harnessServerID+`","type":"Wireguard"}}`)
+	fg.SetRC(harnessServerID, `{"wireguard":{"asc":`+ascJSON+`}}`)
 	// KeenDNS по умолчанию не настроен: Endpoint собирается по WAN.
 	if len(ndnsJSON) > 0 {
 		fg.SetRaw("/show/ndns", []byte(ndnsJSON[0]))
@@ -485,6 +514,30 @@ func TestServersHandler_GenerateServerPeerConf_SignatureFromPeerAndOnlyWithASC(t
 			}
 		}
 	})
+}
+
+// ASC сервера не прочитались — .conf не отдаётся: файл без строк Jc/H1…
+// выглядит правильным, а клиент с обфускацией не подключится (F549).
+func TestServersHandler_GenerateServerPeerConf_ASCReadFailure(t *testing.T) {
+	fg := query.NewFakeGetter()
+	fg.SetJSON("/show/interface/", `{"`+harnessServerID+`":{"id":"`+harnessServerID+`","type":"Wireguard"}}`)
+	fg.SetError("/show/rc/interface/", errors.New("rci down"))
+	queries := query.NewQueries(query.Deps{Getter: fg, Logger: query.NopLogger()})
+	store := storage.NewSettingsStore(t.TempDir())
+	if _, err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	h := NewServersHandler(queries, store, nil, &appLogSpy{})
+
+	server := &ndms.WireguardServer{ID: harnessServerID, ListenPort: 51820, MTU: 1420}
+	sec := storage.ServerPeerSecret{PrivateKey: "PRIV", TunnelIP: "10.9.0.2/32"}
+	conf, err := h.generateServerPeerConf(context.Background(), server, peerFixturePubKey, sec, "1.2.3.4")
+	if err == nil {
+		t.Fatalf("сбой чтения ASC проглочен, отдан конфиг:\n%s", conf)
+	}
+	if conf != "" {
+		t.Fatalf("при ошибке конфиг не пуст:\n%s", conf)
+	}
 }
 
 // Резолвер пира WG-сервера роутера: свой → LAN-адрес роутера → строки нет.
@@ -628,5 +681,59 @@ func TestServersHandler_ResolveServerEndpoint_KeenDNSOnlyWhenDirect(t *testing.T
 				t.Fatalf("имя подставлено при access=%q", tc.ndns)
 			}
 		})
+	}
+}
+
+// W2-P5 п.10: проверка адреса и serverSubnetOf считают подсеть из одного места.
+func TestValidateServerPeerTunnelIP(t *testing.T) {
+	h := &ServersHandler{}
+	srv := &ndms.WireguardServer{Address: "10.9.0.1", Mask: "255.255.255.0"}
+	for ip, want := range map[string]string{
+		"10.9.0.2/32":   "",
+		"10.9.1.2/32":   "not in server subnet 10.9.0.0/24",
+		"10.9.0.1/32":   "server's own address",
+		"10.9.0.0/32":   "network address",
+		"10.9.0.255/32": "broadcast address",
+		"10.9.0.2":      "invalid tunnel IP",
+		"10.9.0.2/24":   "must be a host address", // F296: на роутер уходит голый хост
+	} {
+		err := h.validateServerPeerTunnelIP(srv, ip)
+		if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+			t.Errorf("%s: err = %v, want %q", ip, err, want)
+		}
+	}
+	// Подсеть неизвестна — проверять не с чем.
+	if err := h.validateServerPeerTunnelIP(&ndms.WireguardServer{}, "10.9.1.2/32"); err != nil {
+		t.Errorf("unknown subnet: %v", err)
+	}
+}
+
+// F296: пир, записанный до проверки маски с /24, остаётся правимым — форма
+// эхом шлёт сохранённый адрес, и правка описания не упирается в маску. Новый
+// адрес с не-хостовой маской отвергается.
+func TestServersHandler_UpdateServerPeer_LegacyMaskEditable(t *testing.T) {
+	h, store, _, _, _ := newServersPeerHarness(t, true)
+	if err := store.SetServerPeerSecret(harnessServerID, peerFixturePubKey, storage.ServerPeerSecret{
+		PrivateKey: "k", TunnelIP: "10.9.0.2/24",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rr := putServerPeer(t, h, peerFixturePubKey, `{"description":"phone2","tunnelIP":"10.9.0.2/24"}`); rr.Code != http.StatusOK {
+		t.Fatalf("правка описания у пира с /24: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := putServerPeer(t, h, peerFixturePubKey, `{"description":"phone2","tunnelIP":"10.9.0.3/24"}`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("новый адрес с /24: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	// Тот же хост, маска хоста — старый /24 чинится до /32.
+	if rr := putServerPeer(t, h, peerFixturePubKey, `{"description":"phone2","tunnelIP":"10.9.0.2/32"}`); rr.Code != http.StatusOK {
+		t.Fatalf("починка /24 → /32: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if sec, _ := store.GetServerPeerSecret(harnessServerID, peerFixturePubKey); sec.TunnelIP != "10.9.0.2/32" {
+		t.Fatalf("в записи %q, ждали 10.9.0.2/32", sec.TunnelIP)
+	}
+	// Тот же хост, /24 поверх /32 — мимо проверки адреса в запись не попадает.
+	putServerPeer(t, h, peerFixturePubKey, `{"description":"phone2","tunnelIP":"10.9.0.2/24"}`)
+	if sec, _ := store.GetServerPeerSecret(harnessServerID, peerFixturePubKey); sec.TunnelIP != "10.9.0.2/32" {
+		t.Fatalf("/24 доехал до записи мимо проверки: %q", sec.TunnelIP)
 	}
 }

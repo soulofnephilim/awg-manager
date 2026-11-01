@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 import EditManagedPeerModal from './EditManagedPeerModal.svelte';
+import { api } from '$lib/api/client';
 import type { ManagedPeer } from '$lib/types';
 
-vi.mock('$lib/api/client', () => ({ api: { updateManagedPeer: vi.fn(), generateSignature: vi.fn() } }));
+vi.mock('$lib/api/client', () => ({ api: { updateManagedPeer: vi.fn(), generateSignature: vi.fn(), getManagedPeerPresets: vi.fn() } }));
 vi.mock('$lib/stores/notifications', () => ({ notifications: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('$lib/stores/servers', () => ({ servers: { applyMutationResponse: vi.fn() } }));
 
@@ -65,6 +66,71 @@ describe('EditManagedPeerModal', () => {
 		await fireEvent.input(getByLabelText('Tunnel IP (CIDR)'), { target: { value: '10.0.0.2/32' } });
 
 		expect(saveButton().disabled).toBe(false);
+		expect(baseElement.querySelector('.field-hint.is-error')).toBeFalsy();
+	});
+});
+
+describe('EditManagedPeerModal: сети клиента', () => {
+	it('предзаполняется из пира и шлёт оба поля всегда', async () => {
+		vi.mocked(api.updateManagedPeer).mockResolvedValue(
+			{} as Awaited<ReturnType<typeof api.updateManagedPeer>>
+		);
+		const { getByText, getByLabelText } = render(EditManagedPeerModal, {
+			open: true,
+			serverId: 'srv',
+			peer: basePeer({ clientAllowedIPs: '10.8.0.0/24', remoteSubnets: ['192.168.77.0/24'] }),
+			onclose: vi.fn(),
+			onUpdated: vi.fn(),
+		});
+
+		expect((getByLabelText('AllowedIPs клиента') as HTMLTextAreaElement).value).toBe('10.8.0.0/24');
+		await fireEvent.input(getByLabelText('Сети за клиентом'), { target: { value: '' } });
+		await fireEvent.click(getByText('Сохранить'));
+
+		expect(api.updateManagedPeer).toHaveBeenCalledWith(
+			'srv',
+			'pk',
+			expect.objectContaining({ clientAllowedIPs: '10.8.0.0/24', remoteSubnets: [] })
+		);
+	});
+
+	it('список AllowedIPs — по строке на CIDR, в запрос уходит «, »-список', async () => {
+		vi.mocked(api.updateManagedPeer).mockResolvedValue(
+			{} as Awaited<ReturnType<typeof api.updateManagedPeer>>
+		);
+		const { getByText, getByLabelText } = render(EditManagedPeerModal, {
+			open: true,
+			serverId: 'srv',
+			peer: basePeer({ clientAllowedIPs: '10.8.0.0/24, 10.9.0.0/24' }),
+			onclose: vi.fn(),
+			onUpdated: vi.fn(),
+		});
+
+		const field = getByLabelText('AllowedIPs клиента') as HTMLTextAreaElement;
+		expect(field.value).toBe('10.8.0.0/24,\n10.9.0.0/24');
+		await fireEvent.input(field, { target: { value: '10.8.0.0/24,\n10.9.0.0/24,\n' } });
+		await fireEvent.click(getByText('Сохранить'));
+
+		expect(api.updateManagedPeer).toHaveBeenCalledWith(
+			'srv',
+			'pk',
+			expect.objectContaining({ clientAllowedIPs: '10.8.0.0/24, 10.9.0.0/24' })
+		);
+	});
+});
+
+describe('EditManagedPeerModal: сети за клиентом', () => {
+	it('после очистки поле остаётся доступным', async () => {
+		const { getByLabelText, baseElement } = render(EditManagedPeerModal, {
+			open: true,
+			serverId: 'srv',
+			peer: basePeer({ remoteSubnets: ['192.168.77.0/24'] }),
+			onclose: vi.fn(),
+			onUpdated: vi.fn(),
+		});
+		const field = () => getByLabelText('Сети за клиентом') as HTMLTextAreaElement;
+		await fireEvent.input(field(), { target: { value: '' } });
+		expect(field().disabled).toBe(false);
 		expect(baseElement.querySelector('.field-hint.is-error')).toBeFalsy();
 	});
 });

@@ -3,7 +3,10 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hoaxisr/awg-manager/internal/api"
@@ -202,5 +205,114 @@ func TestOAuthProtectedResourceMetadataHidesHintWhenMcpDisabled(t *testing.T) {
 	}
 	if !strings.Contains(body, `"message":"not found"`) {
 		t.Fatalf("body = %q, want the anonymous not-found", body)
+	}
+}
+
+// Сервер MCP собирается лениво (F541) — первый запрос с верным ключом при
+// включённом MCP обязан получить полностью собранный сервер со списком
+// инструментов.
+func TestMcpEndpoint_LazyServerAnswersToolsList(t *testing.T) {
+	mux := http.NewServeMux()
+	s, keys := newMcpServer(t, true)
+	s.registerMcpRoutes(mux, mcpRouteHandlers())
+	_, plaintext, err := keys.Create("laptop", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	req.Header.Set("Authorization", "Bearer "+plaintext)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"list_tunnels"`) {
+		t.Fatalf("в ответе нет инструментов: %s", rec.Body.String())
+	}
+}
+
+// lazyHandler не строит обработчик до первого запроса и строит его ровно
+// один раз, даже при одновременных запросах.
+func TestLazyHandler_BuildsOnceOnFirstRequest(t *testing.T) {
+	var builds atomic.Int32
+	l := &lazyHandler{build: func() http.Handler {
+		builds.Add(1)
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	}}
+	if n := builds.Load(); n != 0 {
+		t.Fatalf("построен до первого запроса: %d", n)
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			l.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			if rec.Code != http.StatusTeapot {
+				t.Errorf("code = %d, want 418", rec.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := builds.Load(); n != 1 {
+		t.Fatalf("построений %d, ждали 1", n)
+	}
+}
+
+// При выключенном MCP ни регистрация маршрута, ни отклонённый запрос не
+// собирают сервер (F541). Сборка — ~1,1 МБ живой кучи на 64-битной сборке,
+// без неё прирост около нуля (замер 29.09: 1130 КБ против −45 КБ), так что
+// порог 400 КБ не дрожит от шума, а жадную сборку ловит.
+func TestRegisterMcpRoutes_DisabledDoesNotBuildServer(t *testing.T) {
+	s, _ := newMcpServer(t, false)
+	h := mcpRouteHandlers()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	mux := http.NewServeMux()
+	s.registerMcpRoutes(mux, h)
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}")))
+
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > 400<<10 {
+		t.Fatalf("куча выросла на %d КБ — сервер MCP собран при выключенном MCP", grown>>10)
+	}
+	runtime.KeepAlive(mux)
+}
+
+// Паника при сборке не хоронит обработчик до перезапуска: следующий запрос
+// собирает заново.
+func TestLazyHandler_RetriesAfterPanickedBuild(t *testing.T) {
+	calls := 0
+	l := &lazyHandler{build: func() http.Handler {
+		calls++
+		if calls == 1 {
+			panic("сборка упала")
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	}}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("ждали панику первой сборки")
+			}
+		}()
+		l.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}()
+
+	rec := httptest.NewRecorder()
+	l.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("code = %d, want 418: после паники обработчик не пересобран", rec.Code)
 	}
 }

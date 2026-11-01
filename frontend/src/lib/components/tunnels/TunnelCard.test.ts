@@ -58,6 +58,32 @@ describe('TunnelCard: разновидность обфускатора', () => 
 	});
 });
 
+describe('TunnelCard: бэкенд релея обфускатора', () => {
+	it('бейдж «ядро» при relay=kernel', () => {
+		render(TunnelCard, {
+			props: {
+				tunnel: {
+					...base,
+					obfuscator: { flavor: 'phobos', target: 'vpn.example:51824', localPort: 39000, relay: 'kernel' },
+				},
+			},
+		});
+		expect(screen.getByText('ядро')).toBeTruthy();
+	});
+
+	it('без бейджа при relay=process', () => {
+		render(TunnelCard, {
+			props: {
+				tunnel: {
+					...base,
+					obfuscator: { flavor: 'phobos', target: 'vpn.example:51824', localPort: 39000, relay: 'process' },
+				},
+			},
+		});
+		expect(screen.queryByText('ядро')).toBeNull();
+	});
+});
+
 describe('TunnelCard: причина состояния broken', () => {
 	it('причина вытесняет общее «Сломан»', () => {
 		render(TunnelCard, {
@@ -72,5 +98,32 @@ describe('TunnelCard: причина состояния broken', () => {
 	it('без причины остаётся «Сломан»', () => {
 		render(TunnelCard, { props: { tunnel: { ...base, status: 'broken' } } });
 		expect(screen.getByText('Сломан')).toBeTruthy();
+	});
+});
+
+// Откат неудавшегося старта по существующей записи оставляет её down при
+// включённом туннеле: бэкенд отдаёт status=disabled, enabled=true. Подпись —
+// как у needs_start: подсказка статуса (видимая) и метка точки статуса.
+// Мутации «disabled → без подсказки» и «→ всегда Выключен» → красный.
+describe('TunnelCard: включён, но не запустился', () => {
+	const label = 'Не запустился — перезапустите туннель';
+
+	it('status=disabled при enabled=true — подпись «не запустился» (компактный вид)', () => {
+		render(TunnelCard, { props: { tunnel: { ...base, status: 'disabled', enabled: true }, view: 'compact' } });
+		expect(screen.getByText(label)).toBeTruthy();
+		expect(screen.queryByLabelText('Выключен')).toBeNull();
+	});
+
+	it('то же в плотном виде — метка точки статуса', () => {
+		render(TunnelCard, { props: { tunnel: { ...base, status: 'disabled', enabled: true }, view: 'list' } });
+		expect(screen.getByLabelText(label)).toBeTruthy();
+		expect(screen.queryByLabelText('Выключен')).toBeNull();
+	});
+
+	it('status=disabled при enabled=false — «Выключен», без подписи', () => {
+		render(TunnelCard, { props: { tunnel: { ...base, status: 'disabled', enabled: false }, view: 'list' } });
+		expect(screen.getByLabelText('Выключен')).toBeTruthy();
+		expect(screen.queryByText(label)).toBeNull();
+		expect(screen.queryByLabelText(label)).toBeNull();
 	});
 });

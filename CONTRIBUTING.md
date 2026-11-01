@@ -23,7 +23,7 @@ awg-manager/
 
 ### Бекенд
 
-Требуется Go 1.23. Для запуска бекенда локально — стандартный `go run`:
+Требуется Go **не ниже 1.25.0** — минимальная версия указана в `go.mod` корня и вложенного модуля `awgmproto`. Для совпадения с CI используйте **Go 1.26.4**; этот же выпуск закреплён в тестовом Docker-образе. Для запуска бекенда локально — стандартный `go run`:
 
 ```bash
 go run ./cmd/awg-manager
@@ -49,6 +49,38 @@ VITE_API_TARGET=http://192.168.1.1 npm run dev
 ```
 
 Все запросы `/api/*` будут проксироваться на роутер, а фронтенд — подхватывать изменения на лету.
+
+## Локализация интерфейса (i18n)
+
+Строки UI переводятся через [Paraglide](https://inlang.com/m/gerre34r/library-inlang-paraglideJs). Русский — базовый язык, интерфейс переведён на английский целиком. Новый текст интерфейса сразу добавляйте в словари: захардкоженную русскую строку не пропустит тест (см. ниже).
+
+- Словари: `frontend/messages/ru.json` и `frontend/messages/en.json`. Ключ добавляется **в оба файла сразу**; если перевода ещё нет — пусть в `en.json` временно будет русский текст, но ключ должен быть.
+- Имена ключей — `snake_case` с префиксом экрана или компонента: `login_submit`, `settings_language_label`. Однословные кнопки и общие подписи — один ключ `common_*` на всё приложение (`common_save`, `common_close`, `common_cancel`, `common_loading` …): прежде чем заводить новый ключ, проверьте, нет ли такого в `common_*`. Строки, одинаковые по написанию, но с разным смыслом (или с разным переводом, например «Обновить» = Refresh / Update), — разными ключами.
+- В компоненте: `import { m } from '$lib/i18n';` и `{m.login_submit()}` в разметке. Импортируйте именно из `$lib/i18n`, а не из `$lib/paraglide`: модуль подключает реактивную локаль.
+- Параметры — через `{name}` в тексте: `"tunnels_count": "Туннелей: {count}"` → `m.tunnels_count({ count })`.
+- Числа со склонением («1 минуту / 3 минуты / 5 минут») — плюральными формами в самом сообщении, а не склейкой числа со словом: у русского `one`/`few`/`many`, у английского `one`/`*`. Образец — `format_minutes_ago` в `messages/*.json`:
+
+  ```json
+  "format_minutes_ago": [{
+  	"declarations": ["input count", "local countPlural = count: plural"],
+  	"selectors": ["countPlural"],
+  	"match": {
+  		"countPlural=one": "{count} минуту назад",
+  		"countPlural=few": "{count} минуты назад",
+  		"countPlural=many": "{count} минут назад",
+  		"countPlural=*": "{count} минуты назад"
+  	}
+  }]
+  ```
+- Фраза — целиком в одном ключе, без склейки из кусков вроде «на ${next} тему»: падежи и порядок слов в языках разные. Если от состояния меняется полфразы, заведите по ключу на каждый вариант (см. `header_theme_*`).
+- Разметка внутри фразы (жирное слово, `код`, ссылка) — в самом сообщении: `"Группа <strong>{label}</strong> будет удалена"`, а вывод — `<RichText text={m.foo({ label })} />` из `$lib/components/ui/RichText.svelte`. Поддерживаются `<strong>`, `<code>`, `<a>` (адрес — проп `href`) и `<span>` с необязательным `class`; подставленные значения выводятся текстом. `{@html}` для текста из словаря не используйте.
+- Даты и числа для показа форматируйте с `formatLocale()` из `$lib/i18n`, а не с жёстким `'ru-RU'`: она учитывает настройку «Формат даты и времени» (`ru-RU`, `en-GB`, `en-US` или «авто» — по языку интерфейса, для английского — по языку браузера).
+- Смена языка применяется без перезагрузки: шаблоны и `$derived`, вызвавшие `m.*()`, пересчитываются сами. Не кладите `m.*()` в константы модуля, в значения по умолчанию `$props()` и в одноразовые `const` в `<script>` — такие строки не обновятся. Нужен массив подписей — `$derived([...])`; нужен дефолт пропа — `{label ?? m.common_cancel()}` в разметке.
+- Текст, который обработчик записывает в `$state`, храните отложенным вызовом: тип `UiText` из `$lib/i18n`, присваивание `error = () => m.foo()`, показ — `{uiText(error)}`. Так он вычисляется при показе и следует за языком; готовую строку (`error = m.foo()`) не пишите — она останется на старом языке. Текст от сервера (`e.message`) остаётся обычной строкой. Правило проверяет тест каталога (`catalog.test.ts`).
+- Сообщения компилируются в `frontend/src/lib/paraglide/` (в git не попадает): автоматически в `npm run dev`/`build`/`test`, а вручную — `npm run i18n:compile` (его же вызывает `npm run check`). Настройки компиляции и стратегия выбора языка — в `frontend/scripts/paraglide.mjs`.
+- Язык выбирается только вручную в настройках (`localStorage`, ключ `awg-manager-locale`), по умолчанию — русский. Язык браузера не учитывается.
+- Не переводятся: `src/routes/dev/*` (внутренние демо-страницы, в прод-сборку не попадают), регулярные выражения и шаблоны, которыми разбирается текст от бэкенда, поисковые синонимы иконок, данные, которые сохраняются на роутере (имена по умолчанию «Прокси N», «Класс N», «Абонент 1», подпись «Через …» — одни для всех языков, иначе в списке смешались бы языки).
+- Проверка `frontend/src/lib/i18n/catalog.test.ts` (входит в `npm test` и CI) следит, что ключи `ru.json` и `en.json` совпадают, в словарях нет неиспользуемых ключей, в `.svelte`/`.ts` нет кириллицы вне комментариев и обработчики не записывают готовый текст в состояние. Если кириллица в файле — не текст интерфейса (из списка выше), добавьте файл в `ALLOWED` в этом тесте с причиной и числом строк.
 
 ## OpenAPI / Swagger
 
@@ -154,13 +186,13 @@ IPK-пакет для Entware (Keenetic):
 
 ## Тестирование
 
-Команды ниже одинаково работают на macOS, Linux и Windows — нужен только Docker (Desktop или Engine) с Compose v2.
+Для backend-тестов на macOS, Linux и Windows нужен Docker (Desktop или Engine) с Linux-контейнерами и Compose v2 или новее. Все команды запускаются из корня репозитория. Для frontend-тестов отдельно нужны Node.js и npm.
 
 ### Backend (Go)
 
-Большая часть backend-тестов завязана на Linux (ndms, iptables, sing-box и т.д.). Локально их гоняют в Linux-контейнере из `Dockerfile.go-test`.
+Большая часть backend-тестов завязана на Linux (ndms, iptables, sing-box и т.д.). `docker-compose.go-test.yml` использует официальный образ `golang:1.26.4-bookworm`; отдельный Dockerfile не нужен. В образе есть C-компилятор для `-race`. Рабочий каталог монтируется в `/src`, а кэши Go сохраняются между запусками. Разрешение `NET_RAW` нужно тесту ICMP на loopback; доступ к устройствам роутера и privileged-режим не требуются.
 
-**Обёртка (удобнее всего):**
+**Обёртка для macOS/Linux (Bash):**
 
 ```bash
 ./scripts/dev/go-test-docker.sh start
@@ -170,6 +202,19 @@ IPK-пакет для Entware (Keenetic):
 ./scripts/dev/go-test-docker.sh coverage
 ./scripts/dev/go-test-docker.sh stop
 ```
+
+**Обёртка для Windows (PowerShell или cmd):**
+
+```powershell
+.\scripts\dev\dev-backend-tests.bat start
+.\scripts\dev\dev-backend-tests.bat run ./internal/managed
+.\scripts\dev\dev-backend-tests.bat run ./internal/managed -run TestService_Create
+.\scripts\dev\dev-backend-tests.bat full
+.\scripts\dev\dev-backend-tests.bat coverage
+.\scripts\dev\dev-backend-tests.bat stop
+```
+
+Обе обёртки используют фиксированное имя контейнера `awgm-go-test-runner`: одновременно работает один runner. Остановите его перед сменой способа запуска или рабочей копии проекта. Команды Compose ниже можно запускать и из PowerShell.
 
 **Или напрямую через docker compose:**
 
@@ -186,6 +231,17 @@ docker compose -f docker-compose.go-test.yml --profile oneshot run --rm test ./i
 ```
 
 Кэши Go (`go-build`, `go-mod`) сохраняются в `.cache/docker-go-test/` между запусками.
+
+Для проверок с теми же флагами, что в CI, запустите постоянный `runner` одной из обёрток или через Compose и выполните:
+
+```bash
+docker exec awgm-go-test-runner go vet ./...
+docker exec awgm-go-test-runner go test ./... -count=1 -race
+docker exec -w /src/awgmproto awgm-go-test-runner go vet ./...
+docker exec -w /src/awgmproto awgm-go-test-runner go test ./... -count=1 -race
+```
+
+`awgmproto` — отдельный Go-модуль: `./...` из корня его не проверяет. При первом обращении к его зависимостям контейнеру нужен доступ к сети. Сам Go на хосте для этих команд не требуется.
 
 **Как прогонять во время разработки:**
 
@@ -205,7 +261,7 @@ Watch-режим для отладки: `npx vitest`.
 
 ### CI
 
-В GitHub Actions (ubuntu-latest) те же проверки: `go test ./...` для backend и `npm test` для frontend. Локальный `full` перед PR должен проходить так же, как CI.
+В GitHub Actions (ubuntu-latest) на каждый PR: для backend — `gofmt -l` (без `vendor/`), `go vet ./...` и `go test ./... -count=1 -race` в корне и во вложенном модуле `awgmproto` (свой `go.mod`, в `./...` из корня не попадает); для frontend — `npm run check -- --threshold warning` (падает и на предупреждениях), `npm run lint` и `npm test`. Локальный `full` гоняет только `go test ./...` корня без `-race` — остальное перед PR прогоните сами, иначе CI покраснеет там, где локально было зелено.
 
 ## Pull Requests
 
@@ -219,7 +275,7 @@ git rebase origin/develop
 
 - В описании PR кратко опиши что изменилось и зачем.
 - Если добавлял/менял API — убедись, что `swagger.yaml` обновлён и закоммичен.
-- Перед PR прогони тесты: `./scripts/dev/go-test-docker.sh full` (backend) и `npm test` во `frontend/` (если менялся соответствующий код).
+- Перед PR прогони проверки из раздела [CI](#ci), если менялся соответствующий код: backend — `gofmt -l` без `vendor/`, `go vet ./...` и `go test ./... -count=1 -race` в корне и отдельно в `awgmproto`; frontend — `npm run check -- --threshold warning`, `npm run lint`, `npm test` во `frontend/`. Локальный `full` обеих обёрток проверяет только корневой Go-модуль без `-race` и не заменяет весь набор CI.
 - Старайся не смешивать рефакторинг и новую функциональность в одном PR.
 
 ## Conventional Commits

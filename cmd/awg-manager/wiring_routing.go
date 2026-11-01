@@ -14,6 +14,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/managed"
 	"github.com/hoaxisr/awg-manager/internal/monitoring"
+	"github.com/hoaxisr/awg-manager/internal/ndms"
 	ndmsevents "github.com/hoaxisr/awg-manager/internal/ndms/events"
 	ndmsmetrics "github.com/hoaxisr/awg-manager/internal/ndms/metrics"
 	ndmsquery "github.com/hoaxisr/awg-manager/internal/ndms/query"
@@ -22,7 +23,6 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/sys/ndmsinfo"
 	"github.com/hoaxisr/awg-manager/internal/sys/osdetect"
 	"github.com/hoaxisr/awg-manager/internal/traffic"
-	"github.com/hoaxisr/awg-manager/internal/tunnel"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/systemtunnel"
 )
 
@@ -33,8 +33,6 @@ func (a *app) setupOrchestrator() {
 	// Create orchestrator — single brain for all lifecycle decisions.
 	a.orch = orchestrator.New(a.awgStore, a.operator, a.nwgOp, a.stateMgr, a.wanModel, a.loggingService)
 	a.tunnelService.SetOrchestrator(a.orch)
-	// Оба оператора регистрируют ожидаемые хуки до InterfaceUp/Down.
-	wireHookNotifiers(a.orch, a.nwgOp, a.operator)
 	// Endpoint-страж правит host-route и перезапускает релей — то же, что
 	// действия оркестратора, значит под тем же per-tunnel замком.
 	a.nwgOp.SetTunnelLock(func(ctx context.Context, tunnelID, owner string, work func() error) error {
@@ -47,9 +45,6 @@ func (a *app) setupOrchestrator() {
 	a.orch.SetPingCheck(a.pingCheckFacade)
 	// dnsRouteService wiring to orchestrator happens later, after ndmsCommands is built.
 	a.orch.SetClientRoute(a.clientRouteService)
-
-	// Wire HookNotifier for NDMS Commands — orchestrator exists now.
-	a.ndmsCommands.SetHookNotifier(a.orch)
 
 	// System WireGuard tunnels (read-only + ASC editing) — wired to NDMS CQRS layer.
 	a.systemTunnelSvc = systemtunnel.New(a.ndmsQueries, a.ndmsCommands, a.settingsStore,
@@ -81,7 +76,7 @@ func (a *app) setupOrchestrator() {
 	)
 
 	// Static route service — wired to NDMS RouteCommands.
-	a.staticRouteService = staticroute.New(a.staticRouteStore, a.ndmsCommands.Routes, a.catalog, a.loggingService)
+	a.staticRouteService = staticroute.New(a.staticRouteStore, a.ndmsCommands.Routes, a.ndmsQueries.Interfaces, a.ndmsQueries.StaticRoutes, a.catalog, a.loggingService)
 	a.orch.SetStaticRoute(a.staticRouteService)
 
 	// DNS route service — wired to NDMS CQRS layer.
@@ -115,30 +110,19 @@ func (a *app) setupOrchestrator() {
 	// lifecycle (NativeWG needs kmod proxy + endpoint rewrite, not a raw NDMS
 	// flip — issue #183). System interfaces keep the raw flip.
 	a.accessPolicySvc.SetTunnelLifecycle(orchLifecycleAdapter{a.orch}, storeManagedTunnelResolver{a.awgStore})
+	// Больной туннель мониторинг уводит из политик снятием permit (F743).
+	a.pingCheckService.SetPolicies(pingcheckPolicies{a.accessPolicySvc, a.ndmsQueries.Policies})
+	a.accessPolicySvc.SetPolicyHolds(a.pingCheckService)
 
 	// HydraRoute NDMS wiring — now that ndmsCommands/Queries are ready.
 	a.hydraService.SetQueries(a.ndmsQueries)
 	a.hydraService.SetPolicies(a.ndmsCommands.Policies)
 
-	a.ndmsDispatcher = ndmsevents.NewDispatcher(a.ndmsQueries, eventsLogger(a.loggingService))
-
-	// NDMS hook fired — invalidate all 7 routing-section polling stores.
-	// Each client's storeRegistry.invalidateResource() triggers a fresh
-	// REST GET for that section. No need to snapshot server-side anymore.
-	a.ndmsDispatcher.SetRoutingChanged(func() {
-		for _, key := range []events.Resource{
-			events.ResourceRoutingDnsRoutes,
-			events.ResourceRoutingStaticRoutes,
-			events.ResourceRoutingAccessPolicies,
-			events.ResourceRoutingPolicyDevices,
-			events.ResourceRoutingPolicyInterfaces,
-			events.ResourceRoutingClientRoutes,
-			events.ResourceRoutingTunnels,
-		} {
-			a.eventBus.PublishInvalidated(key, "ndms-change")
-		}
-	})
-
+	// Диспетчер, HookSink и читатель spool созданы в setupNDMS — до
+	// прогрева списков (см. там); здесь только запуск воркера. События,
+	// пришедшие раньше, лежат в его очереди. Установка скриптов — после
+	// Start читателя (он создаёт каталог spool), это держится тем, что
+	// setupNDMS идёт раньше этой фазы.
 	a.ndmsDispatcher.Start()
 
 	ndmsInstaller := ndmsevents.NewInstaller(eventsLogger(a.loggingService))
@@ -192,19 +176,20 @@ func (a *app) setupEventWiring() {
 	// Refresh the NDMS interface cache when a kernel tunnel is confirmed up:
 	// OpkgTun iflayerchanged hooks are unreliable, so the cache otherwise keeps
 	// a frozen "down" snapshot and policy/WAN/all-interface lists misreport the
-	// tunnel as down (#328). Async — Invalidate does a blocking HTTP.
-	a.orch.SetInterfaceInvalidator(func(name string) { go a.ndmsQueries.Interfaces.Invalidate(name) })
+	// tunnel as down (#328). Invalidate лишь метит карту грязной (RCI нет):
+	// следующий снимок читает свежий список (F546).
+	a.orch.SetInterfaceInvalidator(a.ndmsQueries.Interfaces.Invalidate)
 	// Перепроверка внешней грани conf перед действием — и disabled перед
-	// остановкой, и running перед подъёмом: FetchSummary ходит в NDMS на
-	// каждый вызов, поэтому видит интерфейс таким, каков он сейчас, а не
-	// каким его оставил последний хук (#669).
+	// остановкой, и running перед подъёмом: DetailsLive читает свежий полный
+	// список, поэтому видит интерфейс таким, каков он сейчас, а не каким его
+	// оставил последний хук (#669). По имени NDMS не спрашивают (F546).
 	//
 	// Пустой ответ (интерфейса нет, status-error «unable to find») — это «не
 	// знаем», а НЕ «держит down»: иначе подъём по грани conf=running получал
 	// бы вето от неответившего NDMS, хотя обе проверки обязаны в таком случае
 	// оставлять грань в силе.
 	a.orch.SetConfLayerProbe(func(ctx context.Context, name string) (bool, error) {
-		details, err := a.ndmsQueries.Interfaces.FetchSummary(ctx, name)
+		details, err := a.ndmsQueries.Interfaces.DetailsLive(ctx, name)
 		if err != nil {
 			return false, err
 		}
@@ -220,6 +205,16 @@ func (a *app) setupEventWiring() {
 		}
 		return up, nil
 	})
+	// ifdestroyed записи работающего туннеля перепроверяется свежим списком:
+	// хук мог опоздать за пересозданием (F569, R31).
+	a.orch.SetRecordPresenceProbe(func(ctx context.Context, name string) (bool, error) {
+		_, _, ok, err := a.ndmsQueries.Interfaces.Confirm(ctx, name)
+		return ok, err
+	})
+	// Своё снятие записи — вердикт точки входа spool по кредиту (Event.Own,
+	// api.NewHookSink в wiring_core): ifdestroyed записи, снятой нашим
+	// `no interface`, оркестратор не проверяет списком и туннель не трогает.
+	a.ndmsDispatcher.SetExistenceListed(existencePublisher(a.eventBus))
 	// Full hr-neo restart on tunnel-running — NDMS assigns fwmarks only
 	// during rci_create_policies (hr-neo startup), so tunnels appearing
 	// after startup would miss CONNMARK rules without this.
@@ -279,21 +274,30 @@ func (j dnsFailoverJournal) Infof(format string, args ...interface{}) {
 	j.log.Info("failover", "", fmt.Sprintf(format, args...))
 }
 
-// hookNotifierSetter — оператор, умеющий принять источник ожидаемых хуков.
-type hookNotifierSetter interface {
-	SetHookNotifier(tunnel.HookNotifier)
+// existencePublisher — слушатель списка пачки хуков существования. Появление и
+// исчезновение интерфейса меняет и туннели, и серверы (тот же кэш WGServers):
+// UI перечитывает их после списка, а не по таймеру опроса (F364). Свои
+// создание и снятие (publish=false: вердикт точки входа по кредитам, П22)
+// хуком не публикуются — иначе в «системных» мелькнул бы призрак создаваемого
+// туннеля.
+func existencePublisher(bus *events.Bus) func(publish bool) {
+	return func(publish bool) {
+		if !publish {
+			return
+		}
+		bus.PublishInvalidated(events.ResourceTunnels, "ndms-hook")
+		bus.PublishInvalidated(events.ResourceServers, "ndms-hook")
+	}
 }
 
-// wireHookNotifiers подключает оркестратор обоим операторам: nwg и, на OS5,
-// kernel-оператору (у того ExpectHook работает через двухслойный OpkgTun).
-// Вынесено из setupOrchestrator ради страж-теста: пропущенный здесь оператор
-// молча превращает свой expectHook в no-op, и собственное `conf: disabled`
-// приезжает в оркестратор как чужое событие.
-func wireHookNotifiers(orch tunnel.HookNotifier, nwgOp hookNotifierSetter, kernelOp any) {
-	if nwgOp != nil {
-		nwgOp.SetHookNotifier(orch)
-	}
-	if ks, ok := kernelOp.(hookNotifierSetter); ok {
-		ks.SetHookNotifier(orch)
-	}
+// pingcheckPolicies — политики для мониторинга (F743): правки через
+// accesspolicy (подтверждение интерфейса, журнал), список — мимо кэша.
+type pingcheckPolicies struct {
+	*accesspolicy.ServiceImpl
+	list *ndmsquery.PolicyStore
+}
+
+func (p pingcheckPolicies) FreshPolicies(ctx context.Context) ([]ndms.Policy, error) {
+	p.list.InvalidateAll()
+	return p.list.List(ctx)
 }

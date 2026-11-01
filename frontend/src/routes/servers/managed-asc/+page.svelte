@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m, uiText, type UiText } from '$lib/i18n';
 	import { api } from '$lib/api/client';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
@@ -9,16 +10,25 @@
 	import { ASCEditor } from '$lib/components/asc';
 	import { applyDisabledASCState, isZeroASCState, validateASCBeforeSave } from '$lib/utils/asc-validation';
 	import { ArrowLeft } from 'lucide-svelte';
-	import { Button } from '$lib/components/ui';
+	import { Button, VersionBadge } from '$lib/components/ui';
 	import { generateASCParams } from '$lib/utils/asc-generator';
+	import { classifyAwgVersionFromAsc } from '$lib/utils/classifyAwgVersion';
+	import { asc3ConfLines, headerProtectionKey } from '$lib/utils/asc3Conf';
 
 	let serverId = $derived($page.url.searchParams.get('id') ?? '');
 
 	let ascParams = $state<ASCParams | null>(null);
 	let systemInfo = $state<SystemInfo | null>(null);
+
+	// Параметры 3.x (#688) задаются при создании и общие для всех клиентов: смена
+	// отключит каждого, поэтому здесь только показ, а запись переносит их как
+	// есть (KeepASC3). Признак 3.x — ключ защиты заголовков, как на бэкенде:
+	// именно при нём прошивка требует S ≥ 12.
+	let headerKey = $derived(headerProtectionKey(ascParams));
+	let awg31Rows = $derived(headerKey ? asc3ConfLines(ascParams).map((l) => l.split(' = ')) : []);
 	let saving = $state(false);
 	let loading = $state(true);
-	let error = $state<string | null>(null);
+	let error = $state<UiText | null>(null);
 	let generating = $state(false);
 
 	let canClearASC = $derived.by(() => ascParams !== null && !isZeroASCState(ascParams));
@@ -30,9 +40,22 @@
 			const extended = systemInfo?.supportsExtendedASC ?? false;
 			const hRanges = systemInfo?.supportsHRanges ?? false;
 			const generated = generateASCParams({ extended, hRanges });
+			// Сервер 3.x (#688): при защите заголовков прошивка отвергает S < 12,
+			// а H шифруются — 1..4. max() сдвигает распределение S3/S4 к 12 —
+			// для обфускации неважно.
+			if (headerKey) {
+				Object.assign(generated, {
+					s3: Math.max(generated.s3 ?? 0, 12),
+					s4: Math.max(generated.s4 ?? 0, 12),
+					h1: '1', h2: '2', h3: '3', h4: '4',
+				});
+			}
 
 			ascParams = extended
 				? ({
+						// Ключи 3.x остаются в объекте: без них повторная генерация
+						// не узнает сервер 3.1 и даст S < 12.
+						...ascParams,
 						...generated,
 						s3: generated.s3!,
 						s4: generated.s4!,
@@ -44,9 +67,9 @@
 					} satisfies ASCParamsExtended)
 				: generated;
 
-			notifications.success('Параметры сгенерированы');
+			notifications.success(m.servers_asc_generated());
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка генерации');
+			notifications.error(e instanceof Error ? e.message : m.servers_asc_generate_failed());
 		} finally {
 			generating = false;
 		}
@@ -55,7 +78,7 @@
 	function handleClearASC() {
 		if (!ascParams) return;
 		applyDisabledASCState(ascParams);
-		notifications.success('ASC подготовлен к отключению — нажмите «Сохранить»');
+		notifications.success(m.servers_asc_prepared_to_disable());
 	}
 
 	$effect(() => {
@@ -63,7 +86,7 @@
 			loadData();
 		} else {
 			loading = false;
-			error = 'Не указан идентификатор сервера';
+			error = () => m.servers_asc_no_server_id();
 		}
 	});
 
@@ -79,7 +102,7 @@
 			ascParams = asc;
 			systemInfo = info;
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Не удалось загрузить параметры';
+			error = e instanceof Error ? e.message : () => m.servers_asc_load_failed();
 		} finally {
 			loading = false;
 		}
@@ -97,13 +120,13 @@
 			const fresh = await api.setManagedServerASC(serverId, ascParams);
 			servers.applyMutationResponse(fresh);
 			ascParams = await api.getManagedServerASC(serverId);
-			notifications.success('Параметры обфускации сохранены');
+			notifications.success(m.system_tunnels_obfuscation_saved());
 			try {
 				const server = await api.getManagedServer(serverId);
 				if (server && server.peers.length > 0) {
 					const n = server.peers.length;
 					notifications.warning(
-						`Клиенты (${n}) должны быть переконфигурированы — скачайте новые конфигурации`,
+						m.servers_asc_clients_reconfigure({ count: n }),
 						12000,
 					);
 				}
@@ -111,7 +134,7 @@
 				// Non-critical — don't block on peer count fetch
 			}
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Ошибка сохранения');
+			notifications.error(e instanceof Error ? e.message : m.system_tunnels_save_failed());
 		} finally {
 			saving = false;
 		}
@@ -119,7 +142,7 @@
 </script>
 
 <svelte:head>
-	<title>Обфускация — AWG Manager</title>
+	<title>{m.servers_asc_page_title()}</title>
 </svelte:head>
 
 <PageContainer width="wide">
@@ -127,10 +150,13 @@
 		<div class="sticky-header">
 		<div class="header-left">
 			<Button variant="ghost" size="sm" onclick={() => goto('/servers')} iconBefore={backIcon}>
-				Назад
+				{m.common_back()}
 			</Button>
-			<h1 class="page-title">Обфускация (ASC)</h1>
-			<span class="badge-managed">Управляемый сервер</span>
+			<h1 class="page-title">{m.servers_asc_heading()}</h1>
+			<span class="badge-managed">{m.servers_asc_badge_managed()}</span>
+			{#if awg31Rows.length}
+				<VersionBadge kind="awg" value={classifyAwgVersionFromAsc(ascParams)} />
+			{/if}
 		</div>
 		<div class="header-actions">
 			{#if canClearASC}
@@ -140,7 +166,7 @@
 					onclick={handleClearASC}
 					disabled={saving || generating || !ascParams}
 				>
-					Убрать ASC
+					{m.servers_asc_clear()}
 				</Button>
 			{/if}
 			<Button
@@ -150,8 +176,8 @@
 				disabled={!ascParams}
 				loading={generating}
 			>
-				<span class="gen-label gen-label-desktop">Сгенерировать параметры</span>
-				<span class="gen-label gen-label-mobile">Сгенерировать</span>
+				<span class="gen-label gen-label-desktop">{m.servers_asc_generate_params()}</span>
+				<span class="gen-label gen-label-mobile">{m.common_generate()}</span>
 			</Button>
 			<Button
 				variant="primary"
@@ -160,17 +186,28 @@
 				disabled={generating || !ascParams}
 				loading={saving}
 			>
-				Сохранить
+				{m.common_save()}
 			</Button>
 		</div>
 	</div>
 
 	{#if loading}
-		<div class="py-12 text-center text-surface-400">Загрузка...</div>
+		<div class="py-12 text-center text-surface-400">{m.tunnels_loading()}</div>
 	{:else if error}
-		<div class="py-12 text-center text-error-500">{error}</div>
+		<div class="py-12 text-center text-[var(--color-error)]">{uiText(error)}</div>
 	{:else if ascParams}
 		<div class="tab-content">
+			{#if awg31Rows.length}
+				<section class="awg31-info">
+					<p class="awg31-note">{m.servers_asc_awg31_readonly()}</p>
+					<dl>
+						{#each awg31Rows as [name, value] (name)}
+							<dt>{name}</dt>
+							<dd class="mono">{value}</dd>
+						{/each}
+					</dl>
+				</section>
+			{/if}
 			<ASCEditor bind:params={ascParams} signatureModes="none" idPrefix="managed-" />
 		</div>
 	{/if}
@@ -182,6 +219,42 @@
 {/snippet}
 
 <style>
+	.awg31-info {
+		margin-bottom: 1rem;
+		padding: 0.75rem;
+		background: var(--bg-tertiary, rgba(255, 255, 255, 0.03));
+		border: 1px solid var(--border);
+		border-radius: 6px;
+	}
+
+	.awg31-note {
+		margin: 0 0 0.5rem;
+		font-size: 0.75rem;
+		color: var(--text-muted);
+	}
+
+	.awg31-info dl {
+		display: grid;
+		grid-template-columns: max-content minmax(0, 1fr);
+		gap: 0.25rem 0.75rem;
+		margin: 0;
+		font-size: 0.8125rem;
+	}
+
+	.awg31-info dt {
+		color: var(--text-secondary);
+	}
+
+	.awg31-info dd {
+		margin: 0;
+		color: var(--text-primary);
+		overflow-wrap: anywhere;
+	}
+
+	.mono {
+		font-family: var(--font-mono, monospace);
+	}
+
 	.sticky-header {
 		display: flex;
 		align-items: center;

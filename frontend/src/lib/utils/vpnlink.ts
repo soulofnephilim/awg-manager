@@ -1,9 +1,10 @@
 import pako from 'pako';
+import { m } from '$lib/i18n';
 
-export type VpnLinkFlavor = 'regular' | 'premium' | 'unknown';
+export type VpnLinkFlavor = 'regular' | 'unknown';
 
 /**
- * Распаковывает vpn:// в JSON-объект без извлечения .conf (для классификации Premium vs клиентская ссылка).
+ * Распаковывает vpn:// в JSON-объект без извлечения .conf (для распознавания ключей облачного портала Amnezia).
  */
 export function decodeVpnLinkPayload(input: string): Record<string, unknown> | null {
 	try {
@@ -46,7 +47,8 @@ function looksLikePremiumVpnPayload(data: Record<string, unknown>): boolean {
 }
 
 /**
- * vpn:// с API другого портала, который текущий экран импорта не проксирует (отличие от каталога премиум-ЛК).
+ * vpn:// с API портала, который панель не принимает: ключ Amnezia Free или
+ * ключ подписки Amnezia Premium.
  */
 export function vpnLinkUnsupportedPortalReason(input: string): string | null {
 	const payload = decodeVpnLinkPayload(input);
@@ -54,20 +56,18 @@ export function vpnLinkUnsupportedPortalReason(input: string): string | null {
 		return null;
 	}
 	const ac = payload.api_config;
-	if (!ac || typeof ac !== 'object' || ac === null) {
-		return null;
+	if (ac && typeof ac === 'object' && (ac as Record<string, unknown>).service_type === 'amnezia-free') {
+		return m.vpnlink_amnezia_free_unsupported();
 	}
-	const st = (ac as Record<string, unknown>).service_type;
-	if (st === 'amnezia-free') {
-		return (
-			'Это ключ Amnezia Free (облачный API другого типа) и не поддерживается в рамках данного функционала'
-		);
+	if (looksLikePremiumVpnPayload(payload)) {
+		return m.vpnlink_amnezia_premium_unsupported();
 	}
 	return null;
 }
 
 /**
- * Обычная клиентская vpn:// (containers + last_config) vs ключ Premium / API (api_config, auth_data, …).
+ * Обычная клиентская vpn:// (containers + last_config) или нет. Ключи облачного
+ * портала отвергает vpnLinkUnsupportedPortalReason.
  */
 export function classifyVpnLink(input: string): VpnLinkFlavor {
 	const trimmed = input.trim();
@@ -78,13 +78,6 @@ export function classifyVpnLink(input: string): VpnLinkFlavor {
 		decodeVpnLink(trimmed);
 		return 'regular';
 	} catch {
-		const payload = decodeVpnLinkPayload(trimmed);
-		if (!payload) {
-			return 'unknown';
-		}
-		if (looksLikePremiumVpnPayload(payload)) {
-			return 'premium';
-		}
 		return 'unknown';
 	}
 }
@@ -103,12 +96,12 @@ export interface VpnLinkResult {
 export function decodeVpnLink(input: string): VpnLinkResult {
 	const trimmed = input.trim();
 	if (!trimmed.startsWith('vpn://')) {
-		throw new Error('Ссылка должна начинаться с vpn://');
+		throw new Error(m.vpnlink_must_start_with_scheme());
 	}
 
 	const encoded = trimmed.slice('vpn://'.length);
 	if (!encoded) {
-		throw new Error('Неверный формат vpn:// ссылки');
+		throw new Error(m.vpnlink_invalid_format());
 	}
 
 	const bytes = base64UrlDecode(encoded);
@@ -140,7 +133,7 @@ function base64UrlDecode(input: string): Uint8Array {
 		}
 		return bytes;
 	} catch {
-		throw new Error('Неверный формат vpn:// ссылки');
+		throw new Error(m.vpnlink_invalid_format());
 	}
 }
 
@@ -189,7 +182,7 @@ function decompress(bytes: Uint8Array): string {
 	try {
 		return new TextDecoder().decode(bytes);
 	} catch {
-		throw new Error('Не удалось распаковать данные');
+		throw new Error(m.vpnlink_decompress_failed());
 	}
 }
 
@@ -198,12 +191,12 @@ function extractConfig(jsonStr: string): VpnLinkResult {
 	try {
 		data = JSON.parse(jsonStr);
 	} catch {
-		throw new Error('Не удалось распаковать данные');
+		throw new Error(m.vpnlink_decompress_failed());
 	}
 
 	const containers = data.containers;
 	if (!Array.isArray(containers) || containers.length === 0) {
-		throw new Error('Конфигурация AWG не найдена в ссылке');
+		throw new Error(m.vpnlink_awg_config_not_found());
 	}
 
 	// Use last container (as AmneziaVPN does)
@@ -212,7 +205,7 @@ function extractConfig(jsonStr: string): VpnLinkResult {
 	// Try to find AWG/WireGuard config in the container
 	const proto = container.awg || container.wireguard;
 	if (!proto) {
-		throw new Error('Контейнер не содержит AWG или WireGuard конфигурацию');
+		throw new Error(m.vpnlink_container_no_config());
 	}
 
 	// Extract .conf content from last_config.
@@ -242,11 +235,7 @@ function extractConfig(jsonStr: string): VpnLinkResult {
 	}
 
 	if (!config) {
-		throw new Error(
-			'Ссылка не содержит готовой конфигурации клиента. ' +
-			'Вероятно, это ссылка полного доступа (Full Access). ' +
-			'Экспортируйте конфигурацию конкретного клиента из AmneziaVPN.'
-		);
+		throw new Error(m.vpnlink_no_client_config());
 	}
 
 	// DNS substitution

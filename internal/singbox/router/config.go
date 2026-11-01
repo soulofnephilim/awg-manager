@@ -8,7 +8,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
@@ -50,9 +54,9 @@ func LoadConfig(path string) (*RouterConfig, error) {
 	if cfg.Route.RuleSet == nil {
 		cfg.Route.RuleSet = []RuleSet{}
 	}
-	if cfg.Route.Rules == nil {
-		cfg.Route.Rules = []Rule{}
-	}
+	cfg.Route.Rules = withoutMDNSDrop(cfg.Route.Rules) // на диске его кладёт materializeConfig
+	// И служебный вход загрузки наборов — его тоже кладёт materializeConfig (F690).
+	stripRuleSetFetch(cfg)
 	if cfg.DNS.Servers == nil {
 		cfg.DNS.Servers = []DNSServer{}
 	}
@@ -63,7 +67,47 @@ func LoadConfig(path string) (*RouterConfig, error) {
 	return cfg, nil
 }
 
+// singboxDefaultIdleTimeout — C.DefaultURLTestIdleTimeout в sing-box.
+const singboxDefaultIdleTimeout = 30 * time.Minute
+
+var singboxDayUnit = regexp.MustCompile(`(\d+)d`)
+
+// parseSingboxDuration — time.ParseDuration плюс единица «d» (сутки),
+// которую понимает badoption.Duration в sing-box.
+func parseSingboxDuration(s string) (time.Duration, error) {
+	s = singboxDayUnit.ReplaceAllStringFunc(strings.TrimSpace(s), func(d string) string {
+		n, _ := strconv.Atoi(strings.TrimSuffix(d, "d"))
+		return strconv.Itoa(n*24) + "h"
+	})
+	return time.ParseDuration(s)
+}
+
+// ensureSafeIdleTimeout guards sing-box from refusing to start: urltest and
+// fallback require interval <= idle_timeout, and an omitted
+// idle_timeout means 30m. A longer interval gets idle_timeout = 2×interval.
+func ensureSafeIdleTimeout(o *Outbound) {
+	interval, err := parseSingboxDuration(o.Interval)
+	if err != nil || interval <= 0 {
+		return
+	}
+	idle := singboxDefaultIdleTimeout
+	if o.IdleTimeout != "" {
+		if idle, err = parseSingboxDuration(o.IdleTimeout); err != nil {
+			return
+		}
+	}
+	if interval > idle {
+		o.IdleTimeout = fmt.Sprintf("%ds", int(interval.Seconds()*2))
+	}
+}
+
 func SaveConfig(path string, cfg *RouterConfig) error {
+	if cfg != nil {
+		// Лечит и группы, сохранённые до появления защиты.
+		for i := range cfg.Outbounds {
+			ensureSafeIdleTimeout(&cfg.Outbounds[i])
+		}
+	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -349,13 +393,14 @@ func normalizeAddressOrRule(r Rule) Rule {
 		Port:             r.Port,
 		Protocol:         r.Protocol,
 		Inbound:          r.Inbound,
+		AuthUser:         r.AuthUser,
 		Network:          r.Network,
 	}
 
 	out := r
 	out.RuleSet, out.Domain, out.DomainSuffix, out.IPCIDR = nil, nil, nil, nil
 	out.SourceIPCIDR, out.Port, out.Protocol, out.Inbound = nil, nil, "", nil
-	out.SourceMACAddress = nil
+	out.SourceMACAddress, out.AuthUser = nil, nil
 	out.Network, out.IPIsPrivate = "", nil
 	out.Type, out.Mode = "logical", "or"
 	out.Rules = addressOr.Rules
@@ -544,7 +589,7 @@ func (c *RouterConfig) EnsureSystemRules(snifferEnabled bool) {
 //     Same upstream validator enforces non-emptiness; this method does
 //     not second-guess the caller.
 //
-// Called from Enable() after EnsureSystemRules. Re-running with the same
+// Called from enable() after EnsureSystemRules. Re-running with the same
 // arguments is a no-op idempotent update.
 func (c *RouterConfig) EnsureRouteWAN(autoDetect bool, kernelName string) {
 	if autoDetect {
@@ -569,6 +614,7 @@ func (c *RouterConfig) SetRouteFinal(tag string) error {
 }
 
 func (c *RouterConfig) AddCompositeOutbound(o Outbound) error {
+	ensureSafeIdleTimeout(&o)
 	if err := validateOutbound(o); err != nil {
 		return err
 	}
@@ -586,6 +632,7 @@ func (c *RouterConfig) AddCompositeOutbound(o Outbound) error {
 }
 
 func (c *RouterConfig) UpdateCompositeOutbound(tag string, o Outbound) error {
+	ensureSafeIdleTimeout(&o)
 	if err := validateOutbound(o); err != nil {
 		return err
 	}
@@ -616,19 +663,34 @@ func (c *RouterConfig) UpdateCompositeOutbound(tag string, o Outbound) error {
 
 // validateCompositeOutbound rejects shapes that compile but produce
 // surprising behavior at runtime. In particular `direct` as a member of
-// a selector/urltest/loadbalance group lets traffic bypass the proxy
-// silently — almost never what the user wants, and a known footgun in
-// sing-box composite groups. Same for `default: "direct"`.
+// a urltest group lets traffic bypass the proxy silently or always win
+// latency tests — a known footgun in sing-box composite groups.
+// For `selector` and `fallback`, `direct` is a legitimate choice (manual bypass or backup).
 func validateCompositeOutbound(o Outbound) error {
 	if strings.TrimSpace(o.Tag) == "" {
 		return fmt.Errorf("outbound tag is required")
 	}
+	// Закрытое множество: иной тип (legacy loadbalance, опечатка) sing-box
+	// отвергает на старте, и слот router не поднялся бы (F715).
+	switch o.Type {
+	case "selector", "urltest", "fallback":
+	default:
+		return fmt.Errorf("outbound %q: unsupported group type %q (expected selector, urltest or fallback)", o.Tag, o.Type)
+	}
 	if len(o.Outbounds) == 0 {
 		return fmt.Errorf("outbound %q: at least one member is required", o.Tag)
 	}
+	isURLTest := o.Type == "urltest"
+	seen := make(map[string]bool, len(o.Outbounds))
 	for _, m := range o.Outbounds {
-		if strings.EqualFold(strings.TrimSpace(m), "direct") {
-			return fmt.Errorf("outbound %q: member %q is not allowed in composite groups (would bypass proxy silently)", o.Tag, m)
+		// Повтор члена sing-box 1.15 отвергает («duplicate tag») и не
+		// стартует целиком (F731). Сравнение точное — как у sing-box.
+		if seen[m] {
+			return fmt.Errorf("outbound %q: member %q is listed more than once (sing-box refuses duplicate group members)", o.Tag, m)
+		}
+		seen[m] = true
+		if strings.EqualFold(strings.TrimSpace(m), "direct") && isURLTest {
+			return fmt.Errorf("outbound %q: member %q is not allowed in %s groups (would bypass proxy silently)", o.Tag, m, o.Type)
 		}
 		// Exact match (not EqualFold): sing-box outbound tags are
 		// case-sensitive keys, so "DE" and "de" are distinct outbounds.
@@ -636,8 +698,8 @@ func validateCompositeOutbound(o Outbound) error {
 			return fmt.Errorf("outbound %q: member %q references itself (would create a circular dependency and crash sing-box)", o.Tag, m)
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(o.Default), "direct") {
-		return fmt.Errorf("outbound %q: default %q is not allowed in composite groups", o.Tag, o.Default)
+	if strings.EqualFold(strings.TrimSpace(o.Default), "direct") && isURLTest {
+		return fmt.Errorf("outbound %q: default %q is not allowed in %s groups", o.Tag, o.Default, o.Type)
 	}
 	return nil
 }
@@ -646,10 +708,16 @@ func validateCompositeOutbound(o Outbound) error {
 // bind_interface and no composite fields; selector/urltest go through the
 // composite validator.
 func validateOutbound(o Outbound) error {
+	var err error
 	if strings.EqualFold(o.Type, "direct") {
-		return validateInterfaceOutbound(o)
+		err = validateInterfaceOutbound(o)
+	} else {
+		err = validateCompositeOutbound(o)
 	}
-	return validateCompositeOutbound(o)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrOutboundInvalid, err)
+	}
+	return nil
 }
 
 // validateInterfaceOutbound checks a user-created direct outbound bound to
@@ -766,7 +834,9 @@ func (c *RouterConfig) renameOutboundReferences(oldTag, newTag string) {
 		c.Route.Final = newTag
 	}
 	for i := range c.Outbounds {
-		c.Outbounds[i].Outbounds = rewriteTagSlice(c.Outbounds[i].Outbounds, oldTag, newTag)
+		// Группа могла уже содержать newTag — без свёртки переименование
+		// дало бы повтор члена, с которым sing-box не стартует (F731).
+		c.Outbounds[i].Outbounds = UniqueMemberTags(rewriteTagSlice(c.Outbounds[i].Outbounds, oldTag, newTag))
 		if c.Outbounds[i].Default == oldTag {
 			c.Outbounds[i].Default = newTag
 		}
@@ -929,6 +999,25 @@ func rewriteTagSlice(tags []string, from, to string) []string {
 	})
 }
 
+// UniqueMemberTags убирает повторы из состава группы, сохраняя порядок первых
+// вхождений (fallback идёт по нему). Без повторов возвращает исходный срез.
+// sing-box 1.15 не стартует с группой, где член указан дважды (F731), —
+// общая свёртка для всех, кто собирает составы групп сам.
+func UniqueMemberTags(tags []string) []string {
+	seen := make(map[string]bool, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	if len(out) == len(tags) {
+		return tags
+	}
+	return out
+}
+
 func removeTagRefs(tags []string, tag string) []string {
 	if len(tags) == 0 {
 		return nil
@@ -984,11 +1073,15 @@ func IsAutoManagedIface(name string) bool {
 // user bind. Keeping them unconditionally avoids a runtime NDMS lookup in the
 // Enable path — a transient lookup error must never silently delete a user's
 // persisted outbound.
-func stripAutoManagedDirect(in []Outbound) []Outbound {
+//
+// foreign — отметки «Сторонний интерфейс» (issue #935, SettingsStore.
+// GetForeignInterfaces); ifaces из этого набора не стрипаются, даже если
+// подпадают под auto-managed префикс.
+func stripAutoManagedDirect(in []Outbound, foreign []string) []Outbound {
 	out := make([]Outbound, 0, len(in))
 	for _, o := range in {
 		if o.Type == "direct" && o.BindInterface != "" &&
-			IsStrippedDirectBind(o.BindInterface) {
+			IsStrippedDirectBind(o.BindInterface, foreign) {
 			continue
 		}
 		out = append(out, o)
@@ -1000,8 +1093,11 @@ func stripAutoManagedDirect(in []Outbound) []Outbound {
 // removed from the effective config by stripAutoManagedDirect (auto-managed
 // AWG/WG/NWG ifaces, excluding proxy t2sN/proxyN which are kept). Exported so
 // the device-proxy outbound catalog can hide non-selectable router directs.
-func IsStrippedDirectBind(iface string) bool {
-	return IsAutoManagedIface(iface) && !isProxyIface(iface)
+//
+// Отмеченные пользователем сторонние интерфейсы (issue #935) не вырезаются —
+// это его выбор, как #323.
+func IsStrippedDirectBind(iface string, foreign []string) bool {
+	return IsAutoManagedIface(iface) && !isProxyIface(iface) && !slices.Contains(foreign, iface)
 }
 
 // isProxyIface reports a Keenetic proxy kernel interface name (tun2socks
@@ -1023,7 +1119,7 @@ func (r Rule) hasAnyMatcher() bool {
 	return len(r.Domain) > 0 || len(r.DomainSuffix) > 0 || len(r.IPCIDR) > 0 ||
 		len(r.SourceIPCIDR) > 0 || len(r.SourceMACAddress) > 0 ||
 		len(r.Port) > 0 || len(r.RuleSet) > 0 || r.Protocol != "" || len(r.Rules) > 0 ||
-		(r.IPIsPrivate != nil && *r.IPIsPrivate) || len(r.Inbound) > 0 || r.Network != ""
+		(r.IPIsPrivate != nil && *r.IPIsPrivate) || len(r.Inbound) > 0 || len(r.AuthUser) > 0 || r.Network != ""
 }
 
 // isSystemUDPTimeoutRule reports whether r is the system route-options rule that
@@ -1060,6 +1156,11 @@ func isSystemPrivateRule(r Rule) bool {
 func isSystemRule(r Rule) bool {
 	return isSystemSniffRule(r) || isSystemHijackRule(r) || isSystemUDPTimeoutRule(r) || isSystemPrivateRule(r)
 }
+
+// IsSystemRule reports a rule EnsureSystemRules keeps on top (sniff,
+// hijack-dns, the udp_timeout route options, the ip_is_private bypass):
+// user edits cannot touch it or go above it.
+func IsSystemRule(r Rule) bool { return isSystemRule(r) }
 
 // systemPrefixLen counts the leading system rules (sniff / hijack-dns /
 // ip_is_private bypass) that EnsureSystemRules keeps ahead of any user routing

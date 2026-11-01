@@ -131,9 +131,26 @@ func EncodeLinkWithClientPort(peer string, wgPort int, password string, vkHashes
 	if err != nil {
 		return "", err
 	}
-	payload := fmt.Sprintf("%s:%d:%d:%d:%s", host, dtlsPort, wgPort, clientListenPort, password)
-	if hashes := strings.Join(splitHashes(strings.Join(vkHashes, ",")), ","); hashes != "" {
-		payload += ":" + hashes
+	hashes := strings.Join(splitHashes(strings.Join(vkHashes, ",")), ",")
+	var payload string
+	if strings.Contains(host, ":") {
+		// Двоеточная форма разбирается по «:», и IPv6-хост в ней невыразим
+		// (parts[0] стал бы первой группой адреса). JSON-форму тот же импорт
+		// понимает (jsonWdttToPayload); для IPv4 и имён форма прежняя (F661).
+		raw, err := json.Marshal(map[string]any{
+			"peer": net.JoinHostPort(host, strconv.Itoa(dtlsPort)), "pass": password,
+			"hashes": hashes, "port": clientListenPort,
+			"workers": 16, // как у двоеточной формы (colonWdttToPayload)
+		})
+		if err != nil {
+			return "", err
+		}
+		payload = base64.StdEncoding.EncodeToString(raw)
+	} else {
+		payload = fmt.Sprintf("%s:%d:%d:%d:%s", host, dtlsPort, wgPort, clientListenPort, password)
+		if hashes != "" {
+			payload += ":" + hashes
+		}
 	}
 	link := SchemeWdtt + payload
 	if n := strings.TrimSpace(name); n != "" {
@@ -448,10 +465,26 @@ func normalizePeer(peer string) string {
 	if peer == "" {
 		return peer
 	}
-	if strings.Contains(peer, ":") {
+	return WithPort(peer, "56000")
+}
+
+// WithPort дописывает port, если его нет. Признак «порт есть» — разбор
+// net.SplitHostPort, а не двоеточие: у голого IPv6 двоеточий много, и такой
+// адрес уезжал в ссылку без порта (F390). Литерал IPv6 берётся в скобки.
+// Строка с двоеточиями, которая не разбирается и не является IPv6
+// (`2001:db8::1:56000` — след старой ошибки), остаётся как есть: её разберёт
+// запасной путь splitPeerHostPort. `v6:порт` без скобок неоднозначен, и при
+// порте до 4 цифр (`2001:db8::1:443` — тоже валидный IPv6) читается как
+// адрес: порт у литерала IPv6 пишется только в скобках.
+func WithPort(peer, port string) string {
+	if _, _, err := net.SplitHostPort(peer); err == nil {
 		return peer
 	}
-	return peer + ":56000"
+	host := strings.TrimSuffix(strings.TrimPrefix(peer, "["), "]")
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return peer
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // PeersEqual compares WDTT peer addresses with default port normalization.

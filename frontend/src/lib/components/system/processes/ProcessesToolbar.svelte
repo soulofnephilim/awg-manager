@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { Button, Card } from '$lib/components/ui';
 	import { RefreshCw, Search, Pause, Power, Check } from 'lucide-svelte';
+	import { formatTime } from '$lib/utils/format';
 
 	interface Props {
 		enabled: boolean;
@@ -9,6 +11,9 @@
 		showKernelThreads: boolean;
 		searchQuery: string;
 		processCount: number;
+		/** Время замера: сервер пересчитывает не чаще раза в 4 с, и «Обновить»
+		 * раньше отдаёт тот же снимок — время показывает, что данные те же. */
+		snapshotAt?: string;
 		ontoggleenabled: () => void;
 		onrefresh: () => void;
 		onintervalchange: (sec: number) => void;
@@ -23,6 +28,7 @@
 		showKernelThreads,
 		searchQuery,
 		processCount,
+		snapshotAt,
 		ontoggleenabled,
 		onrefresh,
 		onintervalchange,
@@ -41,53 +47,49 @@
 				onclick={ontoggleenabled}
 			>
 				<Power size={14} />
-				<span>{enabled ? 'Мониторинг активен' : 'Мониторинг выключен'}</span>
+				<span>{enabled ? m.system_processes_tb_active() : m.system_processes_tb_inactive()}</span>
 			</button>
 
 			{#if enabled}
 				<Button size="sm" variant="ghost" onclick={onrefresh} disabled={loading}>
 					{#snippet iconBefore()}<RefreshCw size={14} class={loading ? 'spin' : ''} />{/snippet}
-					Обновить
+					{m.common_refresh()}
 				</Button>
+				{#if snapshotAt}
+					<span class="snapshot-at">{m.system_processes_tb_updated({ time: formatTime(snapshotAt) })}</span>
+				{/if}
 
 				<!-- Auto refresh interval picker -->
 				<div class="interval-picker">
-					<span class="picker-label">Интервал:</span>
-					<button
-						type="button"
-						class="interval-btn"
-						class:active={interval === 1}
-						onclick={() => onintervalchange(1)}
-					>
-						1с
-					</button>
-					<button
-						type="button"
-						class="interval-btn"
-						class:active={interval === 2}
-						onclick={() => onintervalchange(2)}
-					>
-						2с
-					</button>
+					<span class="picker-label">{m.system_processes_tb_interval()}</span>
+					<!-- Не чаще 5 с: каждый замер — полный проход по /proc на роутере. -->
 					<button
 						type="button"
 						class="interval-btn"
 						class:active={interval === 5}
 						onclick={() => onintervalchange(5)}
 					>
-						5с
+						{m.system_processes_tb_5s()}
+					</button>
+					<button
+						type="button"
+						class="interval-btn"
+						class:active={interval === 30}
+						onclick={() => onintervalchange(30)}
+					>
+						{m.system_processes_tb_30s()}
 					</button>
 					<button
 						type="button"
 						class="interval-btn"
 						class:active={interval === 0}
 						onclick={() => onintervalchange(0)}
-						title="Приостановить опрос"
+						title={m.system_processes_tb_pause_title()}
 					>
 						{#if interval === 0}
-							<Pause size={12} /> Пауза
+							<Pause size={12} /> {m.system_processes_tb_pause()}
 						{:else}
-							Пауза
+							{m.system_processes_tb_pause()}
 						{/if}
 					</button>
 				</div>
@@ -103,9 +105,9 @@
 					onclick={ontogglekernelthreads}
 				>
 					{#if showKernelThreads}
-						<Check size={14} class="icon-inline" /> Все потоки ядра
+						<Check size={14} class="icon-inline" /> {m.system_processes_tb_all_threads()}
 					{:else}
-						Показать потоки ядра
+						{m.system_processes_tb_show_threads()}
 					{/if}
 				</button>
 
@@ -113,12 +115,12 @@
 					<Search size={13} class="search-icon" />
 					<input
 						type="text"
-						placeholder="Поиск по PID, имени, аргументам…"
+						placeholder={m.system_processes_tb_search()}
 						value={searchQuery}
 						oninput={(e) => onsearchchange(e.currentTarget.value)}
 					/>
 				</div>
-				<span class="counter-badge">{processCount} процессов</span>
+				<span class="counter-badge">{m.system_processes_tb_count({ count: processCount })}</span>
 			</div>
 		{/if}
 	</div>
@@ -200,6 +202,13 @@
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm, 6px);
 		padding: 0.15rem;
+	}
+
+	.snapshot-at {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
 	}
 
 	.picker-label {

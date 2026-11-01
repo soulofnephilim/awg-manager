@@ -3,8 +3,11 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/hoaxisr/awg-manager/internal/ndms"
 )
 
 // sampleWGInterfaceListJSON — two WG interfaces plus an unrelated ethernet.
@@ -122,69 +125,13 @@ const sampleWGRCInterfaceReversedAllowIPsJSON = `{
 	}
 }`
 
-const sampleWGSingleInterfaceJSON = `{
-	"id": "Wireguard1",
-	"interface-name": "nwg1",
-	"type": "Wireguard",
-	"description": "ourserver",
-	"state": "up",
-	"link": "up",
-	"connected": "yes",
-	"address": "10.0.1.1",
-	"mask": "255.255.255.0",
-	"mtu": 1420,
-	"wireguard": {
-		"public-key": "SRVKEY1=",
-		"listen-port": 51821,
-		"peer": [
-			{
-				"public-key": "PEERB=",
-				"description": "bob",
-				"remote-endpoint-address": "5.6.7.8",
-				"remote-port": 51820,
-				"rxbytes": 10,
-				"txbytes": 20,
-				"last-handshake": 3,
-				"online": true,
-				"enabled": true
-			}
-		]
-	}
-}`
-
 func primeWGFakeGetter(fg *FakeGetter) {
+	// Runtime серверов — из снимка полного списка (F546): точечных ответов нет.
 	fg.SetJSON("/show/interface/", sampleWGInterfaceListJSON)
-	// Per-interface fetches go through POST (see transport.ShowInterface
-	// rationale) — the fixture body must include the {"show":{"interface":…}}
-	// envelope that NDMS returns over the wire.
-	fg.SetPostInterface("Wireguard0", wrapShowInterface(stripOuterMapEntry(sampleWGInterfaceListJSON, "Wireguard0")))
-	fg.SetPostInterface("Wireguard1", wrapShowInterface(sampleWGSingleInterfaceJSON))
-	fg.SetJSON("/show/rc/interface/Wireguard0", `{"description":"builtin"}`)
-	fg.SetJSON("/show/rc/interface/Wireguard1", sampleWGRCInterfaceJSON)
+	fg.SetRC("Wireguard0", `{"description":"builtin"}`)
+	fg.SetRC("Wireguard1", sampleWGRCInterfaceJSON)
 	fg.SetJSON("/show/interface/system-name?name=Wireguard0", `"nwg0"`)
 	fg.SetJSON("/show/interface/system-name?name=Wireguard1", `"nwg1"`)
-}
-
-// wrapShowInterface produces the {"show":{"interface":<obj>}} envelope
-// that NDMS returns from POST {"show":{"interface":{"name":…}}} queries.
-// Test fixture helper — pairs with InterfaceStore.unwrapShowInterface in
-// production.
-func wrapShowInterface(inner string) string {
-	return `{"show":{"interface":` + inner + `}}`
-}
-
-// stripOuterMapEntry extracts one key's JSON object from a map-shaped blob —
-// trivial helper so the single-interface path has matching fixtures.
-func stripOuterMapEntry(blob, key string) string {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(blob), &m); err != nil {
-		return "{}"
-	}
-	v, ok := m[key]
-	if !ok {
-		return "{}"
-	}
-	return string(v)
 }
 
 func TestWGServerStore_GetAll_ParsesRuntime(t *testing.T) {
@@ -254,8 +201,7 @@ func TestWGServerStore_PeerDescription_FromRCCommentWhenRuntimeEmpty(t *testing.
 		}
 	}`
 	fg.SetJSON("/show/interface/", ifaceList)
-	fg.SetPostInterface("Wireguard1", wrapShowInterface(sampleWGSingleInterfaceJSON))
-	fg.SetJSON("/show/rc/interface/Wireguard1", sampleWGRCInterfaceJSON)
+	fg.SetRC("Wireguard1", sampleWGRCInterfaceJSON)
 	fg.SetJSON("/show/interface/system-name?name=Wireguard1", `"nwg1"`)
 
 	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
@@ -278,12 +224,12 @@ func TestWGServerStore_GetAll_CacheHitSkipsFetch(t *testing.T) {
 	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
 
 	_, _ = s.List(context.Background())
+	base := fg.Calls("/show/interface/")
 	_, _ = s.List(context.Background())
-	// 2 calls total: one from WGServerStore's own /show/interface/ fetch,
-	// one from InterfaceStore.ensureBootstrap which fires when WGServer
-	// resolves system names. Subsequent List() hits both caches.
-	if got := fg.Calls("/show/interface/"); got != 2 {
-		t.Errorf("/show/interface/ calls: want 2 (WG fetch + Interfaces bootstrap), got %d", got)
+	// Повторный List() бьёт в кэш: полный список стоит как все порты и точки
+	// доступа роутера (F467).
+	if got := fg.Calls("/show/interface/") - base; got != 0 {
+		t.Errorf("/show/interface/ calls on cache hit: want 0, got %d", got)
 	}
 }
 
@@ -323,7 +269,7 @@ func TestWGServerStore_Get_Single(t *testing.T) {
 func TestWGServerStore_GetAll_AllowedIPsPreservesRCOrderAndCIDR(t *testing.T) {
 	fg := newFakeGetter()
 	primeWGFakeGetter(fg)
-	fg.SetJSON("/show/rc/interface/Wireguard1", sampleWGRCInterfaceReversedAllowIPsJSON)
+	fg.SetRC("Wireguard1", sampleWGRCInterfaceReversedAllowIPsJSON)
 	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
 
 	servers, err := s.List(context.Background())
@@ -348,7 +294,7 @@ func TestWGServerStore_GetAll_AllowedIPsPreservesRCOrderAndCIDR(t *testing.T) {
 func TestWGServerStore_GetAll_SkipsInvalidNonContiguousMask(t *testing.T) {
 	fg := newFakeGetter()
 	primeWGFakeGetter(fg)
-	fg.SetJSON("/show/rc/interface/Wireguard1", `{
+	fg.SetRC("Wireguard1", `{
 		"description": "ourserver",
 		"wireguard": {
 			"peer": [
@@ -481,13 +427,14 @@ func TestWGServerStore_FindFreeIndex_StartsAtZero(t *testing.T) {
 
 func TestWGServerStore_GetASCParams(t *testing.T) {
 	fg := newFakeGetter()
-	fg.SetJSON("/show/rc/interface/Wireguard1/wireguard/asc", `{
+	fg.SetJSON(ifaceListPath, `{"Wireguard1":{"id":"Wireguard1","type":"Wireguard"}}`)
+	fg.SetRC("Wireguard1", `{"wireguard":{"asc":{
 		"jc": "4", "jmin": "40", "jmax": "70",
 		"s1": "100", "s2": "200",
 		"h1": "aaa", "h2": "bbb", "h3": "ccc", "h4": "ddd",
 		"s3": "300", "s4": "400",
 		"i1": "i1v", "i2": "i2v", "i3": "i3v", "i4": "i4v", "i5": "i5v"
-	}`)
+	}}}`)
 
 	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
 
@@ -519,13 +466,16 @@ func TestWGServerStore_GetASCParams(t *testing.T) {
 	if string(ext["s3"]) != "300" {
 		t.Errorf("s3: %s", ext["s3"])
 	}
+	if len(ext) != 16 {
+		t.Errorf("у интерфейса 2.0 ответ — ровно 16 ключей 2.0: %s", raw2)
+	}
 	if string(ext["i5"]) != `"i5v"` {
 		t.Errorf("i5: %s", ext["i5"])
 	}
 
-	// Base fetch cached separately from extended → 2 RCI calls total.
-	if got := fg.Calls("/show/rc/interface/Wireguard1/wireguard/asc"); got != 2 {
-		t.Errorf("asc calls: want 2, got %d", got)
+	// Обе формы — из одного дерева rc в кэше.
+	if got := fg.Calls("/show/rc/interface/"); got != 1 {
+		t.Errorf("rc tree calls: want 1, got %d", got)
 	}
 }
 
@@ -568,6 +518,7 @@ func TestWGServerStore_InvalidateName_DropsListCache(t *testing.T) {
 	primeWGFakeGetter(fg)
 
 	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+	rcTree := "/show/rc/interface/"
 
 	// Warm both list and per-item caches.
 	_, _ = s.List(context.Background())
@@ -580,15 +531,11 @@ func TestWGServerStore_InvalidateName_DropsListCache(t *testing.T) {
 	_, _ = s.List(context.Background())
 	_, _ = s.Get(context.Background(), "Wireguard1")
 
-	// 3 calls: WGServer list before invalidation + Interfaces bootstrap +
-	// WGServer list after invalidation. (Interfaces is bootstrapped
-	// lazily on first ResolveSystemName, then cached for the rest of
-	// the test.)
-	if got := fg.Calls("/show/interface/"); got != 3 {
-		t.Errorf("/show/interface/ calls: want 3 (WG list ×2 + Interfaces bootstrap), got %d", got)
-	}
-	if got := fg.PostInterfaceCalls("Wireguard1"); got != 2 {
-		t.Errorf("POST show.interface name=Wireguard1 should be hit twice (item invalidated), got %d", got)
+	// Кэши сброшены вместе с деревом rc: runtime берётся из снимка списка
+	// (F546), поэтому пересборку видно по обогащению — одно дерево на List и
+	// Get до сброса и одно после.
+	if got := fg.Calls(rcTree); got != 2 {
+		t.Errorf("%s: want 2 (дерево ×2), got %d", rcTree, got)
 	}
 }
 
@@ -597,6 +544,7 @@ func TestWGServerStore_InvalidateAll(t *testing.T) {
 	primeWGFakeGetter(fg)
 
 	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+	rcTree := "/show/rc/interface/"
 
 	_, _ = s.List(context.Background())
 	_, _ = s.Get(context.Background(), "Wireguard1")
@@ -608,14 +556,10 @@ func TestWGServerStore_InvalidateAll(t *testing.T) {
 	_, _ = s.Get(context.Background(), "Wireguard1")
 	_, _ = s.GetConfig(context.Background(), "Wireguard1")
 
-	// /show/interface/ is called: WGServer.List ×2 (cache busted) +
-	// Interfaces bootstrap ×1 = 3 total.
-	if got := fg.Calls("/show/interface/"); got != 3 {
-		t.Errorf("/show/interface/: want 3 (WG list ×2 + Interfaces bootstrap), got %d", got)
-	}
-	// Single-interface POST happens once per Get() and once per GetConfig() → 4 total.
-	if got := fg.PostInterfaceCalls("Wireguard1"); got != 4 {
-		t.Errorf("POST show.interface name=Wireguard1: want 4, got %d", got)
+	// List, Get и GetConfig делят одно дерево rc до сброса и одно после —
+	// дерево сброшено вместе с кэшами (runtime — из снимка списка, F546).
+	if got := fg.Calls(rcTree); got != 2 {
+		t.Errorf("%s: want 2 (дерево ×2), got %d", rcTree, got)
 	}
 }
 
@@ -702,13 +646,17 @@ func TestWGServerStore_ListSystemTunnels_CachedBetweenCalls(t *testing.T) {
 func TestWGServerStore_ListSystemTunnels_InvalidateRefetches(t *testing.T) {
 	fg := newFakeGetter()
 	primeWGFakeGetter(fg)
-	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+	ifs := NewInterfaceStore(fg, NopLogger())
+	s := NewWGServerStore(fg, NopLogger(), ifs)
 
 	if _, err := s.ListSystemTunnels(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	base := fg.Calls("/show/interface/")
 	s.InvalidateAll()
+	// Состав берётся из снимка списка: метим его грязным — пересборка кэша
+	// видна как один список, попадание в кэш — как ноль.
+	ifs.Invalidate("Wireguard1")
 	if _, err := s.ListSystemTunnels(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -722,12 +670,13 @@ func TestWGServerStore_ListSystemTunnels_InvalidateRefetches(t *testing.T) {
 // читался. ASC3Fields возвращает только ключи 3.x.
 func TestWGServerStore_GetASCParams_NumericForm(t *testing.T) {
 	fg := newFakeGetter()
-	fg.SetJSON("/show/rc/interface/Wireguard1/wireguard/asc", `{
+	fg.SetJSON(ifaceListPath, `{"Wireguard1":{"id":"Wireguard1","type":"Wireguard"}}`)
+	fg.SetRC("Wireguard1", `{"wireguard":{"asc":{
 		"jc": 4, "jmin": 40, "jmax": 70, "s1": 87, "s2": 118,
 		"h1": "100000-100100", "h2": "2", "h3": "3", "h4": "4",
 		"s3": 36, "s4": 12, "i1": "<r 32>", "i2": "", "i3": "", "i4": "", "i5": "",
 		"header-protection-key": "K", "random-trailers": 1
-	}`)
+	}}}`)
 	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
 	raw, err := s.GetASCParams(context.Background(), "Wireguard1", true)
 	if err != nil {
@@ -738,8 +687,155 @@ func TestWGServerStore_GetASCParams_NumericForm(t *testing.T) {
 	if got["jc"] != 4.0 || got["s3"] != 36.0 || got["h1"] != "100000-100100" || got["i1"] != "<r 32>" {
 		t.Fatalf("разбор: %s", raw)
 	}
+	// Ключи 3.x интерфейса идут в ответ (#688, F681): по нему строятся .conf
+	// пира, бэкап и сверка записи.
+	if got["header-protection-key"] != "K" || got["random-trailers"] != 1.0 {
+		t.Fatalf("нет ключей 3.x: %s", raw)
+	}
 	asc3, err := s.ASC3Fields(context.Background(), "Wireguard1")
 	if err != nil || len(asc3) != 2 || string(asc3["random-trailers"]) != "1" {
 		t.Fatalf("ASC3Fields: %v %v", asc3, err)
+	}
+}
+
+// F467: показ читает список с роутера каждый раз — в кэше rx/tx, рукопожатие
+// и uptime стоят до TTL. Свежая выборка освежает и кэш поллера.
+func TestWGServerStore_ListSystemTunnelsFresh_BypassesAndRefreshesCache(t *testing.T) {
+	fg := newFakeGetter()
+	primeWGFakeGetter(fg)
+	ifs := NewInterfaceStore(fg, NopLogger())
+	s := NewWGServerStore(fg, NopLogger(), ifs)
+
+	if _, err := s.ListSystemTunnels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Выборка — из снимка списка (не старше 2 с, F546); грязная метка перед
+	// каждым вызовом делает обращение к снимку видимым как список.
+	base := fg.Calls("/show/interface/")
+	for i := 0; i < 3; i++ {
+		ifs.Invalidate("Wireguard1")
+		if _, err := s.ListSystemTunnelsFresh(context.Background()); err != nil {
+			t.Fatalf("вызов %d: %v", i, err)
+		}
+	}
+	if got := fg.Calls("/show/interface/") - base; got != 3 {
+		t.Errorf("три свежих выборки дали %d обращений к /show/interface/, ожидали 3", got)
+	}
+	ifs.Invalidate("Wireguard1")
+	if _, err := s.ListSystemTunnels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fg.Calls("/show/interface/") - base; got != 3 {
+		t.Errorf("кэш после свежей выборки не освежён: %d обращений, ожидали 3", got)
+	}
+}
+
+// Свежая выборка при сбое RCI отдаёт прежний список, а не ошибку: иначе
+// системные туннели пропадали с главной на цикл, а GET /system-tunnels
+// отвечал 500 (ревью F467).
+func TestWGServerStore_ListSystemTunnelsFresh_StaleOnError(t *testing.T) {
+	fg := newFakeGetter()
+	primeWGFakeGetter(fg)
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+
+	want, err := s.ListSystemTunnelsFresh(context.Background())
+	if err != nil || len(want) == 0 {
+		t.Fatalf("первая выборка: %v, %d туннелей", err, len(want))
+	}
+	fg.SetError("/show/interface/", errors.New("rci busy"))
+	got, err := s.ListSystemTunnelsFresh(context.Background())
+	if err != nil {
+		t.Fatalf("сбой RCI вернул ошибку вместо прежнего списка: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d туннелей, want прежние %d", len(got), len(want))
+	}
+}
+
+// F476: живые поля пиров накладываются по публичному ключу; пир без живых
+// данных остаётся как был, исходный срез не меняется.
+func TestWithLivePeers(t *testing.T) {
+	srv := ndms.WireguardServer{ID: "Wireguard0", Peers: []ndms.WireguardServerPeer{
+		{PublicKey: "A", RxBytes: 1, Endpoint: "1.1.1.1:1", Enabled: true},
+		{PublicKey: "B", RxBytes: 2},
+	}}
+	got := WithLivePeers(srv, []ndms.Peer{{PublicKey: "A", RxBytes: 50, TxBytes: 7, LastHandshakeSecondsAgo: 30, Online: true, RemoteEndpointAddress: "2.2.2.2", RemotePort: 51820}})
+
+	a := got.Peers[0]
+	if a.RxBytes != 50 || a.TxBytes != 7 || !a.Online || a.Endpoint != "2.2.2.2:51820" || a.LastHandshake == "" || !a.Enabled {
+		t.Errorf("A = %+v — живые поля не наложены или затёрт Enabled", a)
+	}
+	if got.Peers[1].RxBytes != 2 {
+		t.Errorf("B = %+v — пира без живых данных менять нельзя", got.Peers[1])
+	}
+	if srv.Peers[0].RxBytes != 1 {
+		t.Error("исходный срез изменён — список из кэша общий для всех читателей")
+	}
+}
+
+// PeersRCFresh читает мимо кэша и без stale-on-error: после удачного чтения
+// сбой возвращается ошибкой, а смена rc видна сразу (#713, проверка пересечений).
+func TestPeersRCFresh_NoCacheNoStale(t *testing.T) {
+	fg := NewFakeGetter()
+	fg.SetJSON(ifaceListPath, `{"Wireguard0":{"id":"Wireguard0","type":"Wireguard"}}`)
+	fg.SetRC("Wireguard0", `{"wireguard":{"peer":[{"key":"K1=","comment":"office","allow-ips":[{"address":"172.16.5.0","mask":"255.255.255.0"}]}]}}`)
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+	ctx := context.Background()
+
+	peers, err := s.PeersRCFresh(ctx, "Wireguard0")
+	if err != nil || len(peers) != 1 || peers[0].Description != "office" ||
+		len(peers[0].AllowedIPs) != 1 || peers[0].AllowedIPs[0] != "172.16.5.0/24" {
+		t.Fatalf("peers = %+v, err = %v", peers, err)
+	}
+	fg.SetRC("Wireguard0", `{"wireguard":{"peer":[]}}`)
+	if peers, err := s.PeersRCFresh(ctx, "Wireguard0"); err != nil || len(peers) != 0 {
+		t.Fatalf("закэшировано: %+v %v", peers, err)
+	}
+	fg.SetError("/show/rc/interface/", errors.New("rci down"))
+	if _, err := s.PeersRCFresh(ctx, "Wireguard0"); err == nil {
+		t.Fatal("сбой чтения замаскирован")
+	}
+}
+
+// F510: сбой чтения rc одного сервера — ошибка List, а не список с пирами без
+// allow-ips: неполный список лёг бы в кэш на TTL. После починки чтения
+// следующий List полный — неполный результат не закэширован.
+func TestWGServerStore_List_EnrichmentErrorNotCached(t *testing.T) {
+	fg := newFakeGetter()
+	primeWGFakeGetter(fg)
+	fg.SetError("/show/rc/interface/", errors.New("rci down"))
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+
+	if servers, err := s.List(context.Background()); err == nil {
+		t.Fatalf("сбой обогащения замаскирован: %+v", servers)
+	}
+	fg.SetError("/show/rc/interface/", nil)
+	servers, err := s.List(context.Background())
+	if err != nil {
+		t.Fatalf("List после починки: %v", err)
+	}
+	if len(servers) != 2 || len(servers[1].Peers) != 1 || len(servers[1].Peers[0].AllowedIPs) == 0 {
+		t.Fatalf("неполный список: %+v", servers)
+	}
+}
+
+// Тот же класс, что F510, у одиночного Get: сбой rc — ошибка, а не элемент без
+// allow-ips в кэше на TTL.
+func TestWGServerStore_Get_EnrichmentErrorNotCached(t *testing.T) {
+	fg := newFakeGetter()
+	primeWGFakeGetter(fg)
+	fg.SetError("/show/rc/interface/", errors.New("rci down"))
+	s := NewWGServerStore(fg, NopLogger(), NewInterfaceStore(fg, NopLogger()))
+
+	if srv, err := s.Get(context.Background(), "Wireguard1"); err == nil {
+		t.Fatalf("сбой обогащения замаскирован: %+v", srv)
+	}
+	fg.SetError("/show/rc/interface/", nil)
+	srv, err := s.Get(context.Background(), "Wireguard1")
+	if err != nil {
+		t.Fatalf("Get после починки: %v", err)
+	}
+	if len(srv.Peers) != 1 || len(srv.Peers[0].AllowedIPs) == 0 {
+		t.Fatalf("неполный элемент: %+v", srv)
 	}
 }

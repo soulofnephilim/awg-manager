@@ -37,6 +37,11 @@ func ensurePolicyTunInbound(in []Inbound, spec PolicyTunInboundSpec) []Inbound {
 		case "tun-in", "tproxy-in", "redirect-in":
 			continue
 		}
+		// Инбаунды v6-слоя tproxy — того же рода: в policy-tun перехвата
+		// netfilter нет, слушать им нечего.
+		if isV6InboundTag(i.Tag) {
+			continue
+		}
 		out = append(out, i)
 	}
 
@@ -60,6 +65,7 @@ func ensurePolicyTunInbound(in []Inbound, spec PolicyTunInboundSpec) []Inbound {
 		AutoRedirect:  boolPtr(false),
 		StrictRoute:   boolPtr(false),
 		Stack:         spec.Stack,
+		DNSMode:       tunDNSMode,
 		UDPTimeout:    resolveUDPTimeout(spec.UDPTimeout),
 		UDPNATMax:     spec.UDPNATMax,
 

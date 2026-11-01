@@ -2,6 +2,7 @@
 	import { api } from '$lib/api/client';
 	import { Toggle, Button, Dropdown } from '$lib/components/ui';
 	import type { HydraRouteConfig } from '$lib/types';
+	import { m } from '$lib/i18n';
 
 	interface Props {
 		/** Внутри pane-container HR Neo — без заголовка и без вложенных card. */
@@ -11,7 +12,11 @@
 	let { embedded = true }: Props = $props();
 
 	let cfg = $state<HydraRouteConfig | null>(null);
-	let dirty = $state(false);
+	// Отправляются только изменённые поля: cfg — снимок с момента открытия
+	// вкладки, и запись целиком откатила бы порядок политик и правки MCP,
+	// сделанные за это время (F728).
+	let changes = $state<Partial<HydraRouteConfig>>({});
+	const dirty = $derived(Object.keys(changes).length > 0);
 	let saving = $state(false);
 	let err = $state('');
 	let advancedOpen = $state(false);
@@ -20,7 +25,7 @@
 		err = '';
 		try {
 			cfg = await api.getHydraRouteConfig();
-			dirty = false;
+			changes = {};
 		} catch (e: unknown) {
 			err = e instanceof Error ? e.message : String(e);
 		}
@@ -30,10 +35,15 @@
 		if (!cfg) return;
 		saving = true;
 		err = '';
+		// Правка, сделанная, пока запрос в полёте, остаётся в changes: ответ
+		// сервера её не стирает, а при ошибке отправленное возвращается.
+		const sent = changes;
+		changes = {};
 		try {
-			cfg = await api.updateHydraRouteConfig(cfg);
-			dirty = false;
+			const saved = await api.updateHydraRouteConfig(sent);
+			cfg = { ...saved, ...changes };
 		} catch (e: unknown) {
+			changes = { ...sent, ...changes };
 			err = e instanceof Error ? e.message : String(e);
 		} finally {
 			saving = false;
@@ -47,24 +57,24 @@
 	function touch<K extends keyof HydraRouteConfig>(key: K, val: HydraRouteConfig[K]) {
 		if (!cfg) return;
 		cfg = { ...cfg, [key]: val };
-		dirty = true;
+		changes = { ...changes, [key]: val };
 	}
 </script>
 
 <div class="settings-layout settings-pane" class:embedded>
 	{#if !embedded}
 		<header class="pane-header">
-			<h2>Настройки демона hrneo</h2>
+			<h2>{m.hrneo_settings_title()}</h2>
 			{#if dirty}
 				<Button variant="primary" size="sm" onclick={save} loading={saving}>
-					Сохранить
+					{m.common_save()}
 				</Button>
 			{/if}
 		</header>
 	{:else if dirty}
 		<div class="save-bar">
 			<Button variant="primary" size="sm" onclick={save} loading={saving}>
-				Сохранить
+				{m.common_save()}
 			</Button>
 		</div>
 	{/if}
@@ -72,30 +82,30 @@
 	{#if err}<div class="error-banner">{err}</div>{/if}
 
 	{#if !cfg}
-		<div class="empty">Загрузка…</div>
+		<div class="empty">{m.common_loading()}</div>
 	{:else}
 		<div class="settings-stack">
 			<div class="settings-block">
-				<div class="section-label">Поведение</div>
+				<div class="section-label">{m.hrneo_settings_behavior()}</div>
 				<div class="block-body" class:card={!embedded}>
 					<div class="setting-row setting-row-toggle">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Auto-start</span>
-							<span class="setting-description">запуск при загрузке роутера</span>
+							<span class="setting-description">{m.hrneo_settings_desc_autostart()}</span>
 						</div>
 						<Toggle checked={cfg.autoStart} onchange={(v) => touch('autoStart', v)} />
 					</div>
 					<div class="setting-row setting-row-toggle">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Clear ipset</span>
-							<span class="setting-description">очищать ipset при старте</span>
+							<span class="setting-description">{m.hrneo_settings_desc_clear_ipset()}</span>
 						</div>
 						<Toggle checked={cfg.clearIPSet} onchange={(v) => touch('clearIPSet', v)} />
 					</div>
 					<div class="setting-row setting-row-toggle">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Conntrack flush</span>
-							<span class="setting-description">сбрасывать conntrack при появлении нового IP</span>
+							<span class="setting-description">{m.hrneo_settings_desc_conntrack()}</span>
 						</div>
 						<Toggle
 							checked={cfg.conntrackFlush}
@@ -105,7 +115,7 @@
 					<div class="setting-row setting-row-toggle">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Global routing</span>
-							<span class="setting-description warn">перезаписывает политики роутера — используйте осторожно</span>
+							<span class="setting-description warn">{m.hrneo_settings_desc_policies_warn()}</span>
 						</div>
 						<Toggle
 							checked={cfg.globalRouting}
@@ -121,7 +131,7 @@
 					<div class="setting-row setting-row-toggle">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Enable timeout</span>
-							<span class="setting-description">записи в ipset будут удаляться по таймауту</span>
+							<span class="setting-description">{m.hrneo_settings_desc_timeout()}</span>
 						</div>
 						<Toggle
 							checked={cfg.ipsetEnableTimeout}
@@ -131,7 +141,7 @@
 					<div class="setting-row">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Ipset timeout</span>
-							<span class="setting-description">секунды (21600 = 6 часов)</span>
+							<span class="setting-description">{m.hrneo_settings_desc_timeout_seconds()}</span>
 						</div>
 						<input
 							class="form-input num"
@@ -144,7 +154,7 @@
 					<div class="setting-row">
 						<div class="flex flex-col gap-1">
 							<span class="font-medium">Ipset maxelem</span>
-							<span class="setting-description">макс. записей, стандартно 65536</span>
+							<span class="setting-description">{m.hrneo_settings_desc_maxelem()}</span>
 						</div>
 						<input
 							class="form-input num"
@@ -159,7 +169,7 @@
 			</div>
 
 			<div class="settings-block">
-				<div class="section-label">Логирование</div>
+				<div class="section-label">{m.hrneo_settings_logging()}</div>
 				<div class="block-body" class:card={!embedded}>
 					<div class="setting-row">
 						<div class="flex flex-col gap-1">
@@ -197,14 +207,14 @@
 
 			<div class="settings-block">
 				<button type="button" class="disclosure" onclick={() => (advancedOpen = !advancedOpen)}>
-					{advancedOpen ? '▾' : '▸'} Расширенные (требуют перезапуск hrneo)
+					{advancedOpen ? '▾' : '▸'} {m.hrneo_settings_advanced()}
 				</button>
 				{#if advancedOpen}
 					<div class="block-body" class:card={!embedded}>
 						<div class="setting-row setting-row-toggle">
 							<div class="flex flex-col gap-1">
 								<span class="font-medium">DirectRoute enabled</span>
-								<span class="setting-description">прямая маршрутизация на интерфейс</span>
+								<span class="setting-description">{m.hrneo_settings_desc_direct_route()}</span>
 							</div>
 							<Toggle
 								checked={cfg.directRouteEnabled}

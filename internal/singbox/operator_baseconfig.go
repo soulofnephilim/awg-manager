@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,12 +141,12 @@ func reconcileConfigSteps(dir, configPath, desiredLogLevel, desiredBootstrapDNS 
 		{stepMigrateLegacyTunnels, func() { ensureLegacyConfigMigrated(dir, log) }},
 		{stepStripBaseOwnedBlocks, func() { patchTunnelsSlotStripBaseOwnedBlocks(tunnels, log) }},
 		// Компат-фиксы нужны каждому продюсеру outbound'ов: 10-tunnels пишет
-		// UI, 40-subscriptions — подписочный адаптер. Только активный путь
+		// UI, 13-subscriptions — подписочный адаптер. Только активный путь
 		// config.d/ — слоты в disabled/ и pending/ не трогаются (та же
 		// семантика, что у stripStrayDirectPlaceholder: их нет в merged).
 		{stepOutboundCompat, func() {
 			patchSlotOutboundCompat(tunnels, log)
-			patchSlotOutboundCompat(filepath.Join(configPath, "40-subscriptions.json"), log)
+			patchSlotOutboundCompat(filepath.Join(configPath, "13-subscriptions.json"), log)
 		}},
 		{stepStripStrayDirect, func() { stripStrayDirectPlaceholder(configPath, log) }},
 		{stepRemoveRouteFinal, func() { removeFinalFromBase(base, log) }},
@@ -348,7 +349,7 @@ func ensureLegacyConfigMigrated(dir string, loggers ...*slog.Logger) {
 	}
 
 	// Legacy may include device-proxy artefacts; modern code emits those
-	// in their own 30-deviceproxy.json slot. Strip leftovers so the user
+	// in their own 12-deviceproxy.json slot. Strip leftovers so the user
 	// can re-enable device proxy without tag collisions on next start.
 	inbounds := filterOutDeviceProxyTags(cfg.inbounds())
 	// Тот же стриж, что и у шага пролога: слот рождается здесь уже без
@@ -417,7 +418,7 @@ func filterOutDirectPlaceholder(in []any) []any {
 
 // filterOutDeviceProxyTags drops inbound/outbound entries whose "tag"
 // field starts with "device-proxy". Those artefacts belong in the
-// dedicated 30-deviceproxy.json slot; keeping them in 10-tunnels.json
+// dedicated 12-deviceproxy.json slot; keeping them in 10-tunnels.json
 // causes a tag-collision FATAL when deviceproxy.Service later writes its
 // own slot.
 func filterOutDeviceProxyTags(in []any) []any {
@@ -584,6 +585,8 @@ func setClashController(m map[string]any, want string) bool {
 // запись — этим занимается reconcileBootstrapServer, который решает, что
 // делать при отсутствующей записи.
 func setBootstrapServer(m map[string]any, want string) bool {
+	// Выведенный адрес отправителя (= прежнему адресу сервера, см.
+	// bootstrapSelfBind) уходит вместе с прежним адресом.
 	dns, _ := m["dns"].(map[string]any)
 	if dns == nil {
 		return false
@@ -596,6 +599,9 @@ func setBootstrapServer(m map[string]any, want string) bool {
 		}
 		if s["server"] == want {
 			return false
+		}
+		if s["inet4_bind_address"] != nil && s["inet4_bind_address"] == s["server"] {
+			delete(s, "inet4_bind_address")
 		}
 		s["server"] = want
 		return true
@@ -650,12 +656,38 @@ func reconcileBootstrapServer(base map[string]any, want string) bool {
 		if s == nil || s["tag"] != "dns-bootstrap" {
 			continue
 		}
-		if want == "" {
-			return false
-		}
-		return setBootstrapServer(base, want)
+		changed := want != "" && setBootstrapServer(base, want)
+		return bootstrapSelfBind(s) || changed
 	}
-	dns["servers"] = append(servers, map[string]any{"type": "udp", "tag": "dns-bootstrap", "server": bootstrapAddr(want)})
+	entry := map[string]any{"type": "udp", "tag": "dns-bootstrap", "server": bootstrapAddr(want)}
+	bootstrapSelfBind(entry)
+	dns["servers"] = append(servers, entry)
+	return true
+}
+
+// routerLocalAddrs — адреса интерфейсов роутера; переменная пакета ради тестов.
+var routerLocalAddrs = net.InterfaceAddrs
+
+// bootstrapSelfBind ставит dns-bootstrap на собственном адресе роутера тот же
+// адрес отправителя (F702, как router.localDNSSelfBind у DNS-серверов
+// маршрутизатора): при включённом маршрутизаторе sing-box биндит сокет к
+// интерфейсу-владельцу адреса, и на ядре Keenetic запрос висит — домены
+// исходящих не резолвятся вовсе. Только при пустом адресе отправителя и без
+// detour; сбой чтения адресов — без подстановки.
+func bootstrapSelfBind(s map[string]any) bool {
+	if s["inet4_bind_address"] != nil || s["detour"] != nil {
+		return false
+	}
+	server, _ := s["server"].(string)
+	ip, err := netip.ParseAddr(server)
+	if err != nil || !ip.Is4() {
+		return false
+	}
+	addrs, err := routerLocalAddrs()
+	if err != nil || !router.AddrIsLocal(addrs, ip) {
+		return false
+	}
+	s["inet4_bind_address"] = server
 	return true
 }
 
@@ -1484,6 +1516,18 @@ func (o *Operator) mutateBase(mutate func(map[string]any) bool) error {
 // `sing-box check` for everything our merge doesn't cover (parse
 // errors, schema violations, unknown option keys, etc.).
 func (o *Operator) preflightConfigDir() error {
+	if err := o.preflightStatic(); err != nil {
+		return err
+	}
+	return o.validator.Validate(o.configPath)
+}
+
+// preflightStatic — дешёвая часть preflightConfigDir: чтение файлов, без
+// запуска бинаря. Её зовёт и startAndWait (холодный старт, watchdog, ручной
+// старт/рестарт): там `sing-box check` на каждом цикле стоил бы секунды на
+// mipsel, а без этой части конфиг с коллизией тегов или протоколом вне
+// сборки доезжал до exec и падал FATAL'ом самого движка (F397).
+func (o *Operator) preflightStatic() error {
 	// Слот мог приехать мимо пролога — из восстановленного бэкапа или правки
 	// руками уже после старта демона. Шаг идемпотентен и на чистом config.d
 	// ничего не пишет (F396). NB: с этой строкой preflight перестал быть
@@ -1495,10 +1539,7 @@ func (o *Operator) preflightConfigDir() error {
 	if _, err := configmerge.MergeDir(o.configPath); err != nil {
 		return err
 	}
-	if err := o.checkOutboundFeatures(); err != nil {
-		return err
-	}
-	return o.validator.Validate(o.configPath)
+	return o.checkOutboundFeatures()
 }
 
 // checkOutboundFeatures scans every config.d JSON fragment for outbounds
@@ -1566,8 +1607,7 @@ func (o *Operator) checkOutboundFeatures() error {
 				tag = fmt.Sprintf("<no-tag index=%d>", i)
 			}
 			unsupported = append(unsupported, fmt.Sprintf(
-				"%s outbounds[%d] %q (%s): missing sing-box build tag %q, update sing-box to version supporting %s",
-				name, i, tag, typ, required, typ,
+				"%s outbounds[%d] %q (%s): %s", name, i, tag, typ, MissingBuildTagMsg(required, typ),
 			))
 		}
 	}

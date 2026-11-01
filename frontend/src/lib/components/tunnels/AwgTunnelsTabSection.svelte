@@ -8,7 +8,6 @@
 	import { EmptyState } from '$lib/components/layout';
 	import { awgTunnelTableSort } from '$lib/stores/tunnelTableSort';
 	import { formatBitRate, formatBytes } from '$lib/utils/format';
-	import { pluralForm, TUNNEL_WORDS } from '$lib/utils/pluralize';
 	import { ariaSort } from '$lib/utils/tunnelTableSort';
 	import CreateIcon from '$lib/components/ui/icons/CreateIcon.svelte';
 	import TunnelSectionHeader from '$lib/components/tunnels/TunnelSectionHeader.svelte';
@@ -29,6 +28,7 @@
 	import { Eye, EyeOff, Upload, Download, Server } from 'lucide-svelte';
 	import { showSummary } from '$lib/stores/showSummary';
 	import type { AwgTabContext } from './awgTabContext';
+	import { m } from '$lib/i18n';
 
 	let { ctx }: { ctx: AwgTabContext } = $props();
 </script>
@@ -53,12 +53,12 @@
 	{#if ctx.dragOver}
 		<div class="drop-overlay">
 			<Upload size={40} strokeWidth={1.5} aria-hidden="true" />
-			<span class="drop-text">Отпустите для импорта</span>
+			<span class="drop-text">{m.tunnels_awg_drop_release()}</span>
 		</div>
 	{:else if ctx.importing}
 		<div class="drop-overlay">
 			<div class="spinner"></div>
-			<span class="drop-text">Импорт...</span>
+			<span class="drop-text">{m.tunnels_awg_importing()}</span>
 		</div>
 	{:else}
 		<div class="term-status">
@@ -71,7 +71,7 @@
 		<div class="term-action-group">
 			<div class="term-drop-hint">
 				<Upload size={28} strokeWidth={1.5} aria-hidden="true" />
-				<span>Перетащите .conf сюда</span>
+				<span>{m.tunnels_awg_drop_hint()}</span>
 			</div>
 
 			<div class="term-backend-selector">
@@ -92,6 +92,7 @@
 					class:selected={ctx.selectedBackend === 'kernel'}
 					class:disabled={ctx.sysInfo !== null && !ctx.sysInfo.backendAvailability?.kernel}
 					disabled={ctx.sysInfo !== null && !ctx.sysInfo.backendAvailability?.kernel}
+					title={ctx.sysInfo !== null && !ctx.sysInfo.backendAvailability?.kernel ? m.tunnel_edit_backend_kernel_unloaded() : ''}
 					onclick={() => ctx.selectedBackend = 'kernel'}
 				>
 					Kernel
@@ -104,20 +105,20 @@
 			<div class="term-commands">
 				{#if ctx.externalList.length > 0}
 					<span class="term-found">
-						найдено {ctx.externalList.length} внешних интерфейс{ctx.externalList.length === 1 ? '' : 'а'}
+						{m.tunnels_awg_found_external({ count: ctx.externalList.length })}
 					</span>
 					<button class="term-cmd term-cmd-primary" onclick={() => {
 						ctx.adoptingInterface = ctx.externalList[0].interfaceName;
 						ctx.adoptDialogOpen = true;
 					}}>
-						<span class="term-arrow">{'>'}</span> подхватить интерфейсы
+						<span class="term-arrow">{'>'}</span> {m.tunnels_awg_cmd_adopt()}
 					</button>
 				{/if}
 				<button class="term-cmd" onclick={() => ctx.fileInput?.click()}>
-					<span class="term-arrow">{'>'}</span> импортировать файл
+					<span class="term-arrow">{'>'}</span> {m.tunnels_awg_cmd_import_file()}
 				</button>
 				<button class="term-cmd" onclick={() => goto('/tunnels/new?tab=vpn')}>
-					<span class="term-arrow">{'>'}</span> импортировать ссылку
+					<span class="term-arrow">{'>'}</span> {m.tunnels_awg_cmd_import_link()}
 				</button>
 			</div>
 		</div>
@@ -133,26 +134,26 @@
 </div>
 
 <div class="info-card">
-	<h3 class="info-title">Об AmneziaWG</h3>
+	<h3 class="info-title">{m.tunnels_awg_about_title()}</h3>
 	<p class="info-section-desc">
-		Форк WireGuard с обфускацией трафика. Три поколения протокола:
+		{m.tunnels_awg_about_desc()}
 	</p>
 	<div class="info-versions">
 		<div class="info-version">
 			<Badge variant="accent" size="sm" mono>AWG 1.0</Badge>
-			<span class="info-version-desc">Базовая обфускация: модификация заголовков (H1–H4), junk-пакеты (Jc/Jmin/Jmax), размеры сообщений (S1–S2).</span>
+			<span class="info-version-desc">{m.tunnels_awg_about_v1()}</span>
 		</div>
 		<div class="info-version">
 			<Badge variant="info" size="sm" mono>AWG 1.5</Badge>
-			<span class="info-version-desc">Мимикрия протоколов: initiation-пакеты (I1–I5) маскируют соединение под QUIC, DTLS, STUN, DNS.</span>
+			<span class="info-version-desc">{m.tunnels_awg_about_v15()}</span>
 		</div>
 		<div class="info-version">
 			<Badge variant="success" size="sm" mono>AWG 2.0</Badge>
-			<span class="info-version-desc">Рандомизация заголовков: H1–H4 задаются диапазонами, генерируются при каждом хэндшейке.</span>
+			<span class="info-version-desc">{m.tunnels_awg_about_v2()}</span>
 		</div>
 	</div>
 	<p class="info-text info-kernel">
-		Работает через <strong>модуль ядра</strong> — трафик обрабатывается напрямую в ядре Linux, что снижает нагрузку на CPU.
+		{m.tunnels_awg_about_kernel_lead()} <strong>{m.tunnels_awg_about_kernel_strong()}</strong> {m.tunnels_awg_about_kernel_tail()}
 	</p>
 </div>
 
@@ -161,7 +162,7 @@
 	{#if !ctx.dashboardOn}
 	<div class="tunnels-toolbar">
 		<div class="count-group">
-			<span class="tunnel-count">{totalCount} {pluralForm(totalCount, TUNNEL_WORDS)}</span>
+			<span class="tunnel-count">{totalCount} {m.tunnels_unit_tunnels({ count: totalCount })}</span>
 			<StoreStatusBadge store={tunnels} />
 		</div>
 		<div class="toolbar-actions">
@@ -175,16 +176,16 @@
 					<LayoutViewToggle
 						value={ctx.awgViewMode}
 						denseValue="cards"
-						ariaLabel="Вид туннелей"
+						ariaLabel={m.tunnels_dashboard_view_aria()}
 						onchange={(mode) => (ctx.awgViewMode = mode)}
 					/>
 				{/snippet}
 			</TunnelToolbarViewRow>
 			<Button variant="secondary" size="md" onclick={ctx.handleExportAll} disabled={ctx.exporting} iconBefore={exportIcon}>
-				Экспорт
+				{m.common_export()}
 			</Button>
 			<Button variant="primary" size="md" onclick={() => goto('/tunnels/new')} iconBefore={createIcon}>
-				Создать
+				{m.common_create()}
 			</Button>
 		</div>
 	</div>
@@ -194,22 +195,22 @@
 			<StatStrip>
 				<Stat
 					value={`${ctx.awgSummaryActive}/${ctx.awgSummaryTotal}`}
-					label={pluralForm(ctx.awgSummaryActive, TUNNEL_WORDS)}
+					label={m.tunnels_unit_tunnels({ count: ctx.awgSummaryActive })}
 					sub={`AWG ${ctx.awgList.length} · system ${ctx.visibleSystemList.length} · external ${ctx.externalList.length}`}
 				/>
 				<Stat
 					value={formatBitRate(ctx.awgSummaryPeak.rate)}
-					label="Пиковая скорость"
+					label={m.tunnels_awg_stat_peak()}
 					sub={ctx.awgSummaryPeak.name}
 				/>
 				<Stat
 					value={formatBytes(ctx.awgSummaryRx + ctx.awgSummaryTx)}
-					label="Суммарный обмен"
+					label={m.tunnels_awg_stat_total()}
 					sub={`↓ ${formatBytes(ctx.awgSummaryRx)} · ↑ ${formatBytes(ctx.awgSummaryTx)}`}
 				/>
 				<Stat
 					value={ctx.awgTrafficLeader.bytes > 0 ? formatBytes(ctx.awgTrafficLeader.bytes) : '—'}
-					label="Лидер по трафику"
+					label={m.tunnels_awg_stat_leader()}
 					sub={ctx.awgTrafficLeader.name}
 				/>
 			</StatStrip>
@@ -222,7 +223,7 @@
 				<span></span>
 				<span role="columnheader" aria-sort={ariaSort($awgTunnelTableSort.sortBy, 'name', $awgTunnelTableSort.sortAsc)}>
 					<TableSortHeader
-						label="Туннель"
+						label={m.tunnels_awg_col_tunnel()}
 						sortKey={'name'}
 						activeSortKey={$awgTunnelTableSort.sortBy}
 						sortAsc={$awgTunnelTableSort.sortAsc}
@@ -231,7 +232,7 @@
 				</span>
 				<span role="columnheader" aria-sort={ariaSort($awgTunnelTableSort.sortBy, 'status', $awgTunnelTableSort.sortAsc)}>
 					<TableSortHeader
-						label="Статус"
+						label={m.tunnels_awg_col_status()}
 						sortKey={'status'}
 						activeSortKey={$awgTunnelTableSort.sortBy}
 						sortAsc={$awgTunnelTableSort.sortAsc}
@@ -249,14 +250,14 @@
 				</span>
 				<span role="columnheader" aria-sort={ariaSort($awgTunnelTableSort.sortBy, 'traffic', $awgTunnelTableSort.sortAsc)}>
 					<TableSortHeader
-						label="Трафик"
+						label={m.tunnels_awg_col_traffic()}
 						sortKey={'traffic'}
 						activeSortKey={$awgTunnelTableSort.sortBy}
 						sortAsc={$awgTunnelTableSort.sortAsc}
 						onchange={(key) => ctx.handleAwgSortChange(key as AwgTunnelSortKey)}
 					/>
 				</span>
-				<span class="awg-list-head-actions">Действия</span>
+				<span class="awg-list-head-actions">{m.tunnels_awg_col_actions()}</span>
 			</div>
 
 		{#each ctx.sortedFilteredAwgList as tunnel (tunnel.id)}
@@ -281,7 +282,7 @@
 							onclick={() => ctx.handleLockClick(tunnel.id)}
 						/>
 					{/if}
-					<span title={tunnel.locked ? 'Туннель защищён от изменений' : undefined}>
+					<span title={tunnel.locked ? m.tunnels_card_locked_title() : undefined}>
 						<Toggle
 							checked={ctx.isManagedTunnelOn(tunnel)}
 							size="sm"
@@ -335,7 +336,7 @@
 								Handshake {tunnel.lastHandshake ? formatRelativeTime(tunnel.lastHandshake) : '—'}
 							</div>
 							{#if tunnel.hasAddressConflict}
-						<div class="awg-list-sub awg-list-sub--error">Дублирует адрес уже запущенного туннеля</div>
+						<div class="awg-list-sub awg-list-sub--error">{m.tunnels_awg_conflict_duplicate()}</div>
 					{:else if showConnectivityRow}
 						<div
 							class="awg-list-connectivity-row"
@@ -356,7 +357,7 @@
 								type="button"
 								class="awg-connectivity-gear"
 								onclick={() => ctx.openConnectivitySettings(tunnel)}
-								title="Настройки проверки связности"
+								title={m.tunnels_card_connectivity_settings()}
 							>
 								<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
 									<path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" />
@@ -364,7 +365,7 @@
 							</button>
 						</div>
 					{:else if isActive && checkDisabled}
-						<div class="awg-list-sub">Проверка связи выключена</div>
+						<div class="awg-list-sub">{m.tunnels_awg_check_off()}</div>
 					{/if}
 					</div>
 					</div>
@@ -382,7 +383,7 @@
 									type="button"
 									class="awg-endpoint-eye"
 									onclick={() => ctx.toggleEndpointVisible('managed', tunnel.id)}
-									title={isEndpointShown ? 'Скрыть' : 'Показать'}
+									title={isEndpointShown ? m.common_hide() : m.common_show()}
 								>
 									{#if isEndpointShown}
 										<Eye size={14} aria-hidden="true" />
@@ -404,19 +405,19 @@
 							rxData={spark.rx}
 							txData={spark.tx}
 							onclick={() => ctx.openDetail(tunnel.id)}
-							title="Открыть детали туннеля"
+							title={m.tunnels_awg_open_details()}
 						/>
 					</div>
 					<div class="awg-list-cell awg-list-cell-actions tunnel-list-cell--actions">
 						<TunnelListActions
 							editHref="/tunnels/{tunnel.id}"
 							editDisabled={!!tunnel.locked}
-							editTitle={tunnel.locked ? 'Туннель защищён от изменений' : `Изменить туннель «${tunnel.name}»`}
+							editTitle={tunnel.locked ? m.tunnels_card_locked_title() : m.tunnels_edit_tunnel_title({ name: tunnel.name })}
 							onTest={() => ctx.openAwgDiagnostics(tunnel.id, tunnel.name)}
-							testTitle="Тест туннеля «{tunnel.name}»"
+							testTitle={m.tunnels_test_tunnel_title({ name: tunnel.name })}
 							onDelete={() => ctx.requestDelete(tunnel.id)}
 							deleteDisabled={!!tunnel.locked}
-							deleteTitle={tunnel.locked ? 'Туннель защищён от изменений' : `Удалить туннель «${tunnel.name}»`}
+							deleteTitle={tunnel.locked ? m.tunnels_card_locked_title() : m.tunnels_delete_tunnel_title({ name: tunnel.name })}
 							deleting={ctx.deleteLoading[tunnel.id] ?? false}
 						/>
 					</div>
@@ -427,13 +428,13 @@
 				{#if ctx.dashboardSectionsLayout}
 					<TunnelSectionHeader
 						nested
-						title="Системные"
+						title={m.tunnels_awg_section_system()}
 						count={ctx.sortedFilteredSystemList.length}
-						countLabel={pluralForm(ctx.sortedFilteredSystemList.length, TUNNEL_WORDS)}
+						countLabel={m.tunnels_unit_tunnels({ count: ctx.sortedFilteredSystemList.length })}
 					/>
 				{:else}
 					<div class="awg-list-row awg-list-row--section">
-						<div class="awg-list-section-title">Системные · {ctx.sortedFilteredSystemList.length}</div>
+						<div class="awg-list-section-title">{m.tunnels_awg_section_system()} · {ctx.sortedFilteredSystemList.length}</div>
 					</div>
 				{/if}
 				{#each ctx.sortedFilteredSystemList as tunnel (tunnel.id)}
@@ -480,7 +481,7 @@
 							<div class="awg-list-sub awg-list-handshake">
 								Handshake {tunnel.peer?.lastHandshake ? formatRelativeTime(tunnel.peer.lastHandshake) : '—'}
 							</div>
-							<div class="awg-list-sub">{tunnel.peer?.via || 'Маршрут не определён'}</div>
+							<div class="awg-list-sub">{tunnel.peer?.via || m.tunnels_awg_route_unknown()}</div>
 						</div>
 						<div class="awg-list-cell">
 						<div class="awg-list-kv-primary awg-list-mono awg-endpoint-line">
@@ -496,7 +497,7 @@
 									type="button"
 									class="awg-endpoint-eye"
 									onclick={() => ctx.toggleEndpointVisible('system', tunnel.id)}
-									title={isEndpointShown ? 'Скрыть' : 'Показать'}
+									title={isEndpointShown ? m.common_hide() : m.common_show()}
 								>
 									{#if isEndpointShown}
 										<Eye size={14} aria-hidden="true" />
@@ -518,22 +519,22 @@
 								rxData={spark.rx}
 								txData={spark.tx}
 								onclick={() => ctx.openDetail(tunnel.id)}
-								title="Открыть детали туннеля"
+								title={m.tunnels_awg_open_details()}
 							/>
 						</div>
 						<div class="awg-list-cell awg-list-cell-actions tunnel-list-cell--actions">
 							<TunnelListActions
 								editHref="/system-tunnels/{tunnel.id}"
-								editTitle="Изменить туннель «{tunnel.description || tunnel.id}»"
+								editTitle={m.tunnels_edit_tunnel_title({ name: tunnel.description || tunnel.id })}
 								onTest={() => ctx.openAwgDiagnostics(tunnel.id, tunnel.description || tunnel.id, 'system')}
-								testTitle="Тест туннеля «{tunnel.description || tunnel.id}»"
+								testTitle={m.tunnels_test_tunnel_title({ name: tunnel.description || tunnel.id })}
 							>
 								{#snippet extra()}
 									<button
 										type="button"
 										class="tunnel-list-actions__btn tunnel-list-actions__btn--primary"
-										title="Перенести туннель «{tunnel.description || tunnel.id}» в серверы"
-										aria-label="Перенести туннель «{tunnel.description || tunnel.id}» в серверы"
+										title={m.tunnels_move_to_servers_title({ name: tunnel.description || tunnel.id })}
+										aria-label={m.tunnels_move_to_servers_title({ name: tunnel.description || tunnel.id })}
 										onclick={() => ctx.markAsServer(tunnel.id)}
 									>
 										<Server size={14} aria-hidden="true" />
@@ -549,13 +550,13 @@
 				{#if ctx.dashboardSectionsLayout}
 					<TunnelSectionHeader
 						nested
-						title="Внешние"
+						title={m.tunnels_awg_section_external()}
 						count={ctx.sortedFilteredExternalList.length}
-						countLabel={pluralForm(ctx.sortedFilteredExternalList.length, TUNNEL_WORDS)}
+						countLabel={m.tunnels_unit_tunnels({ count: ctx.sortedFilteredExternalList.length })}
 					/>
 				{:else}
 					<div class="awg-list-row awg-list-row--section">
-						<div class="awg-list-section-title">Внешние · {ctx.sortedFilteredExternalList.length}</div>
+						<div class="awg-list-section-title">{m.tunnels_awg_section_external()} · {ctx.sortedFilteredExternalList.length}</div>
 					</div>
 				{/if}
 				{#each ctx.sortedFilteredExternalList as tunnel (tunnel.interfaceName)}
@@ -571,19 +572,24 @@
 								{#if tunnel.isAWG}
 									<span class="awg-inline-badge">AWG</span>
 								{:else}
-									<span class="awg-inline-badge awg-inline-badge--muted">только интерфейс</span>
+									<span class="awg-inline-badge awg-inline-badge--muted">{m.tunnels_awg_iface_only()}</span>
 								{/if}
+								{#if tunnel.foreign}<Badge variant="accent" size="sm">{m.tunnels_external_foreign()}</Badge>{/if}
 							</div>
 							<div class="awg-list-sub">
+								<!-- У интерфейса ядра нет номера OpkgTun (tunnelNumber < 0) —
+								     «#-1» не показываем, разделители ставим только между частями. -->
 								{#if tunnel.description}
 									«{tunnel.description}»
-									<span class="awg-list-dot">·</span>
 								{/if}
 								{#if tunnel.publicKey}
+									{#if tunnel.description}<span class="awg-list-dot">·</span>{/if}
 									{tunnel.publicKey.slice(0, 16)}…
-									<span class="awg-list-dot">·</span>
 								{/if}
-								#{tunnel.tunnelNumber}
+								{#if tunnel.tunnelNumber >= 0}
+									{#if tunnel.description || tunnel.publicKey}<span class="awg-list-dot">·</span>{/if}
+									#{tunnel.tunnelNumber}
+								{/if}
 							</div>
 						</div>
 						<div class="awg-list-cell awg-list-cell-status">
@@ -597,10 +603,10 @@
 							<div class="awg-list-sub awg-list-handshake">
 								Handshake {tunnel.lastHandshake ? formatRelativeTime(tunnel.lastHandshake) : '—'}
 							</div>
-							<div class="awg-list-sub">Не управляется AWG Manager</div>
+							<div class="awg-list-sub">{m.tunnels_awg_not_managed()}</div>
 							{#if tunnel.conflictsWith}
 								<div class="awg-list-sub awg-ext-conflict">
-									⚠ адрес {tunnel.addresses?.[0] ?? ''} занят туннелем «{tunnel.conflictsWith}»
+									{m.tunnels_awg_ext_conflict({ address: tunnel.addresses?.[0] ?? '', name: tunnel.conflictsWith })}
 								</div>
 							{/if}
 						</div>
@@ -618,7 +624,7 @@
 										type="button"
 										class="awg-endpoint-eye"
 										onclick={() => ctx.toggleEndpointVisible('external', tunnel.interfaceName)}
-										title={isEndpointShown ? 'Скрыть' : 'Показать'}
+										title={isEndpointShown ? m.common_hide() : m.common_show()}
 									>
 										{#if isEndpointShown}
 											<Eye size={14} aria-hidden="true" />
@@ -631,7 +637,7 @@
 									<span class="awg-endpoint-port">:{ctx.endpointPort(tunnel.endpoint)}</span>
 								{/if}
 							</div>
-							<div class="awg-list-sub">WG интерфейс</div>
+							<div class="awg-list-sub">{m.tunnels_awg_wg_interface()}</div>
 						</div>
 						<div class="awg-list-cell awg-list-cell-rate">
 							<div class="awg-list-rate-stack awg-list-mono">
@@ -643,24 +649,34 @@
 						<div class="awg-list-cell awg-list-cell-actions awg-ext-actions">
 							<!-- Короткая надпись: полная не влезала в колонку действий и
 							     вылезала за неё на узких экранах. Смысл — в title. -->
-							{#if tunnel.isAWG}
+							{#if tunnel.isAWG && !tunnel.foreign}
 								<Button
 									variant="primary"
 									size="sm"
-									title="Взять под управление: {tunnel.interfaceName}"
+									title={m.tunnels_awg_adopt_title({ name: tunnel.interfaceName })}
 									onclick={() => ctx.handleAdoptClick(tunnel.interfaceName)}
 								>
-									Взять
+									{m.tunnels_awg_adopt_short()}
 								</Button>
 							{/if}
-							{#if tunnel.removable}
+							{#if tunnel.foreign}
+								<Button
+									variant="ghost"
+									size="sm"
+									title={m.tunnels_external_unmark_title({ name: tunnel.interfaceName })}
+									onclick={() => ctx.handleForeignUnmark(tunnel.interfaceName)}
+								>
+									{m.tunnels_external_unmark()}
+								</Button>
+							{/if}
+							{#if tunnel.removable && !tunnel.foreign}
 								<Button
 									variant="outline-danger"
 									size="sm"
-									title="Удалить интерфейс {tunnel.interfaceName} с роутера"
+									title={m.tunnels_awg_delete_iface_title({ name: tunnel.interfaceName })}
 									onclick={() => ctx.handleExternalDelete(tunnel.interfaceName)}
 								>
-									Удалить
+									{m.common_delete()}
 								</Button>
 							{/if}
 						</div>
@@ -669,7 +685,7 @@
 			{/if}
 			{#if ctx.awgSearchEmpty}
 				<div class="awg-list-row awg-list-row--section">
-					<div class="awg-list-section-title">Ничего не найдено</div>
+					<div class="awg-list-section-title">{m.tunnels_dashboard_empty_title()}</div>
 				</div>
 			{/if}
 			</div>
@@ -714,12 +730,12 @@
 				{#if ctx.dashboardSectionsLayout}
 					<TunnelSectionHeader
 						nested
-						title="Внешние"
+						title={m.tunnels_awg_section_external()}
 						count={ctx.sortedFilteredExternalList.length}
-						countLabel={pluralForm(ctx.sortedFilteredExternalList.length, TUNNEL_WORDS)}
+						countLabel={m.tunnels_unit_tunnels({ count: ctx.sortedFilteredExternalList.length })}
 					/>
 				{:else}
-					<h2 class="section-title">Внешние туннели</h2>
+					<h2 class="section-title">{m.tunnels_awg_external_tunnels()}</h2>
 				{/if}
 				<div
 					class="tunnel-grid"
@@ -733,13 +749,14 @@
 							view={awgGridView}
 							onadopt={(name) => ctx.handleAdoptClick(name)}
 							ondelete={(name) => ctx.handleExternalDelete(name)}
+							onunmark={(name) => ctx.handleForeignUnmark(name)}
 						/>
 					{/each}
 				</div>
 			</div>
 		{/if}
 		{#if ctx.awgSearchEmpty}
-			<p class="tunnel-list-empty">Ничего не найдено</p>
+			<p class="tunnel-list-empty">{m.tunnels_dashboard_empty_title()}</p>
 		{/if}
 	{/if}
 {/if}

@@ -100,3 +100,47 @@ func TestExtractInterfaceAddress(t *testing.T) {
 		t.Fatalf("без [Interface] ожидали пусто, got %q", got)
 	}
 }
+
+// F390: «порт есть» — по разбору адреса, а не по двоеточию. Голый IPv6
+// уходил в ссылку без порта; литерал берётся в скобки. След старой ошибки
+// (`v6:порт` без скобок) не трогается — его разбирает splitPeerHostPort.
+func TestNormalizePeerIPv6(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"2001:db8::1", "[2001:db8::1]:56000"},
+		{"[2001:db8::1]", "[2001:db8::1]:56000"},
+		{"[2001:db8::1]:443", "[2001:db8::1]:443"},
+		{"1.2.3.4", "1.2.3.4:56000"},
+		{"vpn.example.org:1", "vpn.example.org:1"},
+		{"2001:db8::1:56000x", "2001:db8::1:56000x"},
+	} {
+		if got := normalizePeer(tc.in); got != tc.want {
+			t.Errorf("normalizePeer(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	host, port, err := splitPeerHostPort(normalizePeer("2001:db8::1"))
+	if err != nil || host != "2001:db8::1" || port != 56000 {
+		t.Errorf("split = (%q, %d, %v), want (2001:db8::1, 56000)", host, port, err)
+	}
+}
+
+// F661: IPv6-хост двоеточная форма не переносит — ссылка собирается в
+// JSON-форме и разбирается нашим же импортом обратно в тот же peer; IPv4
+// остаётся двоеточным.
+func TestEncodeLinkIPv6RoundTrip(t *testing.T) {
+	link, err := EncodeLinkWithClientPort("[2001:db8::1]:56004", 56001, "secret", []string{"h1"}, "Дом", 9000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := parseWdttURI(link)
+	if err != nil {
+		t.Fatalf("разбор %q: %v", link, err)
+	}
+	if p.Peer != "[2001:db8::1]:56004" || p.Password != "secret" || p.Name != "Дом" ||
+		p.Listen != "127.0.0.1:9000" || p.Workers != 16 || len(p.VKHashes) != 1 || p.VKHashes[0] != "h1" {
+		t.Fatalf("payload = %+v", p)
+	}
+	v4, _ := EncodeLinkWithClientPort("1.2.3.4:56004", 56001, "secret", nil, "", 9000)
+	if v4 != "wdtt://1.2.3.4:56004:56001:9000:secret" {
+		t.Fatalf("IPv4-ссылка изменилась: %q", v4)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Дефолт потоков зависит от архитектуры: на mips полосу отнимает CPU (замеры
@@ -103,12 +104,12 @@ func TestStoreWireFormatCanary(t *testing.T) {
 			[]string{"name"}, []string{"order"}},
 		{"freeturn-client", FreeTurnClientConfig{Listen: "l", Peer: "p",
 			Provider: "vk", Links: "x", Streams: 1, Transport: "tcp", Mode: "udp",
-			ObfProfile: "none", ObfKey: "k",
+			Bond: true, ObfProfile: "none", ObfKey: "k", ObfTimingMs: 20,
 			StreamsPerCred: 1, Platform: "desktop", DNSMode: "auto",
 			DNSServers: "s", ClientID: "c", Sub: "https://s", Debug: true,
 			KCP: &FreeTurnKCP{Interval: 20}},
 			[]string{"listen", "peer", "provider", "links", "streams", "transport",
-				"mode", "obfProfile", "obfKey",
+				"mode", "bond", "obfProfile", "obfKey", "obfTimingMs",
 				"streamsPerCred", "platform", "dnsMode", "dnsServers", "clientId",
 				"sub", "debug", "kcp"}, nil},
 		{"wdtt-server", WdttServerConfig{Listen: "l", WgPort: 1, ConfigDir: "c",
@@ -247,5 +248,97 @@ func TestFreeTurnClientValidateKCP(t *testing.T) {
 		if err := base.Validate(); err == nil {
 			t.Errorf("%s: ожидали отказ", name)
 		}
+	}
+}
+
+// Лимит bond — зеркало validateBond клиента 4.0: не больше 256/ссылок потоков,
+// иначе процесс не стартует. Границы проверяются с обеих сторон.
+func TestFreeTurnClientValidateBondLimit(t *testing.T) {
+	base := FreeTurnClientConfig{Listen: "127.0.0.1:9000", Peer: "p:1", Provider: "vk",
+		Links: "a, b ,c", Mode: "tcp", Bond: true}
+	for _, tc := range []struct {
+		name    string
+		mut     func(*FreeTurnClientConfig)
+		wantErr bool
+	}{
+		{"3 ссылки, 85 — граница", func(c *FreeTurnClientConfig) { c.Streams = 85 }, false},
+		{"3 ссылки, 86", func(c *FreeTurnClientConfig) { c.Streams = 86 }, true},
+		{"udp: -bond не уходит", func(c *FreeTurnClientConfig) { c.Streams, c.Mode = 86, "udp" }, false},
+		{"bond выкл.", func(c *FreeTurnClientConfig) { c.Streams, c.Bond = 86, false }, false},
+		{"direct: одна группа", func(c *FreeTurnClientConfig) { c.Streams, c.Provider = 256, "direct" }, false},
+		{"без ссылок: одна группа", func(c *FreeTurnClientConfig) { c.Streams, c.Links = 257, "" }, true},
+		{"0 = дефолт 12, 21 ссылка — граница", func(c *FreeTurnClientConfig) { c.Links = strings.Repeat("x,", 20) + "x" }, false},
+		{"0 = дефолт 12, 22 ссылки", func(c *FreeTurnClientConfig) { c.Links = strings.Repeat("x,", 21) + "x" }, true},
+	} {
+		c := base
+		tc.mut(&c)
+		if err := c.Validate(); (err != nil) != tc.wantErr {
+			t.Errorf("%s: err=%v, ждали ошибку=%t", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestAutoReconnectValidation(t *testing.T) {
+	ftBase := FreeTurnClientConfig{Listen: "127.0.0.1:9000", Peer: "p:1"}
+	wdttBase := WdttClientConfig{Mode: "wg", Listen: "127.0.0.1:9000", Peer: "p:1", Password: "pwd", VKHashes: "vk"}
+
+	validIntervals := []string{"", "on_failure", "30m", "1h", "2h", "4h", "8h", "12h", "24h"}
+	for _, interval := range validIntervals {
+		ft := ftBase
+		ft.AutoReconnect = true
+		ft.AutoReconnectInterval = interval
+		if err := ft.Validate(); err != nil {
+			t.Errorf("FreeTurnClientConfig.Validate() rejected valid interval %q: %v", interval, err)
+		}
+
+		wdtt := wdttBase
+		wdtt.AutoReconnect = true
+		wdtt.AutoReconnectInterval = interval
+		if err := wdtt.Validate(); err != nil {
+			t.Errorf("WdttClientConfig.Validate() rejected valid interval %q: %v", interval, err)
+		}
+	}
+
+	invalidIntervals := []string{"1s", "5m", "garbage", "-1h", "100h"}
+	for _, interval := range invalidIntervals {
+		ft := ftBase
+		ft.AutoReconnect = true
+		ft.AutoReconnectInterval = interval
+		if err := ft.Validate(); err == nil {
+			t.Errorf("FreeTurnClientConfig.Validate() accepted invalid interval %q", interval)
+		}
+
+		wdtt := wdttBase
+		wdtt.AutoReconnect = true
+		wdtt.AutoReconnectInterval = interval
+		if err := wdtt.Validate(); err == nil {
+			t.Errorf("WdttClientConfig.Validate() accepted invalid interval %q", interval)
+		}
+	}
+
+	// AutoReconnect = false: любой интервал допустим (игнорируется)
+	ftDisabled := ftBase
+	ftDisabled.AutoReconnect = false
+	ftDisabled.AutoReconnectInterval = "garbage"
+	if err := ftDisabled.Validate(); err != nil {
+		t.Errorf("FreeTurnClientConfig.Validate() failed with AutoReconnect=false: %v", err)
+	}
+}
+
+func TestParseReconnectInterval(t *testing.T) {
+	if got := ParseReconnectInterval("30m"); got != 30*time.Minute {
+		t.Errorf("30m: got %v, want %v", got, 30*time.Minute)
+	}
+	if got := ParseReconnectInterval("2h"); got != 2*time.Hour {
+		t.Errorf("2h: got %v, want %v", got, 2*time.Hour)
+	}
+	if got := ParseReconnectInterval("on_failure"); got != 0 {
+		t.Errorf("on_failure: got %v, want 0", got)
+	}
+	if got := ParseReconnectInterval(""); got != 0 {
+		t.Errorf("empty: got %v, want 0", got)
+	}
+	if got := ParseReconnectInterval("garbage"); got != 0 {
+		t.Errorf("garbage: got %v, want 0", got)
 	}
 }

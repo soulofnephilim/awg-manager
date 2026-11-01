@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hoaxisr/awg-manager/internal/singbox/router"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 )
 
@@ -98,6 +99,58 @@ func (c *Config) routeRules() []any {
 	route, _ := c.raw["route"].(map[string]any)
 	rules, _ := route["rules"].([]any)
 	return rules
+}
+
+func (c *Config) dnsServers() []any {
+	dns, _ := c.raw["dns"].(map[string]any)
+	v, _ := dns["servers"].([]any)
+	return v
+}
+
+// setDNSServers пишет dns.servers; пустой список вместе с опустевшим блоком
+// dns убирается — слот без своих серверов не несёт ключ dns вовсе.
+func (c *Config) setDNSServers(v []any) {
+	dns, _ := c.raw["dns"].(map[string]any)
+	if len(v) == 0 {
+		if dns != nil {
+			delete(dns, "servers")
+			if len(dns) == 0 {
+				delete(c.raw, "dns")
+			}
+		}
+		return
+	}
+	if dns == nil {
+		dns = map[string]any{}
+		c.raw["dns"] = dns
+	}
+	dns["servers"] = v
+}
+
+func (c *Config) upsertDNSServer(tag string, server map[string]any) {
+	servers := c.dnsServers()
+	for i, v := range servers {
+		if m, ok := v.(map[string]any); ok && m["tag"] == tag {
+			servers[i] = server
+			c.setDNSServers(servers)
+			return
+		}
+	}
+	c.setDNSServers(append(servers, server))
+}
+
+func (c *Config) removeDNSServers(drop func(tag string) bool) {
+	servers := c.dnsServers()
+	out := make([]any, 0, len(servers))
+	for _, v := range servers {
+		if m, ok := v.(map[string]any); ok {
+			if tag, _ := m["tag"].(string); drop(tag) {
+				continue
+			}
+		}
+		out = append(out, v)
+	}
+	c.setDNSServers(out)
 }
 
 func (c *Config) setInbounds(v []any)  { c.raw["inbounds"] = v }
@@ -659,6 +712,14 @@ func outboundRequiresFeature(obType string) string {
 	return ""
 }
 
+// MissingBuildTagMsg — хвост отказа «протокол вне сборки бинаря». Один на
+// все места (F408): фронт переводит его по регулярке `missing sing-box build
+// tag "…"` (linkImportError.ts), и переформулировка одной копии молча
+// вернула бы перевод к общему правилу.
+func MissingBuildTagMsg(tag, obType string) string {
+	return fmt.Sprintf("missing sing-box build tag %q, update sing-box to a version supporting %s", tag, obType)
+}
+
 // OutboundTypeRequiresFeature exposes outboundRequiresFeature for
 // cross-package callers (Operator, orchestrator, subscription layer).
 func OutboundTypeRequiresFeature(obType string) string {
@@ -740,9 +801,38 @@ func isDeviceProxyInboundTag(tag string) bool {
 		(strings.HasPrefix(tag, "device-proxy-") && strings.HasSuffix(tag, "-in"))
 }
 
-func isDeviceProxySelectorTag(tag string) bool {
+// deviceProxyLANTag — direct-outbound инстанса для LAN-адресов (F702).
+func deviceProxyLANTag(id string) string {
+	if id == "" || id == "default" {
+		return "device-proxy-lan"
+	}
+	return "device-proxy-" + id + "-lan"
+}
+
+// deviceProxyLANDNSTag — DNS-сервер инстанса: резолвер роутера на 127.0.0.1,
+// им device-proxy-lan резолвит LAN-имена (публичный резолвер их не знает).
+func deviceProxyLANDNSTag(id string) string { return deviceProxyLANTag(id) + "-dns" }
+
+func isDeviceProxyDNSServerTag(tag string) bool {
+	return strings.HasPrefix(tag, "device-proxy-") && strings.HasSuffix(tag, "-lan-dns")
+}
+
+// deviceProxyLANSuffixes / deviceProxyLANNameRegex — имена, которые
+// резолвятся только в LAN: зоны для локальных сетей, однословные имена и
+// собственные имена роутера (my.keenetic.net резолвится в адрес роутера,
+// не обязательно частный — ip_is_private его не ловит). Узко намеренно
+// (решение владельца 21.10): без .local (mDNS) и .internal — корпоративные
+// имена должны уходить в выбранный туннель.
+var deviceProxyLANSuffixes = []any{"lan", "home.arpa", "my.keenetic.net", "my.netcraze.net"}
+
+const deviceProxyLANNameRegex = "^[^.]+$"
+
+// isDeviceProxyOutboundTag — outbound'ы, которые слот прокси для устройств
+// создаёт сам: селектор и LAN-direct инстанса.
+func isDeviceProxyOutboundTag(tag string) bool {
 	return tag == deviceProxySelectorTag ||
-		(strings.HasPrefix(tag, "device-proxy-") && strings.HasSuffix(tag, "-selector"))
+		(strings.HasPrefix(tag, "device-proxy-") &&
+			(strings.HasSuffix(tag, "-selector") || strings.HasSuffix(tag, "-lan")))
 }
 
 // EnsureDeviceProxy writes (or overwrites) the inbound + selector
@@ -797,13 +887,15 @@ func (c *Config) EnsureDeviceProxyInstance(spec DeviceProxyInstanceSpec) error {
 	// era. AWG outbounds now live in 15-awg.json.
 	c.pruneAWGOutbounds(nil)
 
-	members := []any{"direct"}
-	for _, tag := range spec.SBTags {
-		members = append(members, tag)
-	}
+	tags := append([]string{"direct"}, spec.SBTags...)
 	awgTagsCopy := append([]string(nil), spec.AWGTags...)
 	sort.Strings(awgTagsCopy)
-	for _, tag := range awgTagsCopy {
+	tags = append(tags, awgTagsCopy...)
+	// Источники членов независимы: тег композита маршрутизатора не сверяется
+	// с тегами туннелей и с "direct", — повтор свёртываем, с ним sing-box
+	// не стартует (F731).
+	members := []any{}
+	for _, tag := range router.UniqueMemberTags(tags) {
 		members = append(members, tag)
 	}
 
@@ -817,7 +909,24 @@ func (c *Config) EnsureDeviceProxyInstance(spec DeviceProxyInstanceSpec) error {
 	}
 	c.upsertOutbound(selectorTag, selector)
 
-	c.ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag)
+	// Любой *_bind_address отключает автопривязку sing-box к интерфейсу
+	// (common/dialer/default.go, disableDefaultBind): под auto_detect_interface
+	// сокет к собственному адресу роутера привязывается к его интерфейсу, и
+	// на ядре Keenetic соединение висит до таймаута (F702, стенд 21.10).
+	lanTag := deviceProxyLANTag(spec.ID)
+	lanDNSTag := deviceProxyLANDNSTag(spec.ID)
+	// udp на 127.0.0.1, а не type:local: тот уводит .local в mDNS мультикастом
+	// во все интерфейсы, включая WAN. Адрес отправителя не нужен: к loopback
+	// sing-box сокет к интерфейсу не привязывает (control/bind.go, IsVirtual).
+	c.upsertDNSServer(lanDNSTag, map[string]any{"type": "udp", "tag": lanDNSTag, "server": "127.0.0.1"})
+	c.upsertOutbound(lanTag, map[string]any{
+		"type":               "direct",
+		"tag":                lanTag,
+		"inet4_bind_address": "0.0.0.0",
+		"domain_resolver":    lanDNSTag,
+	})
+
+	c.ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag, lanTag)
 	return nil
 }
 
@@ -832,6 +941,9 @@ func (c *Config) RemoveDeviceProxyInstance(id string) {
 	inboundTag, selectorTag := deviceProxyInstanceTags(id)
 	c.removeInbound(inboundTag)
 	c.removeOutbound(selectorTag)
+	c.removeOutbound(deviceProxyLANTag(id))
+	lanDNSTag := deviceProxyLANDNSTag(id)
+	c.removeDNSServers(func(tag string) bool { return tag == lanDNSTag })
 	c.pruneAWGOutbounds(nil)
 	c.removeDeviceProxyInstanceRouteRule(inboundTag)
 }
@@ -864,12 +976,13 @@ func (c *Config) RemoveAllDeviceProxyInstances() {
 			continue
 		}
 		tag, _ := ob["tag"].(string)
-		if isDeviceProxySelectorTag(tag) {
+		if isDeviceProxyOutboundTag(tag) {
 			continue
 		}
 		nextOutbounds = append(nextOutbounds, v)
 	}
 	c.setOutbounds(nextOutbounds)
+	c.removeDNSServers(isDeviceProxyDNSServerTag)
 
 	rules := c.routeRules()
 	nextRules := make([]any, 0, len(rules))
@@ -936,8 +1049,15 @@ func (c *Config) ExtractDeviceProxy() *Config {
 		if !ok {
 			continue
 		}
-		if t, _ := ob["tag"].(string); isDeviceProxySelectorTag(t) {
+		if t, _ := ob["tag"].(string); isDeviceProxyOutboundTag(t) {
 			out.upsertOutbound(t, ob)
+		}
+	}
+	for _, v := range c.dnsServers() {
+		if m, ok := v.(map[string]any); ok {
+			if t, _ := m["tag"].(string); isDeviceProxyDNSServerTag(t) {
+				out.upsertDNSServer(t, m)
+			}
 		}
 	}
 	for _, v := range c.routeRules() {
@@ -1056,7 +1176,33 @@ func (c *Config) pruneAWGOutbounds(keep map[string]string) {
 	c.setOutbounds(out)
 }
 
-func (c *Config) ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag string) {
+func (c *Config) ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag, lanTag string) {
+	// LAN-адреса — мимо туннеля. Слот грузится раньше правил маршрутизатора
+	// (F701), и его системное ip_is_private → direct до этого входа не доходит.
+	privateDirect := map[string]any{
+		"inbound":       inboundTag,
+		"ip_is_private": true,
+		"outbound":      lanTag,
+	}
+	// Loopback и unspecified-адреса роутера — не назначение для клиентов
+	// прокси (ip_is_private ниже включает и те, и другие).
+	rejectLoopback := map[string]any{
+		"inbound": inboundTag,
+		"ip_cidr": []any{"127.0.0.0/8", "::1/128", "0.0.0.0/32", "::/128"},
+		"action":  "reject",
+	}
+	rejectLocalhost := map[string]any{
+		"inbound":       inboundTag,
+		"domain_suffix": []any{"localhost"},
+		"action":        "reject",
+	}
+	// SOCKS5h/HTTP передают имя — ip_is_private по нему не сработает.
+	lanNames := map[string]any{
+		"inbound":       inboundTag,
+		"domain_suffix": deviceProxyLANSuffixes,
+		"domain_regex":  []any{deviceProxyLANNameRegex},
+		"outbound":      lanTag,
+	}
 	rule := map[string]any{
 		"inbound":  inboundTag,
 		"outbound": selectorTag,
@@ -1074,7 +1220,7 @@ func (c *Config) ensureDeviceProxyInstanceRouteRule(inboundTag, selectorTag stri
 		}
 		filtered = append(filtered, v)
 	}
-	c.setRouteRules(append([]any{rule}, filtered...))
+	c.setRouteRules(append([]any{rejectLoopback, rejectLocalhost, lanNames, privateDirect, rule}, filtered...))
 }
 
 func (c *Config) removeDeviceProxyInstanceRouteRule(inboundTag string) {

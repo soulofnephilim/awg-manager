@@ -29,6 +29,10 @@ func NewSingboxFakeIPConfigHandler(svc router.FakeIPConfigService, appLogger log
 	}
 }
 
+// Service returns the fakeip-tun configuration service, for MCP to read the
+// same instance.
+func (h *SingboxFakeIPConfigHandler) Service() router.FakeIPConfigService { return h.svc }
+
 // handleErr maps domain sentinel errors to appropriate HTTP statuses.
 // ErrFakeIPLockedField → 400 (clear client error, field is engine-managed).
 // Reference/conflict errors → 400 CONFLICT (mirror router convention).
@@ -58,6 +62,15 @@ func (h *SingboxFakeIPConfigHandler) handleErr(w http.ResponseWriter, action str
 		// 400: тег inline-набора именует файл его артефакта — иначе два набора
 		// делят один файл и затирают правила друг друга (F434, #941).
 		response.Error(w, err.Error(), "RULE_SET_TAG_UNSAFE")
+	case errors.Is(err, router.ErrBindNotSelectable):
+		// 400: bind_interface вне каталога — ввод пользователя, не сбой (F429).
+		response.Error(w, err.Error(), "BIND_NOT_SELECTABLE")
+	case errors.Is(err, router.ErrDNSBindAddress):
+		// 400: адрес отправителя DNS-сервера — ввод пользователя, не сбой.
+		response.Error(w, err.Error(), "DNS_BIND_ADDRESS_INVALID")
+	case errors.Is(err, router.ErrDNSServerInvalid):
+		// 400: поля DNS-сервера не прошли проверку — ввод, не сбой (F671).
+		response.Error(w, err.Error(), "DNS_SERVER_INVALID")
 	case errors.Is(err, router.ErrInvalidMatchers),
 		errors.Is(err, router.ErrDNSInvalidServer):
 		response.Error(w, err.Error(), "INVALID_MATCHERS")
@@ -68,6 +81,9 @@ func (h *SingboxFakeIPConfigHandler) handleErr(w http.ResponseWriter, action str
 	case errors.Is(err, router.ErrCompositeMemberUnknown):
 		// 400: member-тег композита не существует ни в одном каталоге (#567).
 		response.Error(w, err.Error(), "COMPOSITE_MEMBER_UNKNOWN")
+	case errors.Is(err, router.ErrOutboundInvalid):
+		// 400: форма outbound не прошла проверку — ошибка ввода, не сбой.
+		response.Error(w, err.Error(), "OUTBOUND_INVALID")
 	case errors.Is(err, router.ErrBulkInvalidSelection):
 		// 400: non-empty but invalid bulk selection (duplicate index/tag,
 		// non-route rule, unknown outbound tag, non-remote rule set).

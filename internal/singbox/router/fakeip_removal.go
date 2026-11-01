@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 )
@@ -13,12 +14,14 @@ import (
 // Маршруты пула и CIDR отдельно не снимаются: NDMS удаляет их вместе с
 // интерфейсом, к которому они привязаны (стенд 25.09.2026: v4-пул, CIDR и
 // v6-пул ушли по `no interface`). Перехват DNS и ip rule таблицы 700 живут в
-// ядре и снимаются в prerm — IPTables здесь не собираем: его конструктор
-// переписывает netfilter-хуки, а на удалении нужно обратное.
+// ядре и снимаются в prerm; перехват sb-router — ReleaseNetfilterForRemoval.
 //
 // Персист fakeip после выключения режима очищается, поэтому запись есть
 // только у включённого режима — выключенный интерфейса и не держит.
 func ReleaseFakeIPTunForRemoval(ctx context.Context, d Deps) error {
+	if d.SwapGate == nil {
+		return errNoSwapGate
+	}
 	if d.Settings == nil || d.OpkgTun == nil {
 		return nil
 	}
@@ -36,7 +39,11 @@ func ReleaseFakeIPTunForRemoval(ctx context.Context, d Deps) error {
 	}
 	ndmsName := tunNDMSName(st.Index)
 	// Индекс из записи мог занять ЧУЖОЙ OpkgTun — см. ReleasePolicyTunForRemoval.
-	if s.skipForeignTeardown(ctx, ndmsName, fakeIPTunDescription, "fakeip-remove") {
+	// Скан упал — отказ ошибкой (F493): `--cleanup` печатает её, интерфейс живёт.
+	if proceed, err := s.teardownGate(ctx, ndmsName, "fakeip-remove", fakeIPTunDescription); !proceed {
+		if err != nil {
+			return fmt.Errorf("%s: %w", ndmsName, err)
+		}
 		return nil
 	}
 	return s.teardownOpkgTun(ctx, ndmsName, "fakeip-remove")

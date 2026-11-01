@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import type { SystemProcessItem } from '$lib/api/client';
 	import { Card } from '$lib/components/ui';
 	import { RefreshCw, Search, ArrowUp, ArrowDown } from 'lucide-svelte';
@@ -9,13 +10,14 @@
 		processes: SystemProcessItem[];
 		loading: boolean;
 		initialLoaded: boolean;
+		cpuCount: number;
 		sortField: SortField;
 		sortAsc: boolean;
 		onsort: (field: SortField) => void;
 		onkill: (proc: SystemProcessItem) => void;
 	}
 
-	let { processes, loading, initialLoaded, sortField, sortAsc, onsort, onkill }: Props = $props();
+	let { processes, loading, initialLoaded, cpuCount, sortField, sortAsc, onsort, onkill }: Props = $props();
 </script>
 
 <Card padding="sm">
@@ -23,12 +25,12 @@
 		{#if !initialLoaded && loading}
 			<div class="empty-state">
 				<RefreshCw size={24} class="spin" />
-				<p>Сбор списка процессов роутера…</p>
+				<p>{m.system_processes_t_collecting()}</p>
 			</div>
 		{:else if processes.length === 0}
 			<div class="empty-state">
 				<Search size={24} class="muted" />
-				<p>Процессы не найдены по текущему запросу</p>
+				<p>{m.system_processes_t_none()}</p>
 			</div>
 		{:else}
 			<table class="proc-table">
@@ -44,7 +46,7 @@
 						</th>
 						<th class="th-sortable col-th-user" onclick={() => onsort('user')}>
 							<div class="th-wrap">
-								<span>Польз.</span>
+								<span>{m.system_processes_t_user()}</span>
 								{#if sortField === 'user'}
 									{#if sortAsc}<ArrowUp size={11} />{:else}<ArrowDown size={11} />{/if}
 								{/if}
@@ -52,7 +54,7 @@
 						</th>
 						<th class="th-sortable col-th-state" onclick={() => onsort('state')}>
 							<div class="th-wrap">
-								<span>Сост.</span>
+								<span>{m.system_processes_t_state()}</span>
 								{#if sortField === 'state'}
 									{#if sortAsc}<ArrowUp size={11} />{:else}<ArrowDown size={11} />{/if}
 								{/if}
@@ -60,13 +62,17 @@
 						</th>
 						<th class="th-sortable col-th-threads" onclick={() => onsort('threads')}>
 							<div class="th-wrap">
-								<span>Потоки</span>
+								<span>{m.system_processes_t_threads()}</span>
 								{#if sortField === 'threads'}
 									{#if sortAsc}<ArrowUp size={11} />{:else}<ArrowDown size={11} />{/if}
 								{/if}
 							</div>
 						</th>
-						<th class="th-sortable col-th-cpu" onclick={() => onsort('cpu')}>
+						<th
+							class="th-sortable col-th-cpu"
+							title={cpuCount > 1 ? m.system_processes_t_cpu_title_cores({ count: cpuCount }) : m.system_processes_t_cpu_title()}
+							onclick={() => onsort('cpu')}
+						>
 							<div class="th-wrap">
 								<span>CPU %</span>
 								{#if sortField === 'cpu'}
@@ -74,9 +80,25 @@
 								{/if}
 							</div>
 						</th>
-						<th class="th-sortable col-th-mem" onclick={() => onsort('mem')}>
+						<th
+							class="th-sortable col-th-time"
+							title={m.system_processes_t_cpu_time_title()}
+							onclick={() => onsort('time')}
+						>
 							<div class="th-wrap">
-								<span>Память</span>
+								<span>{m.system_processes_t_cpu_time()}</span>
+								{#if sortField === 'time'}
+									{#if sortAsc}<ArrowUp size={11} />{:else}<ArrowDown size={11} />{/if}
+								{/if}
+							</div>
+						</th>
+						<th
+							class="th-sortable col-th-mem"
+							title={m.system_processes_t_mem_title()}
+							onclick={() => onsort('mem')}
+						>
+							<div class="th-wrap">
+								<span>{m.system_processes_t_memory()}</span>
 								{#if sortField === 'mem'}
 									{#if sortAsc}<ArrowUp size={11} />{:else}<ArrowDown size={11} />{/if}
 								{/if}
@@ -84,18 +106,18 @@
 						</th>
 						<th class="th-sortable col-th-cmd" onclick={() => onsort('name')}>
 							<div class="th-wrap">
-								<span>Команда / Процесс</span>
+								<span>{m.system_processes_t_cmd()}</span>
 								{#if sortField === 'name'}
 									{#if sortAsc}<ArrowUp size={11} />{:else}<ArrowDown size={11} />{/if}
 								{/if}
 							</div>
 						</th>
-						<th class="col-th-act">Стоп</th>
+						<th class="col-th-act">{m.system_processes_t_stop()}</th>
 					</tr>
 				</thead>
 				<tbody>
 					{#each processes as proc (proc.pid)}
-						<ProcessRow {proc} {onkill} />
+						<ProcessRow {proc} {cpuCount} {onkill} />
 					{/each}
 				</tbody>
 			</table>
@@ -146,6 +168,7 @@
 	.col-th-state { width: 48px; text-align: center; }
 	.col-th-threads { width: 56px; text-align: center; }
 	.col-th-cpu { width: 76px; }
+	.col-th-time { width: 84px; }
 	.col-th-mem { width: 110px; }
 	.col-th-cmd { width: auto; overflow: hidden; }
 	.col-th-act { width: 48px; text-align: center; }

@@ -5,6 +5,7 @@
 <script lang="ts">
 	import { Check, X, Loader, Circle } from 'lucide-svelte';
 	import { Modal, Button } from '$lib/components/ui';
+	import { m } from '$lib/i18n';
 	import { humanLabel } from './switchConsequences';
 	import { deriveSteps } from './switchSteps';
 	import type { FakeIPTransitionState, FakeIPMode } from '$lib/stores/fakeipTransition';
@@ -23,7 +24,9 @@
 
 	const fromMode = $derived((transitionState?.from ?? 'tproxy') as FakeIPMode);
 	const toMode = $derived((transitionState?.to ?? 'fakeip-tun') as FakeIPMode);
-	const title = $derived(`Переключение: ${humanLabel(fromMode)} → ${humanLabel(toMode)}`);
+	const title = $derived(
+		m.fakeip_switch_title({ from: humanLabel(fromMode), to: humanLabel(toMode) }),
+	);
 
 	const rows = $derived(deriveSteps(fromMode, toMode, transitionState?.steps ?? [], { failed }));
 	const finalLabel = $derived(humanLabel((transitionState?.finalState as FakeIPMode) ?? fromMode));
@@ -34,7 +37,7 @@
 	<ul class="steps">
 		{#each rows as row (row.title)}
 			<li class="step state-{row.state}">
-				<span class="mark">
+				<span class="switch-mark">
 					{#if row.state === 'done'}<Check size={18} strokeWidth={2.5} />
 					{:else if row.state === 'error'}<X size={18} strokeWidth={2.5} />
 					{:else if row.state === 'current'}<Loader size={18} class="spin" />
@@ -53,16 +56,16 @@
 	</ul>
 
 	{#if done && succeeded}
-		<p class="result ok">✓ Режим «{finalLabel}» активен.</p>
+		<p class="result ok">{m.fakeip_switch_succeeded({ mode: finalLabel })}</p>
 	{:else if failed}
 		<p class="result err">
-			✕ Откат в «{finalLabel}».{#if failedRow}&nbsp;Упавший шаг: {failedRow.title}.{/if}{#if transitionState?.error}&nbsp;{transitionState.error}{/if}
+			{m.fakeip_switch_rolled_back({ mode: finalLabel })}{#if failedRow}&nbsp;{m.fakeip_switch_failed_step({ step: failedRow.title })}{/if}{#if transitionState?.error}&nbsp;{transitionState.error}{/if}
 		</p>
 	{/if}
 
 	{#snippet actions()}
 		{#if done}
-			<Button variant="primary" size="md" onclick={onClose}>Закрыть</Button>
+			<Button variant="primary" size="md" onclick={onClose}>{m.common_close()}</Button>
 		{/if}
 	{/snippet}
 </Modal>
@@ -86,7 +89,7 @@
 		border-bottom: none;
 	}
 
-	.mark {
+	.switch-mark {
 		flex: 0 0 1.375rem;
 		display: inline-flex;
 		align-items: center;
@@ -95,13 +98,13 @@
 		color: var(--text-muted);
 	}
 
-	.step.state-done .mark {
+	.step.state-done .switch-mark {
 		color: var(--color-success);
 	}
-	.step.state-current .mark {
+	.step.state-current .switch-mark {
 		color: var(--color-accent, var(--accent));
 	}
-	.step.state-error .mark {
+	.step.state-error .switch-mark {
 		color: var(--color-error);
 	}
 

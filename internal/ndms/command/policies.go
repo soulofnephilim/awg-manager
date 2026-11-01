@@ -7,19 +7,14 @@ import (
 )
 
 type PolicyCommands struct {
-	poster       Poster
-	save         *SaveCoordinator
-	queries      *query.Queries
-	hookNotifier HookNotifier
+	poster  Poster
+	save    *SaveCoordinator
+	queries *query.Queries
 }
 
-func NewPolicyCommands(p Poster, s *SaveCoordinator, q *query.Queries, hn HookNotifier) *PolicyCommands {
-	return &PolicyCommands{poster: p, save: s, queries: q, hookNotifier: hn}
+func NewPolicyCommands(p Poster, s *SaveCoordinator, q *query.Queries) *PolicyCommands {
+	return &PolicyCommands{poster: p, save: s, queries: q}
 }
-
-// SetHookNotifier replaces the HookNotifier after construction. See
-// InterfaceCommands.SetHookNotifier for the rationale.
-func (c *PolicyCommands) SetHookNotifier(hn HookNotifier) { c.hookNotifier = hn }
 
 func (c *PolicyCommands) CreatePolicy(ctx context.Context, name, description string) error {
 	payload := map[string]any{
@@ -80,42 +75,54 @@ func (c *PolicyCommands) SetStandalone(ctx context.Context, name string, enabled
 		c.queries.RunningConfig.InvalidateAll)
 }
 
-func (c *PolicyCommands) PermitInterface(ctx context.Context, name, iface string, order int) error {
+func (c *PolicyCommands) PermitInterface(ctx context.Context, name string, iface query.Confirmed, order int) error {
 	payload := map[string]any{
 		"ip": map[string]any{
 			"policy": map[string]any{
 				name: map[string]any{
 					"permit": map[string]any{
 						"global":    true,
-						"interface": iface,
+						"interface": iface.Name(),
 						"order":     order,
 					},
 				},
 			},
 		},
 	}
-	return postMutationChecked(ctx, c.poster, c.save, payload, "permit "+iface+" on "+name,
+	return postMutationChecked(ctx, c.poster, c.save, payload, "permit "+iface.Name()+" on "+name,
 		c.queries.Policies.InvalidateAll,
 		c.queries.RunningConfig.InvalidateAll)
 }
 
-func (c *PolicyCommands) DenyInterface(ctx context.Context, name, iface string) error {
-	payload := map[string]any{
+func (c *PolicyCommands) DenyInterface(ctx context.Context, name string, iface query.Confirmed) error {
+	return postMutationChecked(ctx, c.poster, c.save, denyPayload(name, iface), "deny "+iface.Name()+" on "+name,
+		c.queries.Policies.InvalidateAll,
+		c.queries.RunningConfig.InvalidateAll)
+}
+
+// DenyInterfaceUnsaved — DenyInterface без сохранения во флеш: временное
+// снятие мониторингом (F753). Перезагрузка вернёт сохранённый permit, а
+// чужое сохранение, захватившее снятие, отменит возврат — он сохраняется.
+func (c *PolicyCommands) DenyInterfaceUnsaved(ctx context.Context, name string, iface query.Confirmed) error {
+	return PostChecked(ctx, c.poster, denyPayload(name, iface), "deny "+iface.Name()+" on "+name, nil,
+		c.queries.Policies.InvalidateAll,
+		c.queries.RunningConfig.InvalidateAll)
+}
+
+func denyPayload(name string, iface query.Confirmed) map[string]any {
+	return map[string]any{
 		"ip": map[string]any{
 			"policy": map[string]any{
 				name: map[string]any{
 					"permit": map[string]any{
 						"global":    true,
-						"interface": iface,
+						"interface": iface.Name(),
 						"no":        true,
 					},
 				},
 			},
 		},
 	}
-	return postMutationChecked(ctx, c.poster, c.save, payload, "deny "+iface+" on "+name,
-		c.queries.Policies.InvalidateAll,
-		c.queries.RunningConfig.InvalidateAll)
 }
 
 func (c *PolicyCommands) AssignDevice(ctx context.Context, mac, policyName string) error {

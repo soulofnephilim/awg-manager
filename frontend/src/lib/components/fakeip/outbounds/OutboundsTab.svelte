@@ -36,6 +36,7 @@
   рендер делегирован под-карточкам.
 -->
 <script lang="ts">
+	import { m, formatLocale } from '$lib/i18n';
 	import { fakeipConfig } from '$lib/stores/fakeipConfig';
 	import { singboxProxies } from '$lib/stores/singboxProxies';
 	import { singboxDelayHistory, triggerDelayCheck } from '$lib/stores/singbox';
@@ -115,10 +116,12 @@
 		try {
 			await api.singboxFakeIPDeleteOutbound(pendingDelete.tag);
 			await fakeipConfig.loadAll();
-			notifications.success('Outbound удалён');
+			notifications.success(m.sb_router_expert_outbound_deleted());
 			pendingDelete = null;
 		} catch (e) {
-			notifications.error(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+			notifications.error(
+				m.sb_router_common_error({ message: e instanceof Error ? e.message : String(e) }),
+			);
 		} finally {
 			deleteBusy = false;
 		}
@@ -134,7 +137,7 @@
 	let lastTestAtAny = $state<string | null>(null);
 
 	function nowHHMM(): string {
-		return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+		return new Date().toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' });
 	}
 
 	async function handleTest(tag: string): Promise<void> {
@@ -149,9 +152,58 @@
 			// Refresh the live snapshot so `now` / lastDelay reflect the probe.
 			await singboxProxies.refetch();
 		} catch (e) {
-			notifications.error(`Тест не удался: ${e instanceof Error ? e.message : String(e)}`);
+			notifications.error(
+				m.fakeip_outbounds_test_failed({ message: e instanceof Error ? e.message : String(e) }),
+			);
 		} finally {
 			testingTag = null;
+		}
+	}
+
+	// ── Runtime: per-member тест задержки в composite-группе ────────────
+	let memberTesting = $state<Record<string, boolean>>({});
+
+	async function handleMemberTest(
+		groupTag: string,
+		memberTag: string,
+		memberLabel: string,
+	): Promise<void> {
+		if (memberTesting[memberTag]) return;
+		memberTesting = { ...memberTesting, [memberTag]: true };
+		try {
+			const res = await api.singboxDelayCheck(memberTag).catch(async () => {
+				if (memberLabel && memberLabel !== memberTag) {
+					return await api.singboxDelayCheck(memberLabel);
+				}
+				throw new Error('Timeout');
+			});
+			const delay = res?.delay ?? 0;
+			const currentGroup = testResults[groupTag] ?? {};
+			testResults = {
+				...testResults,
+				[groupTag]: { ...currentGroup, [memberTag]: delay },
+			};
+			const stamp = nowHHMM();
+			lastTestAt = { ...lastTestAt, [groupTag]: stamp };
+			lastTestAtAny = stamp;
+			if (delay > 0) {
+				notifications.success(
+					m.fakeip_outbounds_member_delay_result({ name: memberLabel, delay }),
+				);
+			} else {
+				notifications.warning(
+					m.fakeip_outbounds_member_timeout({ name: memberLabel }),
+				);
+			}
+			await singboxProxies.refetch();
+		} catch (e) {
+			notifications.error(
+				m.fakeip_outbounds_test_failed({ message: e instanceof Error ? e.message : String(e) }),
+			);
+		} finally {
+			const next = { ...memberTesting };
+			delete next[memberTag];
+			memberTesting = next;
 		}
 	}
 
@@ -192,7 +244,9 @@
 			await api.singboxRouterSelectProxy({ group, member });
 			await singboxProxies.refetch();
 		} catch (e) {
-			notifications.error(`Не удалось выбрать: ${e instanceof Error ? e.message : String(e)}`);
+			notifications.error(
+				m.fakeip_outbounds_select_failed({ message: e instanceof Error ? e.message : String(e) }),
+			);
 		} finally {
 			selectingTag = null;
 		}
@@ -206,13 +260,11 @@
 				>Outbounds · atomic <span class="sect-count">· {atomicEgresses.length}</span></span
 			>
 			<span class="sect-right">
-				<span class="hc">health-check по запросу{#if lastTestAtAny} · last {lastTestAtAny}{/if}</span>
+				<span class="hc">{m.fakeip_outbounds_health_check()}{#if lastTestAtAny} · last {lastTestAtAny}{/if}</span>
 			</span>
 		</div>
 		{#if atomicEgresses.length === 0}
-			<p class="section-empty">
-				Пул прокси-выходов пуст. Добавьте туннели или подписку.
-			</p>
+			<p class="section-empty">{m.fakeip_outbounds_pool_empty()}</p>
 		{:else}
 			<div class="ocards">
 				{#each atomicEgresses as e (e.tag)}
@@ -235,11 +287,11 @@
 				></span
 			>
 			<button type="button" class="add" onclick={() => (addOpen = true)}>
-				<Plus size={13} aria-hidden="true" /> Новая группа
+				<Plus size={13} aria-hidden="true" /> {m.fakeip_outbounds_new_group()}
 			</button>
 		</div>
 		{#if partitioned.composite.length === 0}
-			<p class="section-empty">Composite-группы не настроены.</p>
+			<p class="section-empty">{m.fakeip_outbounds_no_composites()}</p>
 		{:else}
 			<div class="ocards">
 				{#each partitioned.composite as o (o.tag)}
@@ -253,10 +305,12 @@
 						testDelays={testResults[o.tag]}
 						testing={testingTag === o.tag}
 						selecting={selectingTag === o.tag}
+						{memberTesting}
 						lastTestAt={lastTestAt[o.tag]}
 						onEdit={(tag) => (editTag = tag)}
 						onDelete={requestDelete}
 						onTest={handleTest}
+						onTestMember={handleMemberTest}
 						onSelect={handleSelect}
 					/>
 				{/each}
@@ -267,6 +321,7 @@
 
 {#if addOpen}
 	<CompositeOutboundEditModal
+		outbounds={$storeOutbounds}
 		outboundOptions={$storeOptions}
 		onClose={() => (addOpen = false)}
 		onSave={handleAddSave}
@@ -276,6 +331,7 @@
 {#if editTag !== null && editTarget !== undefined}
 	<CompositeOutboundEditModal
 		outbound={editTarget}
+		outbounds={$storeOutbounds}
 		outboundOptions={$storeOptions}
 		onClose={() => (editTag = null)}
 		onSave={handleEditSave}
@@ -284,8 +340,8 @@
 
 <ConfirmModal
 	open={pendingDelete !== null}
-	title="Удалить outbound"
-	message={pendingDelete ? `Удалить outbound «${pendingDelete.title}»?` : ''}
+	title={m.sb_router_expert_outbound_delete_title()}
+	message={pendingDelete ? m.sb_router_expert_outbound_delete_message({ tag: pendingDelete.title }) : ''}
 	busy={deleteBusy}
 	onConfirm={confirmDelete}
 	onClose={() => {

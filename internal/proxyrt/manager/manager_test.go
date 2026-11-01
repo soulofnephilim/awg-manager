@@ -111,8 +111,9 @@ type fakeInstance struct {
 	// calls — ПОРЯДОК обращений менеджера к инстансу. Сброс паузы обязан
 	// ложиться ДО побудки, и факта вызова тут мало: сброс после побудки
 	// пропадает впустую (см. TestUpdateResetsStartBackoffBeforeWakeup).
-	calls  []string
-	onStop func() // для TestStopRunsOutsideManagerLock
+	calls              []string
+	unsupportedRestart bool
+	onStop             func() // для TestStopRunsOutsideManagerLock
 }
 
 func (f *fakeInstance) Start(context.Context) { f.mu.Lock(); f.started = true; f.mu.Unlock() }
@@ -139,6 +140,13 @@ func (f *fakeInstance) ResetStartBackoff() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "reset")
+}
+
+func (f *fakeInstance) Restart(reason string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "restart:"+reason)
+	return !f.unsupportedRestart
 }
 
 // callTail — последние n обращений: хвост, а не весь список, потому что boot
@@ -1554,6 +1562,33 @@ func TestAckListenMovesClearsDiskAndCache(t *testing.T) {
 	}
 }
 
+func TestManagerRestart(t *testing.T) {
+	e := newEnv(t)
+	seedState(t, e, ftRec("c1"), ftRec("s1"))
+	boot(t, e)
+
+	serverKey := "freeturn-client:s1"
+	e.instances[serverKey].unsupportedRestart = true
+
+	key := "freeturn-client:c1"
+	if err := e.m.Restart(context.Background(), key, "тестовый перезапуск"); err != nil {
+		t.Fatalf("Restart вернул ошибку: %v", err)
+	}
+	inst := e.instances[key]
+	tail := inst.callTail(1)
+	if len(tail) != 1 || tail[0] != "restart:тестовый перезапуск" {
+		t.Errorf("неверный порядок вызовов при Restart: %v", tail)
+	}
+
+	if err := e.m.Restart(context.Background(), serverKey, "перезапуск сервера"); !errors.Is(err, ErrRestartUnsupported) {
+		t.Errorf("Restart неподдерживаемой роли обязан вернуть ErrRestartUnsupported, получено: %v", err)
+	}
+
+	if err := e.m.Restart(context.Background(), "unknown:key", "причина"); !errors.Is(err, ErrInstanceNotFound) {
+		t.Errorf("Restart несуществующего инстанса обязан вернуть ErrInstanceNotFound, получено: %v", err)
+	}
+}
+
 // PF16: переезд listen-порта на пути Update виден тем же каналом, что и на
 // бооте. Прежде боот писал MovedListen, а правка меняла порт молча — при том
 // что снаружи так же мог быть настроен клиент на прежний адрес.
@@ -1930,6 +1965,30 @@ func TestBootBinariesPendingKeepsOldGenerationAlive(t *testing.T) {
 	}
 }
 
+// F304 M2: пока ворота ждали загрузку, демон завершается (ctx отменён) —
+// бут выходит сразу после ворот: ни PostSeed (добивание старого поколения),
+// ни воркеров с мёртвым ctx.
+func TestBootStopsAfterGateWhenCtxCancelled(t *testing.T) {
+	e := newEnv(t)
+	seedState(t, e, rawRec("de", "OpkgTun18", "opkgtun18"))
+	ctx, cancel := context.WithCancel(context.Background())
+	ensure := e.m.deps.EnsureBinaries
+	e.m.deps.EnsureBinaries = func(c context.Context, recs []instancestore.Record, progress func(string)) error {
+		cancel() // SIGTERM пришёл, пока шла загрузка; сами бинари успели
+		return ensure(c, recs, progress)
+	}
+
+	if err := e.m.Boot(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("бут обязан выйти по отменённому ctx: %v", err)
+	}
+	if len(e.postSeed) != 0 || len(e.instances) != 0 {
+		t.Fatalf("после ворот на мёртвом ctx: postSeed=%d inst=%d", len(e.postSeed), len(e.instances))
+	}
+	if info := e.m.SeedInfo(); info.Booted {
+		t.Fatalf("бут отмечен состоявшимся: %+v", info)
+	}
+}
+
 // nil-хук — прежнее поведение (тесты без проводки).
 func TestBootWithoutBinariesHookBootsAsBefore(t *testing.T) {
 	e := newEnv(t)
@@ -2284,5 +2343,38 @@ func TestCreateReturnsNumbersWhenListenFails(t *testing.T) {
 	idx, ok := opkgtun.NDMSIndexOf(c.NdmsIface)
 	if !ok || idx != kernelWindowFirst {
 		t.Fatalf("номер не вернулся после отказа порта: %+v", c)
+	}
+}
+
+// F138: новый wdtt-клиент без device-id получает значение по умолчанию и
+// хранит его в записи; присланный id не трогается; конфиг вызывающего не
+// мутируется.
+func TestCreateFillsDefaultDeviceID(t *testing.T) {
+	for _, tc := range []struct {
+		name, sent, want string
+	}{
+		{"пустой — подставляется", "", "Ultramarina"},
+		{"присланный — сохраняется", "my-phone", "my-phone"},
+		{"одни пробелы — подставляется", "  ", "Ultramarina"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			seedState(t, e)
+			boot(t, e)
+			e.m.deps.DefaultDeviceID = func(context.Context) string { return "Ultramarina" }
+			cfg := &roles.WdttClientConfig{Mode: "raw", Peer: "1.1.1.1:1", Password: "pw", VKHashes: "h", DeviceID: tc.sent}
+			rec := instancestore.Record{ID: "dv", Kind: instancestore.KindWdttClient, Name: "D", Enabled: true, WdttClient: cfg}
+			if err := e.m.Create(context.Background(), rec); err != nil {
+				t.Fatal(err)
+			}
+			st, _ := e.st.Load()
+			c, _ := st.Records[0].WdttClientConfig()
+			if c.DeviceID != tc.want {
+				t.Fatalf("deviceId = %q, want %q", c.DeviceID, tc.want)
+			}
+			if cfg.DeviceID != tc.sent {
+				t.Fatalf("конфиг вызывающего изменён: %q", cfg.DeviceID)
+			}
+		})
 	}
 }

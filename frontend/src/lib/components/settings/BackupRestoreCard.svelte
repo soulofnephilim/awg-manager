@@ -1,9 +1,14 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { Database } from 'lucide-svelte';
 	import { Button, ConfirmModal } from '$lib/components/ui';
 	import { api } from '$lib/api/client';
 	import { notifications } from '$lib/stores/notifications';
 	import { downloadBlob } from '$lib/utils/download';
+	import { formatBytes, formatDate } from '$lib/utils/format';
+	import { updateSnapshots } from '$lib/stores/updateSnapshots';
+	import type { PollingState } from '$lib/stores/polling';
+	import type { UpdateSnapshot, UpdateSnapshotsData } from '$lib/types';
 	import { waitForBackendRestart } from '$lib/restartRecovery';
 	import SettingsSectionLabel from './SettingsSectionLabel.svelte';
 
@@ -12,6 +17,21 @@
 	let restoreConfirmOpen = $state(false);
 	let pendingFile = $state<File | null>(null);
 	let fileInput = $state<HTMLInputElement | null>(null);
+
+	// Список — через стор: снимок, снятый автообновлением, и удаление в другой
+	// вкладке приходят SSE-подсказкой без перезагрузки страницы.
+	let snapshotsState = $state<PollingState<UpdateSnapshotsData> | null>(null);
+	$effect(() => updateSnapshots.subscribe((s) => (snapshotsState = s)));
+	let snapshots = $derived(snapshotsState?.data?.snapshots ?? []);
+	let snapshotKeep = $derived(snapshotsState?.data?.keep ?? 3);
+	let snapshotTtlDays = $derived(snapshotsState?.data?.ttlDays ?? 7);
+	// Ошибку загрузки не выдаём за «снимков нет».
+	let snapshotsError = $derived(snapshotsState?.status === 'error' ? snapshotsState.error : null);
+	let snapshotsLoaded = $derived(snapshotsState?.data != null);
+	let snapshotBusy = $state<string | null>(null);
+	let pendingSnapshot = $state<UpdateSnapshot | null>(null);
+	let deleteSnapshotTarget = $state<UpdateSnapshot | null>(null);
+
 
 	async function readBackendInstanceId(): Promise<string | null> {
 		const res = await fetch('/api/health', {
@@ -35,9 +55,9 @@
 			const blob = await api.exportFullBackup();
 			const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 			downloadBlob(blob, `awg-manager-backup-${stamp}.tar.gz`);
-			notifications.success('Резервная копия создана и скачана');
+			notifications.success(m.settings_backup_created());
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Не удалось создать резервную копию');
+			notifications.error(e instanceof Error ? e.message : m.settings_backup_create_failed());
 		} finally {
 			exporting = false;
 		}
@@ -56,14 +76,14 @@
 		restoreConfirmOpen = true;
 	}
 
-	async function confirmRestore() {
-		if (!pendingFile) return;
-		restoreConfirmOpen = false;
+	// Общий путь восстановления из файла и из снимка: запрос, затем ожидание
+	// перезапуска демона и перезагрузка страницы.
+	async function runRestore(action: () => Promise<unknown>) {
 		restoring = true;
 		const before = await readBackendInstanceId().catch(() => null);
 		try {
-			await api.importFullBackup(pendingFile);
-			notifications.success('Резервная копия восстановлена. AWG Manager перезапускается…');
+			await action();
+			notifications.success(m.settings_backup_restored());
 			const waitResult = await waitForBackendRestart({
 				previousInstanceId: before,
 				readInstanceId: readBackendInstanceId,
@@ -72,30 +92,72 @@
 				timeoutMs: 120_000
 			});
 			if (waitResult === 'timeout') {
-				notifications.warning('Не удалось дождаться перезапуска. Обновите страницу вручную.');
+				notifications.warning(m.settings_backup_restart_timeout());
 				restoring = false;
 				return;
 			}
 			location.reload();
 		} catch (e) {
-			notifications.error(e instanceof Error ? e.message : 'Не удалось восстановить');
+			notifications.error(e instanceof Error ? e.message : m.settings_backup_restore_failed());
 			restoring = false;
-		} finally {
-			pendingFile = null;
 		}
+	}
+
+	async function confirmRestore() {
+		const file = pendingFile;
+		const snap = pendingSnapshot;
+		restoreConfirmOpen = false;
+		pendingFile = null;
+		pendingSnapshot = null;
+		if (file) {
+			await runRestore(() => api.importFullBackup(file));
+		} else if (snap) {
+			await runRestore(() => api.restoreUpdateSnapshot(snap.id));
+		}
+	}
+
+	function askRestoreSnapshot(snap: UpdateSnapshot) {
+		pendingSnapshot = snap;
+		restoreConfirmOpen = true;
+	}
+
+	async function downloadSnapshot(snap: UpdateSnapshot) {
+		snapshotBusy = snap.id;
+		try {
+			downloadBlob(await api.downloadUpdateSnapshot(snap.id), `awg-manager-${snap.id}`);
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : m.settings_backup_snapshot_download_failed());
+		} finally {
+			snapshotBusy = null;
+		}
+	}
+
+	async function confirmDeleteSnapshot() {
+		const snap = deleteSnapshotTarget;
+		if (!snap) return;
+		snapshotBusy = snap.id;
+		try {
+			updateSnapshots.applyMutationResponse(await api.deleteUpdateSnapshot(snap.id));
+			deleteSnapshotTarget = null;
+		} catch (e) {
+			notifications.error(e instanceof Error ? e.message : m.settings_backup_snapshot_delete_failed());
+		} finally {
+			snapshotBusy = null;
+		}
+	}
+
+	function snapshotLabel(snap: UpdateSnapshot): string {
+		return snap.appVersion
+			? m.settings_backup_snapshot_name({ date: formatDate(snap.createdAt), version: snap.appVersion })
+			: formatDate(snap.createdAt);
 	}
 </script>
 
 <div class="card backup-card">
-	<SettingsSectionLabel label="Резервное копирование" icon={Database} tone="blue" header />
+	<SettingsSectionLabel label={m.settings_backup_title()} icon={Database} tone="blue" header />
 
 	<p class="backup-lead">
-		Копия данных awg-manager: туннели, WDTT/FreeTurn, конфигурация sing-box, маршруты и настройки.
-		Не включаются файлы, собранные под этот роутер (модули ядра, бинарь sing-box), кэш sing-box,
-		pid-файлы и служебный каталог run/: при восстановлении остаются свои, а на новом роутере
-		sing-box нужно поставить заново кнопкой.
-		Перед созданием или восстановлением кратковременно останавливаются связанные процессы;
-		после восстановления выполняется холодный перезапуск с синхронизацией портов linked-туннелей.
+		{m.settings_backup_lead()}
 	</p>
 
 	<!-- Архив несёт секреты ОТКРЫТЫМ текстом, и пользователь обязан знать это
@@ -106,33 +168,85 @@
 	     восстановленный на ДРУГОМ роутере, потерял бы приватные ключи
 	     туннелей — то есть перестал бы быть бэкапом. -->
 	<p class="backup-secrets">
-		<strong>Архив содержит секреты в открытом виде:</strong> ключ API панели, приватные и
-		preshared-ключи туннелей и пиров. Кто получил файл — получил доступ к панели и к VPN.
-		Храните и пересылайте его как пароль. Отдельно зашифрован только ключ подписки
-		Amnezia Premium — он привязан к этому роутеру и на другом не прочитается.
+		<strong>{m.settings_backup_secrets_title()}</strong> {m.settings_backup_secrets_text()}
 	</p>
 
 	<div class="setting-row">
 		<div class="flex flex-col gap-1">
-			<span class="font-medium">Создать копию</span>
-			<span class="setting-description">Архив .tar.gz сразу скачается в браузере</span>
+			<span class="font-medium">{m.settings_backup_create_label()}</span>
+			<span class="setting-description">{m.settings_backup_create_description()}</span>
 		</div>
 		<Button variant="secondary" size="sm" loading={exporting} onclick={createBackup}>
-			{exporting ? 'Создание…' : 'Резервное копирование'}
+			{exporting ? m.settings_backup_creating() : m.settings_backup_button()}
 		</Button>
 	</div>
 
 	<div class="setting-row">
 		<div class="flex flex-col gap-1">
-			<span class="font-medium">Восстановление</span>
+			<span class="font-medium">{m.settings_backup_restore_label()}</span>
 			<span class="setting-description">
-				Заменит текущие данные. Чтобы можно было вернуться, сначала сохраните резервную
-				копию.
+				{m.settings_backup_restore_description()}
 			</span>
 		</div>
 		<Button variant="danger" size="sm" loading={restoring} onclick={openRestorePicker}>
-			{restoring ? 'Восстановление…' : 'Восстановить'}
+			{restoring ? m.settings_backup_restoring() : m.settings_backup_restore()}
 		</Button>
+	</div>
+
+	<div class="snapshots">
+		<div class="flex flex-col gap-1">
+			<span class="font-medium">{m.settings_backup_snapshots_label()}</span>
+			<span class="setting-description">
+				{m.settings_backup_snapshots_description({ keep: snapshotKeep, days: snapshotTtlDays })}
+			</span>
+		</div>
+		{#if snapshotsError}
+			<div class="snapshots-error">
+				<p class="setting-description">{m.settings_backup_snapshots_load_failed({ error: snapshotsError })}</p>
+				<Button variant="ghost" size="sm" onclick={() => updateSnapshots.refetch()}>{m.common_retry()}</Button>
+			</div>
+		{:else if !snapshotsLoaded}
+			<!-- Пока список грузится, пустым его не показываем. -->
+		{:else if snapshots.length === 0}
+			<p class="setting-description snapshots-empty">{m.settings_backup_snapshots_empty()}</p>
+		{:else}
+			<ul class="snapshot-list">
+				{#each snapshots as snap (snap.id)}
+					<li class="snapshot-row">
+						<div class="flex flex-col">
+							<span class="snapshot-name">{snapshotLabel(snap)}</span>
+							<span class="setting-description">{formatBytes(snap.size, 1)}</span>
+						</div>
+						<div class="snapshot-actions">
+							<Button
+								variant="ghost"
+								size="sm"
+								disabled={restoring || snapshotBusy !== null}
+								onclick={() => downloadSnapshot(snap)}
+							>
+								{m.common_download()}
+							</Button>
+							<Button
+								variant="outline-danger"
+								size="sm"
+								disabled={restoring || snapshotBusy !== null}
+								onclick={() => askRestoreSnapshot(snap)}
+							>
+								{m.settings_backup_restore()}
+							</Button>
+							<Button
+								variant="ghost"
+								size="sm"
+								disabled={restoring || snapshotBusy !== null}
+								onclick={() => (deleteSnapshotTarget = snap)}
+							>
+								{m.common_delete()}
+							</Button>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{/if}
 	</div>
 
 	<input
@@ -146,18 +260,34 @@
 
 <ConfirmModal
 	open={restoreConfirmOpen}
-	title="Восстановить awg-manager?"
+	title={m.settings_backup_confirm_title()}
 	message={pendingFile
-		? `Будет загружен архив «${pendingFile.name}». Текущие данные будут заменены, затем AWG Manager перезапустится. Продолжить?`
-		: ''}
-	confirmLabel="Восстановить"
+		? m.settings_backup_confirm_message({ name: pendingFile.name })
+		: pendingSnapshot
+			? m.settings_backup_snapshot_confirm_message({ name: snapshotLabel(pendingSnapshot) })
+			: ''}
+	confirmLabel={m.settings_backup_restore()}
 	variant="danger"
 	busy={restoring}
 	onClose={() => {
 		restoreConfirmOpen = false;
 		pendingFile = null;
+		pendingSnapshot = null;
 	}}
 	onConfirm={confirmRestore}
+/>
+
+<ConfirmModal
+	open={deleteSnapshotTarget !== null}
+	title={m.settings_backup_snapshot_delete_title()}
+	message={deleteSnapshotTarget
+		? m.settings_backup_snapshot_delete_message({ name: snapshotLabel(deleteSnapshotTarget) })
+		: ''}
+	confirmLabel={m.common_delete()}
+	variant="danger"
+	busy={snapshotBusy !== null}
+	onClose={() => (deleteSnapshotTarget = null)}
+	onConfirm={confirmDeleteSnapshot}
 />
 
 <style>
@@ -185,9 +315,56 @@
 		line-height: 1.45;
 	}
 
-	/* File input is the last child — keep row padding like other cards. */
-	.backup-card > .setting-row:last-of-type {
-		padding-bottom: 0;
+	.snapshots {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding-top: 0.875rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.snapshots-empty {
+		margin: 0;
+	}
+
+	.snapshots-error {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.snapshots-error p {
+		margin: 0;
+		color: var(--warning, var(--color-warning));
+	}
+
+	.snapshot-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.snapshot-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.5rem 0;
+	}
+
+	.snapshot-name {
+		font-size: 0.875rem;
+	}
+
+	.snapshot-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem;
 	}
 
 	.sr-only {

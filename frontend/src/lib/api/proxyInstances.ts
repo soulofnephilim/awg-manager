@@ -303,6 +303,8 @@ export function toWdttClientConfig(v: ProxyInstanceView): WdttClientConfig {
     peerRaw: v.peerRaw,
     ndmsIface: str(c, "ndmsIface"),
     rawIface: str(c, "rawIface"),
+    autoReconnect: bool(c, "autoReconnect"),
+    autoReconnectInterval: str(c, "autoReconnectInterval"),
   };
 }
 
@@ -370,10 +372,12 @@ export function toFreeTurnClientConfig(
     transport:
       (str(c, "transport") as FreeTurnClientConfig["transport"]) ?? "tcp",
     mode: (str(c, "mode") as FreeTurnClientConfig["mode"]) ?? "udp",
+    bond: bool(c, "bond") === true,
     obfProfile:
       (str(c, "obfProfile") as FreeTurnClientConfig["obfProfile"]) ?? "none",
     obfKey: "",
     obfKeySet: bool(c, "obfKeySet") === true,
+    obfTimingMs: num(c, "obfTimingMs") ?? 0,
     streamsPerCred: num(c, "streamsPerCred") ?? 0,
     kcp: kcpOf(c),
     platform:
@@ -383,6 +387,8 @@ export function toFreeTurnClientConfig(
     clientId: str(c, "clientId"),
     sub: str(c, "sub"),
     debug: bool(c, "debug") === true,
+    autoReconnect: bool(c, "autoReconnect"),
+    autoReconnectInterval: str(c, "autoReconnectInterval"),
   };
 }
 
@@ -646,6 +652,12 @@ export function toWdttClientPatch(cfg: WdttClientConfig): Cfg {
     captchaMode: cfg.captchaMode ?? "",
     vkAuthMode: cfg.vkAuthMode ?? "",
   };
+  if (cfg.autoReconnect !== undefined) {
+    out.autoReconnect = cfg.autoReconnect;
+  }
+  if (cfg.autoReconnectInterval !== undefined) {
+    out.autoReconnectInterval = cfg.autoReconnectInterval;
+  }
   putSecret(out, "password", cfg.password);
   return out;
 }
@@ -701,7 +713,9 @@ export function toFreeTurnClientPatch(cfg: FreeTurnClientConfig): Cfg {
     streams: cfg.streams ?? 0,
     transport: cfg.transport ?? "tcp",
     mode: cfg.mode ?? "udp",
+    bond: cfg.bond === true,
     obfProfile: cfg.obfProfile ?? "none",
+    obfTimingMs: cfg.obfTimingMs ?? 0,
     streamsPerCred: cfg.streamsPerCred ?? 0,
     kcp: cfg.kcp ?? null,
     platform: cfg.platform ?? "",
@@ -711,6 +725,12 @@ export function toFreeTurnClientPatch(cfg: FreeTurnClientConfig): Cfg {
     sub: cfg.sub ?? "",
     debug: cfg.debug === true,
   };
+  if (cfg.autoReconnect !== undefined) {
+    out.autoReconnect = cfg.autoReconnect;
+  }
+  if (cfg.autoReconnectInterval !== undefined) {
+    out.autoReconnectInterval = cfg.autoReconnectInterval;
+  }
   putSecret(out, "obfKey", cfg.obfKey);
   return out;
 }

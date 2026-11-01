@@ -46,38 +46,76 @@ func stableTagFromKey(subID, key string) string {
 // Two refreshes of the same provider produce the same tag for the same
 // logical server.
 func StableTag(subID string, p vlink.ParsedOutbound) string {
-	return stableTagFromKey(subID, identityKey(p))
+	return stableTagFromKey(subID, keysOf(p).narrow)
 }
 
-// IdentityHash returns the subID-independent suffix of StableTag for the
-// narrow key: the first 4 bytes of sha256(identityKey) as hex. Import-time
-// exclusion keys members by this hash because the full StableTag depends on
-// the not-yet-allocated subID.
-func IdentityHash(p vlink.ParsedOutbound) string {
-	return suffixOf(identityKey(p))
+// memberKeys holds every identity tier of one outbound, computed from a single
+// parse of its body: chooseKeys needs all four per member, and re-parsing the
+// JSON per tier is measurable on MIPS with large subscriptions (F736).
+type memberKeys struct {
+	// narrow: protocol + server + port + the user-credential field
+	// appropriate to the protocol.
+	narrow string
+	// ext widens narrow with the reality-masking fields that distinguish
+	// endpoints sharing one server:port:credential — SNI and the reality
+	// short_id. Used only for servers whose narrow key collides.
+	ext string
+	// full widens ext with the transport fields.
+	//
+	// realm_id дописывается только когда он есть: узлы за одним реле hysteria2
+	// делят server:port (это адрес реле) и пароль и различаются лишь им — без
+	// него один пропадал как дубликат (F366). Без realm ключ прежний, и теги уже
+	// расширенных групп не переезжают.
+	full string
+	// cred separates accounts that share the credential selected by narrow,
+	// such as SOCKS/Naive users with the same password. Keep the legacy keys
+	// intact: only groups they cannot distinguish use this tier.
+	cred string
+	// wire widens cred with the on-wire cipher and obfuscation: shadowsocks
+	// method/plugin/plugin_opts and hysteria2 obfs. Two servers on one
+	// server:port:password with a different cipher are different servers
+	// (F737). Its own tier, not part of cred: cred tags are already released.
+	// vless flow is left out — it is a client mode of the same server.
+	wire string
+	// ports widens wire with what picks the server socket besides
+	// server:port: the transport when it is a plain string (mieru TCP/UDP —
+	// transportKey reads only the object form) and the server_ports ranges
+	// (mieru, hysteria2 mport). A range is served by the server's own DNAT,
+	// so different ranges are different servers or one of them is broken —
+	// keeping both beats silently dropping the working one (F738, F739).
+	ports string
 }
 
-// identityKey builds the input for the stable hash: protocol + server +
-// port + the user-credential field appropriate to the protocol.
-func identityKey(p vlink.ParsedOutbound) string {
+// tiers lists the keys from narrowest to widest — the order chooseKeys
+// tries them in.
+func (k memberKeys) tiers() []string {
+	return []string{k.narrow, k.ext, k.full, k.cred, k.wire, k.ports}
+}
+
+func keysOf(p vlink.ParsedOutbound) memberKeys {
 	var ob map[string]any
+	// Ошибку не проверяем: битое тело отбраковывает partitionParsedOutbounds
+	// («invalid outbound json») раньше, чем до него доходят ключи.
 	json.Unmarshal(p.Outbound, &ob)
+	return keysFromOutbound(p.Protocol, p.Server, p.Port, ob)
+}
+
+// keysFromOutbound — то же по уже разобранному телу: ручное добавление берёт
+// тела существующих членов из слота конфига, а не из выдачи (F734).
+func keysFromOutbound(protocol, server string, port uint16, ob map[string]any) memberKeys {
+	uuid, _ := ob["uuid"].(string)
+	password, _ := ob["password"].(string)
+	username, _ := ob["username"].(string)
 	cred := ""
-	for _, k := range []string{"uuid", "password", "username"} {
-		if v, ok := ob[k].(string); ok && v != "" {
+	for _, v := range []string{uuid, password, username} {
+		if v != "" {
 			cred = v
 			break
 		}
 	}
-	return p.Protocol + "|" + p.Server + "|" + itoa(p.Port) + "|" + cred
-}
+	var k memberKeys
+	k.narrow = protocol + "|" + server + "|" + itoa(port) + "|" + cred
 
-// extendedKey widens identityKey with the reality-masking fields that
-// distinguish endpoints sharing one server:port:credential — SNI and the
-// reality short_id. Used only for servers whose narrow key collides.
-func extendedKey(p vlink.ParsedOutbound) string {
-	var ob map[string]any
-	json.Unmarshal(p.Outbound, &ob)
 	sni, sid := "", ""
 	if tls, ok := ob["tls"].(map[string]any); ok {
 		sni, _ = tls["server_name"].(string)
@@ -85,7 +123,35 @@ func extendedKey(p vlink.ParsedOutbound) string {
 			sid, _ = r["short_id"].(string)
 		}
 	}
-	return identityKey(p) + "|" + sni + "|" + sid
+	k.ext = k.narrow + "|" + sni + "|" + sid
+
+	k.full = k.ext + "|" + transportKey(ob)
+	if r, ok := ob["realm"].(map[string]any); ok {
+		if id, _ := r["realm_id"].(string); id != "" {
+			k.full += "|realm:" + id
+		}
+	}
+
+	// Encode the tuple rather than joining credentials with a separator that
+	// may itself occur in a username or password.
+	credKey, _ := json.Marshal([4]string{k.full, uuid, password, username})
+	k.cred = string(credKey)
+
+	method, _ := ob["method"].(string)
+	plugin, _ := ob["plugin"].(string)
+	pluginOpts, _ := ob["plugin_opts"].(string)
+	obfsType, obfsPassword := "", ""
+	if o, ok := ob["obfs"].(map[string]any); ok {
+		obfsType, _ = o["type"].(string)
+		obfsPassword, _ = o["password"].(string)
+	}
+	wireKey, _ := json.Marshal([6]string{k.cred, method, plugin, pluginOpts, obfsType, obfsPassword})
+	k.wire = string(wireKey)
+
+	plainTransport, _ := ob["transport"].(string)
+	portsKey, _ := json.Marshal([]any{k.wire, plainTransport, ob["server_ports"]})
+	k.ports = string(portsKey)
+	return k
 }
 
 // transportKey collects the transport fields that make two endpoints on one
@@ -126,13 +192,6 @@ func transportKey(ob map[string]any) string {
 	return typ + "|" + path + "|" + host + "|" + service + "|" + mode
 }
 
-// fullKey is the widest identity: extendedKey plus the transport fields.
-func fullKey(p vlink.ParsedOutbound) string {
-	var ob map[string]any
-	json.Unmarshal(p.Outbound, &ob)
-	return extendedKey(p) + "|" + transportKey(ob)
-}
-
 func itoa(p uint16) string {
 	if p == 0 {
 		return "0"
@@ -145,46 +204,50 @@ func itoa(p uint16) string {
 	return string(buf)
 }
 
-// chooseKeys returns the identity key for each parsed outbound: the narrow
-// identityKey when it suffices, the extendedKey when masking actually
-// distinguishes endpoints. A narrow-key group is widened only when its members
-// carry >1 distinct extendedKey — i.e. the same server:port:credential is
-// reused with different masking (issue #373). True byte-identical duplicates
-// (one distinct extended key) stay on the narrow key so their tag remains
-// stable across refreshes and matches previously stored narrow tags.
+// chooseKeys uses the narrowest tier that distinguishes every account in a
+// narrow-key group: narrow, ext (masking, issue #373), full (transport,
+// issue #625), cred (remaining credential fields), wire (cipher and
+// obfuscation, F737) or ports (string transport and port ranges, F738/F739)
+// — see memberKeys.
+// Groups the legacy tiers already distinguish retain their previous tags;
+// true duplicates stay on the narrow key.
 // Deterministic over the set (frequency is set-, not order-, dependent). Both
 // ApplyDiff and the import preview build on this so the exclusion suffix
 // (preview) and the final tag (refresh) agree.
 func chooseKeys(parsed []vlink.ParsedOutbound) []string {
-	distinctExt := make(map[string]map[string]struct{}, len(parsed))
-	distinctFull := make(map[string]map[string]struct{}, len(parsed))
-	for _, p := range parsed {
-		nk := identityKey(p)
-		if distinctExt[nk] == nil {
-			distinctExt[nk] = make(map[string]struct{})
-			distinctFull[nk] = make(map[string]struct{})
+	all := make([][]string, len(parsed))
+	// distinct[narrow][tier] — the set of that tier's keys within the group.
+	distinct := make(map[string][]map[string]struct{}, len(parsed))
+	for i, p := range parsed {
+		tiers := keysOf(p).tiers()
+		all[i] = tiers
+		d := distinct[tiers[0]]
+		if d == nil {
+			d = make([]map[string]struct{}, len(tiers))
+			for t := range d {
+				d[t] = make(map[string]struct{})
+			}
+			distinct[tiers[0]] = d
 		}
-		distinctExt[nk][extendedKey(p)] = struct{}{}
-		distinctFull[nk][fullKey(p)] = struct{}{}
+		for t, key := range tiers {
+			d[t][key] = struct{}{}
+		}
 	}
 	keys := make([]string, len(parsed))
-	for i, p := range parsed {
-		nk := identityKey(p)
-		switch {
-		case len(distinctFull[nk]) <= 1:
-			// Byte-identical duplicates: narrow key keeps the tag stable
-			// across refreshes and matches previously stored narrow tags.
-			keys[i] = nk
-		case len(distinctExt[nk]) == len(distinctFull[nk]):
-			// Masking alone tells them apart (issue #373). Staying on the
-			// extended key keeps tags of already-widened groups unchanged —
-			// widening further would re-tag subscriptions that never had the
-			// bug.
-			keys[i] = extendedKey(p)
-		default:
-			// Endpoints share masking and differ only by transport
-			// (issue #625): only the full key separates them.
-			keys[i] = fullKey(p)
+	for i, tiers := range all {
+		d := distinct[tiers[0]]
+		widest := len(d[len(d)-1])
+		// The narrowest tier that separates the group as well as the widest
+		// one. A group with nothing to separate (true duplicates) stops at
+		// narrow — its count is always 1 — so the tag stays stable across
+		// refreshes; a group an older tier already separates stays on it,
+		// since widening further would re-tag subscriptions that never had
+		// the bug.
+		for t, key := range tiers {
+			if len(d[t]) == widest {
+				keys[i] = key
+				break
+			}
 		}
 	}
 	return keys
@@ -262,13 +325,16 @@ func ApplyDiff(subID string, current []string, parsed []vlink.ParsedOutbound) Di
 
 // sameServer сравнивает метаданные двух членов: тот же ли это сервер.
 // Первым аргументом идёт сохранённая запись, вторым — кандидат из выдачи:
-// TransportKey сравнивается, только когда он есть у сохранённой (у записей,
-// сделанных до появления поля, оно пустое — см. MemberInfo).
+// TransportKey и RealmID сравниваются, только когда они есть у сохранённой (у
+// записей, сделанных до появления полей, они пустые — см. MemberInfo).
 func sameServer(stored, candidate MemberInfo) bool {
 	if stored.Protocol != candidate.Protocol || stored.Server != candidate.Server ||
 		stored.Port != candidate.Port || stored.SNI != candidate.SNI ||
 		stored.Transport != candidate.Transport {
 		return false
+	}
+	if stored.RealmID != "" && stored.RealmID != candidate.RealmID {
+		return false // разные узлы за одним реле (F660)
 	}
 	return stored.TransportKey == "" || stored.TransportKey == candidate.TransportKey
 }

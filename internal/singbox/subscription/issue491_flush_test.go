@@ -15,7 +15,7 @@ import (
 
 // issue491Validator скриптует sing-box check: outbound с тегом, содержащим
 // "bad", валится decode-ошибкой с индексом; считает вызовы отдельно для
-// standalone-снапшота (в директории ТОЛЬКО 40-subscriptions.json) и merged
+// standalone-снапшота (в директории ТОЛЬКО 13-subscriptions.json) и merged
 // (есть соседние слоты).
 type issue491Validator struct {
 	standaloneCalls int
@@ -32,7 +32,7 @@ func (v *issue491Validator) Validate(_ context.Context, dir string) error {
 	} else {
 		v.mergedCalls++
 	}
-	path := filepath.Join(dir, "40-subscriptions.json")
+	path := filepath.Join(dir, "13-subscriptions.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil // наш слот не в снапшоте — нечего валидировать
@@ -132,5 +132,40 @@ func TestFlush_DropLoopCapFailsHonestly(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "слишком много неподдерживаемых") {
 		t.Errorf("error must explain the cap: %v", err)
+	}
+}
+
+// Лимит перепроверок исчерпан без успешной проверки — слот не записывается
+// (F760): раньше цикл проваливался в Save с конфигом, который проверку не
+// прошёл.
+func TestFlush_CheckIterationsExhaustedRefusesSave(t *testing.T) {
+	old := flushCheckIterations
+	flushCheckIterations = func(int) int { return 0 }
+	defer func() { flushCheckIterations = old }()
+
+	adapter, _ := newIssue491Harness(t)
+	if err := adapter.AddOutbound("sub-x-good", validVlessJSON("10.0.2.1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Reload(context.Background()); !errors.Is(err, ErrValidation) {
+		t.Fatalf("Reload = %v, want ErrValidation", err)
+	}
+	if _, err := os.Stat(filepath.Join(adapter.orch.ConfigDir(), "13-subscriptions.json")); !os.IsNotExist(err) {
+		t.Errorf("слот записан без успешной проверки: %v", err)
+	}
+}
+
+// Лимит учитывает ссылки в группах слота, а не только число outbound'ов:
+// висячих членов бывает больше, чем outbound'ов, и каждая чистка — итерация
+// (F760, ревью: иначе защита превращала бы такой слот в незаписываемый).
+func TestGroupMemberRefs_CountsMembersAndDefault(t *testing.T) {
+	cfg := slotConfig{Outbounds: []any{
+		map[string]any{"type": "selector", "tag": "g", "outbounds": []any{"a", "b", "c"}, "default": "a"},
+		map[string]any{"type": "urltest", "tag": "u", "outbounds": []any{"a", "b"}},
+		map[string]any{"type": "vless", "tag": "a"},
+	}}
+	cfg.Route = map[string]any{"rules": []any{map[string]any{"outbound": "g"}}}
+	if got := groupMemberRefs(&cfg); got != 8 {
+		t.Fatalf("groupMemberRefs = %d, want 8 (3+default, 2, правило, final)", got)
 	}
 }

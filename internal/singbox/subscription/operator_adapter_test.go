@@ -174,9 +174,12 @@ func TestOperatorAdapter_Flush_UserSlotCollisionFailsFast(t *testing.T) {
 
 type recProxies struct{ removed []int }
 
-func (r *recProxies) NextFreeIndex(context.Context, map[int]bool) (int, error) { return 0, nil }
-func (r *recProxies) EnsureProxy(context.Context, int, int, string) error      { return nil }
-func (r *recProxies) RemoveProxy(_ context.Context, idx int) error {
+func (r *recProxies) NextFreeIndex(context.Context, map[int]bool) (int, error)    { return 0, nil }
+func (r *recProxies) EnsureProxy(context.Context, int, int, string, string) error { return nil }
+func (r *recProxies) CreateProxy(context.Context, int, int, string) (bool, error) {
+	return true, nil
+}
+func (r *recProxies) RemoveProxy(_ context.Context, idx int, _ string) error {
 	r.removed = append(r.removed, idx)
 	return nil
 }
@@ -243,14 +246,145 @@ func TestOperatorAdapter_RemoveRouteRule_MatchesPair(t *testing.T) {
 }
 
 func TestOperatorAdapter_RemoveProxy_DelegatesOrErrorsWithoutRegistrar(t *testing.T) {
-	if err := newAdapterForRemoveTests(t, nil).RemoveProxy(context.Background(), 5); err == nil {
+	if err := newAdapterForRemoveTests(t, nil).RemoveProxy(context.Background(), 5, "x"); err == nil {
 		t.Fatal("без ProxyRegistrar обязана быть ошибка")
 	}
 	pm := &recProxies{}
-	if err := newAdapterForRemoveTests(t, pm).RemoveProxy(context.Background(), 5); err != nil {
+	if err := newAdapterForRemoveTests(t, pm).RemoveProxy(context.Background(), 5, "x"); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(pm.removed, []int{5}) {
 		t.Fatalf("removed = %v, want [5]", pm.removed)
+	}
+}
+
+// slotSelectorDefault читает default селектора из файла слота на диске.
+func slotSelectorDefault(t *testing.T, a *OperatorAdapter, tag string) (string, []string) {
+	t.Helper()
+	data, err := a.orch.LoadApplied(orchestrator.SlotSubscriptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg slotConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("slot: %v", err)
+	}
+	def := ""
+	var tags []string
+	for _, v := range cfg.Outbounds {
+		ob := v.(map[string]any)
+		tags = append(tags, ob["tag"].(string))
+		if ob["tag"] == tag {
+			def, _ = ob["default"].(string)
+		}
+	}
+	return def, tags
+}
+
+func seedSelectorSlot(t *testing.T, a *OperatorAdapter) {
+	t.Helper()
+	for _, ob := range []string{
+		`{"type":"direct","tag":"m1"}`,
+		`{"type":"direct","tag":"m2"}`,
+		`{"type":"selector","tag":"sel","outbounds":["m1","m2"],"default":"m1"}`,
+	} {
+		var m map[string]any
+		_ = json.Unmarshal([]byte(ob), &m)
+		if err := a.AddOutbound(m["tag"].(string), []byte(ob)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Reload(context.Background()); err != nil {
+		t.Fatalf("seed reload: %v", err)
+	}
+}
+
+// F427: выбор сервера пишется в файл слота — рестарт движка стартует с него.
+func TestOperatorAdapter_PersistSelectorDefault_WritesSlot(t *testing.T) {
+	a := newAdapterForRemoveTests(t, nil)
+	seedSelectorSlot(t, a)
+
+	if err := a.PersistSelectorDefault("sel", "m2"); err != nil {
+		t.Fatal(err)
+	}
+	if def, _ := slotSelectorDefault(t, a, "sel"); def != "m2" {
+		t.Fatalf("default на диске = %q, want m2", def)
+	}
+	if err := a.PersistSelectorDefault("nope", "m2"); err == nil {
+		t.Fatal("несуществующий селектор — ждали ошибку")
+	}
+	// Тег есть в sub.MemberTags, но flush его отбросил: default на него
+	// уронил бы старт движка мимо Reload.
+	if err := a.PersistSelectorDefault("sel", "dropped"); err == nil {
+		t.Fatal("член не из outbounds селектора — ждали ошибку")
+	}
+	if def, _ := slotSelectorDefault(t, a, "sel"); def != "m2" {
+		t.Fatalf("отказ всё же записал default = %q", def)
+	}
+}
+
+// Открыт пакет другой подписки: на диск уходит только закоммиченное + default,
+// незакоммиченный outbound не утекает мимо flush; default переживает и откат
+// пакета, и его коммит.
+func TestOperatorAdapter_PersistSelectorDefault_DoesNotLeakOpenBatch(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "rollback", true: "commit"}[commit], func(t *testing.T) {
+			a := newAdapterForRemoveTests(t, nil)
+			seedSelectorSlot(t, a)
+			if err := a.AddOutbound("other", []byte(`{"type":"direct","tag":"other"}`)); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := a.PersistSelectorDefault("sel", "m2"); err != nil {
+				t.Fatal(err)
+			}
+			def, tags := slotSelectorDefault(t, a, "sel")
+			if def != "m2" {
+				t.Fatalf("default на диске = %q, want m2", def)
+			}
+			for _, tag := range tags {
+				if tag == "other" {
+					t.Fatalf("незакоммиченный outbound записан мимо flush: %v", tags)
+				}
+			}
+
+			if commit {
+				if err := a.Reload(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				a.Rollback()
+			}
+			if def, _ := slotSelectorDefault(t, a, "sel"); def != "m2" {
+				t.Fatalf("после %s default на диске = %q, want m2", t.Name(), def)
+			}
+			if got, _ := withSelectorDefault(a.cfg.Outbounds, "sel", "m2"); got == nil {
+				t.Fatal("селектор пропал из памяти")
+			}
+			for _, v := range a.cfg.Outbounds {
+				if ob := v.(map[string]any); ob["tag"] == "sel" && ob["default"] != "m2" {
+					t.Fatalf("в памяти default = %v, want m2", ob["default"])
+				}
+			}
+		})
+	}
+}
+
+// F653: снимок пакета неглубокий — чистка ссылок на снятый тег не должна
+// править карту селектора по месту, иначе урезанная карта переживёт откат
+// неудачного flush.
+func TestCleanReferencesToTag_DoesNotMutateSharedSelector(t *testing.T) {
+	sel := map[string]any{"type": "selector", "tag": "grp", "outbounds": []any{"a", "b"}, "default": "a"}
+	snapshot := []any{sel}
+	cfg := &slotConfig{Outbounds: append([]any(nil), snapshot...)}
+
+	cleanReferencesToTag(cfg, "a")
+
+	if got := sel["outbounds"].([]any); len(got) != 2 || sel["default"] != "a" {
+		t.Fatalf("карта снимка изменена: %v", sel)
+	}
+	live := cfg.Outbounds[0].(map[string]any)
+	if got := live["outbounds"].([]any); len(got) != 1 || live["default"] != "b" {
+		t.Fatalf("живая карта не очищена: %v", live)
 	}
 }

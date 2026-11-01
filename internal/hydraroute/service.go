@@ -2,6 +2,7 @@ package hydraroute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,8 +52,28 @@ func NewService(resolver KernelIfaceResolver, appLogger logging.AppLogger) *Serv
 	if s.status.Installed {
 		s.appLog.Info("detect", "", fmt.Sprintf("HrNeo detected (running=%v)", s.status.Running))
 		s.HealInvalidRuntimeConfig()
+		if rs, err := s.ListRuleSet(); err != nil {
+			s.appLog.Warn("force-interface", "", "failed to read rules: "+err.Error())
+		} else {
+			s.updateForceInterface(rs)
+		}
 	}
 	return s
+}
+
+// updateForceInterface держит наши семейства интерфейсов в ForceInterface
+// (#967). HR Neo сам не перезапускается: при старте awg-manager туннели
+// либо уже подняты, либо при подъёме перезапустят HR Neo (OnTunnelRunning),
+// а mutateRules назначает рестарт и без этого.
+func (s *Service) updateForceInterface(rs RuleSet) {
+	changed, err := syncForceInterface(rs)
+	if err != nil {
+		s.appLog.Warn("force-interface", "", "failed to update ForceInterface: "+err.Error())
+		return
+	}
+	if changed {
+		s.appLog.Info("force-interface", "", "ForceInterface updated")
+	}
 }
 
 func (s *Service) HealInvalidRuntimeConfig() {
@@ -276,7 +297,8 @@ func (s *Service) SetDnsListProvider(fn func() []DnsListInfo) {
 	s.dnsListProvider = fn
 }
 
-// SetQueries wires the NDMS Queries registry used to read ip policies.
+// SetQueries wires the NDMS Queries registry used to read ip policies and
+// confirm interfaces before permit.
 func (s *Service) SetQueries(q *query.Queries) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -311,18 +333,34 @@ func (s *Service) GetGeoData() *GeoDataStore {
 func (s *Service) EnsurePolicyInterfaces(ctx context.Context, policyName string, ndmsIfaces []string) error {
 	s.mu.Lock()
 	policies := s.policies
+	queries := s.queries
 	s.mu.Unlock()
 
-	if policies == nil {
-		return fmt.Errorf("PolicyCommands not available")
+	if policies == nil || queries == nil {
+		return fmt.Errorf("PolicyCommands/Queries not available")
 	}
 
-	for i, iface := range ndmsIfaces {
-		s.appLog.Info("permit-iface", iface, fmt.Sprintf("ip policy %s permit global order %d", policyName, i))
-		if err := policies.PermitInterface(ctx, policyName, iface, i); err != nil {
+	// Ссылка на отсутствующий интерфейс пишет E в журнал ndm (F546): все
+	// интерфейсы подтверждаются ОДНИМ свежим списком, отсутствующие пропускаются.
+	confirmed, err := queries.Interfaces.ConfirmEach(ctx, ndmsIfaces)
+	if err != nil {
+		return fmt.Errorf("permit in policy %s: %w", policyName, err)
+	}
+	// order — по поставленным, а не по индексу во входе: пропуск не должен
+	// оставить дыру (order=1 без order=0 NDMS отвергает).
+	order := 0
+	for _, iface := range ndmsIfaces {
+		c, ok := confirmed[iface]
+		if !ok {
+			s.appLog.Warn("permit-iface", iface, fmt.Sprintf("policy %s: интерфейса нет в NDMS — пропущен", policyName))
+			continue
+		}
+		s.appLog.Info("permit-iface", iface, fmt.Sprintf("ip policy %s permit global order %d", policyName, order))
+		if err := policies.PermitInterface(ctx, policyName, c, order); err != nil {
 			s.appLog.Warn("permit-iface", iface, fmt.Sprintf("policy %s: %v", policyName, err))
 			return fmt.Errorf("permit %s in policy %s: %w", iface, policyName, err)
 		}
+		order++
 	}
 	return nil
 }
@@ -332,11 +370,44 @@ func (s *Service) ReadConfig() (*Config, error) {
 	return ReadConfig()
 }
 
-// WriteConfig syncs geo file paths from geodata (if set), writes the config, and schedules a restart.
-func (s *Service) WriteConfig(cfg *Config) error {
+// ErrNoConfig is UpdateConfig refused: hrneo.conf does not exist — HR Neo
+// is not installed, or has not written its configuration yet.
+var ErrNoConfig = errors.New("hrneo.conf does not exist")
+
+// UpdateConfig reads hrneo.conf, lets edit change it and writes it via
+// writeConfigLocked, all under s.mu — the lock SetPolicyOrder and
+// SyncGeoFilesToConfig write their parts under. A caller that changes a few
+// settings must not write back a whole copy read before such a write: the
+// policy order dragged in the web interface meanwhile would be lost. An
+// edit's error writes nothing. Returns the config written.
+func (s *Service) UpdateConfig(edit func(*Config) error) (*Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// ReadConfig gives the defaults for a missing file, and the write would
+	// create it: on a router without HR Neo that is a hrneo.conf nobody
+	// reads, and "settings saved" for nothing.
+	if _, err := os.Stat(hrConfPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNoConfig
+		}
+		return nil, err
+	}
+	cfg, err := ReadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if err := edit(cfg); err != nil {
+		return nil, err
+	}
+	if err := s.writeConfigLocked(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
+// writeConfigLocked syncs geo file paths from geodata (if set), writes the
+// config and schedules a restart. Caller holds s.mu.
+func (s *Service) writeConfigLocked(cfg *Config) error {
 	if s.geodata != nil {
 		geoIP, geoSite := s.geodata.GeoFilePaths()
 		cfg.GeoIPFiles = geoIP

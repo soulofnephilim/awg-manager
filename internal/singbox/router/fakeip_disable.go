@@ -2,9 +2,11 @@ package router
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
+	"github.com/hoaxisr/awg-manager/internal/netdev"
 	"github.com/hoaxisr/awg-manager/internal/singbox/orchestrator"
 	"github.com/hoaxisr/awg-manager/internal/storage"
 	sysexec "github.com/hoaxisr/awg-manager/internal/sys/exec"
@@ -21,11 +23,12 @@ var fakeIPLinkPresent = func(ctx context.Context, iface string) bool {
 	return err == nil
 }
 
-// fakeIPLinkDelete removes a lingering kernel netdev (`ip link delete <iface>`).
+// fakeIPLinkDelete removes a lingering kernel netdev under the list barrier.
+// Запись OpkgTunN к этому моменту уже снята, так что C 0767 тут невозможен;
+// под гейтом — ради инварианта «ни одного del/add мимо netdev.Swapper» (N1).
 // Seam var for tests.
-var fakeIPLinkDelete = func(ctx context.Context, iface string) error {
-	_, err := sysexec.Run(ctx, ipBinary, "link", "delete", iface)
-	return err
+var fakeIPLinkDelete = func(ctx context.Context, gate *netdev.SwapGate, iface string) error {
+	return gate.DeleteLink(ctx, iface)
 }
 
 // fakeIPDrainComment labels the temporary fail-closed reject route installed
@@ -55,7 +58,7 @@ var fakeIPScheduleDrain = func(removeReject func()) {
 }
 
 // disableFakeIPTun tears down the fakeip-tun path with leak-safe ordering and a
-// fail-closed drain. Called with s.mu held by Disable.
+// fail-closed drain. Called with s.mu held by disable.
 //
 // Drain model (stand-verified, Fix 2): the reject route is NOT a separate
 // interface-less blackhole — that form is rejected by NDMS ("no input"). It is a
@@ -73,6 +76,16 @@ var fakeIPScheduleDrain = func(removeReject func()) {
 // the reject route — it survives the iface deletion still rejecting, which keeps
 // the pool fail-closed for the whole drain window.
 //
+// НА 5.02 ЭТО НЕ ТАК (стенд KN-1810, 5.02.B.1, 27.10, F244): маршрутов пула v4
+// и v6 в конфигурации NDMS нет уже через ~3 с после выключения, `unreachable` в
+// ядре не появляется, удаление OpkgTun уносит и reject-маршрут. Окна drain
+// фактически нет: клиент с кэшированным fake-адресом сразу уходит по дефолту
+// (WAN). Принято как риск: пулы 198.18.0.0/15 и fc00::/7 в интернете не
+// маршрутизируются, наружу уходит лишь первый пакет до перерезолва. Почему NDMS
+// снимает маршрут раньше интерфейса, не установлено. Drain без привязки к
+// интерфейсу (REJECT по dst-пулу в своей цепочке netfilter на окно) — если
+// понадобится fail-closed на 5.02.
+//
 // Safe ordering (each step is leak-conscious; the inline (N) markers below match
 // these numbers):
 //  1. nothing provisioned → just persist Enabled=false (idempotent).
@@ -89,15 +102,12 @@ var fakeIPScheduleDrain = func(removeReject func()) {
 // worse than a fully-attempted teardown, so the teardown steps never abort; only
 // the persist and the drain schedule are mandatory.
 //
-// v6 asymmetry (FAIL-OPEN, honest): the v6 route form (StaticRouteSpec.V6)
-// carries no reject flag, so v6 gets NO explicit reject route — its drain is the
-// pool-route removal alone. On a dual-stack router that has a v6 WAN default
-// route (::/0), removing the pool's more-specific v6 route does NOT drop
-// fakeip-v6 packets — they fall through to ::/0 via WAN and LEAK. The v6 drain is
-// therefore currently fail-open. Closing it needs a v6 reject/blackhole route,
-// which requires extending the v6 route form to support reject — see the
-// TODO(fakeip-v6-drain) marker below. Only v4 gets a real fail-closed reject
-// route today.
+// v6 asymmetry (FAIL-OPEN): v6 gets NO reject route — its drain is the pool-route
+// removal alone, so on a dual-stack router with a v6 default (::/0) fakeip-v6
+// packets fall through to WAN. The v6 form accepts reject since F238
+// (`ipv6 route <prefix> <iface> auto reject`), but renewing it here would not
+// help on 5.02: NDMS drops it together with the interface (see above, F244 —
+// accepted risk).
 func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Settings) error {
 	st, _ := opkgTunOwned(settings, stateFakeIPTun)
 
@@ -169,15 +179,6 @@ func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Se
 	// dual-stack router with a v6 default it does NOT drop, it leaks). Best-effort.
 	// v4 needs NO auto-route removal here — step 2 renewed the single pool route in
 	// place; the async drain (step 7) removes it after the window.
-	// TODO(fakeip-v6-drain): v6 is fail-open on dual-stack routers with a v6 default
-	// route. Форма больше не препятствие: стенд 5.01 принял v6-reject
-	// (`ipv6 route <prefix> <iface> auto reject`), и AddStaticRoute его
-	// доставляет. Осталась работа в самом drain — обновить маршрут пула как
-	// reject вместо снятия, симметрично шагу 2 у v4. Ловушка на этом пути:
-	// снятие v6-маршрута идёт через mutateTolerant(isNoSuchInterface), а к
-	// моменту уборки интерфейс tun уже удалён — отказ будет проглочен, и
-	// reject-маршрут останется резать префикс навсегда. У v4 от этого есть
-	// стартовый sweep, у v6 его нет.
 	if haveV6 {
 		if err := s.deps.StaticRoutes.RemoveStaticRoute(ctx, StaticRouteSpec{
 			V6: true, Network: inet6Range, Interface: ndmsName,
@@ -203,9 +204,10 @@ func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Se
 		// перегенерирует слот 30 до ближайшего reload (issue #465).
 		s.notifyRoutingSlotsChanged()
 	}
+	s.releaseTunNow("fakeip-disable", iface)
 
-	// (4b) Tear the iface down (down → delete; on delete failure — clear the
-	// configured addresses, see teardownOpkgTun) — NDMS name. With the pool
+	// (4b) Tear the iface down (delete; on delete failure — clear the
+	// configured addresses, then down, see teardownOpkgTun) — NDMS name. With the pool
 	// route renewed to reject (step 2), deleting the iface fail-closes the
 	// pool: the reject flag now drops any client still on a fakeip address.
 	// Best-effort: a failed delete is retried by the periodic reap scan.
@@ -215,10 +217,16 @@ func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Se
 	// выполнив второе, мы убили бы посторонний туннель наполовину. Цена гейта
 	// честная: kernel-сироту без NDMS-объекта скан тоже не видит, поэтому её
 	// уборка здесь пропускается (индекс не течёт — аллокатор live-sourced).
-	if !s.skipForeignTeardown(ctx, ndmsName, fakeIPTunDescription, "fakeip-disable") {
+	// Скан упал — тоже пропуск (F493): запись всё равно снимается на шаге (5),
+	// а интерфейс с нашим описанием добирает reapOrphansByDescription, когда
+	// скан заработает. Ошибку гейта не возвращаем: выключение обязано дойти
+	// до персиста.
+	if proceed, gateErr := s.teardownGate(ctx, ndmsName, "fakeip-disable", fakeIPTunDescription); proceed {
 		// (4c) Уборку осиротевшего kernel-netdev делает сам teardownOpkgTun —
 		// он же нужен откатам и реап-ретраям, которые ходят туда напрямую.
 		_ = s.teardownOpkgTun(ctx, ndmsName, "fakeip-disable")
+	} else if gateErr == nil {
+		s.warnPermitIndexChange("fakeip-disable", ndmsName)
 	}
 
 	// Remove specific CIDR routes on disable. After fakeip is off these
@@ -229,14 +237,24 @@ func (s *ServiceImpl) disableFakeIPTun(ctx context.Context, settings *storage.Se
 	if cfg, cerr := s.loadFakeIPConfig(); cerr == nil {
 		cfg = s.ruleSetMaterializer().restoreConfig(cfg)
 		dV4, dV6 := desiredTunCIDRs(cfg)
-		for _, c := range dV4 {
-			if e := s.removeCIDRRoute(ctx, ndmsName, c, false); e != nil {
-				s.appLog.Warn("fakeip-disable", iface, "remove cidr route "+c+": "+e.Error())
-			}
-		}
-		for _, c := range dV6 {
-			if e := s.removeCIDRRoute(ctx, ndmsName, c, true); e != nil {
-				s.appLog.Warn("fakeip-disable", iface, "remove cidr route v6 "+c+": "+e.Error())
+		// Одно подтверждение на оба цикла (F546); интерфейса нет — снимать нечего.
+		if len(dV4)+len(dV6) > 0 {
+			rt, e := s.cidrRoutes(ctx, ndmsName)()
+			switch {
+			case errors.Is(e, ErrIfaceAbsent):
+			case e != nil:
+				s.appLog.Warn("fakeip-disable", iface, "remove cidr routes: "+e.Error())
+			default:
+				for _, c := range dV4 {
+					if e := s.removeCIDRRoute(ctx, rt, ndmsName, c, false); e != nil {
+						s.appLog.Warn("fakeip-disable", iface, "remove cidr route "+c+": "+e.Error())
+					}
+				}
+				for _, c := range dV6 {
+					if e := s.removeCIDRRoute(ctx, rt, ndmsName, c, true); e != nil {
+						s.appLog.Warn("fakeip-disable", iface, "remove cidr route v6 "+c+": "+e.Error())
+					}
+				}
 			}
 		}
 	}
@@ -314,28 +332,22 @@ func (s *ServiceImpl) scheduleFakeIPDrain(poolNet4, poolMask4, ndmsName string) 
 // повториться. Отказ на v6 провалом не считается: v6-адреса могло не быть
 // вовсе, а вечный ретрай выключения хуже незакрытого v6.
 func (s *ServiceImpl) holdOpkgTun(ctx context.Context, ndmsName, scope string) error {
-	if err := s.deps.OpkgTun.RemovePermitAllACL(ctx, ndmsName); err != nil {
+	// v4 и v6 — по одному running-config; отсутствующей привязки/списка команда
+	// не шлёт (F606), так что ошибка здесь — настоящий отказ NDMS. Debug: hold
+	// best-effort, разрешение снимется при следующем выключении.
+	if err := s.deps.OpkgTun.RemovePermitAllACLs(ctx, ndmsName); err != nil {
 		s.appLog.Debug(scope, ndmsName, "remove permit acl: "+err.Error())
-	}
-	// v6-список — отдельная сущность NDMS, каскадом от v4 не снимается. Debug:
-	// у интерфейса без v6 его и не было, «not found» тут норма.
-	if err := s.deps.OpkgTun.RemovePermitAllACLv6(ctx, ndmsName); err != nil {
-		s.appLog.Debug(scope, ndmsName, "remove permit acl v6: "+err.Error())
 	}
 	// Гейт существования — обязателен: дальше идут down/clear, а NDMS создаёт
 	// интерфейс по ЛЮБОЙ мутации его имени (см. teardownOpkgTun). Здесь, в
 	// отличие от teardown, за ними НЕТ delete, который бы такую пустышку
 	// подобрал: hold интерфейс намеренно сохраняет. Пустышка же не несёт
 	// нашего описания, реап по описанию её не видит, и индекс занят навсегда.
-	// Вызывающий зовёт hold только при подтверждённом владении, но подтверждение
-	// даёт скан по описанию, а он «не знаю» трактует как «наш» (fail-closed для
-	// reuse) — то есть на недоступном скане сюда можно прийти и без интерфейса.
+	// Вызывающий зовёт hold при вердикте «наш» либо «скана нет» (обвязка без
+	// NDMS): во втором случае интерфейса может и не быть.
 	if !fakeIPLinkPresent(ctx, strings.ToLower(ndmsName)) {
 		s.appLog.Debug(scope, ndmsName, "hold: интерфейса нет, мутации пропущены")
 		return nil
-	}
-	if err := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); err != nil {
-		s.appLog.Warn(scope, ndmsName, "iface down: "+err.Error())
 	}
 	err := s.deps.OpkgTun.ClearAddress(ctx, ndmsName)
 	if err != nil {
@@ -345,11 +357,32 @@ func (s *ServiceImpl) holdOpkgTun(ctx context.Context, ndmsName, scope string) e
 	if e := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); e != nil {
 		s.appLog.Debug(scope, ndmsName, "clear ipv6 address: "+e.Error())
 	}
+	// Down — ПОСЛЕ снятия адресов: down интерфейса со статическим IPv6 NDMS
+	// отвечает двумя W «reinstall address» (F675, проба 17.10 голым RCI).
+	if e := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); e != nil {
+		s.appLog.Warn(scope, ndmsName, "iface down: "+e.Error())
+	}
 	return err
 }
 
-// teardownOpkgTun best-effort сносит NDMS OpkgTun: down → delete; при провале
-// delete снимает сконфигурированные v4/v6 адреса. Единственное место, где живёт
+// releaseTunNow применяет конфиг без tun-инбаунда сразу, до того как NDMS
+// снесёт или переконфигурирует OpkgTun. Под HoldReloads (SwitchRoutingMode)
+// reload иначе копится до конца перехода, и sing-box держит tun открытым,
+// пока NDMS удаляет запись: C 0xcffd003b в ndm и «engine wait: connection
+// reset by peer» у движка — на каждом переходе с OpkgTun (F447/F638, стенд
+// 28.10). ReloadNow работает под hold и снимает накопленное, лишнего reload
+// на выходе нет. Провал — Warn: дальше идём, как шли раньше.
+func (s *ServiceImpl) releaseTunNow(scope, iface string) {
+	if err := releaseTunApply(s); err != nil {
+		s.appLog.Warn(scope, iface, "apply config without tun: "+err.Error())
+	}
+}
+
+// releaseTunApply — шов над немедленным применением для тестов порядка.
+var releaseTunApply = (*ServiceImpl).orchestratorApplyNow
+
+// teardownOpkgTun best-effort сносит NDMS OpkgTun: delete; при провале delete
+// снимает сконфигурированные v4/v6 адреса и гасит интерфейс. Единственное место, где живёт
 // инвариант: интерфейс с настроенным `ip address`, но без kernel-адреса вгоняет
 // ndm в бесконечный nginx-reload цикл (bind fail → регенерация конфига →
 // reload → …), подвешивающий весь RCI на секунды (stand-verified 2026-07-15) —
@@ -359,18 +392,14 @@ func (s *ServiceImpl) holdOpkgTun(ctx context.Context, ndmsName, scope string) e
 // create-on-reference риском в NDMS) не выполняются вовсе. Возвращает ошибку
 // delete; down и clear'ы — warn-and-continue.
 func (s *ServiceImpl) teardownOpkgTun(ctx context.Context, ndmsName, scope string) error {
-	// Снять permit-all ACL (unbind + no access-list) ДО down/delete: при
-	// успешном delete auto-delete каскадит ACL и сам, но при провале delete
-	// интерфейс не должен остаться с висящей привязкой. Debug, не Warn:
-	// «not found» на давно снятом ACL — норма для reap-ретраев (каждый тик
-	// до успеха delete) и сирот от версий без ACL (ревью).
-	if err := s.deps.OpkgTun.RemovePermitAllACL(ctx, ndmsName); err != nil {
+	// Снять permit-all ACL v4 и v6 ДО down/delete: при успешном delete
+	// auto-delete каскадит ACL и сам, но при провале delete интерфейс не должен
+	// остаться с висящей привязкой. Что снимать — решает свежий running-config
+	// (F606): на давно снятом ACL (reap-ретраи, сироты от версий без ACL) не
+	// уходит ни одного POST. Debug, не Warn: teardown best-effort, а снос
+	// интерфейса ACL всё равно уносит.
+	if err := s.deps.OpkgTun.RemovePermitAllACLs(ctx, ndmsName); err != nil {
 		s.appLog.Debug(scope, ndmsName, "remove permit acl: "+err.Error())
-	}
-	// v6-список — отдельная сущность NDMS, каскадом от v4 не снимается. Debug:
-	// у интерфейса без v6 его и не было, «not found» тут норма.
-	if err := s.deps.OpkgTun.RemovePermitAllACLv6(ctx, ndmsName); err != nil {
-		s.appLog.Debug(scope, ndmsName, "remove permit acl v6: "+err.Error())
 	}
 	// БЕЗ предварительного down: NDMS создаёт интерфейс по ЛЮБОЙ мутации его
 	// имени (стенд 2026-08-24: `{"interface":{"OpkgTunN":{"down":true}}}` на
@@ -393,7 +422,7 @@ func (s *ServiceImpl) teardownOpkgTun(ctx context.Context, ndmsName, scope strin
 		// здесь тот же приём для откатов и реап-ретраев, которые ходят сюда.
 		iface := strings.ToLower(ndmsName)
 		if fakeIPLinkPresent(ctx, iface) {
-			if e := fakeIPLinkDelete(ctx, iface); e != nil {
+			if e := fakeIPLinkDelete(ctx, s.deps.SwapGate, iface); e != nil {
 				s.appLog.Warn(scope, ndmsName, "delete kernel netdev: "+e.Error())
 			}
 		}
@@ -401,15 +430,16 @@ func (s *ServiceImpl) teardownOpkgTun(ctx context.Context, ndmsName, scope strin
 	}
 	s.appLog.Warn(scope, ndmsName, "delete opkgtun: "+err.Error())
 	// Down — только здесь: delete провалился, значит интерфейс СУЩЕСТВУЕТ и
-	// create-on-reference не грозит, а погасить его перед снятием адресов надо.
-	if e := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); e != nil {
-		s.appLog.Warn(scope, ndmsName, "iface down: "+e.Error())
-	}
+	// create-on-reference не грозит; уцелевший интерфейс не должен остаться
+	// поднятым. Гасим ПОСЛЕ снятия адресов — см. holdOpkgTun (F675).
 	if e := s.deps.OpkgTun.ClearAddress(ctx, ndmsName); e != nil {
 		s.appLog.Warn(scope, ndmsName, "clear address: "+e.Error())
 	}
 	if e := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); e != nil {
 		s.appLog.Warn(scope, ndmsName, "clear ipv6 address: "+e.Error())
+	}
+	if e := s.deps.OpkgTun.InterfaceDown(ctx, ndmsName); e != nil {
+		s.appLog.Warn(scope, ndmsName, "iface down: "+e.Error())
 	}
 	return err
 }

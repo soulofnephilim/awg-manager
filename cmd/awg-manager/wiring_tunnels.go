@@ -12,6 +12,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/hydraroute"
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	ndmscommand "github.com/hoaxisr/awg-manager/internal/ndms/command"
+	ndmsevents "github.com/hoaxisr/awg-manager/internal/ndms/events"
 	"github.com/hoaxisr/awg-manager/internal/opkgtun"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
 	"github.com/hoaxisr/awg-manager/internal/presets"
@@ -33,6 +34,7 @@ import (
 	"github.com/hoaxisr/awg-manager/internal/tunnel/state"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wan"
 	"github.com/hoaxisr/awg-manager/internal/tunnel/wg"
+	"github.com/hoaxisr/awg-manager/internal/zapret"
 )
 
 // setupTunnels wires the tunnel core (wg/backend/state/firewall, NDMS
@@ -41,13 +43,11 @@ import (
 func (a *app) setupTunnels() {
 	// Create tunnel service components
 	a.wgClient = wg.New()
-	a.backendImpl = backend.NewKernel()
+	a.backendImpl = backend.NewKernel(a.swapGate)
 	a.stateMgr = state.New(a.ndmsQueries.Interfaces, a.wgClient, a.backendImpl, a.loggingService)
 	firewallMgr := firewall.New(true /* mssClamp */, osdetect.Is5(), a.loggingService)
 
 	// Build NDMS CQRS Commands eagerly so the Operator can consume them.
-	// HookNotifier is wired later (ndmsCommands.SetHookNotifier(orch)) once
-	// the orchestrator exists — this breaks the construction cycle.
 	a.eventBus = events.NewBus()
 	a.ndmsSaveCoord = ndmscommand.NewSaveCoordinator(
 		a.ndmsTransportClient,
@@ -57,12 +57,23 @@ func (a *app) setupTunnels() {
 		env.DurationDefault("AWG_NDMS_SAVE_SETTLE_DELAY", 2*time.Second),
 		a.ndmsQueries.RunningConfig,
 	)
+	a.ndmsSaveCoord.SetLogger(eventsLogger(a.loggingService))
+	// Шина событий ndm — конец нашего сохранения (ConfigurationSaved, П25).
+	// Сразу за координатором и до любой команды: события ловятся с первого
+	// POST. Сокета может не быть (ndm грузится): клиент подключается сам, а
+	// до того сохранения ждут saveFallback (дефолт координатора — шина
+	// отключена). Ошибка Start (не linux) — не фатальна, как у spool.
+	ndmBus := ndmsevents.NewSaveBusReader(ndmsevents.DefaultBusPath, a.ndmsSaveCoord, eventsLogger(a.loggingService))
+	if err := ndmBus.Start(); err != nil {
+		a.bootLog.Warn("ndm-event-bus", "", err.Error())
+	} else {
+		a.deferOnExit(ndmBus.Stop)
+	}
 	a.ndmsCommands = ndmscommand.NewCommands(ndmscommand.Deps{
-		Poster:       a.ndmsTransportClient,
-		Save:         a.ndmsSaveCoord,
-		Queries:      a.ndmsQueries,
-		HookNotifier: nil, // wired after orchestrator construction below
-		IsOS5:        osdetect.Is5,
+		Poster:  a.ndmsTransportClient,
+		Save:    a.ndmsSaveCoord,
+		Queries: a.ndmsQueries,
+		IsOS5:   osdetect.Is5,
 	})
 
 	a.operator = ops.NewOperator(a.ndmsQueries, a.ndmsCommands, a.wgClient, a.backendImpl, firewallMgr)
@@ -91,10 +102,10 @@ func (a *app) setupTunnels() {
 	// Create the main tunnel service
 	a.tunnelService = service.New(a.awgStore, a.nwgOp, a.operator, a.stateMgr, a.wanModel, a.loggingService)
 
-	// Пять владельцев пула OpkgTun собираются ЗДЕСЬ и раздаются готовыми:
+	// Шесть владельцев пула OpkgTun собираются ЗДЕСЬ и раздаются готовыми:
 	// состав общий на всех, кто выдаёт номера (opkgTunOwners).
 	opkgIndices := &routerOpkgTunIndexAdapter{store: a.ndmsQueries.Interfaces}
-	a.opkgTunOwners = newOpkgTunOwners(ndmsSource(opkgIndices), liveSource(opkgIndices),
+	a.opkgTunOwners = newOpkgTunOwners(ndmsSource(opkgIndices, a.settingsStore), liveSource(opkgIndices),
 		a.awgStore, a.settingsStore, a.proxyStore)
 	// Пул собирается ОДИН на процесс и тем же составом: второй экземпляр
 	// означал бы две очереди на выбор, то есть отсутствие атомарности.
@@ -127,6 +138,29 @@ func (a *app) setupTunnels() {
 		exitRegistryAdapter{reg: a.exitRegistry},
 		a.loggingService,
 	)
+	a.catalog.SetOwnedOpkgTun(a.opkgTunOwners.ownedIndices)
+	// F503: WG-серверы — managed (страница /servers) и помеченные. Managed
+	// берутся из настроек напрямую, как в systemtunnels: managed.Service.List
+	// читает то же самое, а ждать его проводки незачем.
+	settings := a.settingsStore
+	a.catalog.SetServerInterfaces(func(context.Context) map[string]bool {
+		out := make(map[string]bool)
+		for _, id := range settings.GetServerInterfaces() {
+			out[id] = true
+		}
+		for _, ms := range settings.GetManagedServers() {
+			if ms.InterfaceName != "" {
+				out[ms.InterfaceName] = true
+			}
+		}
+		return out
+	})
+
+	// Zapret integration. AWGM только читает состояние и правит
+	// пользовательские файлы: пакет zapret ставит пользователь, а наличие
+	// установки определяется лениво, на запрос статуса.
+	a.zapretService = zapret.NewService(a.dataDir, a.loggingService)
+	a.zapretService.SetEventBus(a.eventBus)
 
 	// HydraRoute Neo integration (optional — detected at startup)
 	a.hydraService = hydraroute.NewService(a.catalog, a.loggingService)
@@ -210,6 +244,7 @@ func (a *app) setupServices() {
 		orphanIfaces(a.opkgPool, a.ndmsQueries.Interfaces),
 		ndmsDescriptionsFn(a.ndmsQueries.Interfaces),
 	)
+	a.externalService.SetOpkgTunPool(a.opkgPool, opkgTunSupported)
 
 	// System WireGuard tunnels (read-only + ASC editing) — constructed later,
 	// after ndmsQueries/ndmsCommands are available.

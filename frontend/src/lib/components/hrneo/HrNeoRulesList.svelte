@@ -1,8 +1,10 @@
 <script lang="ts">
 	import type { DnsRoute } from '$lib/types';
 	import HrNeoRuleCard from './HrNeoRuleCard.svelte';
+	import { hrPosKey } from './hrIds';
+	import { Button } from '$lib/components/ui';
 	import RoutingRuleAddMenu from '$lib/components/routing/RoutingRuleAddMenu.svelte';
-	import { pluralize, RULE_WORDS } from '$lib/utils/pluralize';
+	import { m } from '$lib/i18n';
 
 	interface Props {
 		target: string;
@@ -15,8 +17,8 @@
 		ondeleterule: (rule: DnsRoute) => void;
 		oniconrule?: (rule: DnsRoute) => void;
 		ontogglerule?: (rule: DnsRoute, enabled: boolean) => void;
-		toggleLoadingId?: string | null;
 		displayRule?: (rule: DnsRoute) => DnsRoute;
+		ondeletetarget?: () => void;
 	}
 
 	let {
@@ -30,11 +32,9 @@
 		ondeleterule,
 		oniconrule,
 		ontogglerule,
-		toggleLoadingId = null,
 		displayRule,
+		ondeletetarget,
 	}: Props = $props();
-
-	let sortedRules = $derived([...rules].sort((a, b) => a.name.localeCompare(b.name)));
 </script>
 
 <div class="hr-list">
@@ -42,21 +42,25 @@
 		<div class="list-title">
 			<h2>{target}</h2>
 			<span class="kind-badge kind-{targetKind}">{targetKind}</span>
-			<span class="count">{pluralize(rules.length, RULE_WORDS)}</span>
+			<span class="count">{m.routing_rules_count({ count: rules.length })}</span>
 		</div>
-		<RoutingRuleAddMenu label="Добавить правило" oncatalog={oncatalog} onmanual={onmanual} />
+		<div class="header-actions">
+			{#if ondeletetarget}
+				<Button variant="outline-danger" size="sm" onclick={ondeletetarget}>{m.hrneo_target_delete()}</Button>
+			{/if}
+			<RoutingRuleAddMenu label={m.hrneo_rules_list_add()} oncatalog={oncatalog} onmanual={onmanual} />
+		</div>
 	</header>
 
-	{#if sortedRules.length === 0}
-		<div class="empty">Пусто. Добавьте первое правило для этого target.</div>
+	{#if rules.length === 0}
+		<div class="empty">{m.hrneo_rules_list_empty()}</div>
 	{:else}
 		<div class="route-grid">
-			{#each sortedRules as rule (rule.id)}
+			{#each rules as rule (hrPosKey(rule.id))}
 				{@const cardRule = displayRule ? displayRule(rule) : rule}
 				<HrNeoRuleCard
 					rule={cardRule}
 					broken={brokenRuleIds.has(rule.id)}
-					toggleLoading={toggleLoadingId === rule.id}
 					ontoggle={ontogglerule ? (enabled) => ontogglerule(rule, enabled) : undefined}
 					onedit={() => oneditrule(rule)}
 					ondelete={() => ondeleterule(rule)}
@@ -81,6 +85,13 @@
 		padding-bottom: 12px;
 		border-bottom: 1px solid var(--border);
 		gap: 12px;
+	}
+
+	.header-actions {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+		flex-wrap: wrap;
 	}
 
 	.list-title {
@@ -156,7 +167,8 @@
 		.list-header {
 			flex-wrap: wrap;
 		}
-		.list-title {
+		.list-title,
+		.header-actions {
 			flex: 1 1 100%;
 		}
 		.list-header :global(.dropdown-wrapper) {

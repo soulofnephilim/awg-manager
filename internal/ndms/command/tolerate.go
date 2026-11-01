@@ -12,7 +12,7 @@ import "strings"
 // «unable to find», но означает совсем другое — см. isMissingInterface).
 
 // isMissingInterface: `unable to find interface "OpkgTun9"` — снос интерфейса
-// (OpkgTun, Proxy), которого уже нет.
+// (OpkgTun, Proxy, managed Wireguard — стенд 5.02.A.11), которого уже нет.
 func isMissingInterface(msg string) bool {
 	return strings.Contains(strings.ToLower(msg), "unable to find interface")
 }
@@ -116,6 +116,14 @@ func isACLRuleAbsent(msg string) bool {
 	return strings.Contains(strings.ToLower(msg), "no rule found to delete")
 }
 
+// isNoSuchNetInPeer: `"WireguardN": no such net in peer "<key>"` — снятие
+// элемента allow-ips, которого у пира уже нет (стенд 5.02.A.11, 27.09.2026).
+// Применять ТОЛЬКО к снятию allow-ips: RemovePeerAllowIP и миграция managed
+// (снятие 0.0.0.0/0 у пира, TolerateNoSuchNetInPeer).
+func isNoSuchNetInPeer(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "no such net in peer")
+}
+
 // toleratesRouteRemoval — безобидные отказы СНЯТИЯ маршрута: интерфейса уже
 // нет, либо netlink ответил «file exists», потому что по тому же адресу в
 // таблице остался ещё один маршрут (стенд 5.01: запись при этом снимается,
@@ -123,3 +131,14 @@ func isACLRuleAbsent(msg string) bool {
 func toleratesRouteRemoval(msg string) bool {
 	return isNoSuchInterface(msg) || isNetlinkFileExists(msg)
 }
+
+// Предикаты для PostChecked вне пакета: managed шлёт свои payload'ы той же
+// формы, что и команды здесь, и терпит те же отказы на тех же сносах.
+
+// TolerateUnknownInterface — isUnknownInterface: снятие Static NAT, когда
+// сегмента или выхода уже нет (как RemoveStaticNAT).
+func TolerateUnknownInterface(msg string) bool { return isUnknownInterface(msg) }
+
+// TolerateNoSuchNetInPeer — isNoSuchNetInPeer: снятие элемента allow-ips,
+// которого у пира нет (как RemovePeerAllowIP).
+func TolerateNoSuchNetInPeer(msg string) bool { return isNoSuchNetInPeer(msg) }

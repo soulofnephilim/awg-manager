@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/logging"
 	"github.com/hoaxisr/awg-manager/internal/ndms/query"
-	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
 	"github.com/hoaxisr/awg-manager/internal/pingcheck"
 	"github.com/hoaxisr/awg-manager/internal/singbox"
 	"github.com/hoaxisr/awg-manager/internal/storage"
@@ -32,6 +32,7 @@ type Report struct {
 	WAN             WANInfo              `json:"wan"`
 	BootHealth      BootHealth           `json:"bootHealth"`
 	AWGProxyModule  AWGProxyModule       `json:"awgProxyModule"`
+	AWGMRelay       AWGMRelayModule      `json:"awgmRelay"`
 	SingboxConfig   *SingboxConfigInfo   `json:"singboxConfig,omitempty"`
 	JournalWarnings *JournalWarningsInfo `json:"journalWarnings,omitempty"`
 	Tunnels         []TunnelInfo         `json:"tunnels"`
@@ -114,6 +115,15 @@ type AWGProxyModule struct {
 	EndpointCount int      `json:"endpointCount"`
 	RawList       string   `json:"rawList,omitempty"`
 	DmesgLines    []string `json:"dmesgLines,omitempty"`
+}
+
+// AWGMRelayModule — состояние kernel-релея обфускатора Phobos (модуль
+// awgm_relay, спека §4.10). Заполняется collectAWGMRelayModule.
+type AWGMRelayModule struct {
+	Loaded  bool   `json:"loaded"`
+	Version string `json:"version,omitempty"`
+	RawList string `json:"rawList,omitempty"`
+	Slots   int    `json:"slots"`
 }
 
 // SingboxConfigInfo holds the merged sing-box config (sanitized) in the report.
@@ -214,7 +224,6 @@ type PingCheckConfig struct {
 	Target        string `json:"target"`
 	Interval      int    `json:"interval"`
 	FailThreshold int    `json:"failThreshold"`
-	DeadInterval  int    `json:"deadInterval"`
 }
 
 // PingCheckInfo contains runtime ping check status from facade.
@@ -385,6 +394,8 @@ type TunnelServiceForDiag interface {
 	List(ctx context.Context) ([]service.TunnelWithStatus, error)
 	Start(ctx context.Context, tunnelID string) error
 	Stop(ctx context.Context, tunnelID string) error
+	Restart(ctx context.Context, tunnelID string) error
+	SetEnabled(ctx context.Context, tunnelID string, enabled bool) error
 	WANModel() *wan.Model
 	GetResolvedISP(tunnelID string) string
 }
@@ -427,7 +438,7 @@ type SingboxSubMember struct {
 type Deps struct {
 	TunnelService        TunnelServiceForDiag
 	NDMSQueries          *query.Queries
-	NDMSTransport        *transport.Client
+	NDMSGetter           query.Getter // общий клиент RCI для routerinfo
 	KmodLoader           *kmod.Loader
 	TunnelStore          *storage.AWGTunnelStore
 	LogService           LogServiceForDiag
@@ -449,14 +460,24 @@ type Runner struct {
 	result      *Report
 	subscribers []chan DiagEvent
 	opts        RunOptions
+
+	// readAWGMRelayVersion / readAWGMRelayList — шов для теста
+	// collectAWGMRelayModule: реальные /proc-файлы недоступны в CI.
+	// NewRunner задаёт боевые реализации; поле nil означает, что Runner
+	// собран напрямую литералом (как в других тестах пакета) и эти два
+	// коллектора не вызываются.
+	readAWGMRelayVersion func() ([]byte, error)
+	readAWGMRelayList    func() ([]byte, error)
 }
 
 // NewRunner creates a new diagnostics runner.
 func NewRunner(deps Deps) *Runner {
 	return &Runner{
-		deps:   deps,
-		appLog: logging.NewScopedLogger(deps.AppLogger, logging.GroupSystem, logging.SubDiagnostics),
-		status: RunStatus{Status: "idle"},
+		deps:                 deps,
+		appLog:               logging.NewScopedLogger(deps.AppLogger, logging.GroupSystem, logging.SubDiagnostics),
+		status:               RunStatus{Status: "idle"},
+		readAWGMRelayVersion: func() ([]byte, error) { return os.ReadFile("/proc/awgm_relay/version") },
+		readAWGMRelayList:    func() ([]byte, error) { return kmod.ReadProc("/proc/awgm_relay/list") },
 	}
 }
 
@@ -551,22 +572,50 @@ func (r *Runner) closeSubscribers() {
 // RunWithStream starts a diagnostic run and returns a channel of events.
 // If a run is already in progress, it subscribes to the existing run.
 func (r *Runner) RunWithStream(ctx context.Context, opts RunOptions) (<-chan DiagEvent, error) {
-	r.mu.Lock()
-	alreadyRunning := r.status.Status == "running"
-	if !alreadyRunning {
-		r.status = RunStatus{Status: "running", Progress: "Запуск диагностики..."}
-		r.result = nil
-		r.opts = opts
-	}
-	r.mu.Unlock()
+	ch, _ := r.start(opts, true)
+	return ch, nil
+}
 
+// Start starts a run with opts unless one is in progress, and says which.
+// started false: another run — with its own options — is going, and
+// nothing was subscribed. RunWithStream joins that run instead; a caller
+// whose options matter (MCP: no restart test unless asked) must not, and
+// the check and the start are one step under r.mu here (begin).
+func (r *Runner) Start(opts RunOptions) (events <-chan DiagEvent, started bool) {
+	return r.start(opts, false)
+}
+
+func (r *Runner) start(opts RunOptions, join bool) (<-chan DiagEvent, bool) {
+	alreadyRunning := r.begin(opts)
+
+	if alreadyRunning && !join {
+		return nil, false
+	}
 	ch := r.subscribe()
 
 	if !alreadyRunning {
 		go r.executeStream(context.Background())
 	}
 
-	return ch, nil
+	return ch, !alreadyRunning
+}
+
+// begin marks a run started unless one is, and reports whether one was.
+// Only a full run replaces the report: a single-target run produces none
+// (executeStream keeps the report for full runs only), so clearing it would
+// leave nothing behind but the previous full sweep lost.
+func (r *Runner) begin(opts RunOptions) (alreadyRunning bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status.Status == "running" {
+		return true
+	}
+	r.status = RunStatus{Status: "running", Progress: "Запуск диагностики..."}
+	if opts.TunnelID == "" {
+		r.result = nil
+	}
+	r.opts = opts
+	return false
 }
 
 func (r *Runner) execute(ctx context.Context) {
@@ -649,6 +698,9 @@ func (r *Runner) executeStream(ctx context.Context) {
 
 		r.emitPhase("collect_proxy_module", "Состояние awg-proxy...")
 		report.AWGProxyModule = r.collectAWGProxyModule(ctx)
+
+		r.emitPhase("collect_awgm_relay", "Состояние awgm_relay...")
+		report.AWGMRelay = r.collectAWGMRelayModule()
 
 		r.emitPhase("collect_singbox_config", "Сбор sing-box config...")
 		report.SingboxConfig = r.collectSingboxConfig()

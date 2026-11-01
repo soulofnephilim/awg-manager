@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"net"
 	"slices"
 	"strings"
 
@@ -119,6 +120,12 @@ func globalEgressInterfaces(lines []string) []string {
 // и та же строка под чужим интерфейсом нашей не является. Без `ip global`
 // интерфейс пропадает из списка выходов политики, то есть режим тихо мёртв.
 func policyTunIPGlobalPresent(lines []string, ndmsName string) bool {
+	return ifaceBlockHas(lines, ndmsName, "ip global")
+}
+
+// ifaceBlockHas ищет директиву (строку целиком или с аргументами) в блоке
+// интерфейса ndmsName running-config.
+func ifaceBlockHas(lines []string, ndmsName, directive string) bool {
 	inBlock := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -130,7 +137,7 @@ func policyTunIPGlobalPresent(lines []string, ndmsName string) bool {
 			inBlock = len(f) == 2 && f[0] == "interface" && f[1] == ndmsName
 			continue
 		}
-		if inBlock && (trimmed == "ip global" || strings.HasPrefix(trimmed, "ip global ")) {
+		if inBlock && (trimmed == directive || strings.HasPrefix(trimmed, directive+" ")) {
 			return true
 		}
 	}
@@ -190,11 +197,25 @@ func (s *ServiceImpl) policyTunIngressSpec(ctx context.Context, iface, ndmsName 
 		s.appLog.Warn("policy-tun-ingress", iface, "список политик: "+err.Error())
 		return FakeIPIngressSpec{}, false
 	}
+	// F705: пока tun лежит (рестарт/перечитывание движка), NDMS убирает из
+	// таблицы политики маршрут 0.0.0.0/0 через него, и набор выходов пуст —
+	// это не «политик нет». Снятие перехвата DNS (и хука) в это окно пускало
+	// резолвинг мимо туннеля до следующего тика (стенд 21.10: ~50 с).
+	if len(exits) == 0 && !tunLinkRunning(iface) {
+		return FakeIPIngressSpec{}, false
+	}
 	spec.TunDNS = tunDNS
 	for _, e := range exits {
 		spec.Marks = append(spec.Marks, e.Mark)
 	}
 	return spec, true
+}
+
+// tunLinkRunning — tun-интерфейс поднят и с несущей (sing-box держит его fd).
+// Шов для тестов.
+var tunLinkRunning = func(iface string) bool {
+	ifi, err := net.InterfaceByName(iface)
+	return err == nil && ifi.Flags&net.FlagUp != 0 && ifi.Flags&net.FlagRunning != 0
 }
 
 // portRangesContain — вхождение порта в набор диапазонов bypass.
@@ -237,7 +258,7 @@ func (s *ServiceImpl) reconcilePolicyTun(ctx context.Context, sr storage.Singbox
 		if !provisioned && !slotActive {
 			return nil
 		}
-		return s.Disable(ctx)
+		return s.disable(ctx)
 	}
 
 	// Транзиентная ошибка пробы (глюк NDMS на буте) НЕ равна «интерфейс исчез»:
@@ -248,7 +269,7 @@ func (s *ServiceImpl) reconcilePolicyTun(ctx context.Context, sr storage.Singbox
 	if s.deps.OpkgTunIndices != nil {
 		live, probeErr = s.deps.OpkgTunIndices.LiveOpkgTunIndices(ctx)
 	}
-	if s.needsReprovision(ctx, st, live, probeErr, policyTunDescription) {
+	if s.needsReprovision(ctx, st, live, probeErr, policyTunOwnDescriptions(st)...) {
 		// Drift-heal, НЕ действие пользователя: sticky master-Stop не сбрасываем.
 		return s.enableLocked(ctx, false)
 	}
@@ -271,6 +292,7 @@ func (s *ServiceImpl) reconcilePolicyTun(ctx context.Context, sr storage.Singbox
 			"режим включён, но tun-инбаунд пропал из слота — переустановка (недоделанное выключение)")
 		if e := s.deps.Settings.SetOpkgTunState(&storage.OpkgTunState{
 			Mode: storage.OpkgTunModePolicyTun, Index: st.Index, PolicyTun: st.PolicyTun,
+			Description: st.Description, PendingDescription: st.PendingDescription,
 		}); e != nil {
 			s.appLog.Warn("policy-tun-reconcile", iface, "reset policy-tun persist: "+e.Error())
 		}
@@ -298,12 +320,17 @@ func (s *ServiceImpl) reconcilePolicyTun(ctx context.Context, sr storage.Singbox
 	s.healDetachedTun(iface, "policy-tun-reconcile", orchestrator.SlotRouter)
 	// Гейт probeErr == nil: без скана чужой интерфейс на нашем индексе не
 	// отсечён (needsReprovision на ошибке пробы молчит) — адрес ушёл бы ему.
+	// Тот же гейт у переименования: описание — метка владения.
 	if probeErr == nil {
 		s.healTunAddress(ctx, sr, iface, ndmsName, "policy-tun-reconcile")
+		s.healPolicyTunDescription(ctx, st, sr, iface, ndmsName)
 	}
 
 	// One-shot (до первого УСПЕХА) ассерт permit-ACL: покрывает апгрейд поверх
-	// уже включённого режима и удаление списка мимо нас. Гейт probeErr == nil —
+	// уже включённого режима и удаление списка мимо нас (В2). Идемпотентен
+	// чтением: permit уходит только без нашего правила в свежем running-config
+	// (F607, без этого — 2 E duplicate на каждое включение); цена ≈89 тиков ndm
+	// на чтение, по одному на семейство за процесс. Гейт probeErr == nil —
 	// живость интерфейса подтверждена, иначе bind упал бы и осиротевший список
 	// остался бы в конфиге навсегда.
 	if !s.policyTunACLAsserted && s.deps.OpkgTun != nil && probeErr == nil {
@@ -340,6 +367,12 @@ func (s *ServiceImpl) reconcilePolicyTun(ctx context.Context, sr storage.Singbox
 	// форме 1.14.
 	if s.healTunSettings(ctx, orchestrator.SlotRouter, sr) {
 		s.completeExternalFlip(ctx, sr, iface, ndmsName, "policy-tun-reconcile")
+	}
+	// Долечивание F703/F704: выбор WAN и сниффер, сохранённые до версии с
+	// мгновенным применением, доезжают до слота без пересохранения настроек.
+	// Сошлось — ни записи, ни reload.
+	if err := s.reapplyRouterSettings(ctx, sr); err != nil {
+		s.appLog.Warn("reconcile", "router-settings", err.Error())
 	}
 
 	// Ingress-заворот: и drift-heal после сброса firewall NDMS, и применение
@@ -385,17 +418,18 @@ func (s *ServiceImpl) healPolicyTunNDMS(ctx context.Context, sr storage.SingboxR
 	wantV6 := s.resolveFakeIPParams(sr).TunAddr6 != ""
 
 	v4, v6 := policyTunDefaultRoutePresent(lines, ndmsName)
+	addr6 := ifaceBlockHas(lines, ndmsName, "ipv6 address")
 	global := policyTunIPGlobalPresent(lines, ndmsName)
 	permitted := policyTunPermitted(lines, ndmsName, sr.PolicyName)
-	healthy := v4 && global && permitted && (!wantV6 || v6)
+	healthy := v4 && global && permitted && (!wantV6 || v6) && (wantV6 || !v6 && !addr6)
 	if !healthy {
 		// По кэшу всё плохо — перечитываем и решаем по свежим данным: иначе
 		// починка мимо нас (пользователь в веб-морде) выглядела бы дрейфом и
 		// каждый тик переставляла бы уже стоящие маршруты.
-		s.deps.RunningConfig.InvalidateAll()
-		if fresh, ferr := s.deps.RunningConfig.Lines(ctx); ferr == nil {
+		if fresh, ferr := s.deps.RunningConfig.Fetch(ctx); ferr == nil {
 			lines = fresh
 			v4, v6 = policyTunDefaultRoutePresent(fresh, ndmsName)
+			addr6 = ifaceBlockHas(fresh, ndmsName, "ipv6 address")
 			global = policyTunIPGlobalPresent(fresh, ndmsName)
 			permitted = policyTunPermitted(fresh, ndmsName, sr.PolicyName)
 		}
@@ -416,6 +450,9 @@ func (s *ServiceImpl) healPolicyTunNDMS(ctx context.Context, sr storage.SingboxR
 	// WAN, разрешённый в политике мимо нас (веб-морда, прежний tproxy), снова
 	// стал бы обходом туннеля — снимаем на тике (F440).
 	s.denyPolicyWAN(ctx, sr, lines)
+	if !wantV6 {
+		s.dropPolicyTunV6(ctx, iface, ndmsName, v6, addr6)
+	}
 	if s.deps.DefaultRoute == nil {
 		return
 	}
@@ -441,6 +478,28 @@ func (s *ServiceImpl) healPolicyTunNDMS(ctx context.Context, sr storage.SingboxR
 			s.appLog.Warn("policy-tun-reconcile", iface, "re-add ipv6 default route: "+e.Error())
 		} else {
 			s.appLog.Info("policy-tun-reconcile", iface, "v6-дефолт пропал — переустановлен (drift-heal)")
+		}
+	}
+}
+
+// dropPolicyTunV6 снимает v6 с интерфейса, когда пул v6 выключен на живом
+// режиме (F754): сверка умела только ставить, и v6 членов политики уходил в tun
+// до выключения режима. Маршрут — раньше адреса, обратно установке. v6-ACL
+// остаётся: без адреса и маршрута он ничего не пропускает, а на повторном
+// включении пула policyTunACLv6Asserted считает его стоящим.
+func (s *ServiceImpl) dropPolicyTunV6(ctx context.Context, iface, ndmsName string, route6, addr6 bool) {
+	if route6 && s.deps.DefaultRoute != nil {
+		if e := s.deps.DefaultRoute.RemoveIPv6DefaultRoute(ctx, ndmsName); e != nil {
+			s.appLog.Warn("policy-tun-reconcile", iface, "remove ipv6 default route: "+e.Error())
+		} else {
+			s.appLog.Info("policy-tun-reconcile", iface, "пул v6 выключен — v6-дефолт снят")
+		}
+	}
+	if addr6 && s.deps.OpkgTun != nil {
+		if e := s.deps.OpkgTun.ClearIPv6Address(ctx, ndmsName); e != nil {
+			s.appLog.Warn("policy-tun-reconcile", iface, "clear ipv6 address: "+e.Error())
+		} else {
+			s.appLog.Info("policy-tun-reconcile", iface, "пул v6 выключен — v6-адрес снят")
 		}
 	}
 }
@@ -588,7 +647,7 @@ func (s *ServiceImpl) ensurePolicyTunPermit(ctx context.Context, sr storage.Sing
 // пустому слайсу». Uninstall заодно снимает fail-closed blackhole, оставшийся от
 // tproxy: в policy-tun он не применяется.
 func (s *ServiceImpl) reconcilePolicyTunQoS(ctx context.Context, sr storage.SingboxRouterSettings) {
-	qosClasses := activeQoSClasses(sr.QoSClasses)
+	qosClasses := routedQoSClasses(activeQoSClasses(sr.QoSClasses))
 	qosSpecs := qosIPTablesSpecs(qosClasses)
 	if len(qosSpecs) > 0 {
 		if e := EnsureXtDscpModule(ctx); e != nil {
@@ -645,6 +704,14 @@ func (s *ServiceImpl) reconcilePolicyTunQoS(ctx context.Context, sr storage.Sing
 		}
 		s.appLog.Warn("policy-tun-reconcile", "qos",
 			"цепочки DSCP-диспатча пропали при неизменных классах — переустанавливаем")
+	}
+
+	// v6-слой прежнего tproxy-режима: в policy-tun его нет вовсе, а цепочки и
+	// хук переживают рестарт демона. Свип на первой сверке и при каждом сносе
+	// v4-правил — а не только в ветке `want == nil`: при активных классах QoS
+	// та ветка не достигается, и сирота жила бы до выключения режима.
+	if force || want == nil {
+		s.sweepV6(ctx)
 	}
 
 	if want == nil {

@@ -2,6 +2,7 @@
 	// Модалка добавления абонента FreeTurn (Дополнение №4 п.1): та же форма, что
 	// у WDTT, — окно по кнопке шапки, а не inline. Поля свои, решение об
 	// отправке — у владельца списка.
+	import { m } from '$lib/i18n';
 	import { RefreshCw } from 'lucide-svelte';
 	import { Button, IconButton, Input, Modal, Toggle } from '$lib/components/ui';
 	import LinkBox from './LinkBox.svelte';
@@ -41,6 +42,12 @@
 		link?: string;
 		/** Чья ссылка показана: имя абонента либо его Client ID. */
 		linkFor?: string;
+		/**
+		 * Выдача ссылки СУЩЕСТВУЮЩЕМУ абоненту (запись без ссылки — заведённая до
+		 * #919, F371): Client ID и имя подставлены, ID не меняется, запись в
+		 * списке остаётся (внесение — upsert: запись лишь получает ссылку).
+		 */
+		reissue?: { clientId: string; name: string } | null;
 		onsubmit: (values: AddClientValues) => void;
 		onclose: () => void;
 	}
@@ -53,6 +60,7 @@
 		linkPeer = '',
 		link = '',
 		linkFor = '',
+		reissue = null,
 		onsubmit,
 		onclose,
 	}: Props = $props();
@@ -85,7 +93,14 @@
 	// Закрытая модалка полей не хранит: следующее открытие начинается с чистой
 	// формы и нового Client ID.
 	$effect(() => {
-		if (open) return;
+		if (open) {
+			if (reissue) {
+				clientId = reissue.clientId;
+				name = reissue.name;
+				allow = true;
+			}
+			return;
+		}
 		clientId = randomClientId();
 		name = '';
 		allow = true;
@@ -100,44 +115,49 @@
 <!-- Клик по подложке форму не теряет: выход — «Отменить» или Esc. -->
 <Modal
 	{open}
-	title={link ? 'Ссылка абоненту' : 'Новый абонент'}
+	title={link
+		? m.proxy_allowlist_modal_link_title()
+		: reissue
+			? m.proxy_allowlist_issue_title()
+			: m.proxy_allowlist_modal_title()}
 	size="sm"
 	closeOnBackdrop={false}
 	{onclose}
 >
 	{#if link}
 		<div class="issued">
-			<p class="issued-for">Абонент: {linkFor || '—'}</p>
+			<p class="issued-for">{m.proxy_link_panel_subscriber({ name: linkFor || '—' })}</p>
 			<LinkBox {link} freeturn />
 		</div>
 	{:else}
 		<div class="add-form">
 			<div class="field-with-btn">
-				<Input label="Client ID" bind:value={clientId} fullWidth />
-				<IconButton
-					size="sm"
-					ariaLabel="Обновить Client ID"
-					onclick={() => (clientId = randomClientId())}
-				>
-					<RefreshCw size={14} />
-				</IconButton>
+				<Input label="Client ID" bind:value={clientId} disabled={!!reissue} fullWidth />
+				{#if !reissue}
+					<IconButton
+						size="sm"
+						ariaLabel={m.proxy_allowlist_refresh_id()}
+						onclick={() => (clientId = randomClientId())}
+					>
+						<RefreshCw size={14} />
+					</IconButton>
+				{/if}
 			</div>
-			<Input label="Имя абонента" bind:value={name} fullWidth />
+			<Input label={m.proxy_clients_name_label()} bind:value={name} fullWidth />
 			<p class="link-peer-note">
 				{#if linkPeer.trim()}
-					Ссылка будет собрана на адрес <b>{linkPeer.trim()}</b>{#if !/:\d+$/.test(linkPeer.trim())}
+					{m.proxy_allowlist_link_peer()} <b>{linkPeer.trim()}</b>{#if !/:\d+$/.test(linkPeer.trim())}
 						<!-- Порт дописывает бэкенд из listen раздачи: обещать точное
 						     значение ссылки, не зная его, — полуправда. -->
-						с портом раздачи{/if}
+						{m.proxy_allowlist_link_peer_port()}{/if}
 				{:else}
-					Адрес в ссылке — внешний IP роутера. Чтобы отдавать абонентам имя, задайте
-					«Адрес для абонентов» в настройках раздачи
+					{m.proxy_allowlist_link_peer_default()}
 				{/if}
 			</p>
 			<ShareWizardPeer
 				endpointPort={9000}
 				{serverListenPort}
-				createLabel="Создать нового под абонента"
+				createLabel={m.proxy_allowlist_create_peer()}
 				onconnect={() => {}}
 				onpeerconf={(conf, err, unknown) => {
 					peerConf = conf;
@@ -151,21 +171,23 @@
 				}}
 			/>
 			{#if portUnknown || localPort <= 0}
-				<p class="add-error" role="alert">Укажите локальный порт FreeTurn-клиента абонента</p>
+				<p class="add-error" role="alert">{m.proxy_allowlist_port_required()}</p>
 			{:else if confMissing && !peerLoading}
 				<p class="add-error" role="alert">
-					{confError || 'Конфиг пира не получен — без него ссылка абоненту неполная'}
+					{confError || m.proxy_allowlist_conf_missing()}
 				</p>
 			{/if}
-			<Toggle
-				label="Внести в список разрешённых"
-				checked={allow}
-				onchange={(v) => (allow = v)}
-			/>
+			{#if !reissue}
+				<Toggle
+					label={m.proxy_share_wizard_allow()}
+					checked={allow}
+					onchange={(v) => (allow = v)}
+				/>
+			{/if}
 			{#if !allow}
 				<!-- Ссылку хранит запись списка (#919): без записи её негде показать
 				     потом, и владелец должен знать это ДО отправки, а не после. -->
-				<p class="add-note">Без записи в списке ссылку потом не показать — сохраните её сами</p>
+				<p class="add-note">{m.proxy_allowlist_no_entry_note()}</p>
 			{/if}
 			{#if error}
 				<p class="add-error" role="alert">{error}</p>
@@ -174,11 +196,11 @@
 	{/if}
 	{#snippet actions()}
 		{#if link}
-			<Button variant="primary" size="md" onclick={onclose}>Готово</Button>
+			<Button variant="primary" size="md" onclick={onclose}>{m.common_done()}</Button>
 		{:else}
-			<Button variant="secondary" size="md" disabled={busy} onclick={onclose}>Отменить</Button>
+			<Button variant="secondary" size="md" disabled={busy} onclick={onclose}>{m.proxy_common_cancel_action()}</Button>
 			<Button variant="primary" size="md" disabled={!canSubmit} loading={busy} onclick={submit}>
-				Добавить
+				{reissue ? m.proxy_allowlist_issue_link() : m.common_add()}
 			</Button>
 		{/if}
 	{/snippet}

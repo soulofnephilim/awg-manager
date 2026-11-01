@@ -27,12 +27,29 @@ var (
 	// retryable 409 instead of queueing behind the lock indefinitely.
 	ErrOperationInProgress = errors.New("операция с туннелем уже выполняется — дождитесь завершения предыдущей")
 
+	// ErrParseConf — .conf не разобран: ошибка ввода. Ручки отвечают на неё
+	// 400 по errors.Is, а не по тексту обёртки (F666).
+	ErrParseConf = errors.New("parse conf")
+
+	// ErrValidateConf — .conf разобран, но параметры AWG отвергнуты.
+	ErrValidateConf = errors.New("validate conf")
+
+	// ErrPathSwitchNotRunning — правка меняет путь NativeWG (ASC ↔ awg_proxy),
+	// а туннель не работает: смена пути — это Stop+Start, а у туннеля без
+	// рукопожатия он мог быть подвешен на WAN-down (F658).
+	ErrPathSwitchNotRunning = errors.New("правка меняет путь туннеля (ASC ↔ awg_proxy), а туннель сейчас не подключён — запустите его или дождитесь подключения и повторите")
+
 	// ErrAddressInUse indicates the tunnel address is already assigned to a system interface.
 	ErrAddressInUse = errors.New("address already in use")
 
 	// ErrNotObfuscated indicates the tunnel config is plain WireGuard without AWG obfuscation.
 	// The tunnel must be edited to add AWG parameters before it can be started.
 	ErrNotObfuscated = errors.New("конфиг не содержит параметров обфускации AWG — добавьте их в настройках туннеля")
+
+	// ErrInterfaceGone — записи интерфейса туннеля нет в свежем списке NDMS:
+	// команда `interface X …` по ней создала бы X заново (F546). Текст
+	// нейтральный: что делать пользователю, дописывает бэкенд при обёртке.
+	ErrInterfaceGone = errors.New("интерфейс туннеля снят в NDMS")
 )
 
 // OpError represents an error that occurred during a tunnel operation.

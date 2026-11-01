@@ -15,15 +15,18 @@ const shareSchemeCore = `(?:vless|trojan|ss|hysteria2|hy2|naive\+\w+|vpn|mieru|m
 // links on one line still split correctly (old [^\s]+ truncated at the first space anywhere).
 var shareURLStartPlain = regexp.MustCompile(`(?i)(?:^|\s+)(` + shareSchemeCore + `://)`)
 
-// shareURLStartHTML is like plain but allows common HTML/JSON delimiters before the scheme.
-var shareURLStartHTML = regexp.MustCompile(`(?i)(?:^|[\s"'<>=]+)(` + shareSchemeCore + `://)`)
+// shareURLStartHTML also accepts HTML/JSON delimiters and JSON-escaped
+// slashes in the scheme delimiter.
+var shareURLStartHTML = regexp.MustCompile(`(?i)(?:^|[\s"'<>=]+)(` + shareSchemeCore + `:(?://|\\/\\/))`)
 
 // trimShareURLSuffix removes trailing delimiters often glued after a URL in HTML/JSON
 // (quotes, commas, angle brackets, whitespace).
 func trimShareURLSuffix(u string) string {
 	u = strings.TrimSpace(u)
 	lower := strings.ToLower(u)
-	if strings.HasPrefix(lower, "mieru://") || strings.HasPrefix(lower, "mierus://") {
+	// Хвост после пробела у этих схем — подпись провайдера («— 28 дней»), а
+	// не часть ссылки: base64 tt:// и mieru пробелов не содержат (F403).
+	if strings.HasPrefix(lower, "mieru://") || strings.HasPrefix(lower, "mierus://") || strings.HasPrefix(lower, "tt://") {
 		if fields := strings.Fields(u); len(fields) > 0 {
 			u = fields[0]
 		}
@@ -80,22 +83,53 @@ func splitShareURLs(s string, startRe *regexp.Regexp) []string {
 // The returned slice is the list of share links the caller should then feed
 // to vlink.ParseBatch.
 func NormalizeBody(body []byte, contentType string) []string {
+	links, _ := normalizeBodyCounted(body, contentType)
+	return links
+}
+
+// normalizeBodyCounted — NormalizeBody плюс число строк текстового тела со
+// схемой ссылки, которую подписка не принимает (F402): раньше они пропадали
+// молча — ни в Errors, ни в счётчиках. HTML-страница не считается: ссылок
+// на ней много и все посторонние.
+func normalizeBodyCounted(body []byte, contentType string) (links []string, unsupported int) {
 	if decoded, ok := vlink.DoubleDecode(body); ok {
 		return splitLines(decoded)
 	}
 	if isHTML(body, contentType) {
 		extracted := extractFromHTML(body)
 		if len(extracted) > 0 {
-			return extracted
+			return extracted, 0
 		}
 	}
 	return splitLines(body)
 }
 
-func splitLines(b []byte) []string {
+// anySchemeRe — первая схема ссылки в строке (после начала или пробела).
+var anySchemeRe = regexp.MustCompile(`(?i)(?:^|\s)([a-z][a-z0-9+.\-]*)://`)
+
+// foreignSchemeLine разбирает строку без поддерживаемой ссылки: vmess
+// уходит ParseBatch целиком (его счётчик SkippedVmess), http(s) — проза
+// (заголовки подписок, ссылки на каналы; connect-URL TrustTunnel в теле
+// подписки не поддерживается — F401), прочая схема (socks5, wireguard, …) —
+// неподдерживаемая: подписка её не принимает (решение владельца 14.10).
+func foreignSchemeLine(p string) (forward string, unsupported bool) {
+	m := anySchemeRe.FindStringSubmatchIndex(p)
+	if m == nil {
+		return "", false
+	}
+	switch strings.ToLower(p[m[2]:m[3]]) {
+	case "vmess":
+		return strings.TrimSpace(p[m[2]:]), false
+	case "http", "https":
+		return "", false
+	}
+	return "", true
+}
+
+func splitLines(b []byte) (out []string, unsupported int) {
 	s := strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(string(b))
 	parts := strings.Split(s, "\n")
-	out := make([]string, 0, len(parts))
+	out = make([]string, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" || strings.HasPrefix(p, "#") {
@@ -103,13 +137,18 @@ func splitLines(b []byte) []string {
 		}
 		links := splitShareURLs(p, shareURLStartPlain)
 		if len(links) == 0 {
+			if fwd, unsup := foreignSchemeLine(p); fwd != "" {
+				out = append(out, fwd)
+			} else if unsup {
+				unsupported++
+			}
 			continue
 		}
 		for _, link := range links {
 			out = append(out, trimShareURLSuffix(link))
 		}
 	}
-	return out
+	return out, unsupported
 }
 
 func isHTML(body []byte, contentType string) bool {
@@ -127,12 +166,12 @@ func isHTML(body []byte, contentType string) bool {
 // embedded as JSON-escaped strings inside React/Vue/etc. payloads. The
 // motivating case is GitHub's blob view: it serialises the file body
 // as a JSON string inside a script tag, so a real `&` separator in a
-// share-link surfaces in the HTML as the six-character literal `&`.
+// share-link surfaces in the HTML as the six-character literal `\u0026`.
 // The legacy schemeLineRegex used [^\s]+ which truncated URLs at the first space
 // (common in URI fragments: "#📆 Осталось: 28 дней"). We now slice from each scheme://
 // to the next scheme boundary.
 //
-// Other JSON escapes worth unwrapping (`<` / `>` / `'` /
+// Other JSON escapes worth unwrapping (`\u003c` / `\u003e` / `\u0027` /
 // `\/` / `\"` / `\\`) appear in the same envelope for similar reasons.
 // The order of replacements is significant — backslash must be last so
 // we don't mangle the front of the other escapes mid-pass.
@@ -166,10 +205,10 @@ func jsonUnescapeURL(s string) string {
 		return s
 	}
 	r := strings.NewReplacer(
-		`&`, "&",
-		`<`, "<",
-		`>`, ">",
-		`'`, "'",
+		`\u0026`, "&",
+		`\u003c`, "<",
+		`\u003e`, ">",
+		`\u0027`, "'",
 		`\/`, "/",
 		`\"`, `"`,
 		`\\`, `\`, // last — must not chew the leading backslash of the others

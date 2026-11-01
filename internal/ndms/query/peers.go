@@ -2,38 +2,46 @@ package query
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/hoaxisr/awg-manager/internal/ndms"
 	"github.com/hoaxisr/awg-manager/internal/ndms/cache"
-	"github.com/hoaxisr/awg-manager/internal/ndms/transport"
 )
 
 // peerTTL is short because the MetricsPoller refreshes on its own
 // interval (~10s). This TTL mostly serves fast-back-to-back reads.
+// От него зависит допуск дедупа серверов в поллере метрик
+// (metrics.handshakeJitter): его поднимать вместе с этим значением.
 const peerTTL = 8 * time.Second
 
 // PeerStore caches the .wireguard.peer list of /show/interface/{name} —
 // the per-interface peer metrics. Per-interface key.
 type PeerStore struct {
-	getter Getter
-	log    Logger
+	log Logger
+	// interfaces — источник записей: пиры читаются из снимка полного списка,
+	// по имени NDMS не спрашивают (F546).
+	interfaces *InterfaceStore
 
 	store *cache.KeyedStore[string, []ndms.Peer]
 }
 
-func NewPeerStore(g Getter, log Logger) *PeerStore {
-	return NewPeerStoreWithTTL(g, log, peerTTL)
+// NewPeerStore — PeerStore поверх кэша интерфейсов ifaces (обязателен).
+func NewPeerStore(log Logger, ifaces *InterfaceStore) *PeerStore {
+	return NewPeerStoreWithTTL(log, ifaces, peerTTL)
 }
 
-func NewPeerStoreWithTTL(g Getter, log Logger, ttl time.Duration) *PeerStore {
+// NewPeerStoreWithTTL — то же с заданным TTL. Чтение идёт только через ifaces
+// (снимок списка), своего getter у стора нет.
+func NewPeerStoreWithTTL(log Logger, ifaces *InterfaceStore, ttl time.Duration) *PeerStore {
+	if ifaces == nil {
+		panic("query.NewPeerStore: ifaces обязателен — пиры читаются из снимка InterfaceStore (F546)")
+	}
 	if log == nil {
 		log = NopLogger()
 	}
-	s := &PeerStore{getter: g, log: log}
+	s := &PeerStore{log: log, interfaces: ifaces}
 	s.store = cache.NewKeyedStore(ttl, log, "peers", s.fetch)
 	return s
 }
@@ -68,31 +76,30 @@ type peerWire struct {
 }
 
 func (s *PeerStore) fetch(ctx context.Context, name string) ([]ndms.Peer, error) {
-	// Peers are NOT a standalone RCI command — there is no
-	// "show interface <name> wireguard peer" command. The peer list is a
-	// data sub-field of "show interface <name>" (.wireguard.peer). A direct
-	// GET /show/interface/<name>/wireguard/peer happens to work (the GET
-	// handler descends the response tree by URL segment), but that path is
-	// not expressible as a batch-POST command — NDMS parses wireguard/peer
-	// as a command continuation and answers "not found". Querying the
-	// interface and reading .wireguard.peer works in both the direct-GET and
-	// batch-POST transports. Verified against Keenetic RCI 2026-05-23.
+	// Peers are NOT a standalone RCI command — the peer list is a data
+	// sub-field of the interface record (.wireguard.peer). Берём его из
+	// снимка полного списка (не старше SnapshotRecent): поля записи списка те
+	// же, что у `show interface <name>`, а по имени NDMS не спрашивают —
+	// запрос, долетевший между снятием записи и хуком ifdestroyed, пишет E
+	// «unable to find» (F546). Параллельные GetPeers тика делят один список.
+	// Записи в снимке нет — ноль пиров; список не прочитан — ошибка.
+	snap, err := s.interfaces.Snapshot(ctx, SnapshotRecent)
+	if err != nil {
+		return nil, fmt.Errorf("fetch peers %s: %w", name, err)
+	}
+	inner, ok := snap.Raw(name)
+	if !ok {
+		return []ndms.Peer{}, nil
+	}
 	var wrap struct {
 		Wireguard struct {
 			Peer []peerWire `json:"peer"`
 		} `json:"wireguard"`
 	}
-	path := "/show/interface/" + name
-	if err := s.getter.Get(ctx, path, &wrap); err != nil {
-		// 404 means the interface itself doesn't exist (e.g. torn down) —
-		// treat as zero peers so the poller doesn't log warnings on every
-		// tick. A live interface with no peers returns an empty
-		// .wireguard.peer instead.
-		var httpErr *transport.HTTPError
-		if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
-			return []ndms.Peer{}, nil
+	if len(inner) > 0 {
+		if err := json.Unmarshal(inner, &wrap); err != nil {
+			return nil, fmt.Errorf("fetch peers %s: %w", name, err)
 		}
-		return nil, fmt.Errorf("fetch peers %s: %w", name, err)
 	}
 	wire := wrap.Wireguard.Peer
 	out := make([]ndms.Peer, 0, len(wire))

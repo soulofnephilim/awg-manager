@@ -24,6 +24,11 @@
 	--tunnel-list-col-traffic-awg-max: 210px;
 	--tunnel-list-col-ping: 78px;
 	--tunnel-list-col-actions: 92px;
+	/* AWG list: every row is its own grid, so the actions track must not depend
+	   on the row's content. Fixed to the widest regular row (three icon
+	   buttons, 95px); the external row's «Взять» + «Удалить» wrap onto two
+	   lines inside it (.awg-ext-actions wraps) instead of widening the track. */
+	--tunnel-list-col-actions-awg: 96px;
 
 	--tunnel-list-min-width: 764px;
 	--tunnel-list-row-padding: 0.75rem;
@@ -67,7 +72,7 @@
 		minmax(var(--tunnel-list-col-status), 0.85fr)
 		minmax(145px, 0.75fr)
 		minmax(var(--tunnel-list-col-traffic-awg-min), var(--tunnel-list-col-traffic-awg-max))
-		minmax(var(--tunnel-list-col-actions), max-content);
+		var(--tunnel-list-col-actions-awg);
 	border: 1px solid var(--color-border);
 	border-radius: 12px;
 	background: var(--color-bg-secondary);
@@ -882,6 +887,15 @@ button.tunnel-list-traffic-cell:focus-visible {
 	min-width: 0;
 }
 
+/* Карточка, растянутая по ряду сетки, добирает место под шапкой: сведения,
+   кнопки и графики соседних карточек встают в линию, даже когда у одной
+   шапка выше (лишний ряд бейджей, перенесённая подпись). Без растяжения
+   отступ нулевой. Общее для карточек туннелей и активных подписок. */
+.card.view-compact .details,
+.card.view-dense:not(.view-list) .details {
+	margin-top: auto;
+}
+
 /* ─── Grid density overrides ─── */
 .tunnel-grid.tunnel-grid--dense {
 	grid-template-columns: repeat(auto-fill, minmax(min(100%, 248px), 1fr));
@@ -905,7 +919,7 @@ button.tunnel-list-traffic-cell:focus-visible {
 .tunnel-grid.tunnel-grid--dense .detail-label,
 .tunnel-grid.tunnel-grid--dense .kv-label,
 .tunnel-grid.tunnel-grid--dense .iface,
-.tunnel-grid.tunnel-grid--dense .label,
+.tunnel-grid.tunnel-grid--dense .btn-label,
 .tunnel-grid.tunnel-grid--dense .chart-label {
 	font-size: var(--tunnel-card-label-size);
 }
@@ -1126,18 +1140,11 @@ button.tunnel-list-traffic-cell:focus-visible {
 	background: var(--color-bg-secondary);
 }
 
-.singbox-tunnel-table .sbx-tunnel-list-row {
-	display: table-row !important;
-}
-
-.singbox-sub-table .sbx-sub-active-row,
-.singbox-sub-table .sbx-sub-list-row {
-	display: table-row !important;
-}
-
+/* Табличный display здесь не форсируется (F376): сброс через !important
+   прятал не-табличный display на ячейках, и ошибка проявлялась в одной
+   колонке из семи (#921). Ячейка с flex обязана ломать вёрстку сразу. */
 .singbox-tunnel-table td.tunnel-list-cell,
 .singbox-sub-table td.tunnel-list-cell {
-	display: table-cell !important;
 	vertical-align: middle;
 	min-width: 0;
 }
@@ -1329,7 +1336,7 @@ button.tunnel-list-traffic-cell:focus-visible {
 			minmax(140px, 0.78fr)
 			minmax(132px, 0.72fr)
 			minmax(var(--tunnel-list-col-traffic-awg-min), var(--tunnel-list-col-traffic-awg-max))
-			minmax(72px, max-content);
+			var(--tunnel-list-col-actions-awg);
 	}
 }
 
@@ -1342,7 +1349,7 @@ button.tunnel-list-traffic-cell:focus-visible {
 			minmax(128px, 0.72fr)
 			minmax(122px, 0.68fr)
 			minmax(var(--tunnel-list-col-traffic-awg-min), var(--tunnel-list-col-traffic-awg-max))
-			minmax(70px, max-content);
+			var(--tunnel-list-col-actions-awg);
 	}
 
 	.awg-list-row {
@@ -1366,7 +1373,7 @@ html[data-layout-compact='true'] .awg-list-table:not(.singbox-tunnel-table):not(
 		minmax(120px, 0.78fr)
 		minmax(112px, 0.68fr)
 		minmax(var(--tunnel-list-col-traffic-awg-min), var(--tunnel-list-col-traffic-awg-max))
-		minmax(64px, max-content);
+		var(--tunnel-list-col-actions-awg);
 }
 
 html[data-layout-compact='true'] .awg-list-row {
